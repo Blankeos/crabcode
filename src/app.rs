@@ -16,6 +16,8 @@ use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::landing::Landing;
 use crate::ui::components::popup::Popup;
+use crate::ui::components::status_bar::StatusBar;
+use crate::utils::git;
 
 pub struct App {
     pub running: bool,
@@ -24,6 +26,9 @@ pub struct App {
     pub command_registry: Registry,
     pub chat: Chat,
     pub popup: Popup,
+    pub agent: String,
+    pub model: String,
+    pub cwd: String,
 }
 
 impl App {
@@ -34,6 +39,11 @@ impl App {
         let autocomplete = AutoComplete::new(crate::autocomplete::CommandAuto::new(&registry));
         let input = Input::new().with_autocomplete(autocomplete);
 
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "?".to_string());
+
         Self {
             running: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -41,6 +51,9 @@ impl App {
             command_registry: registry,
             chat: Chat::new(),
             popup: Popup::new(),
+            agent: "PLAN".to_string(),
+            model: "nano-gpt".to_string(),
+            cwd,
         }
     }
 
@@ -85,10 +98,7 @@ impl App {
     }
 
     fn ui(&self, f: &mut ratatui::Frame) {
-        use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-        use ratatui::style::{Color, Modifier, Style};
-        use ratatui::text::{Line, Span};
-        use ratatui::widgets::Paragraph;
+        use ratatui::layout::{Constraint, Direction, Layout};
 
         let size = f.area();
 
@@ -117,16 +127,15 @@ impl App {
             self.popup.render(f, chunks[1]);
         }
 
-        let status_text = vec![
-            Span::raw("crabcode "),
-            Span::styled(&self.version, Style::default().add_modifier(Modifier::BOLD)),
-        ];
-
-        let status = Paragraph::new(Line::from(status_text))
-            .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Left);
-
-        f.render_widget(status, chunks[2]);
+        let branch = git::get_current_branch();
+        let status_bar = StatusBar::new(
+            self.version.clone(),
+            self.cwd.clone(),
+            branch,
+            self.agent.clone(),
+            self.model.clone(),
+        );
+        status_bar.render(f, chunks[2]);
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) {
