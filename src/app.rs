@@ -11,6 +11,8 @@ use ratatui::{
 use std::io;
 use std::time::Duration;
 
+use crate::ui::components::landing::Landing;
+
 pub struct App {
     pub running: bool,
     pub version: String,
@@ -67,8 +69,8 @@ impl App {
     fn ui(&self, f: &mut ratatui::Frame) {
         use ratatui::layout::{Alignment, Constraint, Direction, Layout};
         use ratatui::style::{Color, Modifier, Style};
-        use ratatui::text::{Line, Span, Text};
-        use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::Paragraph;
 
         let size = f.area();
 
@@ -76,6 +78,9 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
             .split(size);
+
+        let landing = Landing::new();
+        landing.render(f);
 
         let status_text = vec![
             Span::raw("crabcode "),
@@ -87,26 +92,8 @@ impl App {
 
         let status = Paragraph::new(Line::from(status_text))
             .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: true });
+            .alignment(Alignment::Left);
 
-        let main_text = Text::from(vec![
-            Line::from("Crabcode - Rust AI CLI Coding Agent"),
-            Line::from(""),
-            Line::from("Press 'q' to quit"),
-        ]);
-
-        let main = Paragraph::new(main_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Crabcode")
-                    .title_alignment(Alignment::Center),
-            )
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true });
-
-        f.render_widget(main, chunks[0]);
         f.render_widget(status, chunks[1]);
     }
 
