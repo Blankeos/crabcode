@@ -357,10 +357,10 @@ Color-coded by agent:
 - [x] Status bar implementation
 - [x] Git branch detection
 - [x] CWD display
-- [ ] `/sessions` and `/new` commands
+- [x] `/sessions` and `/new` commands
 
 ### Phase 3: Model Integration (Week 3)
-- [ ] Model configuration types
+- [x] Model configuration types
 - [ ] Provider trait definition
 - [ ] Models.dev API client
 - [ ] `/models` command

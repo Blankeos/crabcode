@@ -196,7 +196,9 @@ impl App {
 
         match parse_input(input) {
             InputType::Command(parsed) => {
-                let result = self.command_registry.execute(&parsed, &mut self.session_manager);
+                let result = self
+                    .command_registry
+                    .execute(&parsed, &mut self.session_manager);
                 match result {
                     crate::command::registry::CommandResult::Success(msg) => {
                         self.chat.add_assistant_message(msg);
