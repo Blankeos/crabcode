@@ -36,14 +36,42 @@ impl Input {
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
         let input = TuiInput::from(event);
-        // println!("ec{} | em{}", event.code, event.modifiers);
+
+        // Check for Shift+Enter (works in most terminals)
+        if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::SHIFT) {
+            self.textarea.insert_newline();
+            return true;
+        }
+
+        // Fallback: Alt+Enter for terminals where Shift+Enter doesn't work
+        if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::ALT) {
+            self.textarea.insert_newline();
+            return true;
+        }
+
+        // Regular Enter submits
+        if event.code == KeyCode::Enter && event.modifiers == KeyModifiers::NONE {
+            return false;
+        }
 
         match event.code {
-            KeyCode::Enter if event.modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => {
+                self.textarea.insert_newline();
+                false
+            }
+            KeyCode::Enter if event.modifiers == KeyModifiers::NONE => false,
+            KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => {
+                self.textarea.input(input);
+                false
+            }
+            KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
+            KeyCode::Tab => true,
+            KeyCode::Up | KeyCode::Down => false,
+            KeyCode::Esc => false,
+            _ => {
                 self.textarea.input(input);
                 true
             }
-            KeyCode::Enter if event.modifiers == KeyModifiers::NONE => false,
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
             KeyCode::Tab => true,
             KeyCode::Up | KeyCode::Down => false,
@@ -106,6 +134,7 @@ impl Input {
 
     pub fn clear(&mut self) {
         self.textarea = TextArea::default();
+        self.textarea.set_cursor_line_style(Style::default());
     }
 
     pub fn set_placeholder(&mut self, placeholder: &'static str) {

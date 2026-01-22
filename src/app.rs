@@ -264,6 +264,7 @@ impl App {
                     }
                 }
             }
+            KeyCode::Enter => {}
             KeyCode::Tab => {
                 if self.popup.is_visible() {
                     if let Some(selected) = self.popup.get_selected() {
