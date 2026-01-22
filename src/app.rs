@@ -11,6 +11,9 @@ use ratatui::{
 use std::io;
 use std::time::Duration;
 
+use crate::command::handlers::register_all_commands;
+use crate::command::registry::Registry;
+use crate::command::parser::InputType;
 use crate::ui::components::input::Input;
 use crate::ui::components::landing::Landing;
 
@@ -18,14 +21,21 @@ pub struct App {
     pub running: bool,
     pub version: String,
     pub input: Input,
+    pub command_registry: Registry,
+    pub last_message: Option<String>,
 }
 
 impl App {
     pub fn new() -> Self {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+        
         Self {
             running: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
             input: Input::new(),
+            command_registry: registry,
+            last_message: None,
         }
     }
 
@@ -110,8 +120,39 @@ impl App {
             KeyCode::Char('c') if key.modifiers == event::KeyModifiers::CONTROL => {
                 self.quit();
             }
+            KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
+                let input_text = self.input.get_text();
+                if !input_text.is_empty() {
+                    self.process_input(&input_text);
+                    self.input.clear();
+                }
+            }
             _ => {
                 self.input.handle_event(key);
+            }
+        }
+    }
+
+    fn process_input(&mut self, input: &str) {
+        use crate::command::parser::parse_input;
+        
+        match parse_input(input) {
+            InputType::Command(parsed) => {
+                let result = self.command_registry.execute(&parsed);
+                match result {
+                    crate::command::registry::CommandResult::Success(msg) => {
+                        self.last_message = Some(msg);
+                        if parsed.name == "exit" {
+                            self.quit();
+                        }
+                    }
+                    crate::command::registry::CommandResult::Error(msg) => {
+                        self.last_message = Some(format!("Error: {}", msg));
+                    }
+                }
+            }
+            InputType::Message(msg) => {
+                self.last_message = Some(format!("Message: {}", msg));
             }
         }
     }

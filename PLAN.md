@@ -344,10 +344,10 @@ Color-coded by agent:
 ## Implementation Phases
 
 ### Phase 1: Foundation (Week 1)
-- [ ] Project setup (Cargo.toml, basic structure)
-- [ ] Main loop with ratatui Terminal
-- [ ] Landing page with logo display
-- [ ] Basic text input using tui-textarea
+- [x] Project setup (Cargo.toml, basic structure)
+- [x] Main loop with ratatui Terminal
+- [x] Landing page with logo display
+- [x] Basic text input using tui-textarea
 - [ ] Command parsing (`/` trigger)
 - [ ] `/exit` command implementation
 
