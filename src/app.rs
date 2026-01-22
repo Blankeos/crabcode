@@ -8,12 +8,14 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::time::Duration;
 
+use crate::autocomplete::AutoComplete;
 use crate::command::handlers::register_all_commands;
 use crate::command::parser::InputType;
 use crate::command::registry::Registry;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::landing::Landing;
+use crate::ui::components::popup::Popup;
 
 pub struct App {
     pub running: bool,
@@ -21,6 +23,7 @@ pub struct App {
     pub input: Input,
     pub command_registry: Registry,
     pub chat: Chat,
+    pub popup: Popup,
 }
 
 impl App {
@@ -28,12 +31,16 @@ impl App {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
+        let autocomplete = AutoComplete::new(crate::autocomplete::CommandAuto::new(&registry));
+        let input = Input::new().with_autocomplete(autocomplete);
+
         Self {
             running: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
-            input: Input::new(),
+            input,
             command_registry: registry,
             chat: Chat::new(),
+            popup: Popup::new(),
         }
     }
 
@@ -106,6 +113,10 @@ impl App {
 
         self.input.render(f, chunks[1]);
 
+        if self.popup.is_visible() {
+            self.popup.render(f, chunks[1]);
+        }
+
         let status_text = vec![
             Span::raw("crabcode "),
             Span::styled(&self.version, Style::default().add_modifier(Modifier::BOLD)),
@@ -131,11 +142,40 @@ impl App {
                 if !input_text.is_empty() {
                     self.process_input(&input_text);
                     self.input.clear();
+                    self.popup.clear();
                 }
             }
-            _ => {
+            KeyCode::Tab => {
                 self.input.handle_event(key);
+                self.popup.clear();
             }
+            KeyCode::Up => {
+                if self.popup.is_visible() {
+                    self.popup.previous();
+                }
+            }
+            KeyCode::Down => {
+                if self.popup.is_visible() {
+                    self.popup.next();
+                }
+            }
+            KeyCode::Esc => {
+                self.popup.clear();
+            }
+            _ => {
+                if self.input.handle_event(key) {
+                    self.update_suggestions();
+                }
+            }
+        }
+    }
+
+    fn update_suggestions(&mut self) {
+        let suggestions = self.input.get_autocomplete_suggestions();
+        if !suggestions.is_empty() {
+            self.popup.set_suggestions(suggestions);
+        } else {
+            self.popup.clear();
         }
     }
 

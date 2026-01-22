@@ -200,7 +200,7 @@ mod tests {
         let mut registry = Registry::new();
 
         let handler_with_args = |parsed: &ParsedCommand| -> CommandResult {
-            if parsed.args.len() > 0 {
+            if !parsed.args.is_empty() {
                 CommandResult::Success(format!("Args: {:?}", parsed.args))
             } else {
                 CommandResult::Error("No args".to_string())
