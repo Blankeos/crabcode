@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-const LOGO: &str = r#"
+pub const LOGO: &str = r#"
 🦀▄▄▄▄ ▄▄▄▄   ▄▄▄  ▄▄▄▄   ▄▄▄▄  ▄▄▄  ▄▄▄▄  ▄▄▄▄▄
 ██▀▀▀ ██▄█▄ ██▀██ ██▄██ ██▀▀▀ ██▀██ ██▀██ ██▄▄
 ▀████ ██ ██ ██▀██ ██▄█▀ ▀████ ▀███▀ ████▀ ██▄▄▄
@@ -24,16 +24,13 @@ impl Landing {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(
-                [
-                    Constraint::Min(0),
-                    Constraint::Length(8),
-                    Constraint::Length(3),
-                    Constraint::Min(0),
-                ]
-                .as_ref(),
-            )
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
             .split(size);
+
+        let top_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4), Constraint::Length(2)].as_ref())
+            .split(chunks[0]);
 
         let logo_text = Text::from(LOGO.trim());
 
@@ -45,52 +42,26 @@ impl Landing {
             )
             .alignment(Alignment::Center);
 
-        let welcome_text = Text::from(vec![
-            Line::from(vec![
-                Span::styled(
-                    "Crabcode",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" - "),
-                Span::styled(
-                    "Rust AI CLI Coding Agent",
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::raw("Press "),
-                Span::styled(
-                    "/",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" for commands or "),
-                Span::styled(
-                    "ctrl+c",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" to quit"),
-            ]),
-        ]);
+        let welcome_text = Text::from(vec![Line::from(vec![
+            Span::styled(
+                "Crabcode",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" - "),
+            Span::styled(
+                "Rust AI CLI Coding Agent",
+                Style::default().fg(Color::White),
+            ),
+        ])]);
 
         let welcome = Paragraph::new(welcome_text)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true });
 
-        f.render_widget(logo, chunks[1]);
-
-        let chat_placeholder = Paragraph::new("Your conversation will appear here")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center);
-        f.render_widget(chat_placeholder, chunks[2]);
-
-        f.render_widget(welcome, chunks[3]);
+        f.render_widget(logo, top_chunks[0]);
+        f.render_widget(welcome, top_chunks[1]);
     }
 }
 

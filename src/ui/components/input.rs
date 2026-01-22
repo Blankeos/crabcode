@@ -1,6 +1,6 @@
 use crate::autocomplete::{AutoComplete, Suggestion};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{prelude::Rect, widgets::Block};
+use ratatui::{prelude::Rect, style::Style, widgets::Block};
 use tui_textarea::{Input as TuiInput, TextArea};
 
 pub struct Input {
@@ -10,7 +10,8 @@ pub struct Input {
 
 impl Input {
     pub fn new() -> Self {
-        let textarea = TextArea::default();
+        let mut textarea = TextArea::default();
+        textarea.set_cursor_line_style(Style::default());
         Self {
             textarea,
             autocomplete: None,
@@ -23,15 +24,25 @@ impl Input {
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let block = Block::bordered();
-        let inner_area = block.inner(area);
+        let border = Block::bordered()
+            .borders(ratatui::widgets::Borders::LEFT)
+            .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan))
+            .border_type(ratatui::widgets::BorderType::Thick)
+            .padding(ratatui::widgets::Padding::horizontal(1));
+        let inner_area = border.inner(area);
         frame.render_widget(&self.textarea, inner_area);
-        frame.render_widget(block, area);
+        frame.render_widget(border, area);
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
         let input = TuiInput::from(event);
+        // println!("ec{} | em{}", event.code, event.modifiers);
+
         match event.code {
+            KeyCode::Enter if event.modifiers == KeyModifiers::SHIFT => {
+                self.textarea.input(input);
+                true
+            }
             KeyCode::Enter if event.modifiers == KeyModifiers::NONE => false,
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
             KeyCode::Tab => true,

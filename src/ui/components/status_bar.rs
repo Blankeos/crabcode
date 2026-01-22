@@ -44,30 +44,23 @@ impl StatusBar {
             left_spans.push(Span::raw(")"));
         }
 
-        let left_line = Line::from(left_spans);
-
         let right_spans = vec![Span::styled(
             &self.version,
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::DIM),
         )];
 
-        let right_line = Line::from(right_spans);
+        let line = Line::from(left_spans);
+        f.render_widget(line, area);
 
-        let left_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: 1,
-        };
+        let version_width = self.version.len() as u16;
         let right_area = Rect {
-            x: area.x,
+            x: area.x + area.width.saturating_sub(version_width + 1),
             y: area.y,
-            width: area.width,
+            width: version_width,
             height: 1,
         };
-
-        f.render_widget(left_line, left_area);
-        f.render_widget(right_line, right_area);
+        let version_line = Line::from(right_spans);
+        f.render_widget(version_line, right_area);
     }
 }
 

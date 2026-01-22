@@ -15,10 +15,16 @@ use crate::command::registry::Registry;
 use crate::session::manager::SessionManager;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
-use crate::ui::components::landing::Landing;
+
 use crate::ui::components::popup::Popup;
 use crate::ui::components::status_bar::StatusBar;
 use crate::utils::git;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppFocus {
+    Landing,
+    Chat,
+}
 
 pub struct App {
     pub running: bool,
@@ -31,6 +37,7 @@ pub struct App {
     pub agent: String,
     pub model: String,
     pub cwd: String,
+    pub focus: AppFocus,
     ctrl_c_press_count: u8,
     last_ctrl_c_time: std::time::Instant,
 }
@@ -59,6 +66,7 @@ impl App {
             agent: "PLAN".to_string(),
             model: "nano-gpt".to_string(),
             cwd,
+            focus: AppFocus::Landing,
             ctrl_c_press_count: 0,
             last_ctrl_c_time: std::time::Instant::now(),
         }
@@ -105,34 +113,112 @@ impl App {
     }
 
     fn ui(&self, f: &mut ratatui::Frame) {
-        use ratatui::layout::{Constraint, Direction, Layout};
+        use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::{Line, Span, Text};
+        use ratatui::widgets::Paragraph;
 
         let size = f.area();
 
-        let chunks = Layout::default()
+        let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(
-                [
-                    Constraint::Min(0),
-                    Constraint::Length(1),
-                    Constraint::Min(0),
-                    Constraint::Length(1),
-                ]
-                .as_ref(),
-            )
+            .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
             .split(size);
 
-        if self.chat.messages.is_empty() {
-            let landing = Landing::new();
-            landing.render(f);
+        if self.focus == AppFocus::Landing {
+            let landing_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(
+                    [
+                        Constraint::Min(0),
+                        Constraint::Length(3),
+                        Constraint::Length(1),
+                    ]
+                    .as_ref(),
+                )
+                .split(main_chunks[0]);
+
+            let landing_logo_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(5),
+                    Constraint::Min(0),
+                ])
+                .split(landing_chunks[0]);
+            let logo = Paragraph::new(Text::from(crate::ui::components::landing::LOGO.trim()))
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .alignment(Alignment::Center);
+            // let welcome = Paragraph::new(Text::from(vec![Line::from(vec![
+            //     Span::styled(
+            //         "Crabcode",
+            //         Style::default()
+            //             .fg(Color::Green)
+            //             .add_modifier(Modifier::BOLD),
+            //     ),
+            //     Span::raw(" - "),
+            //     Span::styled(
+            //         "Rust AI CLI Coding Agent",
+            //         Style::default().fg(Color::White),
+            //     ),
+            // ])]))
+            // .alignment(Alignment::Center)
+            // .wrap(ratatui::widgets::Wrap { trim: true });
+
+            f.render_widget(logo, landing_logo_chunks[1]);
+
+            // f.render_widget(welcome, landing_chunks[0]);
+
+            self.input.render(f, landing_chunks[1]);
+
+            if self.popup.is_visible() {
+                self.popup.render(f, landing_chunks[1]);
+            }
+
+            let help_text = vec![
+                Span::styled("/", Style::default().fg(Color::Cyan)),
+                Span::raw(" commands  "),
+                Span::styled("tab", Style::default().fg(Color::Cyan)),
+                Span::raw(" agents  "),
+                Span::styled("ctrl+cc", Style::default().fg(Color::Cyan)),
+                Span::raw(" quit"),
+            ];
+            let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
+            f.render_widget(help, landing_chunks[2]);
         } else {
-            self.chat.render(f, chunks[0]);
-        }
+            let chat_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(
+                    [
+                        Constraint::Min(0),
+                        Constraint::Length(3),
+                        Constraint::Length(1),
+                    ]
+                    .as_ref(),
+                )
+                .split(main_chunks[0]);
 
-        self.input.render(f, chunks[2]);
+            self.chat.render(f, chat_chunks[0]);
+            self.input.render(f, chat_chunks[1]);
 
-        if self.popup.is_visible() {
-            self.popup.render(f, chunks[2]);
+            if self.popup.is_visible() {
+                self.popup.render(f, chat_chunks[1]);
+            }
+
+            let help_text = vec![
+                Span::styled("/", Style::default().fg(Color::Cyan)),
+                Span::raw(" commands  "),
+                Span::styled("tab", Style::default().fg(Color::Cyan)),
+                Span::raw(" agents  "),
+                Span::styled("ctrl+cc", Style::default().fg(Color::Cyan)),
+                Span::raw(" quit"),
+            ];
+            let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
+            f.render_widget(help, chat_chunks[2]);
         }
 
         let branch = git::get_current_branch();
@@ -143,7 +229,7 @@ impl App {
             self.agent.clone(),
             self.model.clone(),
         );
-        status_bar.render(f, chunks[2]);
+        status_bar.render(f, main_chunks[1]);
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) {
@@ -252,6 +338,12 @@ impl App {
                     .await;
                 match result {
                     crate::command::registry::CommandResult::Success(msg) => {
+                        if parsed.name == "new" {
+                            self.chat.clear();
+                            self.focus = AppFocus::Landing;
+                        } else if self.focus == AppFocus::Landing {
+                            self.focus = AppFocus::Chat;
+                        }
                         self.chat.add_assistant_message(msg);
                         if parsed.name == "exit" {
                             self.quit();
@@ -265,6 +357,9 @@ impl App {
             InputType::Message(msg) => {
                 if !msg.is_empty() {
                     self.chat.add_user_message(&msg);
+                    if self.focus == AppFocus::Landing {
+                        self.focus = AppFocus::Chat;
+                    }
                 }
             }
         }
