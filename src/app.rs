@@ -11,11 +11,13 @@ use ratatui::{
 use std::io;
 use std::time::Duration;
 
+use crate::ui::components::input::Input;
 use crate::ui::components::landing::Landing;
 
 pub struct App {
     pub running: bool,
     pub version: String,
+    pub input: Input,
 }
 
 impl App {
@@ -23,6 +25,7 @@ impl App {
         Self {
             running: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            input: Input::new(),
         }
     }
 
@@ -76,11 +79,13 @@ impl App {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
+            .constraints([Constraint::Min(0), Constraint::Length(3), Constraint::Length(1)].as_ref())
             .split(size);
 
         let landing = Landing::new();
         landing.render(f);
+
+        self.input.render(f, chunks[1]);
 
         let status_text = vec![
             Span::raw("crabcode "),
@@ -94,7 +99,7 @@ impl App {
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Left);
 
-        f.render_widget(status, chunks[1]);
+        f.render_widget(status, chunks[2]);
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) {
@@ -105,7 +110,9 @@ impl App {
             KeyCode::Char('c') if key.modifiers == event::KeyModifiers::CONTROL => {
                 self.quit();
             }
-            _ => {}
+            _ => {
+                self.input.handle_event(key);
+            }
         }
     }
 }
