@@ -60,7 +60,7 @@ impl ApiKeyConfig {
 
     fn config_path() -> PathBuf {
         if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
-            Self::test_path()
+            PathBuf::from("/tmp/crabcode_test_api_keys.json")
         } else {
             dirs::config_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
@@ -70,13 +70,8 @@ impl ApiKeyConfig {
     }
 
     #[cfg(test)]
-    fn test_path() -> PathBuf {
-        PathBuf::from("/tmp/crabcode_test_api_keys.json")
-    }
-
-    #[cfg(test)]
     pub fn load_test() -> Result<Self> {
-        let path = Self::test_path();
+        let path = PathBuf::from("/tmp/crabcode_test_api_keys.json");
         if path.exists() {
             let content = fs::read_to_string(&path)?;
             let config: ApiKeyConfig = serde_json::from_str(&content)?;
@@ -88,7 +83,7 @@ impl ApiKeyConfig {
 
     #[cfg(test)]
     pub fn save_test(&self) -> Result<()> {
-        let path = Self::test_path();
+        let path = PathBuf::from("/tmp/crabcode_test_api_keys.json");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -99,7 +94,7 @@ impl ApiKeyConfig {
 
     #[cfg(test)]
     pub fn cleanup_test() -> Result<()> {
-        let path = Self::test_path();
+        let path = PathBuf::from("/tmp/crabcode_test_api_keys.json");
         if path.exists() {
             fs::remove_file(&path)?;
         }

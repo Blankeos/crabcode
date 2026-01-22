@@ -31,6 +31,8 @@ pub struct App {
     pub agent: String,
     pub model: String,
     pub cwd: String,
+    ctrl_c_press_count: u8,
+    last_ctrl_c_time: std::time::Instant,
 }
 
 impl App {
@@ -57,6 +59,8 @@ impl App {
             agent: "PLAN".to_string(),
             model: "nano-gpt".to_string(),
             cwd,
+            ctrl_c_press_count: 0,
+            last_ctrl_c_time: std::time::Instant::now(),
         }
     }
 
@@ -110,7 +114,8 @@ impl App {
             .constraints(
                 [
                     Constraint::Min(0),
-                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Min(0),
                     Constraint::Length(1),
                 ]
                 .as_ref(),
@@ -124,10 +129,10 @@ impl App {
             self.chat.render(f, chunks[0]);
         }
 
-        self.input.render(f, chunks[1]);
+        self.input.render(f, chunks[2]);
 
         if self.popup.is_visible() {
-            self.popup.render(f, chunks[1]);
+            self.popup.render(f, chunks[2]);
         }
 
         let branch = git::get_current_branch();
@@ -143,26 +148,48 @@ impl App {
 
     fn handle_key_event(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') => {
-                self.quit();
-            }
             KeyCode::Char('c') if key.modifiers == event::KeyModifiers::CONTROL => {
-                self.quit();
+                let now = std::time::Instant::now();
+                if now.duration_since(self.last_ctrl_c_time).as_secs() < 1 {
+                    self.ctrl_c_press_count += 1;
+                    if self.ctrl_c_press_count >= 2 {
+                        self.quit();
+                    }
+                } else {
+                    self.ctrl_c_press_count = 1;
+                }
+                self.last_ctrl_c_time = now;
+                if self.ctrl_c_press_count == 1 {
+                    self.input.clear();
+                }
             }
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
-                let input_text = self.input.get_text();
-                if !input_text.is_empty() {
-                    tokio::task::block_in_place(|| {
-                        let rt = tokio::runtime::Handle::current();
-                        rt.block_on(self.process_input(&input_text));
-                    });
-                    self.input.clear();
-                    self.popup.clear();
+                if self.popup.is_visible() {
+                    self.autocomplete_and_submit();
+                } else {
+                    let input_text = self.input.get_text();
+                    if !input_text.is_empty() {
+                        tokio::task::block_in_place(|| {
+                            let rt = tokio::runtime::Handle::current();
+                            rt.block_on(self.process_input(&input_text));
+                        });
+                        self.input.clear();
+                        self.popup.clear();
+                    }
                 }
             }
             KeyCode::Tab => {
-                self.input.handle_event(key);
-                self.popup.clear();
+                if self.popup.is_visible() {
+                    if let Some(selected) = self.popup.get_selected() {
+                        self.input.set_text(&format!("/{}", selected.name));
+                    }
+                    self.popup.clear();
+                } else {
+                    self.input.handle_event(key);
+                    if self.input.is_slash_at_end() {
+                        self.update_suggestions();
+                    }
+                }
             }
             KeyCode::Up => {
                 if self.popup.is_visible() {
@@ -186,12 +213,32 @@ impl App {
     }
 
     fn update_suggestions(&mut self) {
-        let suggestions = self.input.get_autocomplete_suggestions();
-        if !suggestions.is_empty() {
-            self.popup.set_suggestions(suggestions);
+        if self.input.should_show_suggestions() {
+            let suggestions = self.input.get_autocomplete_suggestions();
+            if !suggestions.is_empty() {
+                self.popup.set_suggestions(suggestions);
+            } else {
+                self.popup.clear();
+            }
         } else {
             self.popup.clear();
         }
+    }
+
+    fn autocomplete_and_submit(&mut self) {
+        if let Some(selected) = self.popup.get_selected() {
+            self.input.set_text(&format!("/{}", selected.name));
+
+            let input_text = self.input.get_text();
+            if !input_text.is_empty() {
+                tokio::task::block_in_place(|| {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(self.process_input(&input_text));
+                });
+                self.input.clear();
+            }
+        }
+        self.popup.clear();
     }
 
     async fn process_input(&mut self, input: &str) {
@@ -268,11 +315,11 @@ mod tests {
             state: crossterm::event::KeyEventState::NONE,
         };
         app.handle_key_event(key);
-        assert!(!app.running);
+        assert!(app.running);
     }
 
     #[test]
-    fn test_handle_key_event_ctrl_c() {
+    fn test_handle_key_event_ctrl_c_single() {
         let mut app = App::new();
         let key = KeyEvent {
             code: KeyCode::Char('c'),
@@ -280,6 +327,21 @@ mod tests {
             kind: crossterm::event::KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         };
+        app.handle_key_event(key);
+        assert!(app.running);
+        assert_eq!(app.input.get_text(), "");
+    }
+
+    #[test]
+    fn test_handle_key_event_ctrl_c_double() {
+        let mut app = App::new();
+        let key = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        app.handle_key_event(key);
         app.handle_key_event(key);
         assert!(!app.running);
     }

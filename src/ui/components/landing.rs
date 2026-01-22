@@ -70,7 +70,7 @@ impl Landing {
                 ),
                 Span::raw(" for commands or "),
                 Span::styled(
-                    "q",
+                    "ctrl+c",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),

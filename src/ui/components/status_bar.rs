@@ -1,8 +1,7 @@
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
     Frame,
 };
 
@@ -32,18 +31,12 @@ impl StatusBar {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let mut left_spans = vec![
-            Span::raw("crabcode "),
-            Span::styled(&self.version, Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" | "),
-        ];
-
         let cwd_display = if self.cwd.len() > 30 {
             format!("...{}", &self.cwd[self.cwd.len() - 27..])
         } else {
             self.cwd.clone()
         };
-        left_spans.push(Span::raw(cwd_display));
+        let mut left_spans = vec![Span::raw(cwd_display)];
 
         if let Some(ref branch) = self.branch {
             left_spans.push(Span::raw(" ("));
@@ -51,34 +44,30 @@ impl StatusBar {
             left_spans.push(Span::raw(")"));
         }
 
-        let right_spans = vec![
-            Span::styled("<", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                &self.agent,
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(">", Style::default().fg(Color::Yellow)),
-            Span::raw(" "),
-            Span::styled("<", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                &self.model,
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(">", Style::default().fg(Color::Yellow)),
-        ];
+        let left_line = Line::from(left_spans);
 
-        let left = Line::from(left_spans);
-        let right = Line::from(right_spans);
+        let right_spans = vec![Span::styled(
+            &self.version,
+            Style::default().add_modifier(Modifier::BOLD),
+        )];
 
-        let status = Paragraph::new(vec![left, right])
-            .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Left);
+        let right_line = Line::from(right_spans);
 
-        f.render_widget(status, area);
+        let left_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        };
+        let right_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        };
+
+        f.render_widget(left_line, left_area);
+        f.render_widget(right_line, right_area);
     }
 }
 

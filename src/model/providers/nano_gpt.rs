@@ -1,15 +1,28 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::stream;
 
 use super::common::{Provider, ProviderStream};
 use crate::model::types::ModelConfig;
+use crate::streaming::client::StreamClient;
 
-pub struct NanoGpt;
+const DEFAULT_API_URL: &str = "https://api.nano-gpt.com/v1/chat/completions";
+
+pub struct NanoGpt {
+    api_url: String,
+    client: StreamClient,
+}
 
 impl NanoGpt {
     pub fn new() -> Self {
-        Self
+        Self {
+            api_url: DEFAULT_API_URL.to_string(),
+            client: StreamClient::new(),
+        }
+    }
+
+    pub fn with_api_url(mut self, api_url: String) -> Self {
+        self.api_url = api_url;
+        self
     }
 }
 
@@ -25,8 +38,13 @@ impl Provider for NanoGpt {
         "nano-gpt"
     }
 
-    async fn stream(&self, _prompt: &str, _config: &ModelConfig) -> Result<ProviderStream> {
-        Ok(Box::pin(stream::empty()))
+    async fn stream(&self, prompt: &str, config: &ModelConfig) -> Result<ProviderStream> {
+        let api_key = config.api_key.as_deref();
+        let mut client = StreamClient::new();
+        let stream = client
+            .stream(&self.api_url, prompt, api_key, &config.model_id)
+            .await?;
+        Ok(Box::pin(stream))
     }
 
     fn supports_model(&self, model_id: &str) -> bool {
@@ -50,12 +68,14 @@ mod tests {
         assert_eq!(provider.provider_id(), "nano-gpt");
     }
 
-    #[tokio::test]
-    async fn test_nano_gpt_stream() {
-        let provider = NanoGpt::new();
-        let config = ModelConfig::new("nano-gpt".to_string(), "gpt-4-mini".to_string());
-        let result = provider.stream("test prompt", &config).await;
-        assert!(result.is_ok());
+    #[test]
+    fn test_nano_gpt_with_api_url() {
+        let provider =
+            NanoGpt::new().with_api_url("https://custom.api.com/v1/chat/completions".to_string());
+        assert_eq!(
+            provider.api_url,
+            "https://custom.api.com/v1/chat/completions"
+        );
     }
 
     #[test]

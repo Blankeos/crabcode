@@ -20,6 +20,14 @@ The MVP focuses on core features with minimal complexity:
 
 ## Tech Stack
 
+### Key Design Decision
+**AI Abstraction Strategy**: crabcode uses [lazy-hq/aisdk](https://github.com/lazy-hq/aisdk) as the primary AI abstraction layer. This provides:
+- Provider-agnostic LLM access (OpenAI, Anthropic, Google, Groq, etc.)
+- Built-in streaming support
+- Agent and tool system
+- Structured output capabilities
+- Avoids reinventing the wheel for AI interactions
+
 ### Core Dependencies
 - **ratatui** - Terminal UI framework (Rust equivalent to React/SolidJS for TUI)
   - Popup example: https://ratatui.rs/examples/apps/popup/
@@ -31,12 +39,17 @@ The MVP focuses on core features with minimal complexity:
 - **anyhow** - Error handling
 - **clap** - CLI argument parsing (optional, can use built-in command parsing)
 - **ignore** - .gitignore file filtering
+- **aisdk** - AI SDK for provider-agnostic LLM interactions
+  - Repository: https://github.com/lazy-hq/aisdk
+  - Documentation: https://aisdk.rs
 
 ### AI Integration
-- Custom streaming implementation (Rust alternative to Vercel AI SDK)
-  - Inspired by: [lazy-hq/aisdk](https://github.com/lazy-hq/aisdk) (Rust AI SDK)
-- SSE (Server-Sent Events) for streaming responses
-- Provider-agnostic model interface
+- **lazy-hq/aisdk** - Rust AI SDK (primary AI abstraction layer)
+  - Documentation: https://aisdk.rs
+  - Features: streaming, tools, agents, structured output
+  - Provider support: OpenAI, Anthropic, Google, Groq, OpenRouter, etc.
+- Provider-agnostic model interface through aisdk
+- Streaming via aisdk's built-in streaming capabilities
 
 ## Architecture
 
@@ -68,11 +81,8 @@ crabcode/
 │   │   ├── mod.rs
 │   │   ├── types.rs           # Model configuration
 │   │   ├── discovery.rs       # Models.dev API integration
-│   │   └── providers/
-│   │       ├── mod.rs
-│   │       ├── nano_gpt.rs    # Nano-GPT provider
-│   │       ├── z_ai.rs         # Z.ai provider
-│   │       └── common.rs        # Shared provider logic
+│   │   ├── aisdk_adapter.rs   # aisdk provider adapter
+│   │   └── config.rs           # aisdk configuration
 │   ├── session/
 │   │   ├── mod.rs
 │   │   ├── types.rs           # Session state
@@ -88,8 +98,8 @@ crabcode/
 │   │   └── file.rs            # @ file suggestions
 │   ├── streaming/
 │   │   ├── mod.rs
-│   │   ├── client.rs          # SSE client
-│   │   └── parser.rs          # Stream event parsing
+│   │   ├── adapter.rs         # aisdk stream adapter
+│   │   └── events.rs          # UI event mapping from aisdk
 │   └── utils/
 │       ├── mod.rs
 │       ├── git.rs             # Git branch detection
@@ -199,6 +209,15 @@ pub enum AgentMode {
 }
 ```
 
+#### Tool Integration (via aisdk)
+- Use aisdk's `#[tool]` macro to expose Rust functions
+- Example tools for MVP:
+  - File read/write operations
+  - Git operations (with user confirmation)
+  - Shell command execution (ask mode for PLAN, execute for BUILD)
+- Tool permissions based on agent type
+- Tools registered with aisdk agent system
+
 ### Model System
 
 #### Models.dev Integration
@@ -206,18 +225,25 @@ pub enum AgentMode {
 - Parse model list with provider information
 - Cache locally (TTL: 24 hours)
 - Provide `/models` command to list available models
+- Cross-reference with aisdk-supported providers
 
-#### Provider Support
+#### Provider Support (via aisdk)
 Priority models for MVP:
-1. **Nano-GPT** - Primary implementation
-   - API endpoint: TBD (needs research)
-   - Streaming: SSE
-   - Auth: API key
+1. **OpenAI** (via aisdk)
+   - Models: gpt-4, gpt-3.5-turbo, etc.
+   - Streaming: Built-in to aisdk
+   - Auth: API key via `OPENAI_API_KEY` env var
 
-2. **Z.ai Coding Plan** - Secondary implementation
-   - API endpoint: TBD (needs research)
-   - Streaming: SSE
-   - Auth: API key
+2. **Anthropic** (via aisdk)
+   - Models: claude-3-opus, claude-3-sonnet, etc.
+   - Streaming: Built-in to aisdk
+   - Auth: API key via `ANTHROPIC_API_KEY` env var
+
+3. **Additional aisdk providers** (as needed)
+   - Google (Gemini)
+   - Groq
+   - OpenRouter
+   - xAI (Grok)
 
 #### Model Configuration
 ```rust
@@ -237,8 +263,13 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
 }
 
-pub trait Provider {
-    async fn stream(&self, prompt: &str, config: &ModelConfig) -> Result<Stream>;
+// aisdk provider adapter
+pub fn create_provider(config: &ModelConfig) -> Result<Box<dyn aisdk::core::LanguageModel>> {
+    match config.provider_id.as_str() {
+        "openai" => Ok(Box::new(aisdk::providers::openai::OpenAI::new(config.model_id.clone())?)),
+        "anthropic" => Ok(Box::new(aisdk::providers::anthropic::Anthropic::new(config.model_id.clone())?)),
+        _ => Err(anyhow::anyhow!("Unsupported provider: {}", config.provider_id)),
+    }
 }
 ```
 
@@ -277,32 +308,40 @@ pub fn discover_files(cwd: &Path) -> Result<Vec<PathBuf>> {
 ### Streaming Chat
 
 #### Stream Events
-Inspired by opencode's stream event types:
+Inspired by opencode's stream event types, mapped from aisdk:
 
 | Event | Meaning | UI Action |
 |--------|----------|------------|
 | `start` | Generation started | Show busy indicator |
 | `text-delta` | Text chunk received | Append to current message |
-| `tool-call` | AI calling a tool | Display tool invocation |
+| `tool-call` | AI calling a tool (via aisdk agent) | Display tool invocation |
 | `tool-result` | Tool execution result | Show tool output |
 | `done` | Stream complete | Mark message as finished |
 | `error` | Stream failed | Show error state |
 
 #### Streaming Implementation
 ```rust
+use aisdk::core::LanguageModelRequest;
+use aisdk::providers::openai::OpenAI;
+
 pub async fn stream_request(
-    client: &reqwest::Client,
-    url: &str,
+    model: &ModelConfig,
     prompt: &str,
 ) -> Result<impl Stream<Item = StreamEvent>> {
-    let response = client
-        .post(url)
-        .json(&Request { messages: vec![prompt] })
-        .send()
+    let provider = aisdk_adapter::create_provider(model)?;
+    
+    let stream = LanguageModelRequest::builder()
+        .model(provider)
+        .prompt(prompt)
+        .build()
+        .stream_text()
         .await?;
 
-    Ok(response.bytes_stream().map(|chunk| {
-        parse_sse_event(chunk)
+    Ok(stream.map(|chunk| {
+        match chunk {
+            Ok(text) => StreamEvent::TextDelta(text),
+            Err(e) => StreamEvent::Error(e.to_string()),
+        }
     }))
 }
 
@@ -364,9 +403,12 @@ Color-coded by agent:
 - [x] Provider trait definition
 - [x] Models.dev API client
 - [x] `/models` command
-- [ ] `/connect` command for API keys
-- [ ] Nano-GPT provider implementation
-- [ ] Z.ai provider implementation
+- [x] `/connect` command for API keys
+- [ ] Add aisdk to Cargo.toml with provider features
+- [ ] Implement aisdk provider adapter
+- [ ] Configure OpenAI provider via aisdk
+- [ ] Configure Anthropic provider via aisdk
+- [ ] Test streaming with aisdk
 
 ### Phase 4: Agent System (Week 4)
 - [ ] Agent type definitions
@@ -385,10 +427,10 @@ Color-coded by agent:
 - [ ] Keyboard navigation in popups
 
 ### Phase 6: Streaming (Week 6)
-- [ ] SSE client implementation
-- [ ] Stream event parsing
-- [ ] Chat message streaming (text-delta)
-- [ ] Tool call display (future-proof)
+- [ ] Implement aisdk stream adapter
+- [ ] Map aisdk stream events to UI events
+- [ ] Chat message streaming (text-delta via aisdk)
+- [ ] Tool call display (via aisdk agent system)
 - [ ] Auto-scroll to latest message
 
 ### Phase 7: Polish (Week 7-8)
@@ -411,18 +453,25 @@ version = "0.1.0"
 
 [models]
 api_keys_dir = "~/.config/crabcode/keys/"
+# Supported providers via aisdk: openai, anthropic, google, groq, openrouter, etc.
 
 [agent.plan]
 name = "plan"
-model_provider = "nano-gpt"
-model_id = "gpt-4-mini"
+model_provider = "openai"
+model_id = "gpt-4"
 temperature = 0.5
 
 [agent.build]
 name = "build"
-model_provider = "z-ai"
-model_id = "coding-plan"
+model_provider = "anthropic"
+model_id = "claude-3-5-sonnet"
 temperature = 0.7
+
+[aisdk]
+# aisdk-specific configuration
+enable_streaming = true
+enable_tools = true
+max_retries = 3
 
 [ui]
 theme = "default"  # dark, light
@@ -440,7 +489,8 @@ max_history = 100
 
 ### Integration Tests
 - Models.dev API client
-- Provider streaming (mocked SSE)
+- aisdk provider adapter
+- aisdk streaming (with mock API keys)
 - Agent switching logic
 - Session persistence
 
@@ -464,10 +514,11 @@ max_history = 100
 - REFACTOR - Refactoring specialist
 
 ### Tool Support
-- File read/write operations
+- File read/write operations (via aisdk `#[tool]` macro)
 - Git operations (commit, branch, diff)
 - Shell command execution (with confirmation)
 - Code execution (sandboxed)
+- Leverage aisdk's tool execution engine
 
 ### Advanced Features
 - Multi-session support
@@ -475,12 +526,18 @@ max_history = 100
 - Collaboration mode (share sessions)
 - Custom agent definitions
 - Plugin system
+- Leverage aisdk's advanced features:
+  - Multi-agent orchestration
+  - Structured output with JSON Schema
+  - Prompt templating (via aisdk prompt feature)
+  - Embedding support for semantic search
 
 ## References
 
 ### Inspiration
 - [anomalyco/opencode](https://github.com/anomalyco/opencode) - Primary inspiration for UX and architecture
-- [lazy-hq/aisdk](https://github.com/lazy-hq/aisdk) - Rust AI SDK patterns
+- [lazy-hq/aisdk](https://github.com/lazy-hq/aisdk) - **Primary AI SDK for provider abstraction, streaming, agents, and tools**
+  - Documentation: https://aisdk.rs
 - [anomalyco/models.dev](https://github.com/anomalyco/models.dev) - Model discovery API
 - [ratatui](https://github.com/ratatui-org/ratatui) - TUI framework
 - [rhysd/tui-textarea](https://github.com/rhysd/tui-textarea) - Text input component
@@ -488,7 +545,8 @@ max_history = 100
 ### Resources
 - [ratatui popup example](https://ratatui.rs/examples/apps/popup/) - Popup implementation reference
 - [models.dev API](https://models.dev/api.json) - Model catalog
-- [Vercel AI SDK docs](https://sdk.vercel.ai/docs) - Streaming patterns
+- [aisdk documentation](https://aisdk.rs) - AI SDK usage guide
+- [aisdk API reference](https://docs.rs/aisdk/latest) - aisdk Rust API docs
 
 ## License
 

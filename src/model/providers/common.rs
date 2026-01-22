@@ -17,11 +17,21 @@ pub trait Provider: Send + Sync {
     fn supports_model(&self, model_id: &str) -> bool;
 }
 
+use super::nano_gpt::NanoGpt;
+use super::z_ai::Zai;
+
 pub struct ProviderFactory;
 
 impl ProviderFactory {
-    pub fn create_provider(_provider_id: &str) -> Result<Box<dyn Provider>> {
-        Err(anyhow::anyhow!("Provider not implemented"))
+    pub fn create_provider(provider_id: &str) -> Result<Box<dyn Provider>> {
+        match provider_id {
+            "nano-gpt" => Ok(Box::new(NanoGpt::new())),
+            "z-ai" => Ok(Box::new(Zai::new())),
+            _ => Err(anyhow::anyhow!(
+                "Provider '{}' not implemented",
+                provider_id
+            )),
+        }
     }
 }
 
@@ -73,5 +83,23 @@ mod tests {
             id: "test-provider".to_string(),
         };
         assert!(provider.supports_model("any-model"));
+    }
+
+    #[test]
+    fn test_provider_factory_create_nano_gpt() {
+        let provider = ProviderFactory::create_provider("nano-gpt").unwrap();
+        assert_eq!(provider.provider_id(), "nano-gpt");
+    }
+
+    #[test]
+    fn test_provider_factory_create_z_ai() {
+        let provider = ProviderFactory::create_provider("z-ai").unwrap();
+        assert_eq!(provider.provider_id(), "z-ai");
+    }
+
+    #[test]
+    fn test_provider_factory_create_unknown() {
+        let result = ProviderFactory::create_provider("unknown");
+        assert!(result.is_err());
     }
 }

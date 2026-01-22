@@ -1,3 +1,4 @@
+use crate::autocomplete::Suggestion;
 use ratatui::{
     prelude::Rect,
     style::{Color, Modifier, Style},
@@ -9,7 +10,7 @@ use ratatui::{
 const MAX_VISIBLE_ITEMS: usize = 8;
 
 pub struct Popup {
-    pub suggestions: Vec<String>,
+    pub suggestions: Vec<Suggestion>,
     pub selected_index: usize,
     pub visible: bool,
 }
@@ -23,7 +24,7 @@ impl Popup {
         }
     }
 
-    pub fn set_suggestions(&mut self, suggestions: Vec<String>) {
+    pub fn set_suggestions(&mut self, suggestions: Vec<Suggestion>) {
         self.suggestions = suggestions;
         self.selected_index = 0;
         self.visible = !self.suggestions.is_empty();
@@ -51,7 +52,7 @@ impl Popup {
         }
     }
 
-    pub fn get_selected(&self) -> Option<&String> {
+    pub fn get_selected(&self) -> Option<&Suggestion> {
         self.suggestions.get(self.selected_index)
     }
 
@@ -85,7 +86,12 @@ impl Popup {
                 } else {
                     Style::default().fg(Color::White)
                 };
-                ListItem::new(Line::styled(suggestion.clone(), style))
+                let text = if !suggestion.description.is_empty() {
+                    format!("{} - {}", suggestion.name, suggestion.description)
+                } else {
+                    suggestion.name.clone()
+                };
+                ListItem::new(Line::styled(text, style))
             })
             .collect();
 
@@ -93,7 +99,7 @@ impl Popup {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::LightGreen))
-                .title("Suggestions"),
+                .title("Commands"),
         );
 
         frame.render_widget(list, popup_area);
@@ -135,7 +141,16 @@ mod tests {
     #[test]
     fn test_set_suggestions() {
         let mut popup = Popup::new();
-        popup.set_suggestions(vec!["item1".to_string(), "item2".to_string()]);
+        popup.set_suggestions(vec![
+            Suggestion {
+                name: "item1".to_string(),
+                description: "desc1".to_string(),
+            },
+            Suggestion {
+                name: "item2".to_string(),
+                description: "desc2".to_string(),
+            },
+        ]);
         assert!(popup.is_visible());
         assert!(popup.has_suggestions());
         assert_eq!(popup.suggestions.len(), 2);
@@ -145,7 +160,10 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut popup = Popup::new();
-        popup.set_suggestions(vec!["item1".to_string()]);
+        popup.set_suggestions(vec![Suggestion {
+            name: "item1".to_string(),
+            description: "desc1".to_string(),
+        }]);
         popup.clear();
         assert!(!popup.is_visible());
         assert!(!popup.has_suggestions());
@@ -156,9 +174,18 @@ mod tests {
     fn test_next() {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![
-            "item1".to_string(),
-            "item2".to_string(),
-            "item3".to_string(),
+            Suggestion {
+                name: "item1".to_string(),
+                description: "desc1".to_string(),
+            },
+            Suggestion {
+                name: "item2".to_string(),
+                description: "desc2".to_string(),
+            },
+            Suggestion {
+                name: "item3".to_string(),
+                description: "desc3".to_string(),
+            },
         ]);
         popup.next();
         assert_eq!(popup.selected_index, 1);
@@ -172,9 +199,18 @@ mod tests {
     fn test_previous() {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![
-            "item1".to_string(),
-            "item2".to_string(),
-            "item3".to_string(),
+            Suggestion {
+                name: "item1".to_string(),
+                description: "desc1".to_string(),
+            },
+            Suggestion {
+                name: "item2".to_string(),
+                description: "desc2".to_string(),
+            },
+            Suggestion {
+                name: "item3".to_string(),
+                description: "desc3".to_string(),
+            },
         ]);
         popup.previous();
         assert_eq!(popup.selected_index, 2);
@@ -185,10 +221,19 @@ mod tests {
     #[test]
     fn test_get_selected() {
         let mut popup = Popup::new();
-        popup.set_suggestions(vec!["item1".to_string(), "item2".to_string()]);
-        assert_eq!(popup.get_selected(), Some(&"item1".to_string()));
+        popup.set_suggestions(vec![
+            Suggestion {
+                name: "item1".to_string(),
+                description: "desc1".to_string(),
+            },
+            Suggestion {
+                name: "item2".to_string(),
+                description: "desc2".to_string(),
+            },
+        ]);
+        assert_eq!(popup.get_selected().map(|s| s.name.as_str()), Some("item1"));
         popup.next();
-        assert_eq!(popup.get_selected(), Some(&"item2".to_string()));
+        assert_eq!(popup.get_selected().map(|s| s.name.as_str()), Some("item2"));
     }
 
     #[test]

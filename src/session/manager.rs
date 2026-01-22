@@ -68,7 +68,7 @@ impl SessionManager {
     }
 
     pub fn delete_session(&mut self, id: &str) -> bool {
-        if let Some(_) = self.sessions.remove(id) {
+        if self.sessions.remove(id).is_some() {
             if self.current_session_id.as_ref() == Some(&id.to_string()) {
                 self.current_session_id = None;
             }

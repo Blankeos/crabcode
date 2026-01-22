@@ -1,0 +1,19 @@
+# Ralphy Progress Log
+
+- [✓] 2026-01-22 16:48 - Project setup (Cargo.toml, basic structure)
+- [✓] 2026-01-22 16:50 - Main loop with ratatui Terminal
+- [✓] 2026-01-22 16:55 - Landing page with logo display
+- [✓] 2026-01-22 16:58 - Basic text input using tui-textarea
+- [✓] 2026-01-22 17:06 - Command parsing (`/` trigger)
+- [✓] 2026-01-22 17:07 - `/exit` command implementation
+- [✓] 2026-01-22 17:22 - Chat message display component
+- [✓] 2026-01-22 17:29 - Auto-suggestion popup (ratatui popup example)
+- [✓] 2026-01-22 17:33 - Status bar implementation
+- [✓] 2026-01-22 17:37 - Git branch detection
+- [✓] 2026-01-22 17:41 - `/sessions` and `/new` commands
+- [✓] 2026-01-22 17:45 - Model configuration types
+- [✓] 2026-01-22 17:48 - Provider trait definition
+- [✓] 2026-01-22 17:54 - Models.dev API client
+- [✓] 2026-01-22 18:09 - `/models` command
+- [✓] 2026-01-22 18:27 - `/connect` command for API keys
+- [✓] 2026-01-22 18:39 - Nano-GPT provider implementation

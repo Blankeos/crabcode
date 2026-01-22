@@ -3,13 +3,17 @@ use crate::command::registry::{Command, CommandResult, Registry};
 use crate::session::manager::SessionManager;
 use std::pin::Pin;
 
-pub fn handle_exit<'a>(_parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async {
-        CommandResult::Success("Exiting...".to_string())
-    })
+pub fn handle_exit<'a>(
+    _parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    Box::pin(async { CommandResult::Success("Exiting...".to_string()) })
 }
 
-pub fn handle_sessions<'a>(_parsed: &'a ParsedCommand, sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+pub fn handle_sessions<'a>(
+    _parsed: &'a ParsedCommand,
+    sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         let sessions = sm.list_sessions();
 
@@ -28,7 +32,10 @@ pub fn handle_sessions<'a>(_parsed: &'a ParsedCommand, sm: &'a mut SessionManage
     })
 }
 
-pub fn handle_new<'a>(parsed: &'a ParsedCommand, sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+pub fn handle_new<'a>(
+    parsed: &'a ParsedCommand,
+    sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let name = if parsed.args.is_empty() {
         None
     } else {
@@ -41,7 +48,10 @@ pub fn handle_new<'a>(parsed: &'a ParsedCommand, sm: &'a mut SessionManager) -> 
     })
 }
 
-pub fn handle_connect<'a>(parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+pub fn handle_connect<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let args = parsed.args.clone();
 
     Box::pin(async move {
@@ -53,7 +63,9 @@ pub fn handle_connect<'a>(parsed: &'a ParsedCommand, _sm: &'a mut SessionManager
         if args.is_empty() {
             let providers = config.list_providers();
             if providers.is_empty() {
-                CommandResult::Success("No API keys configured. Usage: /connect <provider> <api_key>".to_string())
+                CommandResult::Success(
+                    "No API keys configured. Usage: /connect <provider> <api_key>".to_string(),
+                )
             } else {
                 let mut output = String::from("Configured API keys:\n");
                 for provider in providers {
@@ -66,7 +78,10 @@ pub fn handle_connect<'a>(parsed: &'a ParsedCommand, _sm: &'a mut SessionManager
             if let Some(_api_key) = config.get_api_key(provider) {
                 CommandResult::Success(format!("Provider '{}' is configured", provider))
             } else {
-                CommandResult::Success(format!("Provider '{}' is not configured. Usage: /connect {} <api_key>", provider, provider))
+                CommandResult::Success(format!(
+                    "Provider '{}' is not configured. Usage: /connect {} <api_key>",
+                    provider, provider
+                ))
             }
         } else {
             let provider = &args[0];
@@ -82,9 +97,12 @@ pub fn handle_connect<'a>(parsed: &'a ParsedCommand, _sm: &'a mut SessionManager
     })
 }
 
-pub fn handle_models<'a>(parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+pub fn handle_models<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     use crate::model::discovery::Discovery;
-    
+
     let provider_filter = if parsed.args.is_empty() {
         None
     } else {
@@ -93,7 +111,7 @@ pub fn handle_models<'a>(parsed: &'a ParsedCommand, _sm: &'a mut SessionManager)
 
     Box::pin(async move {
         let discovery = Discovery::new();
-        
+
         match discovery {
             Ok(d) => {
                 let filter_ref = provider_filter.as_deref();
@@ -308,7 +326,10 @@ mod tests {
         }
 
         let config = crate::config::ApiKeyConfig::load_test().unwrap();
-        assert_eq!(config.get_api_key("nano-gpt"), Some(&"sk-test-key".to_string()));
+        assert_eq!(
+            config.get_api_key("nano-gpt"),
+            Some(&"sk-test-key".to_string())
+        );
 
         let _ = crate::config::ApiKeyConfig::cleanup_test();
     }
@@ -339,7 +360,11 @@ mod tests {
         let result = handle_models(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
-                assert!(msg.contains("Available models:") || msg.contains("No models found") || msg.contains("Failed"));
+                assert!(
+                    msg.contains("Available models:")
+                        || msg.contains("No models found")
+                        || msg.contains("Failed")
+                );
             }
             _ => panic!("Expected Success"),
         }

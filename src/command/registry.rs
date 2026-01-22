@@ -3,10 +3,11 @@ use crate::session::manager::SessionManager;
 use std::collections::HashMap;
 use std::pin::Pin;
 
-pub type CommandHandler = for<'a> fn(
-    &'a ParsedCommand,
-    &'a mut SessionManager,
-) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>>;
+pub type CommandHandler =
+    for<'a> fn(
+        &'a ParsedCommand,
+        &'a mut SessionManager,
+    ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>>;
 
 #[derive(Clone)]
 pub struct Command {
@@ -73,11 +74,17 @@ impl Default for Registry {
 mod tests {
     use super::*;
 
-    fn dummy_handler<'a>(_parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    fn dummy_handler<'a>(
+        _parsed: &'a ParsedCommand,
+        _sm: &'a mut SessionManager,
+    ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
         Box::pin(async { CommandResult::Success("ok".to_string()) })
     }
 
-    fn dummy_error_handler<'a>(_parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    fn dummy_error_handler<'a>(
+        _parsed: &'a ParsedCommand,
+        _sm: &'a mut SessionManager,
+    ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
         Box::pin(async { CommandResult::Error("error".to_string()) })
     }
 
@@ -211,7 +218,9 @@ mod tests {
         let mut registry = Registry::new();
 
         let handler_with_args =
-            |parsed: &ParsedCommand, _sm: &mut SessionManager| -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + '_>> {
+            |parsed: &ParsedCommand,
+             _sm: &mut SessionManager|
+             -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + '_>> {
                 let args = parsed.args.clone();
                 Box::pin(async move {
                     if !args.is_empty() {

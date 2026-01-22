@@ -1,21 +1,34 @@
 use crate::command::registry::Registry;
 
+#[derive(Clone)]
+pub struct Suggestion {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Default)]
 pub struct CommandAuto {
-    commands: Vec<String>,
+    commands: Vec<Suggestion>,
 }
 
 impl CommandAuto {
     pub fn new(registry: &Registry) -> Self {
-        let commands = registry.get_command_names();
+        let commands = registry
+            .list_commands()
+            .iter()
+            .map(|cmd| Suggestion {
+                name: cmd.name.clone(),
+                description: cmd.description.clone(),
+            })
+            .collect();
         Self { commands }
     }
 
-    pub fn get_suggestions(&self, input: &str) -> Vec<String> {
+    pub fn get_suggestions(&self, input: &str) -> Vec<Suggestion> {
         let input_lower = input.to_lowercase();
         self.commands
             .iter()
-            .filter(|cmd| cmd.to_lowercase().starts_with(&input_lower))
+            .filter(|cmd| cmd.name.to_lowercase().starts_with(&input_lower))
             .cloned()
             .collect()
     }
@@ -30,10 +43,9 @@ mod tests {
     fn dummy_handler(
         _parsed: &crate::command::parser::ParsedCommand,
         _sm: &mut crate::session::manager::SessionManager,
-    ) -> Pin<Box<dyn std::future::Future<Output = crate::command::registry::CommandResult> + Send>> {
-        Box::pin(async {
-            crate::command::registry::CommandResult::Success("ok".to_string())
-        })
+    ) -> Pin<Box<dyn std::future::Future<Output = crate::command::registry::CommandResult> + Send>>
+    {
+        Box::pin(async { crate::command::registry::CommandResult::Success("ok".to_string()) })
     }
 
     fn setup_registry() -> Registry {
@@ -83,7 +95,7 @@ mod tests {
         let auto = CommandAuto::new(&registry);
         let suggestions = auto.get_suggestions("s");
         assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0], "sessions");
+        assert_eq!(suggestions[0].name, "sessions");
     }
 
     #[test]
@@ -92,7 +104,7 @@ mod tests {
         let auto = CommandAuto::new(&registry);
         let suggestions = auto.get_suggestions("help");
         assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0], "help");
+        assert_eq!(suggestions[0].name, "help");
     }
 
     #[test]
@@ -109,6 +121,6 @@ mod tests {
         let auto = CommandAuto::new(&registry);
         let suggestions = auto.get_suggestions("HELP");
         assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0], "help");
+        assert_eq!(suggestions[0].name, "help");
     }
 }

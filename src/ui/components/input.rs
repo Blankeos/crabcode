@@ -1,6 +1,6 @@
-use crate::autocomplete::AutoComplete;
+use crate::autocomplete::{AutoComplete, Suggestion};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::prelude::Rect;
+use ratatui::{prelude::Rect, widgets::Block};
 use tui_textarea::{Input as TuiInput, TextArea};
 
 pub struct Input {
@@ -23,7 +23,10 @@ impl Input {
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
-        frame.render_widget(&self.textarea, area);
+        let block = Block::bordered();
+        let inner_area = block.inner(area);
+        frame.render_widget(&self.textarea, inner_area);
+        frame.render_widget(block, area);
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
@@ -31,10 +34,7 @@ impl Input {
         match event.code {
             KeyCode::Enter if event.modifiers == KeyModifiers::NONE => false,
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
-            KeyCode::Tab => {
-                self.complete_selection();
-                true
-            }
+            KeyCode::Tab => true,
             KeyCode::Up | KeyCode::Down => false,
             KeyCode::Esc => false,
             _ => {
@@ -42,6 +42,16 @@ impl Input {
                 true
             }
         }
+    }
+
+    pub fn should_show_suggestions(&self) -> bool {
+        let text = self.get_text();
+        !text.is_empty() && text.starts_with('/')
+    }
+
+    pub fn is_slash_at_end(&self) -> bool {
+        let text = self.get_text();
+        text.trim_end() == "/"
     }
 
     pub fn complete_selection(&mut self) {
@@ -55,28 +65,21 @@ impl Input {
                 format!("{}{}", &current_text[..start_index], selected)
             };
 
-            self.textarea = TextArea::default();
-            self.textarea.insert_str(new_text);
+            self.set_text(&new_text);
         }
     }
 
     pub fn get_autocomplete_selection(&self) -> Option<String> {
         if let Some(autocomplete) = &self.autocomplete {
             let text = self.get_text();
-            if text.starts_with('/') {
-                let parts: Vec<&str> = text.splitn(2, ' ').collect();
-                if parts.len() > 1 {
-                    let command_arg = parts.get(1).unwrap_or(&"").trim();
-                    let suggestions = autocomplete.get_suggestions(command_arg);
-                    if !suggestions.is_empty() {
-                        return Some(suggestions[0].clone());
-                    }
-                }
+            let suggestions = if text.starts_with('/') {
+                let filter = text.trim_start_matches('/');
+                autocomplete.get_suggestions(filter)
             } else {
-                let suggestions = autocomplete.get_suggestions(&text);
-                if !suggestions.is_empty() {
-                    return Some(suggestions[0].clone());
-                }
+                autocomplete.get_suggestions(&text)
+            };
+            if !suggestions.is_empty() {
+                return Some(suggestions[0].name.clone());
             }
         }
         None
@@ -98,15 +101,21 @@ impl Input {
         self.textarea.set_placeholder_text(placeholder);
     }
 
-    pub fn get_autocomplete_suggestions(&self) -> Vec<String> {
+    pub fn set_text(&mut self, text: &str) {
+        self.textarea = TextArea::default();
+        self.textarea.insert_str(text);
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        self.textarea.insert_str(&c.to_string());
+    }
+
+    pub fn get_autocomplete_suggestions(&self) -> Vec<Suggestion> {
         if let Some(autocomplete) = &self.autocomplete {
             let text = self.get_text();
             if text.starts_with('/') {
-                let parts: Vec<&str> = text.splitn(2, ' ').collect();
-                if parts.len() > 1 {
-                    let command_arg = parts.get(1).unwrap_or(&"").trim();
-                    return autocomplete.get_suggestions(command_arg);
-                }
+                let filter = text.trim_start_matches('/');
+                return autocomplete.get_suggestions(filter);
             } else {
                 return autocomplete.get_suggestions(&text);
             }
