@@ -7,9 +7,9 @@ use ratatui::{
 };
 
 const LOGO: &str = r#"
-  ▄▄▄▄ ▄▄▄▄   ▄▄▄  ▄▄▄▄   ▄▄▄▄  ▄▄▄  ▄▄▄▄  ▄▄▄▄▄
- ██▀▀▀ ██▄█▄ ██▀██ ██▄██ ██▀▀▀ ██▀██ ██▀██ ██▄▄
- ▀████ ██ ██ ██▀██ ██▄█▀ ▀████ ▀███▀ ████▀ ██▄▄▄
+🦀▄▄▄▄ ▄▄▄▄   ▄▄▄  ▄▄▄▄   ▄▄▄▄  ▄▄▄  ▄▄▄▄  ▄▄▄▄▄
+██▀▀▀ ██▄█▄ ██▀██ ██▄██ ██▀▀▀ ██▀██ ██▀██ ██▄▄
+▀████ ██ ██ ██▀██ ██▄█▀ ▀████ ▀███▀ ████▀ ██▄▄▄
 "#;
 
 pub struct Landing;
@@ -26,6 +26,7 @@ impl Landing {
             .direction(Direction::Vertical)
             .constraints(
                 [
+                    Constraint::Min(0),
                     Constraint::Length(8),
                     Constraint::Length(3),
                     Constraint::Min(0),
@@ -82,8 +83,14 @@ impl Landing {
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true });
 
-        f.render_widget(logo, chunks[0]);
-        f.render_widget(welcome, chunks[1]);
+        f.render_widget(logo, chunks[1]);
+
+        let chat_placeholder = Paragraph::new("Your conversation will appear here")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(chat_placeholder, chunks[2]);
+
+        f.render_widget(welcome, chunks[3]);
     }
 }
 
