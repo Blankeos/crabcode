@@ -348,15 +348,15 @@ Color-coded by agent:
 - [x] Main loop with ratatui Terminal
 - [x] Landing page with logo display
 - [x] Basic text input using tui-textarea
-- [ ] Command parsing (`/` trigger)
-- [ ] `/exit` command implementation
+- [x] Command parsing (`/` trigger)
+- [x] `/exit` command implementation
 
 ### Phase 2: UI Components (Week 2)
-- [ ] Chat message display component
-- [ ] Auto-suggestion popup (ratatui popup example)
-- [ ] Status bar implementation
-- [ ] Git branch detection
-- [ ] CWD display
+- [x] Chat message display component
+- [x] Auto-suggestion popup (ratatui popup example)
+- [x] Status bar implementation
+- [x] Git branch detection
+- [x] CWD display
 - [ ] `/sessions` and `/new` commands
 
 ### Phase 3: Model Integration (Week 3)
