@@ -1,57 +1,110 @@
 use crate::command::parser::ParsedCommand;
 use crate::command::registry::{Command, CommandResult, Registry};
 use crate::session::manager::SessionManager;
+use std::pin::Pin;
 
-pub fn handle_exit(_parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
-    CommandResult::Success("Exiting...".to_string())
+pub fn handle_exit<'a>(_parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    Box::pin(async {
+        CommandResult::Success("Exiting...".to_string())
+    })
 }
 
-pub fn handle_sessions(_parsed: &ParsedCommand, sm: &mut SessionManager) -> CommandResult {
-    let sessions = sm.list_sessions();
+pub fn handle_sessions<'a>(_parsed: &'a ParsedCommand, sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    Box::pin(async move {
+        let sessions = sm.list_sessions();
 
-    if sessions.is_empty() {
-        CommandResult::Success("No active sessions".to_string())
-    } else {
-        let mut output = String::from("Active sessions:\n");
-        for session in sessions {
-            output.push_str(&format!(
-                "  - {} ({} messages)\n",
-                session.id, session.message_count
-            ));
+        if sessions.is_empty() {
+            CommandResult::Success("No active sessions".to_string())
+        } else {
+            let mut output = String::from("Active sessions:\n");
+            for session in sessions {
+                output.push_str(&format!(
+                    "  - {} ({} messages)\n",
+                    session.id, session.message_count
+                ));
+            }
+            CommandResult::Success(output)
         }
-        CommandResult::Success(output)
-    }
+    })
 }
 
-pub fn handle_new(parsed: &ParsedCommand, sm: &mut SessionManager) -> CommandResult {
+pub fn handle_new<'a>(parsed: &'a ParsedCommand, sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let name = if parsed.args.is_empty() {
         None
     } else {
         Some(parsed.args[0].clone())
     };
 
-    let session_id = sm.create_session(name);
-    CommandResult::Success(format!("Created new session: {}", session_id))
+    Box::pin(async move {
+        let session_id = sm.create_session(name);
+        CommandResult::Success(format!("Created new session: {}", session_id))
+    })
 }
 
-pub fn handle_connect(parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
-    if parsed.args.is_empty() {
-        CommandResult::Error("Usage: /connect <provider> [model]".to_string())
-    } else {
-        let provider = &parsed.args[0];
-        let model = if parsed.args.len() > 1 {
-            &parsed.args[1]
-        } else {
-            "default"
+pub fn handle_connect<'a>(parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        let config = match crate::config::ApiKeyConfig::load() {
+            Ok(c) => c,
+            Err(e) => return CommandResult::Error(format!("Failed to load config: {}", e)),
         };
-        CommandResult::Success(format!("Connected to {} using model {}", provider, model))
-    }
+
+        if args.is_empty() {
+            let providers = config.list_providers();
+            if providers.is_empty() {
+                CommandResult::Success("No API keys configured. Usage: /connect <provider> <api_key>".to_string())
+            } else {
+                let mut output = String::from("Configured API keys:\n");
+                for provider in providers {
+                    output.push_str(&format!("  - {}\n", provider));
+                }
+                CommandResult::Success(output)
+            }
+        } else if args.len() == 1 {
+            let provider = &args[0];
+            if let Some(_api_key) = config.get_api_key(provider) {
+                CommandResult::Success(format!("Provider '{}' is configured", provider))
+            } else {
+                CommandResult::Success(format!("Provider '{}' is not configured. Usage: /connect {} <api_key>", provider, provider))
+            }
+        } else {
+            let provider = &args[0];
+            let api_key = &args[1];
+            let mut config = config;
+            config.set_api_key(provider.clone(), api_key.clone());
+            if let Err(e) = config.save() {
+                CommandResult::Error(format!("Failed to save config: {}", e))
+            } else {
+                CommandResult::Success(format!("API key configured for provider '{}'", provider))
+            }
+        }
+    })
 }
 
-pub fn handle_models(_parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
-    CommandResult::Success(
-        "Available models:\n  nano-gpt: gpt-4, gpt-3.5-turbo\n  z-ai: coding-plan".to_string(),
-    )
+pub fn handle_models<'a>(parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    use crate::model::discovery::Discovery;
+    
+    let provider_filter = if parsed.args.is_empty() {
+        None
+    } else {
+        Some(parsed.args[0].clone())
+    };
+
+    Box::pin(async move {
+        let discovery = Discovery::new();
+        
+        match discovery {
+            Ok(d) => {
+                let filter_ref = provider_filter.as_deref();
+                match d.list_models(filter_ref).await {
+                    Ok(output) => CommandResult::Success(output),
+                    Err(e) => CommandResult::Error(format!("Failed to fetch models: {}", e)),
+                }
+            }
+            Err(e) => CommandResult::Error(format!("Failed to initialize model discovery: {}", e)),
+        }
+    })
 }
 
 pub fn register_all_commands(registry: &mut Registry) {
@@ -97,25 +150,25 @@ mod tests {
         registry
     }
 
-    #[test]
-    fn test_handle_exit() {
+    #[tokio::test]
+    async fn test_handle_exit() {
         let parsed = ParsedCommand {
             name: "exit".to_string(),
             args: vec![],
         };
         let mut session_manager = SessionManager::new();
-        let result = handle_exit(&parsed, &mut session_manager);
+        let result = handle_exit(&parsed, &mut session_manager).await;
         assert_eq!(result, CommandResult::Success("Exiting...".to_string()));
     }
 
-    #[test]
-    fn test_handle_sessions() {
+    #[tokio::test]
+    async fn test_handle_sessions() {
         let parsed = ParsedCommand {
             name: "sessions".to_string(),
             args: vec![],
         };
         let mut session_manager = SessionManager::new();
-        let result = handle_sessions(&parsed, &mut session_manager);
+        let result = handle_sessions(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
                 assert!(msg.contains("No active sessions"));
@@ -124,8 +177,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_handle_sessions_with_data() {
+    #[tokio::test]
+    async fn test_handle_sessions_with_data() {
         let mut session_manager = SessionManager::new();
         session_manager.create_session(Some("session-1".to_string()));
         session_manager.create_session(Some("session-2".to_string()));
@@ -134,7 +187,7 @@ mod tests {
             name: "sessions".to_string(),
             args: vec![],
         };
-        let result = handle_sessions(&parsed, &mut session_manager);
+        let result = handle_sessions(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
                 assert!(msg.contains("Active sessions:"));
@@ -145,14 +198,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_handle_new_no_args() {
+    #[tokio::test]
+    async fn test_handle_new_no_args() {
         let parsed = ParsedCommand {
             name: "new".to_string(),
             args: vec![],
         };
         let mut session_manager = SessionManager::new();
-        let result = handle_new(&parsed, &mut session_manager);
+        let result = handle_new(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
                 assert!(msg.contains("Created new session: session-1"));
@@ -161,14 +214,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_handle_new_with_name() {
+    #[tokio::test]
+    async fn test_handle_new_with_name() {
         let parsed = ParsedCommand {
             name: "new".to_string(),
             args: vec!["my-session".to_string()],
         };
         let mut session_manager = SessionManager::new();
-        let result = handle_new(&parsed, &mut session_manager);
+        let result = handle_new(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
                 assert!(msg.contains("Created new session: my-session"));
@@ -177,68 +230,141 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_handle_connect_no_args() {
+    #[tokio::test]
+    async fn test_handle_connect_no_args() {
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
+
         let parsed = ParsedCommand {
             name: "connect".to_string(),
             args: vec![],
         };
         let mut session_manager = SessionManager::new();
-        let result = handle_connect(&parsed, &mut session_manager);
-        assert_eq!(
-            result,
-            CommandResult::Error("Usage: /connect <provider> [model]".to_string())
-        );
+        let result = handle_connect(&parsed, &mut session_manager).await;
+        match result {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("No API keys configured"));
+            }
+            _ => panic!("Expected Success"),
+        }
+
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
     }
 
-    #[test]
-    fn test_handle_connect_provider_only() {
+    #[tokio::test]
+    async fn test_handle_connect_provider_only() {
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
+
         let parsed = ParsedCommand {
             name: "connect".to_string(),
             args: vec!["nano-gpt".to_string()],
         };
         let mut session_manager = SessionManager::new();
-        let result = handle_connect(&parsed, &mut session_manager);
-        assert_eq!(
-            result,
-            CommandResult::Success("Connected to nano-gpt using model default".to_string())
-        );
+        let result = handle_connect(&parsed, &mut session_manager).await;
+        match result {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("not configured"));
+            }
+            _ => panic!("Expected Success"),
+        }
+
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
     }
 
-    #[test]
-    fn test_handle_connect_with_model() {
+    #[tokio::test]
+    async fn test_handle_connect_with_api_key() {
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
+
         let parsed = ParsedCommand {
             name: "connect".to_string(),
-            args: vec!["nano-gpt".to_string(), "gpt-4".to_string()],
+            args: vec!["nano-gpt".to_string(), "sk-test-key".to_string()],
         };
         let mut session_manager = SessionManager::new();
-        let result = handle_connect(&parsed, &mut session_manager);
-        assert_eq!(
-            result,
-            CommandResult::Success("Connected to nano-gpt using model gpt-4".to_string())
-        );
+        let result = handle_connect(&parsed, &mut session_manager).await;
+        match result {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("API key configured"));
+            }
+            _ => panic!("Expected Success"),
+        }
+
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
     }
 
-    #[test]
-    fn test_handle_models() {
+    #[tokio::test]
+    async fn test_handle_connect_and_retrieve() {
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let mut session_manager = SessionManager::new();
+
+        let parsed1 = ParsedCommand {
+            name: "connect".to_string(),
+            args: vec!["nano-gpt".to_string(), "sk-test-key".to_string()],
+        };
+        let result1 = handle_connect(&parsed1, &mut session_manager).await;
+        match result1 {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("API key configured"));
+            }
+            _ => panic!("Expected Success"),
+        }
+
+        let config = crate::config::ApiKeyConfig::load_test().unwrap();
+        assert_eq!(config.get_api_key("nano-gpt"), Some(&"sk-test-key".to_string()));
+
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
+    }
+
+    #[tokio::test]
+    async fn test_handle_models() {
         let parsed = ParsedCommand {
             name: "models".to_string(),
             args: vec![],
         };
         let mut session_manager = SessionManager::new();
-        let result = handle_models(&parsed, &mut session_manager);
+        let result = handle_models(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
-                assert!(msg.contains("Available models:"));
-                assert!(msg.contains("nano-gpt"));
-                assert!(msg.contains("z-ai"));
+                assert!(msg.contains("Available models:") || msg.contains("Failed"));
             }
             _ => panic!("Expected Success"),
         }
     }
 
-    #[test]
-    fn test_registry_has_all_commands() {
+    #[tokio::test]
+    async fn test_handle_models_with_filter() {
+        let parsed = ParsedCommand {
+            name: "models".to_string(),
+            args: vec!["open".to_string()],
+        };
+        let mut session_manager = SessionManager::new();
+        let result = handle_models(&parsed, &mut session_manager).await;
+        match result {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("Available models:") || msg.contains("No models found") || msg.contains("Failed"));
+            }
+            _ => panic!("Expected Success"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_models_cleanup() {
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let parsed = ParsedCommand {
+            name: "models".to_string(),
+            args: vec![],
+        };
+        let mut session_manager = SessionManager::new();
+        let result = handle_models(&parsed, &mut session_manager).await;
+        match result {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("Available models:") || msg.contains("Failed"));
+            }
+            _ => panic!("Expected Success"),
+        }
+        let _ = crate::config::ApiKeyConfig::cleanup_test();
+    }
+
+    #[tokio::test]
+    async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
         assert_eq!(names.len(), 5);
@@ -249,27 +375,27 @@ mod tests {
         assert!(names.contains(&"models".to_string()));
     }
 
-    #[test]
-    fn test_execute_exit_command() {
+    #[tokio::test]
+    async fn test_execute_exit_command() {
         let registry = create_registry();
         let parsed = ParsedCommand {
             name: "exit".to_string(),
             args: vec![],
         };
         let mut session_manager = SessionManager::new();
-        let result = registry.execute(&parsed, &mut session_manager);
+        let result = registry.execute(&parsed, &mut session_manager).await;
         assert_eq!(result, CommandResult::Success("Exiting...".to_string()));
     }
 
-    #[test]
-    fn test_execute_unknown_command() {
+    #[tokio::test]
+    async fn test_execute_unknown_command() {
         let registry = create_registry();
         let parsed = ParsedCommand {
             name: "unknown".to_string(),
             args: vec![],
         };
         let mut session_manager = SessionManager::new();
-        let result = registry.execute(&parsed, &mut session_manager);
+        let result = registry.execute(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Error(msg) => {
                 assert!(msg.contains("Unknown command"));

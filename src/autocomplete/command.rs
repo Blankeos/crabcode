@@ -25,12 +25,15 @@ impl CommandAuto {
 mod tests {
     use super::*;
     use crate::command::registry::{Command, Registry};
+    use std::pin::Pin;
 
     fn dummy_handler(
         _parsed: &crate::command::parser::ParsedCommand,
         _sm: &mut crate::session::manager::SessionManager,
-    ) -> crate::command::registry::CommandResult {
-        crate::command::registry::CommandResult::Success("ok".to_string())
+    ) -> Pin<Box<dyn std::future::Future<Output = crate::command::registry::CommandResult> + Send>> {
+        Box::pin(async {
+            crate::command::registry::CommandResult::Success("ok".to_string())
+        })
     }
 
     fn setup_registry() -> Registry {

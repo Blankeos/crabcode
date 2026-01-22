@@ -4,6 +4,7 @@ mod agent;
 mod app;
 mod autocomplete;
 mod command;
+mod config;
 mod model;
 mod session;
 mod streaming;

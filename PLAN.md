@@ -361,9 +361,9 @@ Color-coded by agent:
 
 ### Phase 3: Model Integration (Week 3)
 - [x] Model configuration types
-- [ ] Provider trait definition
-- [ ] Models.dev API client
-- [ ] `/models` command
+- [x] Provider trait definition
+- [x] Models.dev API client
+- [x] `/models` command
 - [ ] `/connect` command for API keys
 - [ ] Nano-GPT provider implementation
 - [ ] Z.ai provider implementation

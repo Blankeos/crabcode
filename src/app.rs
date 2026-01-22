@@ -152,7 +152,10 @@ impl App {
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
                 let input_text = self.input.get_text();
                 if !input_text.is_empty() {
-                    self.process_input(&input_text);
+                    tokio::task::block_in_place(|| {
+                        let rt = tokio::runtime::Handle::current();
+                        rt.block_on(self.process_input(&input_text));
+                    });
                     self.input.clear();
                     self.popup.clear();
                 }
@@ -191,14 +194,15 @@ impl App {
         }
     }
 
-    fn process_input(&mut self, input: &str) {
+    async fn process_input(&mut self, input: &str) {
         use crate::command::parser::parse_input;
 
         match parse_input(input) {
             InputType::Command(parsed) => {
                 let result = self
                     .command_registry
-                    .execute(&parsed, &mut self.session_manager);
+                    .execute(&parsed, &mut self.session_manager)
+                    .await;
                 match result {
                     crate::command::registry::CommandResult::Success(msg) => {
                         self.chat.add_assistant_message(msg);
@@ -306,18 +310,18 @@ mod tests {
         assert!(app.running);
     }
 
-    #[test]
-    fn test_process_input_message() {
+    #[tokio::test]
+    async fn test_process_input_message() {
         let mut app = App::new();
-        app.process_input("hello world");
+        app.process_input("hello world").await;
         assert_eq!(app.chat.messages.len(), 1);
         assert_eq!(app.chat.messages[0].content, "hello world");
     }
 
-    #[test]
-    fn test_process_input_command() {
+    #[tokio::test]
+    async fn test_process_input_command() {
         let mut app = App::new();
-        app.process_input("/sessions");
+        app.process_input("/sessions").await;
         assert_eq!(app.chat.messages.len(), 1);
         assert_eq!(
             app.chat.messages[0].role,
@@ -325,10 +329,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_process_input_empty() {
+    #[tokio::test]
+    async fn test_process_input_empty() {
         let mut app = App::new();
-        app.process_input("");
+        app.process_input("").await;
         assert_eq!(app.chat.messages.len(), 0);
     }
 }

@@ -1,10 +1,14 @@
 use crate::command::parser::ParsedCommand;
 use crate::session::manager::SessionManager;
 use std::collections::HashMap;
+use std::pin::Pin;
 
-pub type CommandHandler = fn(&ParsedCommand, &mut SessionManager) -> CommandResult;
+pub type CommandHandler = for<'a> fn(
+    &'a ParsedCommand,
+    &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Command {
     pub name: String,
     pub description: String,
@@ -36,13 +40,13 @@ impl Registry {
         self.commands.get(name)
     }
 
-    pub fn execute(
+    pub async fn execute<'a>(
         &self,
-        parsed: &ParsedCommand,
-        session_manager: &mut SessionManager,
+        parsed: &'a ParsedCommand,
+        session_manager: &'a mut SessionManager,
     ) -> CommandResult {
         if let Some(command) = self.get(&parsed.name) {
-            (command.handler)(parsed, session_manager)
+            (command.handler)(parsed, session_manager).await
         } else {
             CommandResult::Error(format!("Unknown command: {}", parsed.name))
         }
@@ -69,12 +73,12 @@ impl Default for Registry {
 mod tests {
     use super::*;
 
-    fn dummy_handler(_parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
-        CommandResult::Success("ok".to_string())
+    fn dummy_handler<'a>(_parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+        Box::pin(async { CommandResult::Success("ok".to_string()) })
     }
 
-    fn dummy_error_handler(_parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
-        CommandResult::Error("error".to_string())
+    fn dummy_error_handler<'a>(_parsed: &'a ParsedCommand, _sm: &'a mut SessionManager) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+        Box::pin(async { CommandResult::Error("error".to_string()) })
     }
 
     #[test]
@@ -123,8 +127,8 @@ mod tests {
         assert!(retrieved.is_none());
     }
 
-    #[test]
-    fn test_execute_command() {
+    #[tokio::test]
+    async fn test_execute_command() {
         let mut registry = Registry::new();
         let command = Command {
             name: "test".to_string(),
@@ -138,12 +142,12 @@ mod tests {
             args: vec![],
         };
         let mut session_manager = SessionManager::new();
-        let result = registry.execute(&parsed, &mut session_manager);
+        let result = registry.execute(&parsed, &mut session_manager).await;
         assert_eq!(result, CommandResult::Success("ok".to_string()));
     }
 
-    #[test]
-    fn test_execute_unknown_command() {
+    #[tokio::test]
+    async fn test_execute_unknown_command() {
         let registry = Registry::new();
 
         let parsed = ParsedCommand {
@@ -151,7 +155,7 @@ mod tests {
             args: vec![],
         };
         let mut session_manager = SessionManager::new();
-        let result = registry.execute(&parsed, &mut session_manager);
+        let result = registry.execute(&parsed, &mut session_manager).await;
         assert_eq!(
             result,
             CommandResult::Error("Unknown command: unknown".to_string())
@@ -202,17 +206,20 @@ mod tests {
         assert_eq!(names, vec!["apple".to_string(), "zebra".to_string()]);
     }
 
-    #[test]
-    fn test_execute_with_args() {
+    #[tokio::test]
+    async fn test_execute_with_args() {
         let mut registry = Registry::new();
 
         let handler_with_args =
-            |parsed: &ParsedCommand, _sm: &mut SessionManager| -> CommandResult {
-                if !parsed.args.is_empty() {
-                    CommandResult::Success(format!("Args: {:?}", parsed.args))
-                } else {
-                    CommandResult::Error("No args".to_string())
-                }
+            |parsed: &ParsedCommand, _sm: &mut SessionManager| -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + '_>> {
+                let args = parsed.args.clone();
+                Box::pin(async move {
+                    if !args.is_empty() {
+                        CommandResult::Success(format!("Args: {:?}", args))
+                    } else {
+                        CommandResult::Error("No args".to_string())
+                    }
+                })
             };
 
         let command = Command {
@@ -227,7 +234,7 @@ mod tests {
             args: vec!["arg1".to_string(), "arg2".to_string()],
         };
         let mut session_manager = SessionManager::new();
-        let result = registry.execute(&parsed, &mut session_manager);
+        let result = registry.execute(&parsed, &mut session_manager).await;
         assert_eq!(
             result,
             CommandResult::Success("Args: [\"arg1\", \"arg2\"]".to_string())
