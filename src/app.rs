@@ -4,16 +4,14 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::time::Duration;
 
 use crate::command::handlers::register_all_commands;
-use crate::command::registry::Registry;
 use crate::command::parser::InputType;
+use crate::command::registry::Registry;
+use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::landing::Landing;
 
@@ -22,20 +20,20 @@ pub struct App {
     pub version: String,
     pub input: Input,
     pub command_registry: Registry,
-    pub last_message: Option<String>,
+    pub chat: Chat,
 }
 
 impl App {
     pub fn new() -> Self {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
-        
+
         Self {
             running: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
             input: Input::new(),
             command_registry: registry,
-            last_message: None,
+            chat: Chat::new(),
         }
     }
 
@@ -89,20 +87,28 @@ impl App {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(3), Constraint::Length(1)].as_ref())
+            .constraints(
+                [
+                    Constraint::Min(0),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                ]
+                .as_ref(),
+            )
             .split(size);
 
-        let landing = Landing::new();
-        landing.render(f);
+        if self.chat.messages.is_empty() {
+            let landing = Landing::new();
+            landing.render(f);
+        } else {
+            self.chat.render(f, chunks[0]);
+        }
 
         self.input.render(f, chunks[1]);
 
         let status_text = vec![
             Span::raw("crabcode "),
-            Span::styled(
-                &self.version,
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(&self.version, Style::default().add_modifier(Modifier::BOLD)),
         ];
 
         let status = Paragraph::new(Line::from(status_text))
@@ -135,24 +141,26 @@ impl App {
 
     fn process_input(&mut self, input: &str) {
         use crate::command::parser::parse_input;
-        
+
         match parse_input(input) {
             InputType::Command(parsed) => {
                 let result = self.command_registry.execute(&parsed);
                 match result {
                     crate::command::registry::CommandResult::Success(msg) => {
-                        self.last_message = Some(msg);
+                        self.chat.add_assistant_message(msg);
                         if parsed.name == "exit" {
                             self.quit();
                         }
                     }
                     crate::command::registry::CommandResult::Error(msg) => {
-                        self.last_message = Some(format!("Error: {}", msg));
+                        self.chat.add_assistant_message(format!("Error: {}", msg));
                     }
                 }
             }
             InputType::Message(msg) => {
-                self.last_message = Some(format!("Message: {}", msg));
+                if !msg.is_empty() {
+                    self.chat.add_user_message(&msg);
+                }
             }
         }
     }
@@ -174,6 +182,7 @@ mod tests {
         let app = App::new();
         assert_eq!(app.version, "0.1.0");
         assert!(app.running);
+        assert!(app.chat.messages.is_empty());
     }
 
     #[test]
@@ -188,6 +197,7 @@ mod tests {
         let app = App::default();
         assert_eq!(app.version, "0.1.0");
         assert!(app.running);
+        assert!(app.chat.messages.is_empty());
     }
 
     #[test]
@@ -240,5 +250,31 @@ mod tests {
         };
         app.handle_key_event(key);
         assert!(app.running);
+    }
+
+    #[test]
+    fn test_process_input_message() {
+        let mut app = App::new();
+        app.process_input("hello world");
+        assert_eq!(app.chat.messages.len(), 1);
+        assert_eq!(app.chat.messages[0].content, "hello world");
+    }
+
+    #[test]
+    fn test_process_input_command() {
+        let mut app = App::new();
+        app.process_input("/sessions");
+        assert_eq!(app.chat.messages.len(), 1);
+        assert_eq!(
+            app.chat.messages[0].role,
+            crate::session::types::MessageRole::Assistant
+        );
+    }
+
+    #[test]
+    fn test_process_input_empty() {
+        let mut app = App::new();
+        app.process_input("");
+        assert_eq!(app.chat.messages.len(), 0);
     }
 }
