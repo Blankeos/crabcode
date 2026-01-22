@@ -28,6 +28,7 @@ mod tests {
 
     fn dummy_handler(
         _parsed: &crate::command::parser::ParsedCommand,
+        _sm: &mut crate::session::manager::SessionManager,
     ) -> crate::command::registry::CommandResult {
         crate::command::registry::CommandResult::Success("ok".to_string())
     }

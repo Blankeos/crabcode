@@ -12,6 +12,7 @@ use crate::autocomplete::AutoComplete;
 use crate::command::handlers::register_all_commands;
 use crate::command::parser::InputType;
 use crate::command::registry::Registry;
+use crate::session::manager::SessionManager;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::landing::Landing;
@@ -24,6 +25,7 @@ pub struct App {
     pub version: String,
     pub input: Input,
     pub command_registry: Registry,
+    pub session_manager: SessionManager,
     pub chat: Chat,
     pub popup: Popup,
     pub agent: String,
@@ -49,6 +51,7 @@ impl App {
             version: env!("CARGO_PKG_VERSION").to_string(),
             input,
             command_registry: registry,
+            session_manager: SessionManager::new(),
             chat: Chat::new(),
             popup: Popup::new(),
             agent: "PLAN".to_string(),
@@ -193,7 +196,7 @@ impl App {
 
         match parse_input(input) {
             InputType::Command(parsed) => {
-                let result = self.command_registry.execute(&parsed);
+                let result = self.command_registry.execute(&parsed, &mut self.session_manager);
                 match result {
                     crate::command::registry::CommandResult::Success(msg) => {
                         self.chat.add_assistant_message(msg);

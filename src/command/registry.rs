@@ -1,7 +1,8 @@
 use crate::command::parser::ParsedCommand;
+use crate::session::manager::SessionManager;
 use std::collections::HashMap;
 
-pub type CommandHandler = fn(&ParsedCommand) -> CommandResult;
+pub type CommandHandler = fn(&ParsedCommand, &mut SessionManager) -> CommandResult;
 
 #[derive(Debug, Clone)]
 pub struct Command {
@@ -35,9 +36,13 @@ impl Registry {
         self.commands.get(name)
     }
 
-    pub fn execute(&self, parsed: &ParsedCommand) -> CommandResult {
+    pub fn execute(
+        &self,
+        parsed: &ParsedCommand,
+        session_manager: &mut SessionManager,
+    ) -> CommandResult {
         if let Some(command) = self.get(&parsed.name) {
-            (command.handler)(parsed)
+            (command.handler)(parsed, session_manager)
         } else {
             CommandResult::Error(format!("Unknown command: {}", parsed.name))
         }
@@ -64,11 +69,11 @@ impl Default for Registry {
 mod tests {
     use super::*;
 
-    fn dummy_handler(_parsed: &ParsedCommand) -> CommandResult {
+    fn dummy_handler(_parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
         CommandResult::Success("ok".to_string())
     }
 
-    fn dummy_error_handler(_parsed: &ParsedCommand) -> CommandResult {
+    fn dummy_error_handler(_parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
         CommandResult::Error("error".to_string())
     }
 
@@ -132,7 +137,8 @@ mod tests {
             name: "test".to_string(),
             args: vec![],
         };
-        let result = registry.execute(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = registry.execute(&parsed, &mut session_manager);
         assert_eq!(result, CommandResult::Success("ok".to_string()));
     }
 
@@ -144,7 +150,8 @@ mod tests {
             name: "unknown".to_string(),
             args: vec![],
         };
-        let result = registry.execute(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = registry.execute(&parsed, &mut session_manager);
         assert_eq!(
             result,
             CommandResult::Error("Unknown command: unknown".to_string())
@@ -199,13 +206,14 @@ mod tests {
     fn test_execute_with_args() {
         let mut registry = Registry::new();
 
-        let handler_with_args = |parsed: &ParsedCommand| -> CommandResult {
-            if !parsed.args.is_empty() {
-                CommandResult::Success(format!("Args: {:?}", parsed.args))
-            } else {
-                CommandResult::Error("No args".to_string())
-            }
-        };
+        let handler_with_args =
+            |parsed: &ParsedCommand, _sm: &mut SessionManager| -> CommandResult {
+                if !parsed.args.is_empty() {
+                    CommandResult::Success(format!("Args: {:?}", parsed.args))
+                } else {
+                    CommandResult::Error("No args".to_string())
+                }
+            };
 
         let command = Command {
             name: "test".to_string(),
@@ -218,7 +226,8 @@ mod tests {
             name: "test".to_string(),
             args: vec!["arg1".to_string(), "arg2".to_string()],
         };
-        let result = registry.execute(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = registry.execute(&parsed, &mut session_manager);
         assert_eq!(
             result,
             CommandResult::Success("Args: [\"arg1\", \"arg2\"]".to_string())

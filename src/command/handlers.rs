@@ -1,23 +1,40 @@
 use crate::command::parser::ParsedCommand;
 use crate::command::registry::{Command, CommandResult, Registry};
+use crate::session::manager::SessionManager;
 
-pub fn handle_exit(_parsed: &ParsedCommand) -> CommandResult {
+pub fn handle_exit(_parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
     CommandResult::Success("Exiting...".to_string())
 }
 
-pub fn handle_sessions(_parsed: &ParsedCommand) -> CommandResult {
-    CommandResult::Success("Sessions:\n  No active sessions".to_string())
-}
+pub fn handle_sessions(_parsed: &ParsedCommand, sm: &mut SessionManager) -> CommandResult {
+    let sessions = sm.list_sessions();
 
-pub fn handle_new(parsed: &ParsedCommand) -> CommandResult {
-    if parsed.args.is_empty() {
-        CommandResult::Success("Created new session".to_string())
+    if sessions.is_empty() {
+        CommandResult::Success("No active sessions".to_string())
     } else {
-        CommandResult::Success(format!("Created new session: {}", parsed.args[0]))
+        let mut output = String::from("Active sessions:\n");
+        for session in sessions {
+            output.push_str(&format!(
+                "  - {} ({} messages)\n",
+                session.id, session.message_count
+            ));
+        }
+        CommandResult::Success(output)
     }
 }
 
-pub fn handle_connect(parsed: &ParsedCommand) -> CommandResult {
+pub fn handle_new(parsed: &ParsedCommand, sm: &mut SessionManager) -> CommandResult {
+    let name = if parsed.args.is_empty() {
+        None
+    } else {
+        Some(parsed.args[0].clone())
+    };
+
+    let session_id = sm.create_session(name);
+    CommandResult::Success(format!("Created new session: {}", session_id))
+}
+
+pub fn handle_connect(parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
     if parsed.args.is_empty() {
         CommandResult::Error("Usage: /connect <provider> [model]".to_string())
     } else {
@@ -31,7 +48,7 @@ pub fn handle_connect(parsed: &ParsedCommand) -> CommandResult {
     }
 }
 
-pub fn handle_models(_parsed: &ParsedCommand) -> CommandResult {
+pub fn handle_models(_parsed: &ParsedCommand, _sm: &mut SessionManager) -> CommandResult {
     CommandResult::Success(
         "Available models:\n  nano-gpt: gpt-4, gpt-3.5-turbo\n  z-ai: coding-plan".to_string(),
     )
@@ -86,7 +103,8 @@ mod tests {
             name: "exit".to_string(),
             args: vec![],
         };
-        let result = handle_exit(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = handle_exit(&parsed, &mut session_manager);
         assert_eq!(result, CommandResult::Success("Exiting...".to_string()));
     }
 
@@ -96,11 +114,32 @@ mod tests {
             name: "sessions".to_string(),
             args: vec![],
         };
-        let result = handle_sessions(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = handle_sessions(&parsed, &mut session_manager);
         match result {
             CommandResult::Success(msg) => {
-                assert!(msg.contains("Sessions:"));
                 assert!(msg.contains("No active sessions"));
+            }
+            _ => panic!("Expected Success"),
+        }
+    }
+
+    #[test]
+    fn test_handle_sessions_with_data() {
+        let mut session_manager = SessionManager::new();
+        session_manager.create_session(Some("session-1".to_string()));
+        session_manager.create_session(Some("session-2".to_string()));
+
+        let parsed = ParsedCommand {
+            name: "sessions".to_string(),
+            args: vec![],
+        };
+        let result = handle_sessions(&parsed, &mut session_manager);
+        match result {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("Active sessions:"));
+                assert!(msg.contains("session-1"));
+                assert!(msg.contains("session-2"));
             }
             _ => panic!("Expected Success"),
         }
@@ -112,11 +151,14 @@ mod tests {
             name: "new".to_string(),
             args: vec![],
         };
-        let result = handle_new(&parsed);
-        assert_eq!(
-            result,
-            CommandResult::Success("Created new session".to_string())
-        );
+        let mut session_manager = SessionManager::new();
+        let result = handle_new(&parsed, &mut session_manager);
+        match result {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("Created new session: session-1"));
+            }
+            _ => panic!("Expected Success"),
+        }
     }
 
     #[test]
@@ -125,11 +167,14 @@ mod tests {
             name: "new".to_string(),
             args: vec!["my-session".to_string()],
         };
-        let result = handle_new(&parsed);
-        assert_eq!(
-            result,
-            CommandResult::Success("Created new session: my-session".to_string())
-        );
+        let mut session_manager = SessionManager::new();
+        let result = handle_new(&parsed, &mut session_manager);
+        match result {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("Created new session: my-session"));
+            }
+            _ => panic!("Expected Success"),
+        }
     }
 
     #[test]
@@ -138,7 +183,8 @@ mod tests {
             name: "connect".to_string(),
             args: vec![],
         };
-        let result = handle_connect(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = handle_connect(&parsed, &mut session_manager);
         assert_eq!(
             result,
             CommandResult::Error("Usage: /connect <provider> [model]".to_string())
@@ -151,7 +197,8 @@ mod tests {
             name: "connect".to_string(),
             args: vec!["nano-gpt".to_string()],
         };
-        let result = handle_connect(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = handle_connect(&parsed, &mut session_manager);
         assert_eq!(
             result,
             CommandResult::Success("Connected to nano-gpt using model default".to_string())
@@ -164,7 +211,8 @@ mod tests {
             name: "connect".to_string(),
             args: vec!["nano-gpt".to_string(), "gpt-4".to_string()],
         };
-        let result = handle_connect(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = handle_connect(&parsed, &mut session_manager);
         assert_eq!(
             result,
             CommandResult::Success("Connected to nano-gpt using model gpt-4".to_string())
@@ -177,7 +225,8 @@ mod tests {
             name: "models".to_string(),
             args: vec![],
         };
-        let result = handle_models(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = handle_models(&parsed, &mut session_manager);
         match result {
             CommandResult::Success(msg) => {
                 assert!(msg.contains("Available models:"));
@@ -207,7 +256,8 @@ mod tests {
             name: "exit".to_string(),
             args: vec![],
         };
-        let result = registry.execute(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = registry.execute(&parsed, &mut session_manager);
         assert_eq!(result, CommandResult::Success("Exiting...".to_string()));
     }
 
@@ -218,7 +268,8 @@ mod tests {
             name: "unknown".to_string(),
             args: vec![],
         };
-        let result = registry.execute(&parsed);
+        let mut session_manager = SessionManager::new();
+        let result = registry.execute(&parsed, &mut session_manager);
         match result {
             CommandResult::Error(msg) => {
                 assert!(msg.contains("Unknown command"));
