@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Paragraph},
     Frame,
 };
 
@@ -52,6 +52,7 @@ pub fn render_home(
                 Constraint::Min(0),
                 Constraint::Length(input_height),
                 Constraint::Length(1),
+                Constraint::Length(1),
             ]
             .as_ref(),
         )
@@ -87,6 +88,9 @@ pub fn render_home(
     ];
     let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
     f.render_widget(help, home_chunks[2]);
+
+    let blank = Block::default();
+    f.render_widget(blank, home_chunks[3]);
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
     status_bar.render(f, main_chunks[1]);
