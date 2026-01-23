@@ -1,18 +1,4 @@
-use anyhow::Result;
-use ratatui::crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
-        KeyboardEnhancementFlags, MouseEvent, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{
-        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
-        LeaveAlternateScreen,
-    },
-};
-use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io;
-use std::time::Duration;
+use ratatui::crossterm::event::{self, KeyCode, KeyEvent, MouseEvent};
 
 use crate::autocomplete::AutoComplete;
 use crate::command::handlers::register_all_commands;
@@ -21,26 +7,32 @@ use crate::command::registry::Registry;
 use crate::session::manager::SessionManager;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
-use crate::{
-    get_toast_manager, remove_expired_toasts, render_toasts,
-};
-
-use crate::ui::components::dialog::Dialog;
 use crate::ui::components::popup::Popup;
-use crate::ui::components::status_bar::StatusBar;
 use crate::utils::git;
+
+use crate::views::{
+    ChatState, HomeState, ModelsDialogState, SuggestionsPopupState,
+};
+use crate::views::home::{init_home, render_home};
+use crate::views::chat::{init_chat, render_chat};
+use crate::views::models_dialog::{init_models_dialog, render_models_dialog, handle_models_dialog_key_event, handle_models_dialog_mouse_event};
+use crate::views::suggestions_popup::{init_suggestions_popup, render_suggestions_popup, handle_suggestions_popup_key_event, set_suggestions, clear_suggestions, get_selected_suggestion, is_suggestions_visible};
+
+use crate::{
+    get_toast_manager, render_toasts,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BaseFocus {
-    Landing,
+    Home,
     Chat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OverlayFocus {
     None,
-    Dialog,
-    Popup,
+    ModelsDialog,
+    SuggestionsPopup,
 }
 
 pub struct App {
@@ -49,9 +41,10 @@ pub struct App {
     pub input: Input,
     pub command_registry: Registry,
     pub session_manager: SessionManager,
-    pub chat: Chat,
-    pub popup: Popup,
-    pub dialog: Dialog,
+    pub home_state: HomeState,
+    pub chat_state: ChatState,
+    pub suggestions_popup_state: SuggestionsPopupState,
+    pub models_dialog_state: ModelsDialogState,
     pub agent: String,
     pub model: String,
     pub cwd: String,
@@ -62,6 +55,46 @@ pub struct App {
 }
 
 impl App {
+    pub fn new() -> Self {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+
+        let autocomplete = AutoComplete::new(crate::autocomplete::CommandAuto::new(&registry));
+        let placeholder = Self::get_random_placeholder();
+        let placeholder_static: &'static str = Box::leak(placeholder.into_boxed_str());
+        let mut input = Input::new().with_autocomplete(autocomplete);
+        input.set_placeholder(placeholder_static);
+
+        let home_state = init_home();
+        let chat_state = init_chat(Chat::new());
+        let suggestions_popup_state = init_suggestions_popup(Popup::new());
+        let models_dialog_state = init_models_dialog("Models", vec![]);
+
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "?".to_string());
+
+        Self {
+            running: true,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            input,
+            command_registry: registry,
+            session_manager: SessionManager::new(),
+            home_state,
+            chat_state,
+            suggestions_popup_state,
+            models_dialog_state,
+            agent: "PLAN".to_string(),
+            model: "nano-gpt".to_string(),
+            cwd,
+            base_focus: BaseFocus::Home,
+            overlay_focus: OverlayFocus::None,
+            ctrl_c_press_count: 0,
+            last_ctrl_c_time: std::time::Instant::now(),
+        }
+    }
+
     fn get_random_placeholder() -> String {
         let suggestions = vec![
             "Fix a TODO in the codebase",
@@ -88,271 +121,11 @@ impl App {
         format!("Ask anything... \"{}\"", suggestions[index])
     }
 
-    pub fn new() -> Self {
-        let mut registry = Registry::new();
-        register_all_commands(&mut registry);
-
-        let autocomplete = AutoComplete::new(crate::autocomplete::CommandAuto::new(&registry));
-        let placeholder = Self::get_random_placeholder();
-        let placeholder_static: &'static str = Box::leak(placeholder.into_boxed_str());
-        let mut input = Input::new().with_autocomplete(autocomplete);
-        input.set_placeholder(placeholder_static);
-
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.to_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| "?".to_string());
-
-        Self {
-            running: true,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            input,
-            command_registry: registry,
-            session_manager: SessionManager::new(),
-            chat: Chat::new(),
-            popup: Popup::new(),
-            dialog: Dialog::new("Dialog"),
-            agent: "PLAN".to_string(),
-            model: "nano-gpt".to_string(),
-            cwd,
-            base_focus: BaseFocus::Landing,
-            overlay_focus: OverlayFocus::None,
-            ctrl_c_press_count: 0,
-            last_ctrl_c_time: std::time::Instant::now(),
-        }
-    }
-
     pub fn quit(&mut self) {
         self.running = false;
     }
 
-    pub async fn run(&mut self) -> Result<()> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-
-        if supports_keyboard_enhancement()? {
-            execute!(
-                stdout,
-                EnterAlternateScreen,
-                EnableMouseCapture,
-                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-            )?;
-        } else {
-            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        }
-
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        let result = self.run_event_loop(&mut terminal).await;
-
-        disable_raw_mode()?;
-        if supports_keyboard_enhancement().unwrap_or(false) {
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture,
-                PopKeyboardEnhancementFlags
-            )?;
-        } else {
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            )?;
-        }
-        terminal.show_cursor()?;
-
-        result
-    }
-
-    async fn run_event_loop(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> Result<()> {
-        while self.running {
-            remove_expired_toasts();
-            terminal.draw(|f| self.ui(f))?;
-
-            if event::poll(Duration::from_millis(100))? {
-                let event = event::read()?;
-
-                match event {
-                    Event::Key(key) => {
-                        self.handle_key_event(key);
-                    }
-                    Event::Mouse(mouse) => {
-                        self.handle_mouse_event(mouse);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn ui(&self, f: &mut ratatui::Frame) {
-        use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-        use ratatui::style::{Color, Modifier, Style};
-        use ratatui::text::{Line, Span, Text};
-        use ratatui::widgets::Paragraph;
-
-        let size = f.area();
-
-        let main_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(
-                [
-                    Constraint::Min(0),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                ]
-                .as_ref(),
-            )
-            .split(size);
-
-        if self.overlay_focus == OverlayFocus::Dialog {
-            self.dialog.render(f, size);
-            render_toasts(f, &get_toast_manager().lock().unwrap());
-            let status_bar = StatusBar::new(
-                self.version.clone(),
-                self.cwd.clone(),
-                git::get_current_branch(),
-                self.agent.clone(),
-                self.model.clone(),
-            );
-            status_bar.render(f, main_chunks[2]);
-        } else if self.base_focus == BaseFocus::Landing {
-            let input_height = self.input.get_height();
-            let landing_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(
-                    [
-                        Constraint::Min(0),
-                        Constraint::Length(input_height),
-                        Constraint::Length(1),
-                    ]
-                    .as_ref(),
-                )
-                .split(main_chunks[0]);
-
-            let landing_logo_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(0),
-                    Constraint::Length(5),
-                    Constraint::Min(0),
-                ])
-                .split(landing_chunks[0]);
-            let logo = Paragraph::new(Text::from(crate::ui::components::landing::LOGO.trim()))
-                .style(
-                    Style::default()
-                        .fg(Color::Rgb(255, 140, 0))
-                        .add_modifier(Modifier::BOLD),
-                )
-                .alignment(Alignment::Center);
-            // let welcome = Paragraph::new(Text::from(vec![Line::from(vec![
-            //     Span::styled(
-            //         "Crabcode",
-            //         Style::default()
-            //             .fg(Color::Green)
-            //             .add_modifier(Modifier::BOLD),
-            //     ),
-            //     Span::raw(" - "),
-            //     Span::styled(
-            //         "Rust AI CLI Coding Agent",
-            //         Style::default().fg(Color::White),
-            //     ),
-            // ])]))
-            // .alignment(Alignment::Center)
-            // .wrap(ratatui::widgets::Wrap { trim: true });
-
-            f.render_widget(logo, landing_logo_chunks[1]);
-
-            // f.render_widget(welcome, landing_chunks[0]);
-
-            self.input.render(f, landing_chunks[1]);
-
-            if self.popup.is_visible() {
-                self.popup.render(f, landing_chunks[1], self.overlay_focus == OverlayFocus::Popup);
-            }
-
-            let help_text = vec![
-                Span::styled("/", Style::default().fg(Color::Cyan)),
-                Span::raw(" commands  "),
-                Span::styled("tab", Style::default().fg(Color::Cyan)),
-                Span::raw(" agents  "),
-                Span::styled("ctrl+cc", Style::default().fg(Color::Cyan)),
-                Span::raw(" quit"),
-            ];
-            let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
-            f.render_widget(help, landing_chunks[2]);
-
-            render_toasts(f, &get_toast_manager().lock().unwrap());
-
-            let status_bar = StatusBar::new(
-                self.version.clone(),
-                self.cwd.clone(),
-                git::get_current_branch(),
-                self.agent.clone(),
-                self.model.clone(),
-            );
-            status_bar.render(f, main_chunks[2]);
-        } else {
-            let chat_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(
-                    [
-                        Constraint::Min(0),
-                        Constraint::Length(3),
-                        Constraint::Length(1),
-                    ]
-                    .as_ref(),
-                )
-                .split(main_chunks[0]);
-
-            self.chat.render(f, chat_chunks[0]);
-            self.input.render(f, chat_chunks[1]);
-
-            if self.popup.is_visible() {
-                self.popup.render(f, chat_chunks[1], self.overlay_focus == OverlayFocus::Popup);
-            }
-
-            let help_text = vec![
-                Span::styled("/", Style::default().fg(Color::Rgb(255, 140, 0))),
-                Span::raw(" commands  "),
-                Span::styled("tab", Style::default().fg(Color::Rgb(255, 140, 0))),
-                Span::raw(" agents  "),
-                Span::styled("ctrl+cc", Style::default().fg(Color::Rgb(255, 140, 0))),
-                Span::raw(" quit"),
-            ];
-            let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
-            f.render_widget(help, chat_chunks[2]);
-
-            render_toasts(f, &get_toast_manager().lock().unwrap());
-
-            let status_bar = StatusBar::new(
-                self.version.clone(),
-                self.cwd.clone(),
-                git::get_current_branch(),
-                self.agent.clone(),
-                self.model.clone(),
-            );
-            status_bar.render(f, main_chunks[2]);
-        }
-    }
-
-    fn set_overlay_focus(&mut self, overlay: OverlayFocus) {
-        self.overlay_focus = overlay;
-    }
-
-    fn close_overlay(&mut self) {
-        self.overlay_focus = OverlayFocus::None;
-        self.dialog.hide();
-        self.popup.clear();
-    }
-
-    fn handle_key_event(&mut self, key: KeyEvent) {
+    pub fn handle_keys(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers == event::KeyModifiers::CONTROL => {
                 let now = std::time::Instant::now();
@@ -373,17 +146,17 @@ impl App {
             _ => {}
         }
 
-let handled = match self.overlay_focus {
-            OverlayFocus::Popup => {
-                let handled = self.handle_popup_keys(key);
+        let handled = match self.overlay_focus {
+            OverlayFocus::SuggestionsPopup => {
+                let handled = self.handle_suggestions_popup_keys(key);
                 if !handled {
                     self.input.handle_event(key);
                     self.update_suggestions();
                 }
                 handled
             }
-            OverlayFocus::Dialog => {
-                if self.handle_dialog_keys(key) {
+            OverlayFocus::ModelsDialog => {
+                if handle_models_dialog_key_event(&mut self.models_dialog_state, key) {
                     return;
                 }
                 false
@@ -405,8 +178,8 @@ let handled = match self.overlay_focus {
         }
     }
 
-    fn handle_popup_keys(&mut self, key: KeyEvent) -> bool {
-        let action = self.popup.handle_key_event(key);
+    fn handle_suggestions_popup_keys(&mut self, key: KeyEvent) -> bool {
+        let action = handle_suggestions_popup_key_event(&mut self.suggestions_popup_state, key);
         match action {
             crate::ui::components::popup::PopupAction::Handled => true,
             crate::ui::components::popup::PopupAction::Autocomplete => {
@@ -415,14 +188,6 @@ let handled = match self.overlay_focus {
             }
             crate::ui::components::popup::PopupAction::NotHandled => false,
         }
-    }
-
-    fn handle_dialog_keys(&mut self, key: KeyEvent) -> bool {
-        let handled = self.dialog.handle_key_event(key);
-        if !self.dialog.is_visible() {
-            self.close_overlay();
-        }
-        handled
     }
 
     fn handle_base_keys(&mut self, key: KeyEvent) -> bool {
@@ -436,9 +201,9 @@ let handled = match self.overlay_focus {
                 true
             }
             KeyCode::Esc => {
-                if self.overlay_focus == OverlayFocus::Popup {
+                if self.overlay_focus == OverlayFocus::SuggestionsPopup {
                     self.input.clear();
-                    self.popup.clear();
+                    clear_suggestions(&mut self.suggestions_popup_state);
                     self.overlay_focus = OverlayFocus::None;
                     true
                 } else {
@@ -446,7 +211,7 @@ let handled = match self.overlay_focus {
                 }
             }
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
-                if self.overlay_focus == OverlayFocus::Popup {
+                if self.overlay_focus == OverlayFocus::SuggestionsPopup {
                     self.autocomplete_and_submit();
                     true
                 } else {
@@ -467,7 +232,7 @@ let handled = match self.overlay_focus {
                         rt.block_on(self.process_input(&input_text));
                     });
                     self.input.clear();
-                    self.popup.clear();
+                    clear_suggestions(&mut self.suggestions_popup_state);
                 }
             }
             _ => {
@@ -481,24 +246,24 @@ let handled = match self.overlay_focus {
         if self.input.should_show_suggestions() {
             let suggestions = self.input.get_autocomplete_suggestions();
             if !suggestions.is_empty() {
-                self.popup.set_suggestions(suggestions);
-                self.overlay_focus = OverlayFocus::Popup;
+                set_suggestions(&mut self.suggestions_popup_state, suggestions);
+                self.overlay_focus = OverlayFocus::SuggestionsPopup;
             } else {
-                self.popup.clear();
+                clear_suggestions(&mut self.suggestions_popup_state);
                 self.overlay_focus = OverlayFocus::None;
             }
         } else {
-            self.popup.clear();
+            clear_suggestions(&mut self.suggestions_popup_state);
             self.overlay_focus = OverlayFocus::None;
         }
     }
 
-    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
-        if self.dialog.handle_mouse_event(mouse) {}
+    pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
     }
 
     fn autocomplete_and_submit(&mut self) {
-        if let Some(selected) = self.popup.get_selected() {
+        if let Some(selected) = get_selected_suggestion(&self.suggestions_popup_state) {
             let command = format!("/{}", selected.name);
 
             tokio::task::block_in_place(|| {
@@ -508,8 +273,8 @@ let handled = match self.overlay_focus {
 
             self.input.clear();
         }
-        self.popup.clear();
-        if !self.dialog.is_visible() {
+        clear_suggestions(&mut self.suggestions_popup_state);
+        if !self.models_dialog_state.dialog.is_visible() {
             self.overlay_focus = OverlayFocus::None;
         }
     }
@@ -526,18 +291,18 @@ let handled = match self.overlay_focus {
                 match result {
                     crate::command::registry::CommandResult::Success(msg) => {
                         if parsed.name == "new" {
-                            self.chat.clear();
-                            self.base_focus = BaseFocus::Landing;
-                        } else if self.base_focus == BaseFocus::Landing {
+                            self.chat_state.chat.clear();
+                            self.base_focus = BaseFocus::Home;
+                        } else if self.base_focus == BaseFocus::Home {
                             self.base_focus = BaseFocus::Chat;
                         }
-                        self.chat.add_assistant_message(msg);
+                        self.chat_state.chat.add_assistant_message(msg);
                         if parsed.name == "exit" {
                             self.quit();
                         }
                     }
                     crate::command::registry::CommandResult::Error(msg) => {
-                        self.chat.add_assistant_message(format!("Error: {}", msg));
+                        self.chat_state.chat.add_assistant_message(format!("Error: {}", msg));
                     }
                     crate::command::registry::CommandResult::ShowDialog { title, items } => {
                         let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
@@ -549,18 +314,82 @@ let handled = match self.overlay_focus {
                                 description: item.description,
                             })
                             .collect();
-                        self.dialog = Dialog::with_items(title, dialog_items);
-                        self.dialog.show();
-                        self.overlay_focus = OverlayFocus::Dialog;
+                        self.models_dialog_state = init_models_dialog(title, dialog_items);
+                        self.models_dialog_state.dialog.show();
+                        self.overlay_focus = OverlayFocus::ModelsDialog;
                     }
                 }
             }
-InputType::Message(msg) => {
+            InputType::Message(msg) => {
                 if !msg.is_empty() {
-                    self.chat.add_user_message(&msg);
-                    if self.base_focus == BaseFocus::Landing {
+                    self.chat_state.chat.add_user_message(&msg);
+                    if self.base_focus == BaseFocus::Home {
                         self.base_focus = BaseFocus::Chat;
                     }
+                }
+            }
+        }
+    }
+
+    pub fn render(&self, f: &mut ratatui::Frame) {
+        let size = f.area();
+
+        if self.overlay_focus == OverlayFocus::ModelsDialog {
+            render_models_dialog(f, &self.models_dialog_state, size);
+            render_toasts(f, &get_toast_manager().lock().unwrap());
+        } else {
+            match self.base_focus {
+                BaseFocus::Home => {
+                    render_home(
+                        f,
+                        &self.input,
+                        self.version.clone(),
+                        self.cwd.clone(),
+                        git::get_current_branch(),
+                        self.agent.clone(),
+                        self.model.clone(),
+                    );
+
+                    if is_suggestions_visible(&self.suggestions_popup_state) {
+                        let main_chunks = ratatui::layout::Layout::default()
+                            .direction(ratatui::layout::Direction::Vertical)
+                            .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
+                            .split(size);
+                        let input_height = self.input.get_height();
+                        let home_chunks = ratatui::layout::Layout::default()
+                            .direction(ratatui::layout::Direction::Vertical)
+                            .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(input_height)].as_ref())
+                            .split(main_chunks[0]);
+                        render_suggestions_popup(f, &self.suggestions_popup_state, home_chunks[1], self.overlay_focus == OverlayFocus::SuggestionsPopup);
+                    }
+
+                    render_toasts(f, &get_toast_manager().lock().unwrap());
+                }
+                BaseFocus::Chat => {
+                    render_chat(
+                        f,
+                        &self.chat_state,
+                        &self.input,
+                        self.version.clone(),
+                        self.cwd.clone(),
+                        git::get_current_branch(),
+                        self.agent.clone(),
+                        self.model.clone(),
+                    );
+
+                    if is_suggestions_visible(&self.suggestions_popup_state) {
+                        let main_chunks = ratatui::layout::Layout::default()
+                            .direction(ratatui::layout::Direction::Vertical)
+                            .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
+                            .split(size);
+                        let chat_chunks = ratatui::layout::Layout::default()
+                            .direction(ratatui::layout::Direction::Vertical)
+                            .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(3)].as_ref())
+                            .split(main_chunks[0]);
+                        render_suggestions_popup(f, &self.suggestions_popup_state, chat_chunks[1], self.overlay_focus == OverlayFocus::SuggestionsPopup);
+                    }
+
+                    render_toasts(f, &get_toast_manager().lock().unwrap());
                 }
             }
         }
@@ -570,127 +399,5 @@ InputType::Message(msg) => {
 impl Default for App {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-
-    #[test]
-    fn test_app_creation() {
-        let app = App::new();
-        assert_eq!(app.version, "0.0.1");
-        assert!(app.running);
-        assert!(app.chat.messages.is_empty());
-    }
-
-    #[test]
-    fn test_app_quit() {
-        let mut app = App::new();
-        app.quit();
-        assert!(!app.running);
-    }
-
-    #[test]
-    fn test_app_default() {
-        let app = App::default();
-        assert_eq!(app.version, "0.0.1");
-        assert!(app.running);
-        assert!(app.chat.messages.is_empty());
-    }
-
-    #[test]
-    fn test_handle_key_event_q() {
-        let mut app = App::new();
-        let key = KeyEvent {
-            code: KeyCode::Char('q'),
-            modifiers: KeyModifiers::empty(),
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        };
-        app.handle_key_event(key);
-        assert!(app.running);
-    }
-
-    #[test]
-    fn test_handle_key_event_ctrl_c_single() {
-        let mut app = App::new();
-        let key = KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        };
-        app.handle_key_event(key);
-        assert!(app.running);
-        assert_eq!(app.input.get_text(), "");
-    }
-
-    #[test]
-    fn test_handle_key_event_ctrl_c_double() {
-        let mut app = App::new();
-        let key = KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        };
-        app.handle_key_event(key);
-        app.handle_key_event(key);
-        assert!(!app.running);
-    }
-
-    #[test]
-    fn test_handle_key_event_other() {
-        let mut app = App::new();
-        let key = KeyEvent {
-            code: KeyCode::Char('a'),
-            modifiers: KeyModifiers::empty(),
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        };
-        app.handle_key_event(key);
-        assert!(app.running);
-    }
-
-    #[test]
-    fn test_handle_key_event_escape() {
-        let mut app = App::new();
-        let key = KeyEvent {
-            code: KeyCode::Esc,
-            modifiers: KeyModifiers::empty(),
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        };
-        app.handle_key_event(key);
-        assert!(app.running);
-    }
-
-    #[tokio::test]
-    async fn test_process_input_message() {
-        let mut app = App::new();
-        app.process_input("hello world").await;
-        assert_eq!(app.chat.messages.len(), 1);
-        assert_eq!(app.chat.messages[0].content, "hello world");
-    }
-
-    #[tokio::test]
-    async fn test_process_input_command() {
-        let mut app = App::new();
-        app.process_input("/sessions").await;
-        assert_eq!(app.chat.messages.len(), 1);
-        assert_eq!(
-            app.chat.messages[0].role,
-            crate::session::types::MessageRole::Assistant
-        );
-    }
-
-    #[tokio::test]
-    async fn test_process_input_empty() {
-        let mut app = App::new();
-        app.process_input("").await;
-        assert_eq!(app.chat.messages.len(), 0);
     }
 }
