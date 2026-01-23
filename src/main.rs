@@ -8,6 +8,7 @@ mod config;
 mod model;
 mod session;
 mod streaming;
+mod theme;
 mod ui;
 mod utils;
 mod views;

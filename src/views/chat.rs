@@ -1,11 +1,12 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Paragraph},
     Frame,
 };
 
+use crate::theme::ThemeColors;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
@@ -34,6 +35,7 @@ pub fn render_chat(
     branch: Option<String>,
     agent: String,
     model: String,
+    colors: &ThemeColors,
 ) {
     let size = f.area();
 
@@ -59,11 +61,11 @@ pub fn render_chat(
     input.render(f, above_status_chunks[1]);
 
     let help_text = vec![
-        Span::styled("/", Style::default().fg(Color::Rgb(255, 140, 0))),
+        Span::styled("/", Style::default().fg(colors.info)),
         Span::raw(" commands  "),
-        Span::styled("tab", Style::default().fg(Color::Rgb(255, 140, 0))),
+        Span::styled("tab", Style::default().fg(colors.info)),
         Span::raw(" agents  "),
-        Span::styled("ctrl+cc", Style::default().fg(Color::Rgb(255, 140, 0))),
+        Span::styled("ctrl+cc", Style::default().fg(colors.info)),
         Span::raw(" quit"),
     ];
     let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);

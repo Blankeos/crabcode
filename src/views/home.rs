@@ -1,11 +1,12 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
     Frame,
 };
 
+use crate::theme::ThemeColors;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
 
@@ -36,6 +37,7 @@ pub fn render_home(
     branch: Option<String>,
     agent: String,
     model: String,
+    colors: &ThemeColors,
 ) {
     let size = f.area();
 
@@ -70,7 +72,7 @@ pub fn render_home(
     let logo = Paragraph::new(LOGO.trim())
         .style(
             Style::default()
-                .fg(Color::Rgb(255, 140, 0))
+                .fg(colors.primary)
                 .add_modifier(Modifier::BOLD),
         )
         .alignment(Alignment::Center);
@@ -79,11 +81,11 @@ pub fn render_home(
     input.render(f, home_chunks[1]);
 
     let help_text = vec![
-        Span::styled("/", Style::default().fg(Color::Cyan)),
+        Span::styled("/", Style::default().fg(colors.info)),
         Span::raw(" commands  "),
-        Span::styled("tab", Style::default().fg(Color::Cyan)),
+        Span::styled("tab", Style::default().fg(colors.info)),
         Span::raw(" agents  "),
-        Span::styled("ctrl+cc", Style::default().fg(Color::Cyan)),
+        Span::styled("ctrl+cc", Style::default().fg(colors.info)),
         Span::raw(" quit"),
     ];
     let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);

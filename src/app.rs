@@ -19,7 +19,7 @@ use crate::views::models_dialog::{init_models_dialog, render_models_dialog, hand
 use crate::views::suggestions_popup::{init_suggestions_popup, render_suggestions_popup, handle_suggestions_popup_key_event, set_suggestions, clear_suggestions, get_selected_suggestion, is_suggestions_visible};
 
 use crate::{
-    get_toast_manager, render_toasts,
+    get_toast_manager, render_toasts, theme::{self, Theme},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,6 +52,9 @@ pub struct App {
     pub overlay_focus: OverlayFocus,
     ctrl_c_press_count: u8,
     last_ctrl_c_time: std::time::Instant,
+    pub themes: Vec<Theme>,
+    pub current_theme_index: usize,
+    pub dark_mode: bool,
 }
 
 impl App {
@@ -75,6 +78,9 @@ impl App {
             .and_then(|p| p.to_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "?".to_string());
 
+        let theme = theme::Theme::load_from_file("src/theme.json")
+            .unwrap_or_else(|_| theme::Theme::load_from_file("src/themes/ayu.json").unwrap());
+
         Self {
             running: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -92,6 +98,9 @@ impl App {
             overlay_focus: OverlayFocus::None,
             ctrl_c_press_count: 0,
             last_ctrl_c_time: std::time::Instant::now(),
+            themes: vec![theme],
+            current_theme_index: 0,
+            dark_mode: true,
         }
     }
 
@@ -123,6 +132,36 @@ impl App {
 
     pub fn quit(&mut self) {
         self.running = false;
+    }
+
+    pub fn get_current_theme_colors(&self) -> theme::ThemeColors {
+        if self.themes.is_empty() {
+            return theme::ThemeColors {
+                primary: ratatui::style::Color::Rgb(255, 140, 0),
+                background: ratatui::style::Color::Reset,
+                text: ratatui::style::Color::Reset,
+                text_weak: ratatui::style::Color::Reset,
+                text_strong: ratatui::style::Color::Reset,
+                border: ratatui::style::Color::Reset,
+                success: ratatui::style::Color::Rgb(0, 255, 0),
+                warning: ratatui::style::Color::Rgb(255, 255, 0),
+                error: ratatui::style::Color::Rgb(255, 0, 0),
+                info: ratatui::style::Color::Rgb(0, 255, 255),
+            };
+        }
+
+        let theme = &self.themes[self.current_theme_index];
+        theme.get_colors(self.dark_mode)
+    }
+
+    pub fn cycle_theme(&mut self) {
+        if !self.themes.is_empty() {
+            self.current_theme_index = (self.current_theme_index + 1) % self.themes.len();
+        }
+    }
+
+    pub fn toggle_dark_mode(&mut self) {
+        self.dark_mode = !self.dark_mode;
     }
 
     pub fn handle_keys(&mut self, key: KeyEvent) {
@@ -336,6 +375,7 @@ impl App {
 
     pub fn render(&self, f: &mut ratatui::Frame) {
         let size = f.area();
+        let colors = self.get_current_theme_colors();
 
         match self.base_focus {
             BaseFocus::Home => {
@@ -347,6 +387,7 @@ impl App {
                     git::get_current_branch(),
                     self.agent.clone(),
                     self.model.clone(),
+                    &colors,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state) && self.overlay_focus != OverlayFocus::ModelsDialog {
@@ -372,6 +413,7 @@ impl App {
                     git::get_current_branch(),
                     self.agent.clone(),
                     self.model.clone(),
+                    &colors,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state) && self.overlay_focus != OverlayFocus::ModelsDialog {

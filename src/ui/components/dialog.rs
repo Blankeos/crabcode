@@ -174,20 +174,16 @@ impl Dialog {
 
     pub fn next(&mut self) {
         let flat_items = self.get_flat_items();
-        if !flat_items.is_empty() {
-            self.selected_index = (self.selected_index + 1) % flat_items.len();
+        if !flat_items.is_empty() && self.selected_index < flat_items.len() - 1 {
+            self.selected_index += 1;
             self.adjust_scroll();
         }
     }
 
     pub fn previous(&mut self) {
         let flat_items = self.get_flat_items();
-        if !flat_items.is_empty() {
-            self.selected_index = if self.selected_index == 0 {
-                flat_items.len() - 1
-            } else {
-                self.selected_index - 1
-            };
+        if !flat_items.is_empty() && self.selected_index > 0 {
+            self.selected_index -= 1;
             self.adjust_scroll();
         }
     }
@@ -215,6 +211,7 @@ impl Dialog {
         let mut current_item_index = 0;
 
         for (_, items) in &self.filtered_items {
+            line_index += 1;
             for _item in items {
                 if current_item_index == item_index {
                     return line_index;
@@ -624,7 +621,7 @@ mod tests {
         assert_eq!(dialog.selected_index, 2);
 
         dialog.next();
-        assert_eq!(dialog.selected_index, 0);
+        assert_eq!(dialog.selected_index, 2);
     }
 
     #[test]
@@ -633,10 +630,17 @@ mod tests {
         assert_eq!(dialog.selected_index, 0);
 
         dialog.previous();
-        assert_eq!(dialog.selected_index, 2);
+        assert_eq!(dialog.selected_index, 0);
 
+        dialog.selected_index = 2;
         dialog.previous();
         assert_eq!(dialog.selected_index, 1);
+
+        dialog.previous();
+        assert_eq!(dialog.selected_index, 0);
+
+        dialog.previous();
+        assert_eq!(dialog.selected_index, 0);
     }
 
     #[test]

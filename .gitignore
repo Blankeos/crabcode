@@ -1,2 +1,4 @@
 target/
 src/themes/
+!src/theme.json
+!src/theme.json
