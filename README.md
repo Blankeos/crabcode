@@ -9,7 +9,7 @@ A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interac
 
 ## Features
 
-- **Built for the OpenCode user** - works out of the box w/ opencode themes, every UX from opencode carefully ported into rust.
+- **Built for the OpenCode user** - works out of the box w/ opencode themes, every UX and more from opencode carefully ported into rust.
 - **Opens literally instantly** - one of my main motivations why I made this, rust! :D Very lightweight after build.
 - **Terminal UI (TUI)** - Beautiful, responsive interface built with [ratatui](https://github.com/ratatui-org/ratatui)
 - **Agent System** - Switch between PLAN (read-only analysis) and BUILD (implementation) agents with TAB

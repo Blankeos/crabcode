@@ -232,13 +232,19 @@ impl Discovery {
                     capabilities.push("structured_output".to_string());
                 }
 
-                models.push(crate::model::types::Model {
-                    id: model_id.clone(),
-                    name: model.name.clone(),
-                    provider_id: provider_id.clone(),
-                    provider_name: provider.name.clone(),
-                    capabilities,
-                });
+                let is_text_model = model.modalities
+                    .as_ref()
+                    .map_or(true, |m| m.output.contains(&"text".to_string()) && !m.output.contains(&"image".to_string()));
+
+                if is_text_model {
+                    models.push(crate::model::types::Model {
+                        id: model_id.clone(),
+                        name: model.name.clone(),
+                        provider_id: provider_id.clone(),
+                        provider_name: provider.name.clone(),
+                        capabilities,
+                    });
+                }
             }
         }
 

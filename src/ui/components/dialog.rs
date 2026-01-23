@@ -1,4 +1,6 @@
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{
     prelude::Rect,
     style::{Color, Modifier, Style},
@@ -273,33 +275,15 @@ impl Dialog {
                 self.next();
                 true
             }
-            KeyCode::Left | KeyCode::Right => {
+            KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => true,
+            KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
+            _ => {
                 let input = TuiInput::from(event);
                 self.search_textarea.input(input);
-                true
-            }
-            KeyCode::Char(c) => {
-                let text = self.search_textarea.lines().join("");
-                if event.modifiers.is_empty() && text == "Search" {
-                    self.search_textarea = TextArea::default();
-                }
-                self.search_textarea.insert_char(c);
                 self.search_query = self.search_textarea.lines().join("");
                 self.apply_filter();
                 true
             }
-            KeyCode::Backspace => {
-                self.search_textarea.delete_char();
-                let text = self.search_textarea.lines().join("");
-                if text.is_empty() {
-                    self.search_textarea = TextArea::default();
-                    self.search_textarea.set_placeholder_text("Search");
-                }
-                self.search_query = text;
-                self.apply_filter();
-                true
-            }
-            _ => false,
         }
     }
 
