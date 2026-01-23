@@ -94,8 +94,8 @@ impl Chat {
         let mut lines = Vec::new();
 
         let (prefix, color) = match message.role {
-            MessageRole::User => ("You", Color::Cyan),
-            MessageRole::Assistant => ("AI", Color::Green),
+            MessageRole::User => ("You", Color::Rgb(255, 140, 0)),
+            MessageRole::Assistant => ("AI", Color::Rgb(255, 165, 0)),
             MessageRole::System => ("System", Color::Yellow),
             MessageRole::Tool => ("Tool", Color::Gray),
         };

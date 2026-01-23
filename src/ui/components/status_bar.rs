@@ -40,7 +40,10 @@ impl StatusBar {
 
         if let Some(ref branch) = self.branch {
             left_spans.push(Span::raw(" ("));
-            left_spans.push(Span::styled(branch, Style::default().fg(Color::Cyan)));
+            left_spans.push(Span::styled(
+                branch,
+                Style::default().fg(Color::Rgb(255, 140, 0)),
+            ));
             left_spans.push(Span::raw(")"));
         }
 

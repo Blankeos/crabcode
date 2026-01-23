@@ -164,16 +164,24 @@ impl App {
 
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
+            .constraints(
+                [
+                    Constraint::Min(0),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ]
+                .as_ref(),
+            )
             .split(size);
 
         if self.focus == AppFocus::Landing {
+            let input_height = self.input.get_height();
             let landing_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(
                     [
                         Constraint::Min(0),
-                        Constraint::Length(3),
+                        Constraint::Length(input_height),
                         Constraint::Length(1),
                     ]
                     .as_ref(),
@@ -191,7 +199,7 @@ impl App {
             let logo = Paragraph::new(Text::from(crate::ui::components::landing::LOGO.trim()))
                 .style(
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(Color::Rgb(255, 140, 0))
                         .add_modifier(Modifier::BOLD),
                 )
                 .alignment(Alignment::Center);
@@ -253,11 +261,11 @@ impl App {
             }
 
             let help_text = vec![
-                Span::styled("/", Style::default().fg(Color::Cyan)),
+                Span::styled("/", Style::default().fg(Color::Rgb(255, 140, 0))),
                 Span::raw(" commands  "),
-                Span::styled("tab", Style::default().fg(Color::Cyan)),
+                Span::styled("tab", Style::default().fg(Color::Rgb(255, 140, 0))),
                 Span::raw(" agents  "),
-                Span::styled("ctrl+cc", Style::default().fg(Color::Cyan)),
+                Span::styled("ctrl+cc", Style::default().fg(Color::Rgb(255, 140, 0))),
                 Span::raw(" quit"),
             ];
             let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
@@ -272,7 +280,7 @@ impl App {
             self.agent.clone(),
             self.model.clone(),
         );
-        status_bar.render(f, main_chunks[1]);
+        status_bar.render(f, main_chunks[2]);
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) {

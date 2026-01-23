@@ -1,7 +1,7 @@
 use crate::autocomplete::{AutoComplete, Suggestion};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::{Rect, Style};
-use ratatui::widgets::Block;
+use ratatui::widgets::{Block, Paragraph};
 use tui_textarea::{Input as TuiInput, TextArea};
 
 pub struct Input {
@@ -27,11 +27,45 @@ impl Input {
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
         let border = Block::bordered()
             .borders(ratatui::widgets::Borders::LEFT)
-            .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan))
+            .border_style(
+                ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(255, 140, 0)),
+            )
             .border_type(ratatui::widgets::BorderType::Thick)
             .padding(ratatui::widgets::Padding::horizontal(1));
         let inner_area = border.inner(area);
-        frame.render_widget(&self.textarea, inner_area);
+
+        let line_count = self.textarea.lines().len().max(1);
+        let textarea_height = line_count.min(6) as u16;
+
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(textarea_height),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .split(inner_area);
+
+        frame.render_widget(&self.textarea, chunks[0]);
+
+        let info_text = ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled(
+                "Plan",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(255, 165, 0)),
+            ),
+            ratatui::text::Span::raw("  "),
+            ratatui::text::Span::styled(
+                "GPT-4",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(255, 200, 100)),
+            ),
+            ratatui::text::Span::raw("  "),
+            ratatui::text::Span::styled(
+                "OpenAI",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
+            ),
+        ]);
+
+        let info_paragraph = Paragraph::new(info_text);
+        frame.render_widget(info_paragraph, chunks[1]);
         frame.render_widget(border, area);
     }
 
@@ -165,6 +199,12 @@ impl Input {
         }
         Vec::new()
     }
+
+    pub fn get_height(&self) -> u16 {
+        let line_count = self.textarea.lines().len().max(1);
+        let textarea_height = line_count.min(6) as u16;
+        textarea_height + 1
+    }
 }
 
 impl Default for Input {
@@ -176,6 +216,7 @@ impl Default for Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::crossterm::event::{KeyEventKind, KeyEventState};
 
     #[test]
     fn test_input_creation() {

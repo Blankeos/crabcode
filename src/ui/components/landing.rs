@@ -37,7 +37,7 @@ impl Landing {
         let logo = Paragraph::new(logo_text)
             .style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Rgb(255, 140, 0))
                     .add_modifier(Modifier::BOLD),
             )
             .alignment(Alignment::Center);
@@ -46,7 +46,7 @@ impl Landing {
             Span::styled(
                 "Crabcode",
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(Color::Rgb(255, 165, 0))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" - "),

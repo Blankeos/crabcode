@@ -81,7 +81,7 @@ impl Popup {
                 let style = if i == self.selected_index {
                     Style::default()
                         .fg(Color::Black)
-                        .bg(Color::LightGreen)
+                        .bg(Color::Rgb(255, 200, 100))
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
@@ -96,9 +96,9 @@ impl Popup {
             .collect();
 
         let border_style = if has_focus {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(Color::Rgb(255, 140, 0))
         } else {
-            Style::default().fg(Color::LightGreen)
+            Style::default().fg(Color::Rgb(255, 200, 100))
         };
 
         let list = List::new(items).block(
