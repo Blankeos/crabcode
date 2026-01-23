@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
 };
 use std::collections::HashMap;
-use tui_textarea::TextArea;
+use tui_textarea::{Input as TuiInput, TextArea};
 
 #[derive(Debug, Clone)]
 pub struct DialogItem {
@@ -269,6 +269,11 @@ impl Dialog {
             }
             KeyCode::Down => {
                 self.next();
+                true
+            }
+            KeyCode::Left | KeyCode::Right => {
+                let input = TuiInput::from(event);
+                self.search_textarea.input(input);
                 true
             }
             KeyCode::Char(c) => {

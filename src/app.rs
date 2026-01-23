@@ -31,10 +31,16 @@ use crate::ui::components::status_bar::StatusBar;
 use crate::utils::git;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AppFocus {
+pub enum BaseFocus {
     Landing,
     Chat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OverlayFocus {
+    None,
     Dialog,
+    Popup,
 }
 
 pub struct App {
@@ -49,8 +55,8 @@ pub struct App {
     pub agent: String,
     pub model: String,
     pub cwd: String,
-    pub focus: AppFocus,
-    pub popup_has_focus: bool,
+    pub base_focus: BaseFocus,
+    pub overlay_focus: OverlayFocus,
     ctrl_c_press_count: u8,
     last_ctrl_c_time: std::time::Instant,
 }
@@ -109,8 +115,8 @@ impl App {
             agent: "PLAN".to_string(),
             model: "nano-gpt".to_string(),
             cwd,
-            focus: AppFocus::Landing,
-            popup_has_focus: false,
+            base_focus: BaseFocus::Landing,
+            overlay_focus: OverlayFocus::None,
             ctrl_c_press_count: 0,
             last_ctrl_c_time: std::time::Instant::now(),
         }
@@ -193,12 +199,6 @@ impl App {
 
         let size = f.area();
 
-        if self.dialog.is_visible() {
-            self.dialog.render(f, size);
-        }
-
-        render_toasts(f, &get_toast_manager().lock().unwrap());
-
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(
@@ -211,7 +211,18 @@ impl App {
             )
             .split(size);
 
-        if self.focus == AppFocus::Landing {
+        if self.overlay_focus == OverlayFocus::Dialog {
+            self.dialog.render(f, size);
+            render_toasts(f, &get_toast_manager().lock().unwrap());
+            let status_bar = StatusBar::new(
+                self.version.clone(),
+                self.cwd.clone(),
+                git::get_current_branch(),
+                self.agent.clone(),
+                self.model.clone(),
+            );
+            status_bar.render(f, main_chunks[2]);
+        } else if self.base_focus == BaseFocus::Landing {
             let input_height = self.input.get_height();
             let landing_chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -263,8 +274,7 @@ impl App {
             self.input.render(f, landing_chunks[1]);
 
             if self.popup.is_visible() {
-                self.popup
-                    .render(f, landing_chunks[1], self.popup_has_focus);
+                self.popup.render(f, landing_chunks[1], self.overlay_focus == OverlayFocus::Popup);
             }
 
             let help_text = vec![
@@ -277,6 +287,17 @@ impl App {
             ];
             let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
             f.render_widget(help, landing_chunks[2]);
+
+            render_toasts(f, &get_toast_manager().lock().unwrap());
+
+            let status_bar = StatusBar::new(
+                self.version.clone(),
+                self.cwd.clone(),
+                git::get_current_branch(),
+                self.agent.clone(),
+                self.model.clone(),
+            );
+            status_bar.render(f, main_chunks[2]);
         } else {
             let chat_chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -294,7 +315,7 @@ impl App {
             self.input.render(f, chat_chunks[1]);
 
             if self.popup.is_visible() {
-                self.popup.render(f, chat_chunks[1], self.popup_has_focus);
+                self.popup.render(f, chat_chunks[1], self.overlay_focus == OverlayFocus::Popup);
             }
 
             let help_text = vec![
@@ -307,17 +328,28 @@ impl App {
             ];
             let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
             f.render_widget(help, chat_chunks[2]);
-        }
 
-        let branch = git::get_current_branch();
-        let status_bar = StatusBar::new(
-            self.version.clone(),
-            self.cwd.clone(),
-            branch,
-            self.agent.clone(),
-            self.model.clone(),
-        );
-        status_bar.render(f, main_chunks[2]);
+            render_toasts(f, &get_toast_manager().lock().unwrap());
+
+            let status_bar = StatusBar::new(
+                self.version.clone(),
+                self.cwd.clone(),
+                git::get_current_branch(),
+                self.agent.clone(),
+                self.model.clone(),
+            );
+            status_bar.render(f, main_chunks[2]);
+        }
+    }
+
+    fn set_overlay_focus(&mut self, overlay: OverlayFocus) {
+        self.overlay_focus = overlay;
+    }
+
+    fn close_overlay(&mut self) {
+        self.overlay_focus = OverlayFocus::None;
+        self.dialog.hide();
+        self.popup.clear();
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) {
@@ -336,55 +368,111 @@ impl App {
                 if self.ctrl_c_press_count == 1 {
                     self.input.clear();
                 }
+                return;
             }
-            KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
-                if self.focus == AppFocus::Dialog {
-                    if let Some(_selected) = self.dialog.get_selected() {
-                        self.dialog.hide();
-                        if self.focus == AppFocus::Dialog {
-                            self.focus = AppFocus::Landing;
-                        }
-                    }
-                } else if self.popup.is_visible() {
-                    self.autocomplete_and_submit();
-                } else {
-                    let input_text = self.input.get_text();
-                    if !input_text.is_empty() {
-                        tokio::task::block_in_place(|| {
-                            let rt = tokio::runtime::Handle::current();
-                            rt.block_on(self.process_input(&input_text));
-                        });
-                        self.input.clear();
-                        self.popup.clear();
-                        self.popup_has_focus = false;
-                    }
+            _ => {}
+        }
+
+let handled = match self.overlay_focus {
+            OverlayFocus::Popup => {
+                let handled = self.handle_popup_keys(key);
+                if !handled {
+                    self.input.handle_event(key);
+                    self.update_suggestions();
                 }
+                handled
             }
-            KeyCode::Enter => {}
+            OverlayFocus::Dialog => {
+                if self.handle_dialog_keys(key) {
+                    return;
+                }
+                false
+            }
+            OverlayFocus::None => {
+                if self.handle_base_keys(key) {
+                    return;
+                }
+                false
+            }
+        };
+
+        if handled {
+            return;
+        }
+
+        if self.overlay_focus == OverlayFocus::None {
+            self.handle_input_and_app_keys(key);
+        }
+    }
+
+    fn handle_popup_keys(&mut self, key: KeyEvent) -> bool {
+        let action = self.popup.handle_key_event(key);
+        match action {
+            crate::ui::components::popup::PopupAction::Handled => true,
+            crate::ui::components::popup::PopupAction::Autocomplete => {
+                self.autocomplete_and_submit();
+                true
+            }
+            crate::ui::components::popup::PopupAction::NotHandled => false,
+        }
+    }
+
+    fn handle_dialog_keys(&mut self, key: KeyEvent) -> bool {
+        let handled = self.dialog.handle_key_event(key);
+        if !self.dialog.is_visible() {
+            self.close_overlay();
+        }
+        handled
+    }
+
+    fn handle_base_keys(&mut self, key: KeyEvent) -> bool {
+        match key.code {
             KeyCode::Tab => {
                 if self.agent == "PLAN" {
                     self.agent = "BUILD".to_string();
                 } else {
                     self.agent = "PLAN".to_string();
                 }
+                true
             }
             KeyCode::Esc => {
-                if self.focus == AppFocus::Dialog {
-                    if self.dialog.handle_key_event(key) {
-                        self.focus = AppFocus::Landing;
-                    }
-                } else if self.popup.is_visible() {
+                if self.overlay_focus == OverlayFocus::Popup {
                     self.input.clear();
                     self.popup.clear();
-                    self.popup_has_focus = false;
+                    self.overlay_focus = OverlayFocus::None;
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
+                if self.overlay_focus == OverlayFocus::Popup {
+                    self.autocomplete_and_submit();
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_input_and_app_keys(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
+                let input_text = self.input.get_text();
+                if !input_text.is_empty() {
+                    tokio::task::block_in_place(|| {
+                        let rt = tokio::runtime::Handle::current();
+                        rt.block_on(self.process_input(&input_text));
+                    });
+                    self.input.clear();
+                    self.popup.clear();
                 }
             }
             _ => {
-                if self.focus == AppFocus::Dialog {
-                    self.dialog.handle_key_event(key);
-                } else if self.input.handle_event(key) {
-                    self.update_suggestions();
-                }
+                self.input.handle_event(key);
+                self.update_suggestions();
             }
         }
     }
@@ -394,14 +482,14 @@ impl App {
             let suggestions = self.input.get_autocomplete_suggestions();
             if !suggestions.is_empty() {
                 self.popup.set_suggestions(suggestions);
-                self.popup_has_focus = true;
+                self.overlay_focus = OverlayFocus::Popup;
             } else {
                 self.popup.clear();
-                self.popup_has_focus = false;
+                self.overlay_focus = OverlayFocus::None;
             }
         } else {
             self.popup.clear();
-            self.popup_has_focus = false;
+            self.overlay_focus = OverlayFocus::None;
         }
     }
 
@@ -411,19 +499,19 @@ impl App {
 
     fn autocomplete_and_submit(&mut self) {
         if let Some(selected) = self.popup.get_selected() {
-            self.input.set_text(&format!("/{}", selected.name));
+            let command = format!("/{}", selected.name);
 
-            let input_text = self.input.get_text();
-            if !input_text.is_empty() {
-                tokio::task::block_in_place(|| {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(self.process_input(&input_text));
-                });
-                self.input.clear();
-            }
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(self.process_input(&command));
+            });
+
+            self.input.clear();
         }
         self.popup.clear();
-        self.popup_has_focus = false;
+        if !self.dialog.is_visible() {
+            self.overlay_focus = OverlayFocus::None;
+        }
     }
 
     async fn process_input(&mut self, input: &str) {
@@ -439,9 +527,9 @@ impl App {
                     crate::command::registry::CommandResult::Success(msg) => {
                         if parsed.name == "new" {
                             self.chat.clear();
-                            self.focus = AppFocus::Landing;
-                        } else if self.focus == AppFocus::Landing {
-                            self.focus = AppFocus::Chat;
+                            self.base_focus = BaseFocus::Landing;
+                        } else if self.base_focus == BaseFocus::Landing {
+                            self.base_focus = BaseFocus::Chat;
                         }
                         self.chat.add_assistant_message(msg);
                         if parsed.name == "exit" {
@@ -463,15 +551,15 @@ impl App {
                             .collect();
                         self.dialog = Dialog::with_items(title, dialog_items);
                         self.dialog.show();
-                        self.focus = AppFocus::Dialog;
+                        self.overlay_focus = OverlayFocus::Dialog;
                     }
                 }
             }
-            InputType::Message(msg) => {
+InputType::Message(msg) => {
                 if !msg.is_empty() {
                     self.chat.add_user_message(&msg);
-                    if self.focus == AppFocus::Landing {
-                        self.focus = AppFocus::Chat;
+                    if self.base_focus == BaseFocus::Landing {
+                        self.base_focus = BaseFocus::Chat;
                     }
                 }
             }

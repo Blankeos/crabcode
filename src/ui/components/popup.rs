@@ -1,4 +1,5 @@
 use crate::autocomplete::Suggestion;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::Rect,
     style::{Color, Modifier, Style},
@@ -8,6 +9,12 @@ use ratatui::{
 };
 
 const MAX_VISIBLE_ITEMS: usize = 8;
+
+pub enum PopupAction {
+    Handled,
+    Autocomplete,
+    NotHandled,
+}
 
 pub struct Popup {
     pub suggestions: Vec<Suggestion>,
@@ -54,6 +61,36 @@ impl Popup {
 
     pub fn get_selected(&self) -> Option<&Suggestion> {
         self.suggestions.get(self.selected_index)
+    }
+
+    pub fn handle_key_event(&mut self, event: KeyEvent) -> PopupAction {
+        if !self.visible {
+            return PopupAction::NotHandled;
+        }
+
+        match event.code {
+            KeyCode::Tab => PopupAction::Autocomplete,
+            KeyCode::Up => {
+                self.previous();
+                PopupAction::Handled
+            }
+            KeyCode::Down => {
+                self.next();
+                PopupAction::Handled
+            }
+            KeyCode::Enter => {
+                if !self.suggestions.is_empty() {
+                    PopupAction::Autocomplete
+                } else {
+                    PopupAction::NotHandled
+                }
+            }
+            KeyCode::Esc => {
+                self.clear();
+                PopupAction::Handled
+            }
+            _ => PopupAction::NotHandled,
+        }
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, has_focus: bool) {
@@ -247,5 +284,118 @@ mod tests {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![]);
         assert!(!popup.is_visible());
+    }
+
+    #[test]
+    fn test_handle_key_event_not_visible() {
+        let mut popup = Popup::new();
+        let key = KeyEvent {
+            code: KeyCode::Down,
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+            kind: ratatui::crossterm::event::KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        };
+        let action = popup.handle_key_event(key);
+        assert!(matches!(action, PopupAction::NotHandled));
+    }
+
+    #[test]
+    fn test_handle_key_event_down() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(vec![
+            Suggestion {
+                name: "item1".to_string(),
+                description: "desc1".to_string(),
+            },
+            Suggestion {
+                name: "item2".to_string(),
+                description: "desc2".to_string(),
+            },
+        ]);
+        let key = KeyEvent {
+            code: KeyCode::Down,
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+            kind: ratatui::crossterm::event::KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        };
+        let action = popup.handle_key_event(key);
+        assert!(matches!(action, PopupAction::Handled));
+        assert_eq!(popup.selected_index, 1);
+    }
+
+    #[test]
+    fn test_handle_key_event_up() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(vec![
+            Suggestion {
+                name: "item1".to_string(),
+                description: "desc1".to_string(),
+            },
+            Suggestion {
+                name: "item2".to_string(),
+                description: "desc2".to_string(),
+            },
+        ]);
+        let key = KeyEvent {
+            code: KeyCode::Up,
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+            kind: ratatui::crossterm::event::KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        };
+        let action = popup.handle_key_event(key);
+        assert!(matches!(action, PopupAction::Handled));
+        assert_eq!(popup.selected_index, 1);
+    }
+
+    #[test]
+    fn test_handle_key_event_tab() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(vec![Suggestion {
+            name: "item1".to_string(),
+            description: "desc1".to_string(),
+        }]);
+        let key = KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+            kind: ratatui::crossterm::event::KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        };
+        let action = popup.handle_key_event(key);
+        assert!(matches!(action, PopupAction::Autocomplete));
+    }
+
+    #[test]
+    fn test_handle_key_event_esc() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(vec![Suggestion {
+            name: "item1".to_string(),
+            description: "desc1".to_string(),
+        }]);
+        let key = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+            kind: ratatui::crossterm::event::KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        };
+        let action = popup.handle_key_event(key);
+        assert!(matches!(action, PopupAction::Handled));
+        assert!(!popup.is_visible());
+    }
+
+    #[test]
+    fn test_handle_key_event_char() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(vec![Suggestion {
+            name: "item1".to_string(),
+            description: "desc1".to_string(),
+        }]);
+        let key = KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+            kind: ratatui::crossterm::event::KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        };
+        let action = popup.handle_key_event(key);
+        assert!(matches!(action, PopupAction::NotHandled));
     }
 }
