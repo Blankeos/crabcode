@@ -1,3 +1,7 @@
+use nucleo_matcher::{
+    pattern::{CaseMatching, Normalization, Pattern},
+    Config, Matcher,
+};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -11,7 +15,7 @@ use ratatui::{
 use std::collections::HashMap;
 use tui_textarea::{Input as TuiInput, TextArea};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DialogItem {
     pub id: String,
     pub name: String,
@@ -19,7 +23,18 @@ pub struct DialogItem {
     pub description: String,
 }
 
-#[derive(Debug, Clone)]
+impl Clone for DialogItem {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            group: self.group.clone(),
+            description: self.description.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Dialog {
     pub title: String,
     pub items: Vec<DialogItem>,
@@ -35,6 +50,7 @@ pub struct Dialog {
     pub search_textarea: TextArea<'static>,
     pub scrollbar_state: ScrollbarState,
     pub is_dragging_scrollbar: bool,
+    matcher: Matcher,
 }
 
 impl Dialog {
@@ -57,6 +73,7 @@ impl Dialog {
             search_textarea,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
+            matcher: Matcher::new(Config::DEFAULT),
         }
     }
 
@@ -142,18 +159,32 @@ impl Dialog {
                 })
                 .collect();
         } else {
-            let query = self.search_query.to_lowercase();
+            let pattern = Pattern::parse(
+                &self.search_query,
+                CaseMatching::Ignore,
+                Normalization::Smart,
+            );
             let mut filtered: Vec<(String, Vec<DialogItem>)> = Vec::new();
 
             for group in &self.groups {
-                let matching_items: Vec<DialogItem> = self
-                    .grouped_items
-                    .get(group)
-                    .unwrap()
+                let items = self.grouped_items.get(group).unwrap();
+                let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+                let descriptions: Vec<&str> =
+                    items.iter().map(|item| item.description.as_str()).collect();
+
+                let matched_names: Vec<(&str, u32)> = pattern.match_list(names, &mut self.matcher);
+                let matched_descriptions: Vec<(&str, u32)> =
+                    pattern.match_list(descriptions, &mut self.matcher);
+
+                let matching_items: Vec<DialogItem> = items
                     .iter()
                     .filter(|item| {
-                        item.name.to_lowercase().contains(&query)
-                            || item.description.to_lowercase().contains(&query)
+                        matched_names
+                            .iter()
+                            .any(|(name, _)| *name == item.name.as_str())
+                            || matched_descriptions
+                                .iter()
+                                .any(|(desc, _)| *desc == item.description.as_str())
                     })
                     .cloned()
                     .collect();
@@ -592,6 +623,28 @@ impl Dialog {
 impl Default for Dialog {
     fn default() -> Self {
         Self::new("Dialog")
+    }
+}
+
+impl Clone for Dialog {
+    fn clone(&self) -> Self {
+        Self {
+            title: self.title.clone(),
+            items: self.items.clone(),
+            grouped_items: self.grouped_items.clone(),
+            filtered_items: self.filtered_items.clone(),
+            groups: self.groups.clone(),
+            selected_index: self.selected_index,
+            visible: self.visible,
+            search_query: self.search_query.clone(),
+            scroll_offset: self.scroll_offset,
+            dialog_area: self.dialog_area,
+            content_area: self.content_area,
+            search_textarea: self.search_textarea.clone(),
+            scrollbar_state: self.scrollbar_state,
+            is_dragging_scrollbar: self.is_dragging_scrollbar,
+            matcher: Matcher::new(Config::DEFAULT),
+        }
     }
 }
 

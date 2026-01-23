@@ -3,7 +3,7 @@ use ratatui::{layout::Rect, Frame};
 
 use crate::ui::components::dialog::{Dialog, DialogItem};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ModelsDialogState {
     pub dialog: Dialog,
 }
