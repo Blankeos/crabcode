@@ -218,7 +218,8 @@ impl App {
             self.input.render(f, landing_chunks[1]);
 
             if self.popup.is_visible() {
-                self.popup.render(f, landing_chunks[1], self.popup_has_focus);
+                self.popup
+                    .render(f, landing_chunks[1], self.popup_has_focus);
             }
 
             let help_text = vec![
