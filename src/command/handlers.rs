@@ -101,6 +101,7 @@ pub fn handle_models<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    use crate::command::registry::DialogItem;
     use crate::model::discovery::Discovery;
 
     let provider_filter = if parsed.args.is_empty() {
@@ -114,9 +115,43 @@ pub fn handle_models<'a>(
 
         match discovery {
             Ok(d) => {
-                let filter_ref = provider_filter.as_deref();
-                match d.list_models(filter_ref).await {
-                    Ok(output) => CommandResult::Success(output),
+                match d.fetch_models().await {
+                    Ok(models) => {
+                        let items: Vec<DialogItem> = models
+                            .into_iter()
+                            .filter(|model| {
+                                if let Some(filter) = &provider_filter {
+                                    model.provider_id.contains(filter)
+                                        || model.provider_name.to_lowercase().contains(filter)
+                                } else {
+                                    true
+                                }
+                            })
+                            .map(|model| DialogItem {
+                                id: model.id.clone(),
+                                name: model.name.clone(),
+                                group: model.provider_name.clone(),
+                                description: format!(
+                                    "{} | {}",
+                                    model.provider_name,
+                                    model.capabilities.join(", ")
+                                ),
+                            })
+                            .collect();
+
+                        if items.is_empty() {
+                            if let Some(filter) = provider_filter {
+                                CommandResult::Error(format!("No models found for provider: {}", filter))
+                            } else {
+                                CommandResult::Error("No models available".to_string())
+                            }
+                        } else {
+                            CommandResult::ShowDialog {
+                                title: "Available Models".to_string(),
+                                items,
+                            }
+                        }
+                    }
                     Err(e) => CommandResult::Error(format!("Failed to fetch models: {}", e)),
                 }
             }
@@ -344,10 +379,12 @@ mod tests {
         let mut session_manager = SessionManager::new();
         let result = handle_models(&parsed, &mut session_manager).await;
         match result {
-            CommandResult::Success(msg) => {
-                assert!(msg.contains("Available models:") || msg.contains("Failed"));
+            CommandResult::ShowDialog { title, items } => {
+                assert_eq!(title, "Available Models");
+                assert!(!items.is_empty());
             }
-            _ => panic!("Expected Success"),
+            CommandResult::Error(_) => {}
+            _ => panic!("Expected ShowDialog or Error"),
         }
         let _ = crate::model::discovery::Discovery::cleanup_test();
     }
@@ -362,14 +399,12 @@ mod tests {
         let mut session_manager = SessionManager::new();
         let result = handle_models(&parsed, &mut session_manager).await;
         match result {
-            CommandResult::Success(msg) => {
-                assert!(
-                    msg.contains("Available models:")
-                        || msg.contains("No models found")
-                        || msg.contains("Failed")
-                );
+            CommandResult::ShowDialog { title, items } => {
+                assert_eq!(title, "Available Models");
+                assert!(!items.is_empty());
             }
-            _ => panic!("Expected Success"),
+            CommandResult::Error(_) => {}
+            _ => panic!("Expected ShowDialog or Error"),
         }
         let _ = crate::model::discovery::Discovery::cleanup_test();
     }
@@ -385,10 +420,12 @@ mod tests {
         let mut session_manager = SessionManager::new();
         let result = handle_models(&parsed, &mut session_manager).await;
         match result {
-            CommandResult::Success(msg) => {
-                assert!(msg.contains("Available models:") || msg.contains("Failed"));
+            CommandResult::ShowDialog { title, items } => {
+                assert_eq!(title, "Available Models");
+                assert!(!items.is_empty());
             }
-            _ => panic!("Expected Success"),
+            CommandResult::Error(_) => {}
+            _ => panic!("Expected ShowDialog or Error"),
         }
         let _ = crate::config::ApiKeyConfig::cleanup_test();
         let _ = crate::model::discovery::Discovery::cleanup_test();

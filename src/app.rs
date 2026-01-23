@@ -2,7 +2,7 @@ use anyhow::Result;
 use ratatui::crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        KeyboardEnhancementFlags, MouseEvent, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -22,9 +22,10 @@ use crate::session::manager::SessionManager;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::{
-    get_toast_manager, push_toast, remove_expired_toasts, render_toasts, Toast, ToastLevel,
+    get_toast_manager, remove_expired_toasts, render_toasts,
 };
 
+use crate::ui::components::dialog::Dialog;
 use crate::ui::components::popup::Popup;
 use crate::ui::components::status_bar::StatusBar;
 use crate::utils::git;
@@ -33,6 +34,7 @@ use crate::utils::git;
 pub enum AppFocus {
     Landing,
     Chat,
+    Dialog,
 }
 
 pub struct App {
@@ -43,6 +45,7 @@ pub struct App {
     pub session_manager: SessionManager,
     pub chat: Chat,
     pub popup: Popup,
+    pub dialog: Dialog,
     pub agent: String,
     pub model: String,
     pub cwd: String,
@@ -102,6 +105,7 @@ impl App {
             session_manager: SessionManager::new(),
             chat: Chat::new(),
             popup: Popup::new(),
+            dialog: Dialog::new("Dialog"),
             agent: "PLAN".to_string(),
             model: "nano-gpt".to_string(),
             cwd,
@@ -167,14 +171,14 @@ impl App {
             if event::poll(Duration::from_millis(100))? {
                 let event = event::read()?;
 
-                if let Event::Key(key) = event {
-                    push_toast(Toast::new(
-                        format!("Input event: {:?}", key.code),
-                        ToastLevel::Info,
-                        None,
-                    ));
-                    // println!("{:?}", key.modifiers);
-                    self.handle_key_event(key);
+                match event {
+                    Event::Key(key) => {
+                        self.handle_key_event(key);
+                    }
+                    Event::Mouse(mouse) => {
+                        self.handle_mouse_event(mouse);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -188,6 +192,10 @@ impl App {
         use ratatui::widgets::Paragraph;
 
         let size = f.area();
+
+        if self.dialog.is_visible() {
+            self.dialog.render(f, size);
+        }
 
         render_toasts(f, &get_toast_manager().lock().unwrap());
 
@@ -330,7 +338,14 @@ impl App {
                 }
             }
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
-                if self.popup.is_visible() {
+                if self.focus == AppFocus::Dialog {
+                    if let Some(_selected) = self.dialog.get_selected() {
+                        self.dialog.hide();
+                        if self.focus == AppFocus::Dialog {
+                            self.focus = AppFocus::Landing;
+                        }
+                    }
+                } else if self.popup.is_visible() {
                     self.autocomplete_and_submit();
                 } else {
                     let input_text = self.input.get_text();
@@ -353,29 +368,21 @@ impl App {
                     self.agent = "PLAN".to_string();
                 }
             }
-            KeyCode::Up => {
-                if self.popup.is_visible() && self.popup_has_focus {
-                    self.popup.previous();
-                } else {
-                    self.input.handle_event(key);
-                }
-            }
-            KeyCode::Down => {
-                if self.popup.is_visible() && self.popup_has_focus {
-                    self.popup.next();
-                } else {
-                    self.input.handle_event(key);
-                }
-            }
             KeyCode::Esc => {
-                if self.popup.is_visible() {
+                if self.focus == AppFocus::Dialog {
+                    if self.dialog.handle_key_event(key) {
+                        self.focus = AppFocus::Landing;
+                    }
+                } else if self.popup.is_visible() {
                     self.input.clear();
                     self.popup.clear();
                     self.popup_has_focus = false;
                 }
             }
             _ => {
-                if self.input.handle_event(key) {
+                if self.focus == AppFocus::Dialog {
+                    self.dialog.handle_key_event(key);
+                } else if self.input.handle_event(key) {
                     self.update_suggestions();
                 }
             }
@@ -396,6 +403,10 @@ impl App {
             self.popup.clear();
             self.popup_has_focus = false;
         }
+    }
+
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if self.dialog.handle_mouse_event(mouse) {}
     }
 
     fn autocomplete_and_submit(&mut self) {
@@ -440,6 +451,20 @@ impl App {
                     crate::command::registry::CommandResult::Error(msg) => {
                         self.chat.add_assistant_message(format!("Error: {}", msg));
                     }
+                    crate::command::registry::CommandResult::ShowDialog { title, items } => {
+                        let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
+                            .into_iter()
+                            .map(|item| crate::ui::components::dialog::DialogItem {
+                                id: item.id,
+                                name: item.name,
+                                group: item.group,
+                                description: item.description,
+                            })
+                            .collect();
+                        self.dialog = Dialog::with_items(title, dialog_items);
+                        self.dialog.show();
+                        self.focus = AppFocus::Dialog;
+                    }
                 }
             }
             InputType::Message(msg) => {
@@ -468,7 +493,7 @@ mod tests {
     #[test]
     fn test_app_creation() {
         let app = App::new();
-        assert_eq!(app.version, "0.1.0");
+        assert_eq!(app.version, "0.0.1");
         assert!(app.running);
         assert!(app.chat.messages.is_empty());
     }
@@ -483,7 +508,7 @@ mod tests {
     #[test]
     fn test_app_default() {
         let app = App::default();
-        assert_eq!(app.version, "0.1.0");
+        assert_eq!(app.version, "0.0.1");
         assert!(app.running);
         assert!(app.chat.messages.is_empty());
     }

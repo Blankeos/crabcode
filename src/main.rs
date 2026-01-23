@@ -15,7 +15,7 @@ use anyhow::Result;
 use app::App;
 use clap::Parser;
 use ratatui::layout::Rect;
-use ratatui_toolkit::{render_toasts, Toast, ToastLevel, ToastManager};
+use ratatui_toolkit::{render_toasts, Toast, ToastManager};
 use std::sync::Mutex;
 
 lazy_static::lazy_static! {

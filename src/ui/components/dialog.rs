@@ -164,8 +164,11 @@ impl Dialog {
     }
 
     fn update_scrollbar(&mut self) {
-        let flat_items = self.get_flat_items();
-        self.scrollbar_state = self.scrollbar_state.content_length(flat_items.len());
+        let mut total_lines = 0;
+        for (_, items) in &self.filtered_items {
+            total_lines += items.len() + 1;
+        }
+        self.scrollbar_state = self.scrollbar_state.content_length(total_lines);
         self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
     }
 
@@ -207,12 +210,30 @@ impl Dialog {
         count
     }
 
+    fn get_line_index_of_item(&self, item_index: usize) -> usize {
+        let mut line_index = 0;
+        let mut current_item_index = 0;
+
+        for (_, items) in &self.filtered_items {
+            for _item in items {
+                if current_item_index == item_index {
+                    return line_index;
+                }
+                line_index += 1;
+                current_item_index += 1;
+            }
+        }
+        line_index
+    }
+
     fn adjust_scroll(&mut self) {
         let visible_rows = self.get_visible_row_count();
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        } else if self.selected_index >= self.scroll_offset + visible_rows {
-            self.scroll_offset = self.selected_index - visible_rows + 1;
+        let selected_line = self.get_line_index_of_item(self.selected_index);
+
+        if selected_line < self.scroll_offset {
+            self.scroll_offset = selected_line;
+        } else if selected_line >= self.scroll_offset + visible_rows {
+            self.scroll_offset = selected_line - visible_rows + 1;
         }
         self.update_scrollbar();
     }
@@ -389,43 +410,42 @@ impl Dialog {
             )]));
         } else {
             let mut current_group = String::new();
-            let mut global_index = 0;
+            let mut line_index = 0;
 
             for (group, items) in &self.filtered_items {
                 for item in items {
-                    if global_index >= self.scroll_offset
-                        && global_index < self.scroll_offset + self.get_visible_row_count()
-                    {
-                        if &current_group != group {
-                            current_group = group.clone();
-                            content_lines.push(Line::from(vec![Span::styled(
-                                format!("\n{}", group),
-                                Style::default()
-                                    .fg(Color::Rgb(255, 140, 0))
-                                    .add_modifier(Modifier::BOLD),
-                            )]));
-                        }
-
-                        let style = if global_index == self.selected_index {
+                    if &current_group != group {
+                        current_group = group.clone();
+                        content_lines.push(Line::from(vec![Span::styled(
+                            format!("\n{}", group),
                             Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::Rgb(255, 200, 100))
-                        } else {
-                            Style::default().fg(Color::White)
-                        };
-
-                        let item_text = format!("  {}", item.name);
-                        let padding =
-                            " ".repeat((list_area_width as usize).saturating_sub(item_text.len()));
-                        let full_text = format!("{}{}", item_text, padding);
-                        content_lines.push(Line::from(full_text).style(style));
+                                .fg(Color::Rgb(255, 140, 0))
+                                .add_modifier(Modifier::BOLD),
+                        )]));
+                        line_index += 1;
                     }
-                    global_index += 1;
+
+                    let style = if line_index == self.selected_index {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Rgb(255, 200, 100))
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+
+                    let item_text = format!("  {}", item.name);
+                    let padding =
+                        " ".repeat((list_area_width as usize).saturating_sub(item_text.len()));
+                    let full_text = format!("{}{}", item_text, padding);
+                    content_lines.push(Line::from(full_text).style(style));
+                    line_index += 1;
                 }
             }
         }
 
-        let content_paragraph = Paragraph::new(content_lines).wrap(Wrap { trim: false });
+        let content_paragraph = Paragraph::new(content_lines)
+            .wrap(Wrap { trim: false })
+            .scroll(((self.scroll_offset as u16).saturating_sub(1), 0));
         frame.render_widget(content_paragraph, chunks[3]);
 
         frame.render_stateful_widget(

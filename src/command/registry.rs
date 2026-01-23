@@ -20,6 +20,18 @@ pub struct Command {
 pub enum CommandResult {
     Success(String),
     Error(String),
+    ShowDialog {
+        title: String,
+        items: Vec<DialogItem>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DialogItem {
+    pub id: String,
+    pub name: String,
+    pub group: String,
+    pub description: String,
 }
 
 pub struct Registry {

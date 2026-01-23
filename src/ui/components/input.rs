@@ -186,7 +186,7 @@ impl Input {
     }
 
     pub fn insert_char(&mut self, c: char) {
-        self.textarea.insert_str(&c.to_string());
+        self.textarea.insert_str(c.to_string().as_str());
     }
 
     pub fn get_autocomplete_suggestions(&self) -> Vec<Suggestion> {
