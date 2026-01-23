@@ -27,16 +27,15 @@ impl AutoComplete {
     pub fn get_suggestions(&self, input: &str) -> Vec<Suggestion> {
         match &self.mode {
             AutoCompleteMode::Command => self.command_auto.get_suggestions(input),
-            AutoCompleteMode::File => {
-                self.file_auto
-                    .get_suggestions(input)
-                    .into_iter()
-                    .map(|name| Suggestion {
-                        name,
-                        description: String::new(),
-                    })
-                    .collect()
-            }
+            AutoCompleteMode::File => self
+                .file_auto
+                .get_suggestions(input)
+                .into_iter()
+                .map(|name| Suggestion {
+                    name,
+                    description: String::new(),
+                })
+                .collect(),
         }
     }
 }

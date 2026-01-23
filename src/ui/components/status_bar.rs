@@ -31,10 +31,20 @@ impl StatusBar {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let cwd_display = if self.cwd.len() > 30 {
-            format!("...{}", &self.cwd[self.cwd.len() - 27..])
+        let cwd_with_tilde = if let Some(home) = std::env::var_os("HOME") {
+            let home_str = home.to_string_lossy();
+            if self.cwd.starts_with(&*home_str) {
+                format!("~{}", &self.cwd[home_str.len()..])
+            } else {
+                self.cwd.clone()
+            }
         } else {
             self.cwd.clone()
+        };
+        let cwd_display = if cwd_with_tilde.len() > 30 {
+            format!("...{}", &cwd_with_tilde[cwd_with_tilde.len() - 27..])
+        } else {
+            cwd_with_tilde
         };
         let mut left_spans = vec![Span::raw(cwd_display)];
 

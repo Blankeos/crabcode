@@ -1,10 +1,14 @@
 [package]
 name = "crabcode"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
-description = "Rust AI CLI Coding Agent"
+description = "(WIP) Rust AI CLI Coding Agent with a beautiful terminal UI"
 license = "MIT"
-repository = "https://github.com/anomalyco/crabcode"
+repository = "https://github.com/blankeos/crabcode"
+readme = "README.md"
+keywords = ["ai", "cli", "coding", "agent", "tui"]
+categories = ["command-line-utilities", "development-tools", "api-bindings"]
+authors = ["Carlo Taleon <carloantonioct@gmail.com>"]
 
 [dependencies]
 ratatui = "0.29"
@@ -22,7 +26,6 @@ futures = "0.3"
 dirs = "5.0"
 ratatui-toolkit = "0.1"
 lazy_static = "1.5"
-crossterm = "0.29.0"
 
 [dev-dependencies]
 tokio-test = "0.4"

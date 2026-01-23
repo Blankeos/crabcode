@@ -15,7 +15,7 @@ use anyhow::Result;
 use app::App;
 use clap::Parser;
 use ratatui::layout::Rect;
-use ratatui_toolkit::{Toast, ToastLevel, ToastManager, render_toasts};
+use ratatui_toolkit::{render_toasts, Toast, ToastLevel, ToastManager};
 use std::sync::Mutex;
 
 lazy_static::lazy_static! {
@@ -37,18 +37,18 @@ pub fn get_toast_manager() -> &'static Mutex<ToastManager> {
 pub fn get_toast_surface_area(frame_area: Rect) -> Rect {
     let toasts = get_toast_manager().lock().unwrap();
     let active_toasts = toasts.get_active();
-    
+
     if active_toasts.is_empty() {
         return Rect::new(frame_area.x, frame_area.y, 0, 0);
     }
-    
+
     const TOAST_HEIGHT: u16 = 3;
     const TOAST_GAP: u16 = 1;
     const TOAST_MARGIN: u16 = 2;
-    
+
     let total_height = (active_toasts.len() as u16 * (TOAST_HEIGHT + TOAST_GAP)) + TOAST_MARGIN;
     let width = frame_area.width.saturating_sub(4);
-    
+
     Rect::new(
         frame_area.x + 2,
         frame_area.y + frame_area.height.saturating_sub(total_height),

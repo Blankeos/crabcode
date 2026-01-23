@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -98,22 +99,37 @@ pub struct Discovery {
 
 impl Discovery {
     pub fn new() -> Result<Self> {
-        let cache_dir = dirs::home_dir()
-            .context("Could not find home directory")?
-            .join(".cache")
-            .join("crabcode");
+        if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+            let cache_dir = PathBuf::from("/tmp/crabcode_test_cache");
+            fs::create_dir_all(&cache_dir).context("Failed to create test cache directory")?;
 
-        fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
+            let cache_path = cache_dir.join("models_dev_cache.json");
 
-        let cache_path = cache_dir.join("models_dev_cache.json");
+            Ok(Self {
+                client: Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                    .context("Failed to create HTTP client")?,
+                cache_path,
+            })
+        } else {
+            let cache_dir = dirs::home_dir()
+                .context("Could not find home directory")?
+                .join(".cache")
+                .join("crabcode");
 
-        Ok(Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .context("Failed to create HTTP client")?,
-            cache_path,
-        })
+            fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
+
+            let cache_path = cache_dir.join("models_dev_cache.json");
+
+            Ok(Self {
+                client: Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                    .context("Failed to create HTTP client")?,
+                cache_path,
+            })
+        }
     }
 
     fn get_cache_path(&self) -> &PathBuf {
@@ -279,6 +295,15 @@ impl Discovery {
         }
 
         Ok(output)
+    }
+
+    #[cfg(test)]
+    pub fn cleanup_test() -> Result<()> {
+        let cache_path = PathBuf::from("/tmp/crabcode_test_cache/models_dev_cache.json");
+        if cache_path.exists() {
+            fs::remove_file(&cache_path).context("Failed to remove test cache file")?;
+        }
+        Ok(())
     }
 }
 

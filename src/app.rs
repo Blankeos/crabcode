@@ -53,12 +53,41 @@ pub struct App {
 }
 
 impl App {
+    fn get_random_placeholder() -> String {
+        let suggestions = vec![
+            "Fix a TODO in the codebase",
+            "What is the tech stack of this project?",
+            "Write unit tests for this module",
+            "Refactor this function for better performance",
+            "Add error handling to this code",
+            "Explain how this code works",
+            "Find and fix a bug in this module",
+            "Add documentation to this function",
+            "Create a new feature for X",
+            "Optimize this database query",
+            "Add type hints to this code",
+            "Implement caching for this endpoint",
+        ];
+
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let index = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as usize
+            % suggestions.len();
+
+        format!("Ask anything... \"{}\"", suggestions[index])
+    }
+
     pub fn new() -> Self {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
         let autocomplete = AutoComplete::new(crate::autocomplete::CommandAuto::new(&registry));
-        let input = Input::new().with_autocomplete(autocomplete);
+        let placeholder = Self::get_random_placeholder();
+        let placeholder_static: &'static str = Box::leak(placeholder.into_boxed_str());
+        let mut input = Input::new().with_autocomplete(autocomplete);
+        input.set_placeholder(placeholder_static);
 
         let cwd = std::env::current_dir()
             .ok()
@@ -434,7 +463,7 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     #[test]
     fn test_app_creation() {
@@ -465,8 +494,8 @@ mod tests {
         let key = KeyEvent {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::empty(),
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         };
         app.handle_key_event(key);
         assert!(app.running);
@@ -478,8 +507,8 @@ mod tests {
         let key = KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         };
         app.handle_key_event(key);
         assert!(app.running);
@@ -492,8 +521,8 @@ mod tests {
         let key = KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         };
         app.handle_key_event(key);
         app.handle_key_event(key);
@@ -506,8 +535,8 @@ mod tests {
         let key = KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::empty(),
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         };
         app.handle_key_event(key);
         assert!(app.running);
@@ -519,8 +548,8 @@ mod tests {
         let key = KeyEvent {
             code: KeyCode::Esc,
             modifiers: KeyModifiers::empty(),
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         };
         app.handle_key_event(key);
         assert!(app.running);

@@ -336,6 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_models() {
+        let _ = crate::model::discovery::Discovery::cleanup_test();
         let parsed = ParsedCommand {
             name: "models".to_string(),
             args: vec![],
@@ -348,10 +349,12 @@ mod tests {
             }
             _ => panic!("Expected Success"),
         }
+        let _ = crate::model::discovery::Discovery::cleanup_test();
     }
 
     #[tokio::test]
     async fn test_handle_models_with_filter() {
+        let _ = crate::model::discovery::Discovery::cleanup_test();
         let parsed = ParsedCommand {
             name: "models".to_string(),
             args: vec!["open".to_string()],
@@ -368,11 +371,13 @@ mod tests {
             }
             _ => panic!("Expected Success"),
         }
+        let _ = crate::model::discovery::Discovery::cleanup_test();
     }
 
     #[tokio::test]
     async fn test_handle_models_cleanup() {
         let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let _ = crate::model::discovery::Discovery::cleanup_test();
         let parsed = ParsedCommand {
             name: "models".to_string(),
             args: vec![],
@@ -386,6 +391,7 @@ mod tests {
             _ => panic!("Expected Success"),
         }
         let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let _ = crate::model::discovery::Discovery::cleanup_test();
     }
 
     #[tokio::test]
