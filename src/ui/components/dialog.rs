@@ -32,6 +32,7 @@ pub struct Dialog {
     pub content_area: Rect,
     pub search_textarea: TextArea<'static>,
     pub scrollbar_state: ScrollbarState,
+    pub is_dragging_scrollbar: bool,
 }
 
 impl Dialog {
@@ -53,6 +54,7 @@ impl Dialog {
             content_area: Rect::default(),
             search_textarea,
             scrollbar_state: ScrollbarState::default(),
+            is_dragging_scrollbar: false,
         }
     }
 
@@ -166,7 +168,9 @@ impl Dialog {
     fn update_scrollbar(&mut self) {
         let mut total_lines = 0;
         for (_, items) in &self.filtered_items {
-            total_lines += items.len() + 1;
+            if !items.is_empty() {
+                total_lines += items.len() + 1;
+            }
         }
         self.scrollbar_state = self.scrollbar_state.content_length(total_lines);
         self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
@@ -201,7 +205,9 @@ impl Dialog {
     fn get_content_line_count(&self) -> usize {
         let mut count = 0;
         for (_, items) in &self.filtered_items {
-            count += items.len() + 1;
+            if !items.is_empty() {
+                count += items.len() + 1;
+            }
         }
         count
     }
@@ -211,7 +217,6 @@ impl Dialog {
         let mut current_item_index = 0;
 
         for (_, items) in &self.filtered_items {
-            line_index += 1;
             for _item in items {
                 if current_item_index == item_index {
                     return line_index;
@@ -411,23 +416,21 @@ impl Dialog {
                 Style::default().fg(Color::Gray),
             )]));
         } else {
-            let mut current_group = String::new();
-            let mut line_index = 0;
+            let mut item_index = 0;
 
             for (group, items) in &self.filtered_items {
-                for item in items {
-                    if &current_group != group {
-                        current_group = group.clone();
-                        content_lines.push(Line::from(vec![Span::styled(
-                            format!("\n{}", group),
-                            Style::default()
-                                .fg(Color::Rgb(255, 140, 0))
-                                .add_modifier(Modifier::BOLD),
-                        )]));
-                        line_index += 1;
-                    }
+                if items.is_empty() {
+                    continue;
+                }
+                content_lines.push(Line::from(vec![Span::styled(
+                    group.clone(),
+                    Style::default()
+                        .fg(Color::Rgb(255, 140, 0))
+                        .add_modifier(Modifier::BOLD),
+                )]));
 
-                    let style = if line_index == self.selected_index {
+                for item in items {
+                    let style = if item_index == self.selected_index {
                         Style::default()
                             .fg(Color::Black)
                             .bg(Color::Rgb(255, 200, 100))
@@ -440,7 +443,7 @@ impl Dialog {
                         " ".repeat((list_area_width as usize).saturating_sub(item_text.len()));
                     let full_text = format!("{}{}", item_text, padding);
                     content_lines.push(Line::from(full_text).style(style));
-                    line_index += 1;
+                    item_index += 1;
                 }
             }
         }
