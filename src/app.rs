@@ -373,7 +373,7 @@ impl App {
         }
     }
 
-    pub fn render(&self, f: &mut ratatui::Frame) {
+    pub fn render(&mut self, f: &mut ratatui::Frame) {
         let size = f.area();
         let colors = self.get_current_theme_colors();
 
@@ -431,7 +431,7 @@ impl App {
         }
 
         if self.overlay_focus == OverlayFocus::ModelsDialog && self.models_dialog_state.dialog.is_visible() {
-            render_models_dialog(f, &self.models_dialog_state, size);
+            render_models_dialog(f, &mut self.models_dialog_state, size);
         }
 
         render_toasts(f, &get_toast_manager().lock().unwrap());

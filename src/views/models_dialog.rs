@@ -24,7 +24,7 @@ pub fn init_models_dialog(title: impl Into<String>, items: Vec<DialogItem>) -> M
     ModelsDialogState::with_items(title, items)
 }
 
-pub fn render_models_dialog(f: &mut Frame, dialog_state: &ModelsDialogState, area: Rect) {
+pub fn render_models_dialog(f: &mut Frame, dialog_state: &mut ModelsDialogState, area: Rect) {
     dialog_state.dialog.render(f, area);
 }
 

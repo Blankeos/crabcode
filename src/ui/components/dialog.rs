@@ -310,68 +310,19 @@ impl Dialog {
 
         use ratatui::layout::Position;
         let point = Position::new(event.column, event.row);
-        if !self.content_area.contains(point) {
-            return false;
-        }
-
-        match event.kind {
-            MouseEventKind::ScrollDown => {
-                self.next();
-                true
-            }
-            MouseEventKind::ScrollUp => {
-                self.previous();
-                true
-            }
-            MouseEventKind::Down(MouseButton::Left) => {
-                let relative_y = event.row - self.content_area.y;
-                if relative_y > 4 {
-                    let item_index = (relative_y - 5) as usize;
-                    let flat_items = self.get_flat_items();
-                    if item_index < flat_items.len() {
-                        self.selected_index = item_index;
-                        return true;
-                    }
-                }
-                false
-            }
-            _ => false,
-        }
-    }
-
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
-        if !self.visible {
-            return;
-        }
-
-        const DIALOG_WIDTH: u16 = 70;
-        const DIALOG_HEIGHT: u16 = 25;
-
-        let dialog_width = area.width.min(DIALOG_WIDTH);
-        let dialog_height = area.height.min(DIALOG_HEIGHT);
-
-        let dialog_area = Rect {
-            x: (area.width - dialog_width) / 2,
-            y: (area.height - dialog_height) / 2,
-            width: dialog_width,
-            height: dialog_height,
-        };
-
-        frame.render_widget(Clear, dialog_area);
 
         const PADDING: u16 = 3;
         let content_area = Rect {
-            x: dialog_area.x + PADDING,
-            y: dialog_area.y + PADDING,
-            width: dialog_area.width.saturating_sub(PADDING * 2),
-            height: dialog_area.height.saturating_sub(PADDING * 2),
+            x: self.dialog_area.x + PADDING,
+            y: self.dialog_area.y + PADDING,
+            width: self.dialog_area.width.saturating_sub(PADDING * 2),
+            height: self.dialog_area.height.saturating_sub(PADDING * 2),
         };
 
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new("")
-                .style(ratatui::style::Style::default().bg(Color::Rgb(20, 20, 30))),
-            dialog_area,
-        );
+        if !content_area.contains(point) {
+            self.is_dragging_scrollbar = false;
+            return false;
+        }
 
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
@@ -383,6 +334,165 @@ impl Dialog {
                 ratatui::layout::Constraint::Length(1),
             ])
             .split(content_area);
+
+        let list_area = chunks[3];
+        let scrollbar_area = Rect {
+            x: list_area.x + list_area.width - 1,
+            y: list_area.y,
+            width: 1,
+            height: list_area.height,
+        };
+
+        let is_on_scrollbar = scrollbar_area.contains(point);
+
+        match event.kind {
+            MouseEventKind::ScrollDown => {
+                self.next();
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                self.previous();
+                true
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if is_on_scrollbar {
+                    self.is_dragging_scrollbar = true;
+                    self.scroll_to_position(event.row, scrollbar_area);
+                    true
+                } else {
+                    if let Some(item_index) = self.get_item_index_from_y(event.row, list_area) {
+                        self.selected_index = item_index;
+                        return true;
+                    }
+                    false
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.is_dragging_scrollbar {
+                    self.scroll_to_position(event.row, scrollbar_area);
+                    true
+                } else {
+                    false
+                }
+            }
+            MouseEventKind::Moved => {
+                if !is_on_scrollbar {
+                    if let Some(item_index) = self.get_item_index_from_y(event.row, list_area) {
+                        if item_index != self.selected_index {
+                            self.selected_index = item_index;
+                        }
+                    }
+                }
+                false
+            }
+            MouseEventKind::Up(_) => {
+                if self.is_dragging_scrollbar {
+                    self.is_dragging_scrollbar = false;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn get_item_index_from_y(&self, row: u16, list_area: Rect) -> Option<usize> {
+        let relative_y = row.saturating_sub(list_area.y) as usize;
+        let content_line = self.scroll_offset + relative_y;
+
+        let mut current_line = 0;
+        let mut item_index = 0;
+
+        for (_, items) in &self.filtered_items {
+            if items.is_empty() {
+                continue;
+            }
+
+            let group_header_line = current_line;
+            let items_start_line = group_header_line + 1;
+            let items_end_line = items_start_line + items.len();
+
+            if content_line >= items_start_line && content_line < items_end_line {
+                return Some(item_index + (content_line - items_start_line));
+            }
+
+            current_line = items_end_line;
+            item_index += items.len();
+        }
+
+        None
+    }
+
+    fn scroll_to_position(&mut self, row: u16, scrollbar_area: Rect) {
+        let total_lines = self.get_content_line_count();
+        if total_lines == 0 {
+            return;
+        }
+
+        let visible_rows = scrollbar_area.height as usize;
+        let relative_y = row.saturating_sub(scrollbar_area.y) as usize;
+
+        let new_offset = (relative_y * total_lines) / visible_rows.max(1);
+        self.scroll_offset = new_offset.saturating_sub(visible_rows / 3);
+        let max_offset = total_lines.saturating_sub(visible_rows);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+
+        let flat_items = self.get_flat_items();
+        if !flat_items.is_empty() {
+            self.selected_index = flat_items
+                .len()
+                .saturating_sub(1)
+                .min(self.scroll_offset + visible_rows / 2);
+        }
+
+        self.update_scrollbar();
+    }
+
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        if !self.visible {
+            return;
+        }
+
+        const DIALOG_WIDTH: u16 = 70;
+        const DIALOG_HEIGHT: u16 = 25;
+
+        let dialog_width = area.width.min(DIALOG_WIDTH);
+        let dialog_height = area.height.min(DIALOG_HEIGHT);
+
+        self.dialog_area = Rect {
+            x: (area.width - dialog_width) / 2,
+            y: (area.height - dialog_height) / 2,
+            width: dialog_width,
+            height: dialog_height,
+        };
+
+        frame.render_widget(Clear, self.dialog_area);
+
+        const PADDING: u16 = 3;
+        self.content_area = Rect {
+            x: self.dialog_area.x + PADDING,
+            y: self.dialog_area.y + PADDING,
+            width: self.dialog_area.width.saturating_sub(PADDING * 2),
+            height: self.dialog_area.height.saturating_sub(PADDING * 2),
+        };
+
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new("")
+                .style(ratatui::style::Style::default().bg(Color::Rgb(20, 20, 30))),
+            self.dialog_area,
+        );
+
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(3),
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .split(self.content_area);
 
         let title_line = Line::from(vec![
             Span::styled(
