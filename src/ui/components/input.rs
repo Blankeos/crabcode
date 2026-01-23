@@ -40,12 +40,14 @@ impl Input {
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([
+                ratatui::layout::Constraint::Length(1),
                 ratatui::layout::Constraint::Length(textarea_height),
+                ratatui::layout::Constraint::Length(1),
                 ratatui::layout::Constraint::Length(1),
             ])
             .split(inner_area);
 
-        frame.render_widget(&self.textarea, chunks[0]);
+        frame.render_widget(&self.textarea, chunks[1]);
 
         let info_text = ratatui::text::Line::from(vec![
             ratatui::text::Span::styled(
@@ -65,7 +67,7 @@ impl Input {
         ]);
 
         let info_paragraph = Paragraph::new(info_text);
-        frame.render_widget(info_paragraph, chunks[1]);
+        frame.render_widget(info_paragraph, chunks[3]);
         frame.render_widget(border, area);
     }
 
@@ -203,7 +205,7 @@ impl Input {
     pub fn get_height(&self) -> u16 {
         let line_count = self.textarea.lines().len().max(1);
         let textarea_height = line_count.min(6) as u16;
-        textarea_height + 1
+        textarea_height + 3
     }
 }
 
