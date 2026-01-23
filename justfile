@@ -6,3 +6,6 @@ dev:
 
 preview:
     ./target/release/crabcode
+
+gen-themes:
+    bun run scripts/gen-themes.ts
