@@ -32,9 +32,10 @@ pub fn handle_models_dialog_key_event(
     dialog_state: &mut ModelsDialogState,
     event: KeyEvent,
 ) -> bool {
+    let was_visible = dialog_state.dialog.is_visible();
     let handled = dialog_state.dialog.handle_key_event(event);
-    if !dialog_state.dialog.is_visible() {
-        dialog_state.dialog.hide();
+    if was_visible && !dialog_state.dialog.is_visible() {
+        return false;
     }
     handled
 }

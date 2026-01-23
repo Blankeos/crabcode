@@ -159,6 +159,9 @@ impl App {
                 if handle_models_dialog_key_event(&mut self.models_dialog_state, key) {
                     return;
                 }
+                if !self.models_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
+                }
                 false
             }
             OverlayFocus::None => {
@@ -334,65 +337,62 @@ impl App {
     pub fn render(&self, f: &mut ratatui::Frame) {
         let size = f.area();
 
-        if self.overlay_focus == OverlayFocus::ModelsDialog {
-            render_models_dialog(f, &self.models_dialog_state, size);
-            render_toasts(f, &get_toast_manager().lock().unwrap());
-        } else {
-            match self.base_focus {
-                BaseFocus::Home => {
-                    render_home(
-                        f,
-                        &self.input,
-                        self.version.clone(),
-                        self.cwd.clone(),
-                        git::get_current_branch(),
-                        self.agent.clone(),
-                        self.model.clone(),
-                    );
+        match self.base_focus {
+            BaseFocus::Home => {
+                render_home(
+                    f,
+                    &self.input,
+                    self.version.clone(),
+                    self.cwd.clone(),
+                    git::get_current_branch(),
+                    self.agent.clone(),
+                    self.model.clone(),
+                );
 
-                    if is_suggestions_visible(&self.suggestions_popup_state) {
-                        let main_chunks = ratatui::layout::Layout::default()
-                            .direction(ratatui::layout::Direction::Vertical)
-                            .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
-                            .split(size);
-                        let input_height = self.input.get_height();
-                        let home_chunks = ratatui::layout::Layout::default()
-                            .direction(ratatui::layout::Direction::Vertical)
-                            .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(input_height)].as_ref())
-                            .split(main_chunks[0]);
-                        render_suggestions_popup(f, &self.suggestions_popup_state, home_chunks[1], self.overlay_focus == OverlayFocus::SuggestionsPopup);
-                    }
-
-                    render_toasts(f, &get_toast_manager().lock().unwrap());
+                if is_suggestions_visible(&self.suggestions_popup_state) && self.overlay_focus != OverlayFocus::ModelsDialog {
+                    let main_chunks = ratatui::layout::Layout::default()
+                        .direction(ratatui::layout::Direction::Vertical)
+                        .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
+                        .split(size);
+                    let input_height = self.input.get_height();
+                    let home_chunks = ratatui::layout::Layout::default()
+                        .direction(ratatui::layout::Direction::Vertical)
+                        .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(input_height)].as_ref())
+                        .split(main_chunks[0]);
+                    render_suggestions_popup(f, &self.suggestions_popup_state, home_chunks[1], self.overlay_focus == OverlayFocus::SuggestionsPopup);
                 }
-                BaseFocus::Chat => {
-                    render_chat(
-                        f,
-                        &self.chat_state,
-                        &self.input,
-                        self.version.clone(),
-                        self.cwd.clone(),
-                        git::get_current_branch(),
-                        self.agent.clone(),
-                        self.model.clone(),
-                    );
+            }
+            BaseFocus::Chat => {
+                render_chat(
+                    f,
+                    &self.chat_state,
+                    &self.input,
+                    self.version.clone(),
+                    self.cwd.clone(),
+                    git::get_current_branch(),
+                    self.agent.clone(),
+                    self.model.clone(),
+                );
 
-                    if is_suggestions_visible(&self.suggestions_popup_state) {
-                        let main_chunks = ratatui::layout::Layout::default()
-                            .direction(ratatui::layout::Direction::Vertical)
-                            .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
-                            .split(size);
-                        let chat_chunks = ratatui::layout::Layout::default()
-                            .direction(ratatui::layout::Direction::Vertical)
-                            .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(3)].as_ref())
-                            .split(main_chunks[0]);
-                        render_suggestions_popup(f, &self.suggestions_popup_state, chat_chunks[1], self.overlay_focus == OverlayFocus::SuggestionsPopup);
-                    }
-
-                    render_toasts(f, &get_toast_manager().lock().unwrap());
+                if is_suggestions_visible(&self.suggestions_popup_state) && self.overlay_focus != OverlayFocus::ModelsDialog {
+                    let main_chunks = ratatui::layout::Layout::default()
+                        .direction(ratatui::layout::Direction::Vertical)
+                        .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
+                        .split(size);
+                    let chat_chunks = ratatui::layout::Layout::default()
+                        .direction(ratatui::layout::Direction::Vertical)
+                        .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(3)].as_ref())
+                        .split(main_chunks[0]);
+                    render_suggestions_popup(f, &self.suggestions_popup_state, chat_chunks[1], self.overlay_focus == OverlayFocus::SuggestionsPopup);
                 }
             }
         }
+
+        if self.overlay_focus == OverlayFocus::ModelsDialog && self.models_dialog_state.dialog.is_visible() {
+            render_models_dialog(f, &self.models_dialog_state, size);
+        }
+
+        render_toasts(f, &get_toast_manager().lock().unwrap());
     }
 }
 
