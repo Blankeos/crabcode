@@ -1,8 +1,14 @@
 use anyhow::Result;
 use ratatui::crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, supports_keyboard_enhancement},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
@@ -15,6 +21,9 @@ use crate::command::registry::Registry;
 use crate::session::manager::SessionManager;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
+use crate::{
+    get_toast_manager, push_toast, remove_expired_toasts, render_toasts, Toast, ToastLevel,
+};
 
 use crate::ui::components::popup::Popup;
 use crate::ui::components::status_bar::StatusBar;
@@ -38,6 +47,7 @@ pub struct App {
     pub model: String,
     pub cwd: String,
     pub focus: AppFocus,
+    pub popup_has_focus: bool,
     ctrl_c_press_count: u8,
     last_ctrl_c_time: std::time::Instant,
 }
@@ -67,6 +77,7 @@ impl App {
             model: "nano-gpt".to_string(),
             cwd,
             focus: AppFocus::Landing,
+            popup_has_focus: false,
             ctrl_c_press_count: 0,
             last_ctrl_c_time: std::time::Instant::now(),
         }
@@ -79,7 +90,7 @@ impl App {
     pub async fn run(&mut self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        
+
         if supports_keyboard_enhancement()? {
             execute!(
                 stdout,
@@ -88,13 +99,9 @@ impl App {
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             )?;
         } else {
-            execute!(
-                stdout,
-                EnterAlternateScreen,
-                EnableMouseCapture
-            )?;
+            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         }
-        
+
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -125,11 +132,19 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<()> {
         while self.running {
+            remove_expired_toasts();
             terminal.draw(|f| self.ui(f))?;
 
             if event::poll(Duration::from_millis(100))? {
                 let event = event::read()?;
+
                 if let Event::Key(key) = event {
+                    push_toast(Toast::new(
+                        format!("Input event: {:?}", key.code),
+                        ToastLevel::Info,
+                        None,
+                    ));
+                    // println!("{:?}", key.modifiers);
                     self.handle_key_event(key);
                 }
             }
@@ -144,6 +159,8 @@ impl App {
         use ratatui::widgets::Paragraph;
 
         let size = f.area();
+
+        render_toasts(f, &get_toast_manager().lock().unwrap());
 
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -201,7 +218,7 @@ impl App {
             self.input.render(f, landing_chunks[1]);
 
             if self.popup.is_visible() {
-                self.popup.render(f, landing_chunks[1]);
+                self.popup.render(f, landing_chunks[1], self.popup_has_focus);
             }
 
             let help_text = vec![
@@ -231,7 +248,7 @@ impl App {
             self.input.render(f, chat_chunks[1]);
 
             if self.popup.is_visible() {
-                self.popup.render(f, chat_chunks[1]);
+                self.popup.render(f, chat_chunks[1], self.popup_has_focus);
             }
 
             let help_text = vec![
@@ -286,35 +303,38 @@ impl App {
                         });
                         self.input.clear();
                         self.popup.clear();
+                        self.popup_has_focus = false;
                     }
                 }
             }
             KeyCode::Enter => {}
             KeyCode::Tab => {
-                if self.popup.is_visible() {
-                    if let Some(selected) = self.popup.get_selected() {
-                        self.input.set_text(&format!("/{}", selected.name));
-                    }
-                    self.popup.clear();
+                if self.agent == "PLAN" {
+                    self.agent = "BUILD".to_string();
                 } else {
-                    self.input.handle_event(key);
-                    if self.input.is_slash_at_end() {
-                        self.update_suggestions();
-                    }
+                    self.agent = "PLAN".to_string();
                 }
             }
             KeyCode::Up => {
-                if self.popup.is_visible() {
+                if self.popup.is_visible() && self.popup_has_focus {
                     self.popup.previous();
+                } else {
+                    self.input.handle_event(key);
                 }
             }
             KeyCode::Down => {
-                if self.popup.is_visible() {
+                if self.popup.is_visible() && self.popup_has_focus {
                     self.popup.next();
+                } else {
+                    self.input.handle_event(key);
                 }
             }
             KeyCode::Esc => {
-                self.popup.clear();
+                if self.popup.is_visible() {
+                    self.input.clear();
+                    self.popup.clear();
+                    self.popup_has_focus = false;
+                }
             }
             _ => {
                 if self.input.handle_event(key) {
@@ -329,11 +349,14 @@ impl App {
             let suggestions = self.input.get_autocomplete_suggestions();
             if !suggestions.is_empty() {
                 self.popup.set_suggestions(suggestions);
+                self.popup_has_focus = true;
             } else {
                 self.popup.clear();
+                self.popup_has_focus = false;
             }
         } else {
             self.popup.clear();
+            self.popup_has_focus = false;
         }
     }
 
@@ -351,6 +374,7 @@ impl App {
             }
         }
         self.popup.clear();
+        self.popup_has_focus = false;
     }
 
     async fn process_input(&mut self, input: &str) {

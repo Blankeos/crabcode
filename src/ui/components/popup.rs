@@ -56,7 +56,7 @@ impl Popup {
         self.suggestions.get(self.selected_index)
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&self, frame: &mut Frame, area: Rect, has_focus: bool) {
         if !self.visible || self.suggestions.is_empty() {
             return;
         }
@@ -95,10 +95,16 @@ impl Popup {
             })
             .collect();
 
+        let border_style = if has_focus {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::LightGreen)
+        };
+
         let list = List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::LightGreen))
+                .border_style(border_style)
                 .title("Commands"),
         );
 

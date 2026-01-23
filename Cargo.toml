@@ -20,6 +20,8 @@ copypasta = "0.10"
 async-trait = "0.1"
 futures = "0.3"
 dirs = "5.0"
+ratatui-toolkit = "0.1"
+lazy_static = "1.5"
 
 [dev-dependencies]
 tokio-test = "0.4"

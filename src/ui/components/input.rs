@@ -38,6 +38,12 @@ impl Input {
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
         let input = TuiInput::from(event);
 
+        // push_toast(Toast::new(
+        //     format!("Input event: {:?} | {:?}", input.key, input.shift),
+        //     ToastLevel::Info,
+        //     None,
+        // ));
+
         // Check for Shift+Enter (works in most terminals)
         if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::SHIFT) {
             self.textarea.insert_newline();
@@ -61,8 +67,17 @@ impl Input {
                 true
             }
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
+            KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
+                let (cursor_row, cursor_col) = self.textarea.cursor();
+                if let Some(lines) = self.textarea.lines().get(cursor_row) {
+                    let before_cursor = &lines[..cursor_col.min(lines.len())];
+                    for _ in 0..before_cursor.chars().count() {
+                        self.textarea.delete_char();
+                    }
+                }
+                true
+            }
             KeyCode::Tab => true,
-            KeyCode::Up | KeyCode::Down => false,
             KeyCode::Esc => false,
             _ => {
                 self.textarea.input(input);
@@ -194,8 +209,8 @@ mod tests {
         let event = KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: KeyModifiers::empty(),
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         };
         let handled = input.handle_event(event);
         assert!(handled);
@@ -207,8 +222,8 @@ mod tests {
         let event = KeyEvent {
             code: KeyCode::Enter,
             modifiers: KeyModifiers::empty(),
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         };
         let handled = input.handle_event(event);
         assert!(!handled);
@@ -220,8 +235,8 @@ mod tests {
         let event = KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         };
         let handled = input.handle_event(event);
         assert!(!handled);
