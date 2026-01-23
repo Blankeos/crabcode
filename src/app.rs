@@ -1,8 +1,8 @@
 use anyhow::Result;
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
+use ratatui::crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, supports_keyboard_enhancement},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
@@ -79,18 +79,42 @@ impl App {
     pub async fn run(&mut self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        
+        if supports_keyboard_enhancement()? {
+            execute!(
+                stdout,
+                EnterAlternateScreen,
+                EnableMouseCapture,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?;
+        } else {
+            execute!(
+                stdout,
+                EnterAlternateScreen,
+                EnableMouseCapture
+            )?;
+        }
+        
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
         let result = self.run_event_loop(&mut terminal).await;
 
         disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
+        if supports_keyboard_enhancement().unwrap_or(false) {
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                PopKeyboardEnhancementFlags
+            )?;
+        } else {
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            )?;
+        }
         terminal.show_cursor()?;
 
         result
@@ -104,7 +128,8 @@ impl App {
             terminal.draw(|f| self.ui(f))?;
 
             if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
+                let event = event::read()?;
+                if let Event::Key(key) = event {
                     self.handle_key_event(key);
                 }
             }

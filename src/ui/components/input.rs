@@ -1,6 +1,7 @@
 use crate::autocomplete::{AutoComplete, Suggestion};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{prelude::Rect, style::Style, widgets::Block};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::prelude::{Rect, Style};
+use ratatui::widgets::Block;
 use tui_textarea::{Input as TuiInput, TextArea};
 
 pub struct Input {
@@ -57,19 +58,6 @@ impl Input {
         match event.code {
             KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => {
                 self.textarea.insert_newline();
-                false
-            }
-            KeyCode::Enter if event.modifiers == KeyModifiers::NONE => false,
-            KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => {
-                self.textarea.input(input);
-                false
-            }
-            KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
-            KeyCode::Tab => true,
-            KeyCode::Up | KeyCode::Down => false,
-            KeyCode::Esc => false,
-            _ => {
-                self.textarea.input(input);
                 true
             }
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,

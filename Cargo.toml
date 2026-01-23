@@ -7,8 +7,8 @@ license = "MIT"
 repository = "https://github.com/anomalyco/crabcode"
 
 [dependencies]
-ratatui = "0.28"
-tui-textarea = { version = "0.6", features = ["ratatui"] }
+ratatui = "0.29"
+tui-textarea = { version = "0.7", features = ["ratatui"] }
 tokio = { version = "1.40", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -17,7 +17,6 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 ignore = "0.4"
 copypasta = "0.10"
-crossterm = "0.28"
 async-trait = "0.1"
 futures = "0.3"
 dirs = "5.0"
