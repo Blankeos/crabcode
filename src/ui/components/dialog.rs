@@ -168,29 +168,34 @@ impl Dialog {
 
             for group in &self.groups {
                 let items = self.grouped_items.get(group).unwrap();
-                let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
-                let descriptions: Vec<&str> =
-                    items.iter().map(|item| item.description.as_str()).collect();
 
-                let matched_names: Vec<(&str, u32)> = pattern.match_list(names, &mut self.matcher);
-                let matched_descriptions: Vec<(&str, u32)> =
-                    pattern.match_list(descriptions, &mut self.matcher);
-
-                let matching_items: Vec<DialogItem> = items
+                let combined_strings: Vec<String> = items
                     .iter()
-                    .filter(|item| {
-                        matched_names
-                            .iter()
-                            .any(|(name, _)| *name == item.name.as_str())
-                            || matched_descriptions
-                                .iter()
-                                .any(|(desc, _)| *desc == item.description.as_str())
-                    })
-                    .cloned()
+                    .map(|item| format!("{} {}", group, item.name))
                     .collect();
 
-                if !matching_items.is_empty() {
-                    filtered.push((group.clone(), matching_items));
+                let matched: Vec<(&str, u32)> = pattern.match_list(
+                    combined_strings.iter().map(|s| s.as_str()),
+                    &mut self.matcher,
+                );
+
+                if !matched.is_empty() {
+                    let mut scored_items: Vec<(DialogItem, u32)> = matched
+                        .into_iter()
+                        .filter_map(|(combined_str, score)| {
+                            items
+                                .iter()
+                                .find(|item| format!("{} {}", group, item.name) == *combined_str)
+                                .map(|item| (item.clone(), score))
+                        })
+                        .collect();
+
+                    scored_items.sort_by(|a, b| b.1.cmp(&a.1));
+
+                    let sorted_items: Vec<DialogItem> =
+                        scored_items.into_iter().map(|(item, _)| item).collect();
+
+                    filtered.push((group.clone(), sorted_items));
                 }
             }
             self.filtered_items = filtered;
