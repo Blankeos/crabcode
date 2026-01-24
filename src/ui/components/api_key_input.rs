@@ -10,7 +10,10 @@ use tui_textarea::{Input as TuiInput, TextArea};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputAction {
-    Submitted(String),
+    Submitted {
+        api_key: String,
+        provider_name: String,
+    },
     Cancelled,
     Continue,
 }
@@ -68,8 +71,12 @@ impl ApiKeyInput {
             KeyCode::Enter => {
                 let api_key = self.get_api_key();
                 if !api_key.trim().is_empty() {
+                    let provider_name = self.provider_name.clone();
                     self.hide();
-                    InputAction::Submitted(api_key)
+                    InputAction::Submitted {
+                        api_key,
+                        provider_name,
+                    }
                 } else {
                     InputAction::Continue
                 }

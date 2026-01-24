@@ -230,7 +230,7 @@ impl App {
                     if let Some(selected_item) = crate::views::connect_dialog::get_pending_selection(
                         &mut self.connect_dialog_state,
                     ) {
-                        self.api_key_input.show(&selected_item.name);
+                        self.api_key_input.show(&selected_item.id);
                         self.overlay_focus = OverlayFocus::ApiKeyInput;
                         return;
                     }
@@ -241,10 +241,10 @@ impl App {
             OverlayFocus::ApiKeyInput => {
                 let action = self.api_key_input.handle_key_event(key);
                 match action {
-                    crate::ui::components::api_key_input::InputAction::Submitted(api_key) => {
+                    crate::ui::components::api_key_input::InputAction::Submitted { api_key, provider_name } => {
                         if let Some(auth_dao) = crate::persistence::AuthDAO::new().ok() {
                             let _ = auth_dao.set_provider(
-                                self.api_key_input.provider_name.clone(),
+                                provider_name,
                                 crate::persistence::AuthConfig::Api { key: api_key },
                             );
                             self.connect_dialog_state = init_connect_dialog();
