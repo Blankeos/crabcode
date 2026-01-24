@@ -310,10 +310,15 @@ impl Dialog {
         } else if selected_line
             >= self
                 .scroll_offset
-                .saturating_add(visible_rows.saturating_sub(2))
+                .saturating_add(visible_rows.saturating_sub(1))
         {
-            self.scroll_offset = selected_line.saturating_sub(visible_rows.saturating_sub(3));
+            self.scroll_offset = selected_line.saturating_sub(visible_rows.saturating_sub(1));
         }
+
+        if self.selected_index == 0 {
+            self.scroll_offset = 0;
+        }
+
         self.update_scrollbar();
     }
 
@@ -627,7 +632,12 @@ impl Dialog {
                             ),
                         ])
                     } else {
-                        Line::from(format!("  {}", item.name))
+                        let text_len = item.name.len() + 2;
+                        let padding_len = (list_area_width as usize).saturating_sub(text_len);
+                        Line::from(vec![
+                            Span::raw(format!("  {}", item.name)),
+                            Span::raw(" ".repeat(padding_len)),
+                        ])
                     };
 
                     content_lines.push(line.style(style));
