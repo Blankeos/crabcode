@@ -42,7 +42,7 @@ pub fn handle_connect_dialog_key_event(
         if let Some(item) = dialog_state.dialog.get_selected() {
             dialog_state.pending_selection = Some(item.clone());
             dialog_state.dialog.hide();
-            return true;
+            return false;
         }
     }
 
