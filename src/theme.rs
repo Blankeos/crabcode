@@ -62,6 +62,18 @@ pub struct ThemeColors {
     pub info: ratatui::style::Color,
 }
 
+pub fn darken_color(color: ratatui::style::Color, factor: f32) -> ratatui::style::Color {
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => {
+            let r = (r as f32 * factor).max(0.0).min(255.0) as u8;
+            let g = (g as f32 * factor).max(0.0).min(255.0) as u8;
+            let b = (b as f32 * factor).max(0.0).min(255.0) as u8;
+            ratatui::style::Color::Rgb(r, g, b)
+        }
+        _ => color,
+    }
+}
+
 impl Theme {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;

@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Paragraph},
     Frame,
 };
@@ -69,13 +69,24 @@ pub fn render_home(
         ])
         .split(home_chunks[0]);
 
-    let logo = Paragraph::new(LOGO.trim())
-        .style(
-            Style::default()
-                .fg(colors.primary)
-                .add_modifier(Modifier::BOLD),
-        )
-        .alignment(Alignment::Center);
+    let logo_lines: Vec<Line> = LOGO
+        .trim()
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let color = if i == 2 {
+                crate::theme::darken_color(colors.primary, 0.7)
+            } else {
+                colors.primary
+            };
+            Line::styled(
+                line,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect();
+
+    let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
 
     f.render_widget(logo, logo_chunks[1]);
     input.render(f, home_chunks[1]);

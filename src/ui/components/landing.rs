@@ -6,6 +6,18 @@ use ratatui::{
     Frame,
 };
 
+fn darken_color(color: Color, factor: f32) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => {
+            let r = (r as f32 * factor).max(0.0).min(255.0) as u8;
+            let g = (g as f32 * factor).max(0.0).min(255.0) as u8;
+            let b = (b as f32 * factor).max(0.0).min(255.0) as u8;
+            Color::Rgb(r, g, b)
+        }
+        _ => color,
+    }
+}
+
 pub const LOGO: &str = r#"
 🦀▄▄▄▄ ▄▄▄▄   ▄▄▄  ▄▄▄▄   ▄▄▄▄  ▄▄▄  ▄▄▄▄  ▄▄▄▄▄
 ██▀▀▀ ██▄█▄ ██▀██ ██▄██ ██▀▀▀ ██▀██ ██▀██ ██▄▄
@@ -32,15 +44,24 @@ impl Landing {
             .constraints([Constraint::Length(4), Constraint::Length(2)].as_ref())
             .split(chunks[0]);
 
-        let logo_text = Text::from(LOGO.trim());
+        let logo_lines: Vec<Line> = LOGO
+            .trim()
+            .lines()
+            .enumerate()
+            .map(|(i, line)| {
+                let color = if i == 2 {
+                    darken_color(Color::Rgb(255, 140, 0), 0.7)
+                } else {
+                    Color::Rgb(255, 140, 0)
+                };
+                Line::styled(
+                    line,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect();
 
-        let logo = Paragraph::new(logo_text)
-            .style(
-                Style::default()
-                    .fg(Color::Rgb(255, 140, 0))
-                    .add_modifier(Modifier::BOLD),
-            )
-            .alignment(Alignment::Center);
+        let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
 
         let welcome_text = Text::from(vec![Line::from(vec![
             Span::styled(
