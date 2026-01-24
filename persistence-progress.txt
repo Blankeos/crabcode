@@ -1,0 +1,92 @@
+# Persistence Layer Implementation Progress
+
+## Completed Tasks
+
+### Core Infrastructure
+- ✅ Added dependencies to Cargo.toml (rusqlite, cuid2, chrono)
+- ✅ Created persistence module structure (src/persistence/mod.rs)
+- ✅ Implemented file system utilities (data/cache directories)
+
+### Database Layer
+- ✅ Implemented migration system for SQLite database (src/persistence/migrations.rs)
+  - Supports version tracking via PRAGMA user_version
+  - Migrate to v1 with sessions, messages, and migrations tables
+  - All indexes created for performance
+
+### Data Access Objects
+- ✅ Implemented AuthDAO for credential management (src/persistence/auth.rs)
+  - Load/save credentials from auth.json
+  - Support for API key and OAuth configurations
+  - CRUD operations for provider credentials
+
+- ✅ Implemented ProviderDAO for provider/model cache (src/persistence/providers.rs)
+  - Cache providers.json in cache directory
+  - Store provider lists and model information
+  - Query models by ID
+
+- ✅ Implemented HistoryDAO for session/message storage (src/persistence/history.rs)
+  - Session management (create, list, get, delete, rename)
+  - Message management (add, list)
+  - Session statistics tracking (tokens, cost, time)
+  - Full session retrieval
+
+### Type Conversions
+- ✅ Added conversion functions between persistence types and session types (src/persistence/conversions.rs)
+  - SessionMessage <-> Message conversion using CUID2 for IDs
+  - session_to_persistence utility
+  - persistence_to_session utility
+
+## Implementation Details
+
+### Storage Locations
+- SQLite Database: ~/.local/share/crabcode/data.db
+- Credentials: ~/.local/share/crabcode/auth.json
+- Provider Cache: ~/.cache/crabcode/providers.json
+
+### Database Schema Version
+Current version: 1
+
+### Key Features Implemented
+1. Auto-upgrade database on open
+2. Migrations wrapped in transactions
+3. Cascade delete for session messages
+4. JSON storage for message parts (flexible for future expansion)
+5. Session statistics (tokens, cost, time, avg tokens/sec)
+
+## Compilation Status
+✅ All persistence layer code compiles successfully with cargo check
+
+## Integration Points
+The persistence layer can now be integrated with:
+- src/session/manager.rs - Replace in-memory storage with persistent storage
+- src/config.rs - Load credentials from AuthDAO
+- src/model/discovery.rs - Cache provider information via ProviderDAO
+
+## Next Steps for Integration
+1. Update SessionManager to use HistoryDAO for storage
+2. Add persistence initialization to main.rs
+3. Create command handlers for session history (list, load, delete, rename)
+4. Add cost estimation based on model pricing from ProviderCache
+
+## New Feature: Authenticated Providers
+Added `get_configured_providers()` and `display_configured_providers()` to ProviderDAO.
+These methods combine AuthDAO and ProviderDAO to show only providers that have configured credentials.
+
+Usage example:
+```rust
+let auth_dao = AuthDAO::new()?;
+let provider_dao = ProviderDAO::new()?;
+
+// Get list of configured providers with their models
+let configured = provider_dao.get_configured_providers(&auth_dao)?;
+
+// Display formatted output
+let output = provider_dao.display_configured_providers(&auth_dao)?;
+println!("{}", output);
+```
+
+This will show:
+- Provider name and ID
+- Authentication type (api/oauth)
+- Available models with pricing
+- Only providers with configured credentials are shown

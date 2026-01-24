@@ -6,6 +6,7 @@ mod autocomplete;
 mod command;
 mod config;
 mod model;
+mod persistence;
 mod session;
 mod streaming;
 mod theme;
