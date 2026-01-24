@@ -52,6 +52,7 @@ pub struct Dialog {
     pub search_textarea: TextArea<'static>,
     pub scrollbar_state: ScrollbarState,
     pub is_dragging_scrollbar: bool,
+    pub visible_row_count: usize,
     matcher: Matcher,
 }
 
@@ -75,6 +76,7 @@ impl Dialog {
             search_textarea,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
+            visible_row_count: 0,
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -248,7 +250,7 @@ impl Dialog {
         if total_lines == 0 {
             return;
         }
-        let visible_rows = self.get_visible_row_count();
+        let visible_rows = self.get_visible_row_count().max(1);
         let max_offset = total_lines.saturating_sub(visible_rows);
         self.scroll_offset = (self.scroll_offset + 1).min(max_offset);
         self.update_scrollbar();
@@ -302,7 +304,7 @@ impl Dialog {
     }
 
     fn adjust_scroll(&mut self) {
-        let visible_rows = self.get_visible_row_count();
+        let visible_rows = self.get_visible_row_count().max(1);
         let selected_line = self.get_line_index_of_item(self.selected_index);
 
         if selected_line < self.scroll_offset {
@@ -323,14 +325,18 @@ impl Dialog {
     }
 
     fn get_visible_row_count(&self) -> usize {
-        const DIALOG_WIDTH: u16 = 70;
-        const DIALOG_HEIGHT: u16 = 25;
-        const PADDING: u16 = 3;
+        if self.visible_row_count > 0 {
+            self.visible_row_count
+        } else {
+            const DIALOG_WIDTH: u16 = 70;
+            const DIALOG_HEIGHT: u16 = 25;
+            const PADDING: u16 = 3;
 
-        let total_fixed_height = 1 + 1 + 3 + 1 + 1;
-        let padding_total = PADDING * 2;
-        let list_area_height = DIALOG_HEIGHT.saturating_sub(total_fixed_height + padding_total);
-        list_area_height as usize
+            let total_fixed_height = 1 + 1 + 3 + 1 + 1;
+            let padding_total = PADDING * 2;
+            let list_area_height = DIALOG_HEIGHT.saturating_sub(total_fixed_height + padding_total);
+            list_area_height as usize
+        }
     }
 
     pub fn get_selected(&self) -> Option<&DialogItem> {
@@ -504,13 +510,17 @@ impl Dialog {
         let visible_rows = scrollbar_area.height as usize;
         let relative_y = row.saturating_sub(scrollbar_area.y) as usize;
 
-        let new_offset = (relative_y * total_lines) / visible_rows.max(1);
+        let new_offset = if visible_rows > 0 {
+            (relative_y * total_lines) / visible_rows
+        } else {
+            0
+        };
         self.scroll_offset = new_offset.saturating_sub(visible_rows / 3);
         let max_offset = total_lines.saturating_sub(visible_rows);
         self.scroll_offset = self.scroll_offset.min(max_offset);
 
         let flat_items = self.get_flat_items();
-        if !flat_items.is_empty() {
+        if !flat_items.is_empty() && visible_rows > 0 {
             self.selected_index = flat_items
                 .len()
                 .saturating_sub(1)
@@ -653,9 +663,16 @@ impl Dialog {
             .scroll((self.scroll_offset as u16, 0));
         frame.render_widget(content_paragraph, chunks[3]);
 
+        self.visible_row_count = chunks[3].height as usize;
+        let total_content_length = self.get_content_line_count();
+        self.scrollbar_state = self.scrollbar_state.content_length(total_content_length);
+        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
+
         frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            chunks[3],
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            chunks[3].inner(ratatui::layout::Margin::new(0, 0)),
             &mut self.scrollbar_state,
         );
 
@@ -718,6 +735,7 @@ impl Clone for Dialog {
             search_textarea: self.search_textarea.clone(),
             scrollbar_state: self.scrollbar_state,
             is_dragging_scrollbar: self.is_dragging_scrollbar,
+            visible_row_count: self.visible_row_count,
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
