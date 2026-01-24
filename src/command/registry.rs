@@ -32,6 +32,7 @@ pub struct DialogItem {
     pub name: String,
     pub group: String,
     pub description: String,
+    pub connected: bool,
 }
 
 pub struct Registry {

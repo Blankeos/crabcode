@@ -1,3 +1,4 @@
+pub mod api_key_input;
 pub mod chat;
 pub mod dialog;
 pub mod input;

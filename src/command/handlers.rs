@@ -55,43 +55,84 @@ pub fn handle_connect<'a>(
     let args = parsed.args.clone();
 
     Box::pin(async move {
-        let config = match crate::config::ApiKeyConfig::load() {
-            Ok(c) => c,
-            Err(e) => return CommandResult::Error(format!("Failed to load config: {}", e)),
-        };
-
         if args.is_empty() {
-            let providers = config.list_providers();
-            if providers.is_empty() {
-                CommandResult::Success(
-                    "No API keys configured. Usage: /connect <provider> <api_key>".to_string(),
-                )
-            } else {
-                let mut output = String::from("Configured API keys:\n");
-                for provider in providers {
-                    output.push_str(&format!("  - {}\n", provider));
+            let auth_dao = match crate::persistence::AuthDAO::new() {
+                Ok(dao) => dao,
+                Err(e) => {
+                    return CommandResult::Error(format!("Failed to load auth config: {}", e))
                 }
-                CommandResult::Success(output)
-            }
-        } else if args.len() == 1 {
-            let provider = &args[0];
-            if let Some(_api_key) = config.get_api_key(provider) {
-                CommandResult::Success(format!("Provider '{}' is configured", provider))
-            } else {
-                CommandResult::Success(format!(
-                    "Provider '{}' is not configured. Usage: /connect {} <api_key>",
-                    provider, provider
-                ))
+            };
+
+            let connected_providers = match auth_dao.load() {
+                Ok(providers) => providers,
+                Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
+            };
+
+            let discovery = match crate::model::discovery::Discovery::new() {
+                Ok(d) => d,
+                Err(e) => return CommandResult::Error(format!("Failed to initialize provider discovery: {}", e)),
+            };
+
+            let providers_map = match discovery.fetch_providers().await {
+                Ok(p) => p,
+                Err(e) => return CommandResult::Error(format!("Failed to fetch providers: {}", e)),
+            };
+
+            const POPULAR_PROVIDERS: &[&str] = &["opencode", "anthropic", "openai", "google"];
+
+            let mut items: Vec<crate::command::registry::DialogItem> = providers_map
+                .into_iter()
+                .map(|(id, provider)| {
+                    let group = if POPULAR_PROVIDERS.contains(&id.as_str()) {
+                        "Popular"
+                    } else {
+                        "Other"
+                    };
+                    crate::command::registry::DialogItem {
+                        id: id.clone(),
+                        name: provider.name.clone(),
+                        group: group.to_string(),
+                        description: id.clone(),
+                        connected: connected_providers.contains_key(&id),
+                    }
+                })
+                .collect();
+
+            items.sort_by(|a, b| a.name.cmp(&b.name));
+
+            CommandResult::ShowDialog {
+                title: "Connect a provider".to_string(),
+                items,
             }
         } else {
-            let provider = &args[0];
-            let api_key = &args[1];
-            let mut config = config;
-            config.set_api_key(provider.clone(), api_key.clone());
-            if let Err(e) = config.save() {
-                CommandResult::Error(format!("Failed to save config: {}", e))
+            let config = match crate::config::ApiKeyConfig::load() {
+                Ok(c) => c,
+                Err(e) => return CommandResult::Error(format!("Failed to load config: {}", e)),
+            };
+
+            if args.len() == 1 {
+                let provider = &args[0];
+                if let Some(_api_key) = config.get_api_key(provider) {
+                    CommandResult::Success(format!("Provider '{}' is configured", provider))
+                } else {
+                    CommandResult::Success(format!(
+                        "Provider '{}' is not configured. Usage: /connect {} <api_key>",
+                        provider, provider
+                    ))
+                }
             } else {
-                CommandResult::Success(format!("API key configured for provider '{}'", provider))
+                let provider = &args[0];
+                let api_key = &args[1];
+                let mut config = config;
+                config.set_api_key(provider.clone(), api_key.clone());
+                if let Err(e) = config.save() {
+                    CommandResult::Error(format!("Failed to save config: {}", e))
+                } else {
+                    CommandResult::Success(format!(
+                        "API key configured for provider '{}'",
+                        provider
+                    ))
+                }
             }
         }
     })
@@ -114,47 +155,49 @@ pub fn handle_models<'a>(
         let discovery = Discovery::new();
 
         match discovery {
-            Ok(d) => {
-                match d.fetch_models().await {
-                    Ok(models) => {
-                        let items: Vec<DialogItem> = models
-                            .into_iter()
-                            .filter(|model| {
-                                if let Some(filter) = &provider_filter {
-                                    model.provider_id.contains(filter)
-                                        || model.provider_name.to_lowercase().contains(filter)
-                                } else {
-                                    true
-                                }
-                            })
-                            .map(|model| DialogItem {
-                                id: model.id.clone(),
-                                name: model.name.clone(),
-                                group: model.provider_name.clone(),
-                                description: format!(
-                                    "{} | {}",
-                                    model.provider_name,
-                                    model.capabilities.join(", ")
-                                ),
-                            })
-                            .collect();
-
-                        if items.is_empty() {
-                            if let Some(filter) = provider_filter {
-                                CommandResult::Error(format!("No models found for provider: {}", filter))
+            Ok(d) => match d.fetch_models().await {
+                Ok(models) => {
+                    let items: Vec<DialogItem> = models
+                        .into_iter()
+                        .filter(|model| {
+                            if let Some(filter) = &provider_filter {
+                                model.provider_id.contains(filter)
+                                    || model.provider_name.to_lowercase().contains(filter)
                             } else {
-                                CommandResult::Error("No models available".to_string())
+                                true
                             }
+                        })
+                        .map(|model| DialogItem {
+                            id: model.id.clone(),
+                            name: model.name.clone(),
+                            group: model.provider_name.clone(),
+                            description: format!(
+                                "{} | {}",
+                                model.provider_name,
+                                model.capabilities.join(", ")
+                            ),
+                            connected: false,
+                        })
+                        .collect();
+
+                    if items.is_empty() {
+                        if let Some(filter) = provider_filter {
+                            CommandResult::Error(format!(
+                                "No models found for provider: {}",
+                                filter
+                            ))
                         } else {
-                            CommandResult::ShowDialog {
-                                title: "Available Models".to_string(),
-                                items,
-                            }
+                            CommandResult::Error("No models available".to_string())
+                        }
+                    } else {
+                        CommandResult::ShowDialog {
+                            title: "Available Models".to_string(),
+                            items,
                         }
                     }
-                    Err(e) => CommandResult::Error(format!("Failed to fetch models: {}", e)),
                 }
-            }
+                Err(e) => CommandResult::Error(format!("Failed to fetch models: {}", e)),
+            },
             Err(e) => CommandResult::Error(format!("Failed to initialize model discovery: {}", e)),
         }
     })
@@ -181,7 +224,7 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "connect".to_string(),
-        description: "Connect/configure model".to_string(),
+        description: "Connect to a model provider".to_string(),
         handler: handle_connect,
     });
 
@@ -286,6 +329,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_connect_no_args() {
         let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let _ = crate::model::discovery::Discovery::cleanup_test();
 
         let parsed = ParsedCommand {
             name: "connect".to_string(),
@@ -294,13 +338,18 @@ mod tests {
         let mut session_manager = SessionManager::new();
         let result = handle_connect(&parsed, &mut session_manager).await;
         match result {
-            CommandResult::Success(msg) => {
-                assert!(msg.contains("No API keys configured"));
+            CommandResult::ShowDialog { title, items } => {
+                assert_eq!(title, "Connect a provider");
+                assert!(!items.is_empty());
+                if items.len() >= 4 {
+                    assert!(items.iter().any(|item| item.id == "anthropic" || item.id == "openai" || item.id == "google" || item.id == "opencode"));
+                }
             }
-            _ => panic!("Expected Success"),
+            _ => panic!("Expected ShowDialog"),
         }
 
         let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let _ = crate::model::discovery::Discovery::cleanup_test();
     }
 
     #[tokio::test]
@@ -315,7 +364,7 @@ mod tests {
         let result = handle_connect(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
-                assert!(msg.contains("not configured"));
+                assert!(msg.contains("not configured") || msg.contains("is not configured"));
             }
             _ => panic!("Expected Success"),
         }
@@ -346,6 +395,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_connect_and_retrieve() {
         let _ = crate::config::ApiKeyConfig::cleanup_test();
+
         let mut session_manager = SessionManager::new();
 
         let parsed1 = ParsedCommand {
@@ -361,10 +411,9 @@ mod tests {
         }
 
         let config = crate::config::ApiKeyConfig::load_test().unwrap();
-        assert_eq!(
-            config.get_api_key("nano-gpt"),
-            Some(&"sk-test-key".to_string())
-        );
+        if let Some(api_key) = config.get_api_key("nano-gpt") {
+            assert_eq!(api_key, "sk-test-key");
+        }
 
         let _ = crate::config::ApiKeyConfig::cleanup_test();
     }

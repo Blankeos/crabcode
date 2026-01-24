@@ -47,36 +47,42 @@ The connect dialog integrates with the persistence layer defined in PERSISTENCE.
 ### auth.json Format
 ```json
 {
-  "providers": {
-    "openai": "sk-...",
-    "anthropic": "sk-ant-...",
-    "openrouter": "sk-or-..."
+  "opencode": {
+    "type": "api",
+    "key": "sk-..."
   },
-  "default_provider": "openai"
+  "anthropic": {
+    "type": "api",
+    "key": "sk-ant-..."
+  },
+  "google": {
+    "type": "oauth",
+    "refresh": "1//askdmamksm9192",
+    "access": "ya29.n2njasd",
+    "expires": 178237812391
+  }
 }
 ```
 
 ### Connection Status Detection
 A provider is considered "connected" if:
-- Provider ID exists in `auth.json.providers`
-- The API key value is non-empty
+- Provider ID exists as a key in auth.json (HashMap<String, AuthConfig>)
+- The AuthConfig is non-empty (has valid key/access token)
 
 ### Implementation Approach
 
-#### Option A: Update Existing ApiKeyConfig
-Modify `src/config.rs::ApiKeyConfig` to use auth.json format:
-- Change path to `~/.local/share/crabcode/auth.json`
-- Update JSON structure to match PERSISTENCE.md format
-- Add `default_provider` field
-- Maintain backward compatibility or migrate existing keys
+The persistence layer (`src/persistence/auth.rs`) is already implemented with:
+- `AuthConfig` enum (Api/OAuth variants)
+- `AuthDAO` with methods: `load()`, `save()`, `set_provider()`, `remove_provider()`, `get_api_key()`
 
-#### Option B: Create New AuthConfig
-Create new `src/persistence/auth.rs` with proper auth.json handling:
-- New `AuthConfig` struct matching PERSISTENCE.md spec
-- Methods: `load()`, `save()`, `has_provider()`, `get_provider_key()`, `set_provider_key()`, `set_default_provider()`
-- Deprecate or migrate `ApiKeyConfig`
-
-**Recommendation**: Option B - Create new persistence layer module and migrate to it, keeping the architecture aligned with PERSISTENCE.md.
+**Connection Status Check**:
+```rust
+fn is_provider_connected(provider_id: &str) -> bool {
+    let auth_dao = AuthDAO::new().ok()?;
+    let providers = auth_dao.load().ok()?;
+    providers.contains_key(provider_id)
+}
+```
 
 ## Component Reuse Analysis
 
@@ -105,13 +111,15 @@ Create new `src/persistence/auth.rs` with proper auth.json handling:
 
 ### Connection Status Detection Logic
 ```rust
-// In connect dialog initialization, check auth.json:
+// In connect dialog initialization, check auth.json via AuthDAO:
 fn is_provider_connected(provider_id: &str) -> bool {
-    let auth = AuthConfig::load().unwrap_or_default();
-    auth.providers.contains_key(provider_id)
-        && auth.providers.get(provider_id)
-           .map(|key| !key.is_empty())
-           .unwrap_or(false)
+    match AuthDAO::new() {
+        Ok(auth_dao) => match auth_dao.load() {
+            Ok(providers) => providers.contains_key(provider_id),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
 }
 ```
 
@@ -231,102 +239,27 @@ The Dialog component is already quite generic. The main difference is the item r
    - Render api_key_input when OverlayFocus::ApiKeyInput
    - Ensure proper layering (both overlay over main content)
 
-### Phase 6: Create/Update Persistence Layer
+### Phase 6: Integrate with Existing Persistence Layer
 
-1. **Create src/persistence/auth.rs** (NEW):
-   ```rust
-   use serde::{Deserialize, Serialize};
-   use std::collections::HashMap;
-   use std::path::PathBuf;
+The persistence layer already exists in `src/persistence/auth.rs` with `AuthDAO` and `AuthConfig`. Integration steps:
 
-   #[derive(Debug, Clone, Serialize, Deserialize)]
-   pub struct AuthConfig {
-       pub providers: HashMap<String, String>,
-       pub default_provider: String,
-   }
+1. **Add import** to connect_dialog.rs:
+    ```rust
+    use crabcode::persistence::{AuthDAO, AuthConfig};
+    ```
 
-   impl Default for AuthConfig {
-       fn default() -> Self {
-           Self {
-               providers: HashMap::new(),
-               default_provider: String::new(),
-           }
-       }
-   }
+2. **Integration with connect dialog**:
+    - When API key input submits:
+      - Create `AuthDAO` instance
+      - Call `auth_dao.set_provider(provider_id, AuthConfig::Api { key: api_key })`
+      - Update connection status in dialog
+      - Close API key input and return to connect dialog
 
-   impl AuthConfig {
-       pub fn load() -> Result<Self, Error> {
-           let path = Self::auth_path();
-           if path.exists() {
-               let content = fs::read_to_string(&path)?;
-               let config: AuthConfig = serde_json::from_str(&content)?;
-               Ok(config)
-           } else {
-               Ok(Self::default())
-           }
-       }
-
-       pub fn save(&self) -> Result<()> {
-           let path = Self::auth_path();
-           if let Some(parent) = path.parent() {
-               fs::create_dir_all(parent)?;
-           }
-           let content = serde_json::to_string_pretty(self)?;
-           fs::write(&path, content)?;
-           Ok(())
-       }
-
-       pub fn set_provider_key(&mut self, provider: String, api_key: String) {
-           self.providers.insert(provider, api_key);
-       }
-
-       pub fn get_provider_key(&self, provider: &str) -> Option<&String> {
-           self.providers.get(provider)
-       }
-
-       pub fn has_provider(&self, provider: &str) -> bool {
-           self.providers.contains_key(provider)
-               && self.providers.get(provider)
-                  .map(|key| !key.is_empty())
-                  .unwrap_or(false)
-       }
-
-       pub fn set_default_provider(&mut self, provider: String) {
-           self.default_provider = provider;
-       }
-
-       fn auth_path() -> PathBuf {
-           dirs::data_local_dir()
-               .unwrap_or_else(|| PathBuf::from("."))
-               .join("crabcode")
-               .join("auth.json")
-       }
-   }
-   ```
-
-2. **Create src/persistence/mod.rs** (NEW):
-   ```rust
-   pub mod auth;
-
-   pub use auth::AuthConfig;
-   ```
-
-3. **Update src/lib.rs or src/main.rs**:
-   - Add `pub mod persistence;` to expose the module
-
-4. **Integration with connect dialog**:
-   - When API key input submits:
-     - Load AuthConfig
-     - Call `auth_config.set_provider_key(provider_id, api_key)`
-     - Call `auth_config.save()`
-     - Update connection status in dialog
-     - Close API key input and return to connect dialog
-
-5. **Migration from old ApiKeyConfig** (OPTIONAL):
-   - If existing users have `~/.config/crabcode/api_keys.json`:
-     - On startup, check if old file exists
-     - Migrate keys to new `~/.local/share/crabcode/auth.json`
-     - Optionally backup old file
+3. **Optional: Migration from old ApiKeyConfig**:
+    - If existing users have `~/.config/crabcode/api_keys.json`:
+      - On startup, check if old file exists
+      - Migrate keys to new `~/.local/share/crabcode/auth.json`
+      - Optionally backup old file
 
 ## File Structure
 
@@ -343,22 +276,25 @@ src/
 │   └── mod.rs                     // MODIFIED: Export ConnectDialogState
 ├── command/
 │   └── handlers.rs                // MODIFIED: Update handle_connect
-├── persistence/                   // NEW: Persistence layer
-│   ├── mod.rs                     // Export AuthConfig
-│   └── auth.rs                    // AuthConfig for auth.json handling
+├── persistence/                   // ALREADY EXISTS
+│   ├── mod.rs                     // Exports AuthDAO, AuthConfig
+│   ├── auth.rs                    // AuthDAO, AuthConfig (ENUM: Api/OAuth)
+│   ├── providers.rs               // Provider cache
+│   ├── history.rs                 // Session/message history
+│   └── conversions.rs             // Data conversions
 ├── app.rs                         // MODIFIED: Add connect_dialog and api_key_input states
 └── config.rs                      // (DEPRECATED: Migrate to persistence::AuthConfig)
 ```
 
 ## Key Design Decisions
 
-### 1. Persistence Layer Migration
-Create new `persistence::AuthConfig` instead of using existing `config::ApiKeyConfig` because:
-- Aligns with PERSISTENCE.md specification
+### 1. Persistence Layer Integration
+Use existing `persistence::AuthDAO` and `AuthConfig` instead of creating new structures because:
+- Persistence layer already implemented per PERSISTENCE.md specification
 - Uses correct file location: `~/.local/share/crabcode/auth.json`
-- Supports `default_provider` field
+- Supports both API key and OAuth authentication via AuthConfig enum
 - Better separation of concerns (credentials vs config)
-- Enables future migration from old API key storage
+- Existing `AuthDAO` provides `set_provider()`, `get_api_key()`, `remove_provider()` methods
 
 ### 2. DialogItem Extension
 Add `connected: bool` to DialogItem instead of creating ProviderDialogItem because:
@@ -397,9 +333,9 @@ Add separate variants for ConnectDialog and ApiKeyInput because:
    - Test Esc cancels input
 
 4. **Integration**:
-   - Test command handler returns ShowDialog with correct items
-   - Test API key saving to config
-   - Test connection status updates
+    - Test command handler returns ShowDialog with correct items
+    - Test API key saving via AuthDAO::set_provider()
+    - Test connection status updates using AuthDAO::load()
 
 ## Dependencies
 
@@ -421,37 +357,36 @@ dirs = "5.0"
 
 ## Open Questions
 
-1. **Migration Strategy**: How to handle existing users with `~/.config/crabcode/api_keys.json`?
-   - Option A: Auto-migrate on startup (silent migration)
-   - Option B: Prompt user to migrate (requires UI flow)
-   - Option C: Support both formats simultaneously (complex)
-   - Option D: Start fresh, users must re-enter keys (simple but disruptive)
-
-2. **Provider Source**: Where do we get the list of available providers?
-   - Option: From model/discovery (may need provider listing)
-   - Option: Hardcoded list in handlers.rs
-   - Option: New provider registry
+1. **Provider Source**: Where do we get the list of available providers?
+    - Option: From `providers.json` cache via ProviderDAO
+    - Option: Hardcoded list in handlers.rs
+    - Option: New provider registry
 
 2. **Provider Groups**: Should providers be grouped like models are?
-   - If so, what are the groups? (e.g., "OpenAI-compatible", "Custom", etc.)
+    - If so, what are the groups? (e.g., "OpenAI-compatible", "Custom", etc.)
 
 3. **Existing /connect behavior**: The current /connect command accepts args like `/connect nano-gpt sk-key`
-   - Should this still work?
-   - Or should the dialog be the only interface?
+    - Should this still work?
+    - Or should the dialog be the only interface?
 
 4. **Error Handling**: What happens if API key validation fails?
-   - Show error in toast?
-   - Keep API key input open with error message?
+    - Show error in toast?
+    - Keep API key input open with error message?
+
+5. **Default Provider**: The auth.json format doesn't include a default_provider field
+    - Should we add it to auth.json as a top-level field?
+    - Or use a different mechanism (e.g., last used provider)?
+    - Or derive it from command/config?
 
 ## Success Criteria
 
 - [ ] `/connect` command opens "Connect a provider" dialog
 - [ ] Providers are listed in a grouped scrollable list
 - [ ] Fuzzy search works on provider names
-- [ ] Connected providers show "🟢 Connected" status (checked against auth.json)
+- [ ] Connected providers show "🟢 Connected" status (checked via AuthDAO)
 - [ ] Pressing Enter on a provider opens API key input overlay
 - [ ] API key input overlay has correct layout and styling
-- [ ] Submitting API key saves to auth.json and updates status
+- [ ] Submitting API key saves via AuthDAO and updates status
 - [ ] ESC closes both dialog and overlay appropriately
 - [ ] Existing models dialog continues to work unchanged
-- [ ] Migration from old ApiKeyConfig to new AuthConfig is handled gracefully
+- [ ] Uses existing AuthDAO/AuthConfig from persistence layer

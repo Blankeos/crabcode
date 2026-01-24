@@ -10,16 +10,27 @@ use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
 use crate::utils::git;
 
-use crate::views::{
-    ChatState, HomeState, ModelsDialogState, SuggestionsPopupState,
+use crate::views::chat::{init_chat, render_chat};
+use crate::views::connect_dialog::{
+    get_pending_selection, handle_connect_dialog_key_event, handle_connect_dialog_mouse_event,
+    init_connect_dialog, render_connect_dialog,
 };
 use crate::views::home::{init_home, render_home};
-use crate::views::chat::{init_chat, render_chat};
-use crate::views::models_dialog::{init_models_dialog, render_models_dialog, handle_models_dialog_key_event, handle_models_dialog_mouse_event};
-use crate::views::suggestions_popup::{init_suggestions_popup, render_suggestions_popup, handle_suggestions_popup_key_event, set_suggestions, clear_suggestions, get_selected_suggestion, is_suggestions_visible};
+use crate::views::models_dialog::{
+    handle_models_dialog_key_event, handle_models_dialog_mouse_event, init_models_dialog,
+    render_models_dialog,
+};
+use crate::views::suggestions_popup::{
+    clear_suggestions, get_selected_suggestion, handle_suggestions_popup_key_event,
+    init_suggestions_popup, is_suggestions_visible, render_suggestions_popup, set_suggestions,
+};
+use crate::views::{
+    ChatState, ConnectDialogState, HomeState, ModelsDialogState, SuggestionsPopupState,
+};
 
 use crate::{
-    get_toast_manager, render_toasts, theme::{self, Theme},
+    get_toast_manager, render_toasts,
+    theme::{self, Theme},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,6 +43,8 @@ pub enum BaseFocus {
 pub enum OverlayFocus {
     None,
     ModelsDialog,
+    ConnectDialog,
+    ApiKeyInput,
     SuggestionsPopup,
 }
 
@@ -45,6 +58,8 @@ pub struct App {
     pub chat_state: ChatState,
     pub suggestions_popup_state: SuggestionsPopupState,
     pub models_dialog_state: ModelsDialogState,
+    pub connect_dialog_state: ConnectDialogState,
+    pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     pub agent: String,
     pub model: String,
     pub cwd: String,
@@ -72,6 +87,8 @@ impl App {
         let chat_state = init_chat(Chat::new());
         let suggestions_popup_state = init_suggestions_popup(Popup::new());
         let models_dialog_state = init_models_dialog("Models", vec![]);
+        let connect_dialog_state = init_connect_dialog();
+        let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
         let cwd = std::env::current_dir()
             .ok()
@@ -91,6 +108,8 @@ impl App {
             chat_state,
             suggestions_popup_state,
             models_dialog_state,
+            connect_dialog_state,
+            api_key_input,
             agent: "PLAN".to_string(),
             model: "nano-gpt".to_string(),
             cwd,
@@ -203,6 +222,43 @@ impl App {
                 }
                 false
             }
+            OverlayFocus::ConnectDialog => {
+                if handle_connect_dialog_key_event(&mut self.connect_dialog_state, key) {
+                    return;
+                }
+                if !self.connect_dialog_state.dialog.is_visible() {
+                    if let Some(selected_item) = crate::views::connect_dialog::get_pending_selection(
+                        &mut self.connect_dialog_state,
+                    ) {
+                        self.api_key_input.show(&selected_item.name);
+                        self.overlay_focus = OverlayFocus::ApiKeyInput;
+                        return;
+                    }
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                false
+            }
+            OverlayFocus::ApiKeyInput => {
+                let action = self.api_key_input.handle_key_event(key);
+                match action {
+                    crate::ui::components::api_key_input::InputAction::Submitted(api_key) => {
+                        if let Some(auth_dao) = crate::persistence::AuthDAO::new().ok() {
+                            let _ = auth_dao.set_provider(
+                                self.api_key_input.provider_name.clone(),
+                                crate::persistence::AuthConfig::Api { key: api_key },
+                            );
+                            self.connect_dialog_state = init_connect_dialog();
+                        }
+                        self.overlay_focus = OverlayFocus::None;
+                        true
+                    }
+                    crate::ui::components::api_key_input::InputAction::Cancelled => {
+                        self.overlay_focus = OverlayFocus::None;
+                        true
+                    }
+                    crate::ui::components::api_key_input::InputAction::Continue => false,
+                }
+            }
             OverlayFocus::None => {
                 if self.handle_base_keys(key) {
                     return;
@@ -301,7 +357,11 @@ impl App {
     }
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
-        handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
+        if self.overlay_focus == OverlayFocus::ModelsDialog {
+            handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
+        } else if self.overlay_focus == OverlayFocus::ConnectDialog {
+            handle_connect_dialog_mouse_event(&mut self.connect_dialog_state, mouse);
+        }
     }
 
     fn autocomplete_and_submit(&mut self) {
@@ -316,9 +376,6 @@ impl App {
             self.input.clear();
         }
         clear_suggestions(&mut self.suggestions_popup_state);
-        if !self.models_dialog_state.dialog.is_visible() {
-            self.overlay_focus = OverlayFocus::None;
-        }
     }
 
     async fn process_input(&mut self, input: &str) {
@@ -344,21 +401,47 @@ impl App {
                         }
                     }
                     crate::command::registry::CommandResult::Error(msg) => {
-                        self.chat_state.chat.add_assistant_message(format!("Error: {}", msg));
+                        self.chat_state
+                            .chat
+                            .add_assistant_message(format!("Error: {}", msg));
                     }
                     crate::command::registry::CommandResult::ShowDialog { title, items } => {
-                        let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
-                            .into_iter()
-                            .map(|item| crate::ui::components::dialog::DialogItem {
-                                id: item.id,
-                                name: item.name,
-                                group: item.group,
-                                description: item.description,
-                            })
-                            .collect();
-                        self.models_dialog_state = init_models_dialog(title, dialog_items);
-                        self.models_dialog_state.dialog.show();
-                        self.overlay_focus = OverlayFocus::ModelsDialog;
+                        if title == "Connect a provider" {
+                            let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
+                                items
+                                    .into_iter()
+                                    .map(|item| crate::ui::components::dialog::DialogItem {
+                                        id: item.id,
+                                        name: item.name,
+                                        group: item.group,
+                                        description: item.description,
+                                        connected: item.connected,
+                                    })
+                                    .collect();
+                            self.connect_dialog_state = crate::views::ConnectDialogState::new(
+                                crate::ui::components::dialog::Dialog::with_items(
+                                    title,
+                                    dialog_items,
+                                ),
+                            );
+                            self.connect_dialog_state.dialog.show();
+                            self.overlay_focus = OverlayFocus::ConnectDialog;
+                        } else {
+                            let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
+                                items
+                                    .into_iter()
+                                    .map(|item| crate::ui::components::dialog::DialogItem {
+                                        id: item.id,
+                                        name: item.name,
+                                        group: item.group,
+                                        description: item.description,
+                                        connected: item.connected,
+                                    })
+                                    .collect();
+                            self.models_dialog_state = init_models_dialog(title, dialog_items);
+                            self.models_dialog_state.dialog.show();
+                            self.overlay_focus = OverlayFocus::ModelsDialog;
+                        }
                     }
                 }
             }
@@ -390,7 +473,9 @@ impl App {
                     &colors,
                 );
 
-                if is_suggestions_visible(&self.suggestions_popup_state) && self.overlay_focus != OverlayFocus::ModelsDialog {
+                if is_suggestions_visible(&self.suggestions_popup_state)
+                    && self.overlay_focus != OverlayFocus::ModelsDialog
+                {
                     let main_chunks = ratatui::layout::Layout::default()
                         .direction(ratatui::layout::Direction::Vertical)
                         .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
@@ -398,9 +483,20 @@ impl App {
                     let input_height = self.input.get_height();
                     let home_chunks = ratatui::layout::Layout::default()
                         .direction(ratatui::layout::Direction::Vertical)
-                        .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(input_height)].as_ref())
+                        .constraints(
+                            [
+                                ratatui::layout::Constraint::Min(0),
+                                ratatui::layout::Constraint::Length(input_height),
+                            ]
+                            .as_ref(),
+                        )
                         .split(main_chunks[0]);
-                    render_suggestions_popup(f, &self.suggestions_popup_state, home_chunks[1], self.overlay_focus == OverlayFocus::SuggestionsPopup);
+                    render_suggestions_popup(
+                        f,
+                        &self.suggestions_popup_state,
+                        home_chunks[1],
+                        self.overlay_focus == OverlayFocus::SuggestionsPopup,
+                    );
                 }
             }
             BaseFocus::Chat => {
@@ -416,22 +512,47 @@ impl App {
                     &colors,
                 );
 
-                if is_suggestions_visible(&self.suggestions_popup_state) && self.overlay_focus != OverlayFocus::ModelsDialog {
+                if is_suggestions_visible(&self.suggestions_popup_state)
+                    && self.overlay_focus != OverlayFocus::ModelsDialog
+                {
                     let main_chunks = ratatui::layout::Layout::default()
                         .direction(ratatui::layout::Direction::Vertical)
                         .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
                         .split(size);
                     let chat_chunks = ratatui::layout::Layout::default()
                         .direction(ratatui::layout::Direction::Vertical)
-                        .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(3)].as_ref())
+                        .constraints(
+                            [
+                                ratatui::layout::Constraint::Min(0),
+                                ratatui::layout::Constraint::Length(3),
+                            ]
+                            .as_ref(),
+                        )
                         .split(main_chunks[0]);
-                    render_suggestions_popup(f, &self.suggestions_popup_state, chat_chunks[1], self.overlay_focus == OverlayFocus::SuggestionsPopup);
+                    render_suggestions_popup(
+                        f,
+                        &self.suggestions_popup_state,
+                        chat_chunks[1],
+                        self.overlay_focus == OverlayFocus::SuggestionsPopup,
+                    );
                 }
             }
         }
 
-        if self.overlay_focus == OverlayFocus::ModelsDialog && self.models_dialog_state.dialog.is_visible() {
+        if self.overlay_focus == OverlayFocus::ModelsDialog
+            && self.models_dialog_state.dialog.is_visible()
+        {
             render_models_dialog(f, &mut self.models_dialog_state, size);
+        }
+
+        if self.overlay_focus == OverlayFocus::ConnectDialog
+            && self.connect_dialog_state.dialog.is_visible()
+        {
+            render_connect_dialog(f, &mut self.connect_dialog_state, size);
+        }
+
+        if self.overlay_focus == OverlayFocus::ApiKeyInput && self.api_key_input.is_visible() {
+            self.api_key_input.render(f, size);
         }
 
         render_toasts(f, &get_toast_manager().lock().unwrap());

@@ -21,6 +21,7 @@ pub struct DialogItem {
     pub name: String,
     pub group: String,
     pub description: String,
+    pub connected: bool,
 }
 
 impl Clone for DialogItem {
@@ -30,6 +31,7 @@ impl Clone for DialogItem {
             name: self.name.clone(),
             group: self.group.clone(),
             description: self.description.clone(),
+            connected: self.connected,
         }
     }
 }
@@ -105,7 +107,18 @@ impl Dialog {
 
         self.groups = {
             let mut groups: Vec<_> = self.grouped_items.keys().cloned().collect();
-            groups.sort();
+            groups.sort_by(|a, b| {
+                const SPECIAL_GROUPS: &[&str] = &["Popular", "Other"];
+                let a_special = SPECIAL_GROUPS.iter().position(|&g| g == a);
+                let b_special = SPECIAL_GROUPS.iter().position(|&g| g == b);
+
+                match (a_special, b_special) {
+                    (Some(ai), Some(bi)) => ai.cmp(&bi),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.cmp(b),
+                }
+            });
             groups
         };
     }
@@ -230,6 +243,22 @@ impl Dialog {
         }
     }
 
+    pub fn scroll_down(&mut self) {
+        let total_lines = self.get_content_line_count();
+        if total_lines == 0 {
+            return;
+        }
+        let visible_rows = self.get_visible_row_count();
+        let max_offset = total_lines.saturating_sub(visible_rows);
+        self.scroll_offset = (self.scroll_offset + 1).min(max_offset);
+        self.update_scrollbar();
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.update_scrollbar();
+    }
+
     fn get_flat_items(&self) -> Vec<&DialogItem> {
         let mut items = Vec::new();
         for (_, group_items) in &self.filtered_items {
@@ -255,6 +284,12 @@ impl Dialog {
         let mut current_item_index = 0;
 
         for (_, items) in &self.filtered_items {
+            if items.is_empty() {
+                continue;
+            }
+
+            line_index += 1;
+
             for _item in items {
                 if current_item_index == item_index {
                     return line_index;
@@ -272,15 +307,25 @@ impl Dialog {
 
         if selected_line < self.scroll_offset {
             self.scroll_offset = selected_line;
-        } else if selected_line >= self.scroll_offset + visible_rows {
-            self.scroll_offset = selected_line - visible_rows + 1;
+        } else if selected_line
+            >= self
+                .scroll_offset
+                .saturating_add(visible_rows.saturating_sub(2))
+        {
+            self.scroll_offset = selected_line.saturating_sub(visible_rows.saturating_sub(3));
         }
         self.update_scrollbar();
     }
 
     fn get_visible_row_count(&self) -> usize {
-        let dialog_height = self.dialog_area.height.saturating_sub(10);
-        dialog_height as usize
+        const DIALOG_WIDTH: u16 = 70;
+        const DIALOG_HEIGHT: u16 = 25;
+        const PADDING: u16 = 3;
+
+        let total_fixed_height = 1 + 1 + 3 + 1;
+        let padding_total = PADDING * 2;
+        let list_area_height = DIALOG_HEIGHT.saturating_sub(total_fixed_height + padding_total);
+        list_area_height as usize
     }
 
     pub fn get_selected(&self) -> Option<&DialogItem> {
@@ -367,11 +412,11 @@ impl Dialog {
 
         match event.kind {
             MouseEventKind::ScrollDown => {
-                self.next();
+                self.scroll_down();
                 true
             }
             MouseEventKind::ScrollUp => {
-                self.previous();
+                self.scroll_up();
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -568,11 +613,24 @@ impl Dialog {
                         Style::default().fg(Color::White)
                     };
 
-                    let item_text = format!("  {}", item.name);
-                    let padding =
-                        " ".repeat((list_area_width as usize).saturating_sub(item_text.len()));
-                    let full_text = format!("{}{}", item_text, padding);
-                    content_lines.push(Line::from(full_text).style(style));
+                    let line = if item.connected {
+                        let status_text = "🟢 Connected";
+                        let total_text_len = item.name.len() + status_text.len() + 2;
+                        let padding_len =
+                            (list_area_width as usize).saturating_sub(total_text_len + 4);
+                        Line::from(vec![
+                            Span::raw(format!("  {}", item.name)),
+                            Span::raw(" ".repeat(padding_len)),
+                            Span::styled(
+                                status_text.to_string(),
+                                Style::default().fg(Color::Rgb(100, 255, 100)),
+                            ),
+                        ])
+                    } else {
+                        Line::from(format!("  {}", item.name))
+                    };
+
+                    content_lines.push(line.style(style));
                     item_index += 1;
                 }
             }
@@ -580,13 +638,13 @@ impl Dialog {
 
         let content_paragraph = Paragraph::new(content_lines)
             .wrap(Wrap { trim: false })
-            .scroll(((self.scroll_offset as u16).saturating_sub(1), 0));
+            .scroll((self.scroll_offset as u16, 0));
         frame.render_widget(content_paragraph, chunks[3]);
 
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
             chunks[3],
-            &mut self.scrollbar_state.clone(),
+            &mut self.scrollbar_state,
         );
 
         let footer_line = Line::from(vec![
@@ -664,18 +722,21 @@ mod tests {
                 name: "Model A".to_string(),
                 group: "Provider1".to_string(),
                 description: "Description for Model A".to_string(),
+                connected: false,
             },
             DialogItem {
                 id: "2".to_string(),
                 name: "Model B".to_string(),
                 group: "Provider1".to_string(),
                 description: "Description for Model B".to_string(),
+                connected: false,
             },
             DialogItem {
                 id: "3".to_string(),
                 name: "Model C".to_string(),
                 group: "Provider2".to_string(),
                 description: "Description for Model C".to_string(),
+                connected: false,
             },
         ]
     }
