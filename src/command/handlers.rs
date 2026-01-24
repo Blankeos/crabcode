@@ -144,6 +144,7 @@ pub fn handle_models<'a>(
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     use crate::command::registry::DialogItem;
     use crate::model::discovery::Discovery;
+    use crate::persistence::AuthDAO;
 
     let provider_filter = if parsed.args.is_empty() {
         None
@@ -152,6 +153,20 @@ pub fn handle_models<'a>(
     };
 
     Box::pin(async move {
+        let auth_dao = match AuthDAO::new() {
+            Ok(dao) => dao,
+            Err(e) => return CommandResult::Error(format!("Failed to load auth config: {}", e)),
+        };
+
+        let connected_providers = match auth_dao.load() {
+            Ok(providers) => providers,
+            Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
+        };
+
+        if connected_providers.is_empty() {
+            return CommandResult::Error("No models available. Please connect a provider first using /connect".to_string());
+        }
+
         let discovery = Discovery::new();
 
         match discovery {
@@ -160,12 +175,13 @@ pub fn handle_models<'a>(
                     let items: Vec<DialogItem> = models
                         .into_iter()
                         .filter(|model| {
-                            if let Some(filter) = &provider_filter {
-                                model.provider_id.contains(filter)
-                                    || model.provider_name.to_lowercase().contains(filter)
-                            } else {
-                                true
-                            }
+                            connected_providers.contains_key(&model.provider_id)
+                                && if let Some(filter) = &provider_filter {
+                                    model.provider_id.contains(filter)
+                                        || model.provider_name.to_lowercase().contains(filter)
+                                } else {
+                                    true
+                                }
                         })
                         .map(|model| DialogItem {
                             id: model.id.clone(),

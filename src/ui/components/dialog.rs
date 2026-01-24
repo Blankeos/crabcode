@@ -327,7 +327,7 @@ impl Dialog {
         const DIALOG_HEIGHT: u16 = 25;
         const PADDING: u16 = 3;
 
-        let total_fixed_height = 1 + 1 + 3 + 1;
+        let total_fixed_height = 1 + 1 + 3 + 1 + 1;
         let padding_total = PADDING * 2;
         let list_area_height = DIALOG_HEIGHT.saturating_sub(total_fixed_height + padding_total);
         list_area_height as usize
@@ -401,6 +401,7 @@ impl Dialog {
                 ratatui::layout::Constraint::Length(1),
                 ratatui::layout::Constraint::Length(3),
                 ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(1),
                 ratatui::layout::Constraint::Length(1),
             ])
             .split(content_area);
@@ -561,6 +562,7 @@ impl Dialog {
                 ratatui::layout::Constraint::Length(3),
                 ratatui::layout::Constraint::Min(0),
                 ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(1),
             ])
             .split(self.content_area);
 
@@ -610,7 +612,8 @@ impl Dialog {
                 )]));
 
                 for item in items {
-                    let style = if item_index == self.selected_index {
+                    let is_selected = item_index == self.selected_index;
+                    let style = if is_selected {
                         Style::default()
                             .fg(Color::Black)
                             .bg(Color::Rgb(255, 200, 100))
@@ -620,9 +623,8 @@ impl Dialog {
 
                     let line = if item.connected {
                         let status_text = "🟢 Connected";
-                        let total_text_len = item.name.len() + status_text.len() + 2;
-                        let padding_len =
-                            (list_area_width as usize).saturating_sub(total_text_len + 4);
+                        let padding_len = (list_area_width as usize)
+                            .saturating_sub(item.name.len() + status_text.len() + 2);
                         Line::from(vec![
                             Span::raw(format!("  {}", item.name)),
                             Span::raw(" ".repeat(padding_len)),
@@ -689,7 +691,7 @@ impl Dialog {
 
         let footer_paragraph =
             Paragraph::new(footer_line).alignment(ratatui::layout::Alignment::Left);
-        frame.render_widget(footer_paragraph, chunks[4]);
+        frame.render_widget(footer_paragraph, chunks[5]);
     }
 }
 
