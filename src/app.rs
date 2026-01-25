@@ -5,6 +5,8 @@ use crate::command::handlers::register_all_commands;
 use crate::command::parser::InputType;
 use crate::command::registry::Registry;
 use crate::session::manager::SessionManager;
+
+use crate::{push_toast, remove_expired_toasts};
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
@@ -73,6 +75,7 @@ pub struct App {
     pub sessions_dialog_state: SessionsDialogState,
     pub session_rename_dialog_state: SessionRenameDialogState,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
+    pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
     pub model: String,
     pub cwd: String,
@@ -117,6 +120,24 @@ impl App {
             .with_history()
             .unwrap_or_else(|_| SessionManager::new());
 
+        let prefs_dao = match crate::persistence::PrefsDAO::new() {
+            Ok(dao) => Some(dao),
+            Err(e) => {
+                eprintln!("Warning: Failed to initialize preferences DAO: {}", e);
+                None
+            }
+        };
+
+        let active_model = if let Some(ref dao) = prefs_dao {
+            dao.get_active_model()
+                .ok()
+                .flatten()
+                .map(|(_provider_id, model_id)| model_id)
+                .unwrap_or_else(|| "claude-3-sonnet".to_string())
+        } else {
+            "claude-3-sonnet".to_string()
+        };
+
         Self {
             running: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -131,8 +152,9 @@ impl App {
             sessions_dialog_state,
             session_rename_dialog_state,
             api_key_input,
+            prefs_dao,
             agent: "Plan".to_string(),
-            model: "nano-gpt".to_string(),
+            model: active_model,
             cwd,
             base_focus: BaseFocus::Home,
             overlay_focus: OverlayFocus::None,
@@ -235,9 +257,48 @@ impl App {
                 handled
             }
             OverlayFocus::ModelsDialog => {
-                if handle_models_dialog_key_event(&mut self.models_dialog_state, key) {
-                    return;
+                let action = handle_models_dialog_key_event(&mut self.models_dialog_state, key);
+                
+                match action {
+                    crate::views::models_dialog::ModelsDialogAction::SelectModel { provider_id, model_id } => {
+                        let model_id_clone = model_id.clone();
+                        self.model = model_id_clone.clone();
+                        
+                        if let Some(ref dao) = self.prefs_dao {
+                            if let Err(e) = dao.set_active_model(provider_id.clone(), model_id_clone.clone()) {
+                                eprintln!("Failed to save active model: {}", e);
+                            }
+                        }
+                        
+                        push_toast(ratatui_toolkit::Toast::new(
+                            format!("Switched to: {}", model_id_clone),
+                            ratatui_toolkit::ToastLevel::Info,
+                            None,
+                        ));
+                    }
+                    crate::views::models_dialog::ModelsDialogAction::ToggleFavorite { provider_id, model_id } => {
+                        let is_favorite = if let Some(ref dao) = self.prefs_dao {
+                            dao.toggle_favorite(provider_id.clone(), model_id.clone())
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        
+                        push_toast(ratatui_toolkit::Toast::new(
+                            if is_favorite {
+                                "Added to favorites"
+                            } else {
+                                "Removed from favorites"
+                            },
+                            ratatui_toolkit::ToastLevel::Info,
+                            None,
+                        ));
+
+                        self.refresh_models_dialog();
+                    }
+                    crate::views::models_dialog::ModelsDialogAction::None => {}
                 }
+                
                 if !self.models_dialog_state.dialog.is_visible() {
                     self.overlay_focus = OverlayFocus::None;
                 }
@@ -466,7 +527,10 @@ impl App {
         use crate::command::parser::parse_input;
 
         match parse_input(input) {
-            InputType::Command(parsed) => {
+            InputType::Command(mut parsed) => {
+                parsed.prefs_dao = self.prefs_dao.as_ref();
+                parsed.active_model_id = Some(self.model.clone());
+
                 let result = self
                     .command_registry
                     .execute(&parsed, &mut self.session_manager)
@@ -507,6 +571,7 @@ impl App {
                                         description: item.description,
                                         connected: item.connected,
                                         tip: None,
+                                        provider_id: item.provider_id.clone(),
                                     })
                                     .collect();
                             self.connect_dialog_state = crate::views::ConnectDialogState::new(
@@ -528,6 +593,7 @@ impl App {
                                         description: item.description,
                                         connected: item.connected,
                                         tip: item.tip,
+                                        provider_id: item.provider_id.clone(),
                                     })
                                     .collect();
                             self.sessions_dialog_state =
@@ -544,7 +610,8 @@ impl App {
                                         group: item.group,
                                         description: item.description,
                                         connected: item.connected,
-                                        tip: None,
+                                        tip: item.tip,
+                                        provider_id: item.provider_id.clone(),
                                     })
                                     .collect();
                             self.models_dialog_state = init_models_dialog(title, dialog_items);
@@ -606,11 +673,194 @@ impl App {
                     description: String::new(),
                     connected: false,
                     tip: Some(time),
+                    provider_id: String::new(),
                 }
             })
             .collect();
 
         self.sessions_dialog_state.refresh_items(items);
+    }
+
+    fn refresh_models_dialog(&mut self) {
+        use crate::ui::components::dialog::DialogItem;
+        use crate::model::discovery::Discovery;
+        use crate::model::types::Model as ModelType;
+
+        let auth_dao = match crate::persistence::AuthDAO::new() {
+            Ok(dao) => dao,
+            Err(_) => return,
+        };
+
+        let connected_providers = match auth_dao.load() {
+            Ok(providers) => providers,
+            Err(_) => return,
+        };
+
+        if connected_providers.is_empty() {
+            return;
+        }
+
+        let discovery = match Discovery::new() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        let models = match tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(discovery.fetch_models())
+        }) {
+            Ok(models) => models,
+            Err(_) => return,
+        };
+
+        let prefs = self.prefs_dao.as_ref().and_then(|dao| {
+            dao.get_model_preferences().ok()
+        });
+
+        let mut model_lookup: std::collections::HashMap<(String, String), ModelType> =
+            std::collections::HashMap::new();
+
+        for model in &models {
+            if connected_providers.contains_key(&model.provider_id) {
+                model_lookup.insert(
+                    (model.provider_id.clone(), model.id.clone()),
+                    model.clone(),
+                );
+            }
+        }
+
+        let favorites_set = prefs
+            .as_ref()
+            .map(|p| {
+                p.favorite
+                    .iter()
+                    .map(|m| (m.provider_id.clone(), m.model_id.clone()))
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+
+        let recent_set = prefs
+            .as_ref()
+            .map(|p| {
+                p.recent
+                    .iter()
+                    .map(|m| (m.provider_id.clone(), m.model_id.clone()))
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut items: Vec<DialogItem> = Vec::new();
+
+        let add_model_item = |items: &mut Vec<DialogItem>, model: &ModelType, group: &str| {
+            let is_active = self.model == model.id;
+            let is_favorite = favorites_set.contains(&(model.provider_id.clone(), model.id.clone()));
+
+            let tip = if is_active {
+                Some("✓ Active".to_string())
+            } else if is_favorite {
+                Some("★ Favorite".to_string())
+            } else {
+                None
+            };
+
+            items.push(DialogItem {
+                id: model.id.clone(),
+                name: model.name.clone(),
+                group: group.to_string(),
+                description: format!(
+                    "{} | {}",
+                    model.provider_name,
+                    model.capabilities.join(", ")
+                ),
+                connected: false,
+                tip,
+                provider_id: model.provider_id.clone(),
+            });
+        };
+
+        let favorites_list = prefs
+            .as_ref()
+            .map(|p| p.favorite.clone())
+            .unwrap_or_default();
+
+        let mut favorite_models = Vec::new();
+        for fav in &favorites_list {
+            if let Some(model) = model_lookup.get(&(fav.provider_id.clone(), fav.model_id.clone())) {
+                favorite_models.push(model.clone());
+            }
+        }
+
+        for model in &favorite_models {
+            add_model_item(&mut items, model, "Favorite");
+        }
+
+        let recent_list = prefs
+            .as_ref()
+            .map(|p| p.recent.clone())
+            .unwrap_or_default();
+
+        let mut recent_models = Vec::new();
+        for recent in &recent_list {
+            if favorites_set.contains(&(recent.provider_id.clone(), recent.model_id.clone())) {
+                continue;
+            }
+            if let Some(model) = model_lookup.get(&(recent.provider_id.clone(), recent.model_id.clone())) {
+                recent_models.push(model.clone());
+            }
+        }
+
+        for model in &recent_models {
+            add_model_item(&mut items, model, "Recent");
+        }
+
+        let mut provider_models: std::collections::HashMap<String, Vec<ModelType>> =
+            std::collections::HashMap::new();
+
+        for model in models {
+            let model_key = (model.provider_id.clone(), model.id.clone());
+            if favorites_set.contains(&model_key) || recent_set.contains(&model_key) {
+                continue;
+            }
+
+            if connected_providers.contains_key(&model.provider_id) {
+                provider_models
+                    .entry(model.provider_name.clone())
+                    .or_default()
+                    .push(model);
+            }
+        }
+
+        for (provider_name, models_list) in provider_models {
+            for model in &models_list {
+                add_model_item(&mut items, model, &provider_name);
+            }
+        }
+
+        items.sort_by(|a, b| {
+            let is_a_special = a.group == "Favorite" || a.group == "Recent";
+            let is_b_special = b.group == "Favorite" || b.group == "Recent";
+
+            if is_a_special && !is_b_special {
+                return std::cmp::Ordering::Less;
+            }
+            if !is_a_special && is_b_special {
+                return std::cmp::Ordering::Greater;
+            }
+
+            if is_a_special && is_b_special {
+                if a.group == "Favorite" && b.group != "Favorite" {
+                    return std::cmp::Ordering::Less;
+                }
+                if a.group != "Favorite" && b.group == "Favorite" {
+                    return std::cmp::Ordering::Greater;
+                }
+                return std::cmp::Ordering::Equal;
+            }
+
+            a.group.cmp(&b.group).then(a.name.cmp(&b.name))
+        });
+
+        self.models_dialog_state.refresh_items(items);
     }
 
     pub fn render(&mut self, f: &mut ratatui::Frame) {

@@ -1,12 +1,21 @@
-#[derive(Debug, Clone, PartialEq)]
-pub struct ParsedCommand {
+#[derive(Debug, Clone)]
+pub struct ParsedCommand<'a> {
     pub name: String,
     pub args: Vec<String>,
+    pub raw: String,c
+    pub prefs_dao: Option<&'a crate::persistence::PrefsDAO>,
+    pub active_model_id: Option<String>,
+}
+
+impl<'a> PartialEq for ParsedCommand<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.args == other.args
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum InputType {
-    Command(ParsedCommand),
+pub enum InputType<'a> {
+    Command(ParsedCommand<'a>),
     Message(String),
 }
 
@@ -33,7 +42,13 @@ fn parse_command(input: &str) -> Option<ParsedCommand> {
     let name = parts[0].to_string();
     let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
 
-    Some(ParsedCommand { name, args })
+    Some(ParsedCommand {
+        name,
+        args,
+        raw: input.to_string(),
+        prefs_dao: None,
+        active_model_id: None,
+    })
 }
 
 #[cfg(test)]
@@ -48,7 +63,10 @@ mod tests {
             result,
             Some(ParsedCommand {
                 name: "exit".to_string(),
-                args: vec![]
+                args: vec![],
+                raw: "/exit".to_string(),
+                prefs_dao: None,
+                active_model_id: None,
             })
         );
     }
@@ -61,7 +79,10 @@ mod tests {
             result,
             Some(ParsedCommand {
                 name: "new".to_string(),
-                args: vec!["my-session".to_string()]
+                args: vec!["my-session".to_string()],
+                raw: "/new my-session".to_string(),
+                prefs_dao: None,
+                active_model_id: None,
             })
         );
     }
@@ -74,7 +95,10 @@ mod tests {
             result,
             Some(ParsedCommand {
                 name: "connect".to_string(),
-                args: vec!["nano-gpt".to_string(), "gpt-4".to_string()]
+                args: vec!["nano-gpt".to_string(), "gpt-4".to_string()],
+                raw: "/connect nano-gpt gpt-4".to_string(),
+                prefs_dao: None,
+                active_model_id: None,
             })
         );
     }
@@ -101,7 +125,10 @@ mod tests {
             result,
             InputType::Command(ParsedCommand {
                 name: "exit".to_string(),
-                args: vec![]
+                args: vec![],
+                raw: "/exit".to_string(),
+                prefs_dao: None,
+                active_model_id: None,
             })
         );
     }
@@ -128,7 +155,10 @@ mod tests {
             result,
             InputType::Command(ParsedCommand {
                 name: "sessions".to_string(),
-                args: vec![]
+                args: vec![],
+                raw: "/sessions".to_string(),
+                prefs_dao: None,
+                active_model_id: None,
             })
         );
     }

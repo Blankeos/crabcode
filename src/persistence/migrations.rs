@@ -1,14 +1,24 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 pub fn run_migrations(db: &mut Connection) -> Result<()> {
-    let current_version: i32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let current_version: i32 = get_current_version(db)?;
 
     if current_version < 1 {
         migrate_to_v1(db)?;
     }
 
     Ok(())
+}
+
+fn get_current_version(db: &Connection) -> Result<i32> {
+    match db.prepare("SELECT MAX(version) FROM migrations") {
+        Ok(mut stmt) => {
+            let result: Option<i32> = stmt.query_row([], |row| row.get(0))?;
+            Ok(result.unwrap_or(0))
+        }
+        Err(_) => Ok(0),
+    }
 }
 
 fn migrate_to_v1(db: &mut Connection) -> Result<()> {
@@ -44,13 +54,23 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
             applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         );
 
+        CREATE TABLE IF NOT EXISTS prefs (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_prefs_updated ON prefs(updated_at DESC);
         "#,
     )?;
 
-    tx.pragma_update(None, "user_version", 1)?;
+    tx.execute(
+        "INSERT INTO migrations (version, applied_at) VALUES (1, strftime('%s', 'now'))",
+        params![],
+    )?;
 
     tx.commit()?;
     Ok(())

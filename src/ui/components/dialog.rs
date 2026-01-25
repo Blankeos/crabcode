@@ -23,6 +23,7 @@ pub struct DialogItem {
     pub description: String,
     pub connected: bool,
     pub tip: Option<String>,
+    pub provider_id: String,
 }
 
 impl Clone for DialogItem {
@@ -34,6 +35,7 @@ impl Clone for DialogItem {
             description: self.description.clone(),
             connected: self.connected,
             tip: self.tip.clone(),
+            provider_id: self.provider_id.clone(),
         }
     }
 }
@@ -129,7 +131,7 @@ impl Dialog {
                 .push(item.clone());
         }
 
-        const SPECIAL_GROUPS: &[&str] = &["Popular", "Other"];
+        const SPECIAL_GROUPS: &[&str] = &["Favorite", "Recent", "Popular", "Other"];
         let mut special: Vec<String> = Vec::new();
         let mut regular: Vec<String> = Vec::new();
 
@@ -833,6 +835,7 @@ mod tests {
                 description: "Description for Model A".to_string(),
                 connected: false,
                 tip: None,
+                provider_id: "provider1".to_string(),
             },
             DialogItem {
                 id: "2".to_string(),
@@ -841,6 +844,7 @@ mod tests {
                 description: "Description for Model B".to_string(),
                 connected: false,
                 tip: None,
+                provider_id: "provider1".to_string(),
             },
             DialogItem {
                 id: "3".to_string(),
@@ -849,6 +853,7 @@ mod tests {
                 description: "Description for Model C".to_string(),
                 connected: false,
                 tip: None,
+                provider_id: "provider2".to_string(),
             },
         ]
     }
