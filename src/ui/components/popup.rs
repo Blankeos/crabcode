@@ -98,7 +98,7 @@ impl Popup {
             return;
         }
 
-        let popup_width = area.width.min(60);
+        let popup_width = area.width;
         let popup_height = (self.suggestions.len() as u16).min(MAX_VISIBLE_ITEMS as u16) + 2;
 
         let popup_area = Rect {
@@ -110,25 +110,57 @@ impl Popup {
 
         frame.render_widget(Clear, popup_area);
 
+        let max_name_len = self
+            .suggestions
+            .iter()
+            .map(|s| s.name.len())
+            .max()
+            .unwrap_or(0);
+
+        use ratatui::text::Span;
+
         let items: Vec<ListItem> = self
             .suggestions
             .iter()
             .enumerate()
             .map(|(i, suggestion)| {
-                let style = if i == self.selected_index {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Rgb(255, 200, 100))
-                        .add_modifier(Modifier::BOLD)
+                let (bg_style, name_fg, desc_fg) = if i == self.selected_index {
+                    (Color::Rgb(255, 200, 100), Color::Black, Color::Black)
                 } else {
-                    Style::default().fg(Color::White)
+                    (Color::Reset, Color::White, Color::Rgb(150, 150, 150))
                 };
-                let text = if !suggestion.description.is_empty() {
-                    format!("{} - {}", suggestion.name, suggestion.description)
+
+                let name_style = Style::default()
+                    .fg(name_fg)
+                    .bg(bg_style)
+                    .add_modifier(Modifier::BOLD);
+                let desc_style = Style::default().fg(desc_fg).bg(bg_style);
+                let padding_style = Style::default().bg(bg_style);
+
+                let line = if !suggestion.description.is_empty() {
+                    let mid_padding = " ".repeat(max_name_len + 3 - suggestion.name.len());
+                    let content_len = suggestion.name.len()
+                        + suggestion.description.len()
+                        + mid_padding.len()
+                        + 2;
+                    let end_padding =
+                        " ".repeat(popup_width.saturating_sub(content_len as u16).max(0) as usize);
+                    Line::from(vec![
+                        Span::styled(format!("/{}", suggestion.name), name_style),
+                        Span::styled(mid_padding, padding_style),
+                        Span::styled(suggestion.description.clone(), desc_style),
+                        Span::styled(end_padding, padding_style),
+                    ])
                 } else {
-                    suggestion.name.clone()
+                    let content_len = suggestion.name.len() + 1;
+                    let end_padding =
+                        " ".repeat(popup_width.saturating_sub(content_len as u16).max(0) as usize);
+                    Line::from(vec![
+                        Span::styled(format!("/{}", suggestion.name), name_style),
+                        Span::styled(end_padding, padding_style),
+                    ])
                 };
-                ListItem::new(Line::styled(text, style))
+                ListItem::new(line)
             })
             .collect();
 
