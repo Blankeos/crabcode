@@ -219,14 +219,19 @@ impl Dialog {
     }
 
     fn update_scrollbar(&mut self) {
-        let mut total_lines = 0;
-        for (_, items) in &self.filtered_items {
-            if !items.is_empty() {
-                total_lines += items.len() + 1;
-            }
-        }
-        self.scrollbar_state = self.scrollbar_state.content_length(total_lines);
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
+        let total_lines = self.get_content_line_count();
+        let visible_rows = self.get_visible_row_count().max(1);
+        let max_offset = total_lines.saturating_sub(visible_rows);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+
+        let scrollbar_content_length = max_offset.saturating_add(1).max(1);
+        let scrollbar_position = self
+            .scroll_offset
+            .min(scrollbar_content_length.saturating_sub(1));
+        self.scrollbar_state = self
+            .scrollbar_state
+            .content_length(scrollbar_content_length);
+        self.scrollbar_state = self.scrollbar_state.position(scrollbar_position);
     }
 
     pub fn next(&mut self) {
@@ -272,11 +277,13 @@ impl Dialog {
     }
 
     fn get_content_line_count(&self) -> usize {
+        let flat_items = self.get_flat_items();
+        if flat_items.is_empty() {
+            return 1;
+        }
         let mut count = 0;
         for (_, items) in &self.filtered_items {
-            if !items.is_empty() {
-                count += items.len() + 1;
-            }
+            count += items.len() + 1;
         }
         count
     }
@@ -477,7 +484,10 @@ impl Dialog {
     fn get_item_index_from_y(&self, row: u16, list_area: Rect) -> Option<usize> {
         let relative_y = row.saturating_sub(list_area.y) as usize;
         let content_line = self.scroll_offset + relative_y;
+        self.get_item_index_from_line(content_line)
+    }
 
+    fn get_item_index_from_line(&self, line: usize) -> Option<usize> {
         let mut current_line = 0;
         let mut item_index = 0;
 
@@ -490,8 +500,8 @@ impl Dialog {
             let items_start_line = group_header_line + 1;
             let items_end_line = items_start_line + items.len();
 
-            if content_line >= items_start_line && content_line < items_end_line {
-                return Some(item_index + (content_line - items_start_line));
+            if line >= items_start_line && line < items_end_line {
+                return Some(item_index + (line - items_start_line));
             }
 
             current_line = items_end_line;
@@ -509,22 +519,21 @@ impl Dialog {
 
         let visible_rows = scrollbar_area.height as usize;
         let relative_y = row.saturating_sub(scrollbar_area.y) as usize;
+        let max_offset = total_lines.saturating_sub(visible_rows);
 
-        let new_offset = if visible_rows > 0 {
-            (relative_y * total_lines) / visible_rows
+        let new_offset = if max_offset > 0 {
+            (relative_y * max_offset) / visible_rows
         } else {
             0
         };
-        self.scroll_offset = new_offset.saturating_sub(visible_rows / 3);
-        let max_offset = total_lines.saturating_sub(visible_rows);
-        self.scroll_offset = self.scroll_offset.min(max_offset);
+        self.scroll_offset = new_offset.min(max_offset);
 
         let flat_items = self.get_flat_items();
         if !flat_items.is_empty() && visible_rows > 0 {
-            self.selected_index = flat_items
-                .len()
-                .saturating_sub(1)
-                .min(self.scroll_offset + visible_rows / 2);
+            let item_at_offset = self.get_item_index_from_line(self.scroll_offset);
+            if let Some(idx) = item_at_offset {
+                self.selected_index = idx;
+            }
         }
 
         self.update_scrollbar();
@@ -658,21 +667,20 @@ impl Dialog {
             }
         }
 
-        let content_paragraph = Paragraph::new(content_lines)
-            .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset as u16, 0));
+        self.visible_row_count = chunks[3].height as usize;
+        self.update_scrollbar();
+
+        let content_paragraph =
+            Paragraph::new(content_lines).scroll((self.scroll_offset as u16, 0));
         frame.render_widget(content_paragraph, chunks[3]);
 
-        self.visible_row_count = chunks[3].height as usize;
-        let total_content_length = self.get_content_line_count();
-        self.scrollbar_state = self.scrollbar_state.content_length(total_content_length);
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
-
+        let scrollbar_area = chunks[3];
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓")),
-            chunks[3].inner(ratatui::layout::Margin::new(0, 0)),
+                .end_symbol(Some("↓"))
+                .track_symbol(Some(" ")),
+            scrollbar_area,
             &mut self.scrollbar_state,
         );
 

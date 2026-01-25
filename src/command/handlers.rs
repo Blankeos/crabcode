@@ -70,7 +70,12 @@ pub fn handle_connect<'a>(
 
             let discovery = match crate::model::discovery::Discovery::new() {
                 Ok(d) => d,
-                Err(e) => return CommandResult::Error(format!("Failed to initialize provider discovery: {}", e)),
+                Err(e) => {
+                    return CommandResult::Error(format!(
+                        "Failed to initialize provider discovery: {}",
+                        e
+                    ))
+                }
             };
 
             let providers_map = match discovery.fetch_providers().await {
@@ -78,7 +83,13 @@ pub fn handle_connect<'a>(
                 Err(e) => return CommandResult::Error(format!("Failed to fetch providers: {}", e)),
             };
 
-            const POPULAR_PROVIDERS: &[&str] = &["opencode", "anthropic", "openai", "google"];
+            const POPULAR_PROVIDERS: &[&str] = &[
+                "opencode",
+                "anthropic",
+                "openai",
+                "google",
+                "zai-coding-plan",
+            ];
 
             let mut items: Vec<crate::command::registry::DialogItem> = providers_map
                 .into_iter()
@@ -164,7 +175,9 @@ pub fn handle_models<'a>(
         };
 
         if connected_providers.is_empty() {
-            return CommandResult::Error("No models available. Please connect a provider first using /connect".to_string());
+            return CommandResult::Error(
+                "No models available. Please connect a provider first using /connect".to_string(),
+            );
         }
 
         let discovery = Discovery::new();
@@ -172,7 +185,7 @@ pub fn handle_models<'a>(
         match discovery {
             Ok(d) => match d.fetch_models().await {
                 Ok(models) => {
-                    let items: Vec<DialogItem> = models
+                    let mut items: Vec<DialogItem> = models
                         .into_iter()
                         .filter(|model| {
                             connected_providers.contains_key(&model.provider_id)
@@ -195,6 +208,8 @@ pub fn handle_models<'a>(
                             connected: false,
                         })
                         .collect();
+
+                    items.sort_by(|a, b| (&a.group, &a.name).cmp(&(&b.group, &b.name)));
 
                     if items.is_empty() {
                         if let Some(filter) = provider_filter {
@@ -358,7 +373,10 @@ mod tests {
                 assert_eq!(title, "Connect a provider");
                 assert!(!items.is_empty());
                 if items.len() >= 4 {
-                    assert!(items.iter().any(|item| item.id == "anthropic" || item.id == "openai" || item.id == "google" || item.id == "opencode"));
+                    assert!(items.iter().any(|item| item.id == "anthropic"
+                        || item.id == "openai"
+                        || item.id == "google"
+                        || item.id == "opencode"));
                 }
             }
             _ => panic!("Expected ShowDialog"),
