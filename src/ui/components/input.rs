@@ -24,7 +24,7 @@ impl Input {
         self
     }
 
-    pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
+    pub fn render(&self, frame: &mut ratatui::Frame, area: Rect, agent: &str, model: &str) {
         let border = Block::bordered()
             .borders(ratatui::widgets::Borders::LEFT)
             .border_style(
@@ -51,12 +51,12 @@ impl Input {
 
         let info_text = ratatui::text::Line::from(vec![
             ratatui::text::Span::styled(
-                "Plan",
+                agent.to_string(),
                 ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(255, 165, 0)),
             ),
             ratatui::text::Span::raw("  "),
             ratatui::text::Span::styled(
-                "GPT-4",
+                model.to_string(),
                 ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(255, 200, 100)),
             ),
             ratatui::text::Span::raw("  "),
@@ -113,7 +113,7 @@ impl Input {
                 }
                 true
             }
-            KeyCode::Tab => true,
+            KeyCode::Tab => false,
             KeyCode::Esc => false,
             _ => {
                 self.textarea.input(input);

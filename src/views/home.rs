@@ -89,7 +89,7 @@ pub fn render_home(
     let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
 
     f.render_widget(logo, logo_chunks[1]);
-    input.render(f, home_chunks[1]);
+    input.render(f, home_chunks[1], &agent, &model);
 
     let help_text = vec![
         Span::styled("/", Style::default().fg(colors.info)),

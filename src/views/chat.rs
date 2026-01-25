@@ -58,7 +58,7 @@ pub fn render_chat(
         .split(main_chunks[0]);
 
     chat_state.chat.render(f, above_status_chunks[0]);
-    input.render(f, above_status_chunks[1]);
+    input.render(f, above_status_chunks[1], &agent, &model);
 
     let help_text = vec![
         Span::styled("/", Style::default().fg(colors.info)),
