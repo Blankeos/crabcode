@@ -115,29 +115,39 @@ impl Dialog {
         self.grouped_items.clear();
         self.groups.clear();
 
+        let mut seen_groups = std::collections::HashSet::new();
+        let mut groups_in_order: Vec<String> = Vec::new();
+
         for item in &self.items {
+            let group = item.group.clone();
+            if seen_groups.insert(group.clone()) {
+                groups_in_order.push(group.clone());
+            }
             self.grouped_items
-                .entry(item.group.clone())
+                .entry(group)
                 .or_default()
                 .push(item.clone());
         }
 
-        self.groups = {
-            let mut groups: Vec<_> = self.grouped_items.keys().cloned().collect();
-            groups.sort_by(|a, b| {
-                const SPECIAL_GROUPS: &[&str] = &["Popular", "Other"];
-                let a_special = SPECIAL_GROUPS.iter().position(|&g| g == a);
-                let b_special = SPECIAL_GROUPS.iter().position(|&g| g == b);
+        const SPECIAL_GROUPS: &[&str] = &["Popular", "Other"];
+        let mut special: Vec<String> = Vec::new();
+        let mut regular: Vec<String> = Vec::new();
 
-                match (a_special, b_special) {
-                    (Some(ai), Some(bi)) => ai.cmp(&bi),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => a.cmp(b),
-                }
-            });
-            groups
-        };
+        for group in groups_in_order {
+            if SPECIAL_GROUPS.contains(&group.as_str()) {
+                special.push(group);
+            } else {
+                regular.push(group);
+            }
+        }
+
+        special.sort_by(|a, b| {
+            let ai = SPECIAL_GROUPS.iter().position(|&g| g == a).unwrap();
+            let bi = SPECIAL_GROUPS.iter().position(|&g| g == b).unwrap();
+            ai.cmp(&bi)
+        });
+
+        self.groups = special.into_iter().chain(regular.into_iter()).collect();
     }
 
     pub fn show(&mut self) {

@@ -248,7 +248,7 @@ impl App {
                     return;
                 }
                 if !self.connect_dialog_state.dialog.is_visible() {
-                    if let Some(selected_item) = crate::views::connect_dialog::get_pending_selection(
+                    if let Some(selected_item) = get_pending_selection(
                         &mut self.connect_dialog_state,
                     ) {
                         self.api_key_input.show(&selected_item.id);
@@ -576,13 +576,14 @@ impl App {
     fn refresh_sessions_dialog(&mut self) {
         use chrono::{DateTime, Local, Utc};
 
-        let sessions = self.session_manager.list_sessions();
+        let mut sessions = self.session_manager.list_sessions();
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
         let items: Vec<crate::ui::components::dialog::DialogItem> = sessions
             .into_iter()
             .map(|session| {
                 let date_group = {
-                    let datetime: DateTime<Local> = session.created_at.into();
+                    let datetime: DateTime<Local> = session.updated_at.into();
                     let now: DateTime<Local> = Utc::now().into();
                     let duration = now.signed_duration_since(datetime);
 
@@ -594,7 +595,7 @@ impl App {
                 };
 
                 let time = {
-                    let datetime: DateTime<Local> = session.created_at.into();
+                    let datetime: DateTime<Local> = session.updated_at.into();
                     datetime.format("%-I:%M %p").to_string()
                 };
 

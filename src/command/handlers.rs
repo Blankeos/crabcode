@@ -16,13 +16,14 @@ pub fn handle_sessions<'a>(
     sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        let sessions = sm.list_sessions();
+        let mut sessions = sm.list_sessions();
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
         let items: Vec<crate::command::registry::DialogItem> = sessions
             .into_iter()
             .map(|session| {
-                let date_group = format_date_group(session.created_at);
-                let time = format_time(session.created_at);
+                let date_group = format_date_group(session.updated_at);
+                let time = format_time(session.updated_at);
 
                 crate::command::registry::DialogItem {
                     id: session.id.clone(),

@@ -100,6 +100,7 @@ impl Session {
 
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message);
+        self.updated_at = SystemTime::now();
     }
 
     pub fn add_user_message(&mut self, content: impl Into<String>) {
