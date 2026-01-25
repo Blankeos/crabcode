@@ -2,7 +2,7 @@
 pub struct ParsedCommand<'a> {
     pub name: String,
     pub args: Vec<String>,
-    pub raw: String,c
+    pub raw: String,
     pub prefs_dao: Option<&'a crate::persistence::PrefsDAO>,
     pub active_model_id: Option<String>,
 }

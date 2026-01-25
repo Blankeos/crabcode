@@ -660,49 +660,113 @@ impl Dialog {
 
                 for item in items {
                     let is_selected = item_index == self.selected_index;
-                    let style = if is_selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Rgb(255, 200, 100))
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
+                    let is_special_group = group == "Favorite" || group == "Recent";
+                    let has_description = is_special_group && !item.description.is_empty();
 
-                    let line = if let Some(tip) = &item.tip {
-                        let padding_len = (list_area_width as usize)
-                            .saturating_sub(item.name.len() + tip.len() + 4);
-                        Line::from(vec![
-                            Span::raw(format!("  {}", item.name)),
-                            Span::raw(" ".repeat(padding_len)),
-                            Span::styled(
-                                tip,
-                                Style::default()
-                                    .fg(Color::Rgb(150, 120, 100))
-                                    .add_modifier(Modifier::DIM),
-                            ),
-                        ])
+                    let mut spans: Vec<Span> = if let Some(tip) = &item.tip {
+                        let base_len = if has_description {
+                            item.name.len() + item.description.len() + 4
+                        } else {
+                            item.name.len() + 2
+                        };
+                        let padding_len =
+                            (list_area_width as usize).saturating_sub(base_len + tip.len() + 2);
+
+                        if has_description {
+                            vec![
+                                Span::raw(format!("  {}  ", item.name)),
+                                Span::styled(
+                                    item.description.clone(),
+                                    Style::default()
+                                        .fg(Color::Rgb(150, 150, 150))
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                                Span::raw(" ".repeat(padding_len)),
+                                Span::styled(
+                                    tip,
+                                    Style::default()
+                                        .fg(Color::Rgb(150, 120, 100))
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                            ]
+                        } else {
+                            vec![
+                                Span::raw(format!("  {}", item.name)),
+                                Span::raw(" ".repeat(padding_len)),
+                                Span::styled(
+                                    tip,
+                                    Style::default()
+                                        .fg(Color::Rgb(150, 120, 100))
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                            ]
+                        }
                     } else if item.connected {
+                        let base_len = if has_description {
+                            item.name.len() + item.description.len() + 4
+                        } else {
+                            item.name.len() + 2
+                        };
                         let status_text = "🟢 Connected";
                         let padding_len = (list_area_width as usize)
-                            .saturating_sub(item.name.len() + status_text.len() + 2);
-                        Line::from(vec![
-                            Span::raw(format!("  {}", item.name)),
-                            Span::raw(" ".repeat(padding_len)),
+                            .saturating_sub(base_len + status_text.len() + 2);
+
+                        if has_description {
+                            vec![
+                                Span::raw(format!("  {}  ", item.name)),
+                                Span::styled(
+                                    item.description.clone(),
+                                    Style::default()
+                                        .fg(Color::Rgb(150, 150, 150))
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                                Span::raw(" ".repeat(padding_len)),
+                                Span::styled(
+                                    status_text.to_string(),
+                                    Style::default().fg(Color::Rgb(100, 255, 100)),
+                                ),
+                            ]
+                        } else {
+                            vec![
+                                Span::raw(format!("  {}", item.name)),
+                                Span::raw(" ".repeat(padding_len)),
+                                Span::styled(
+                                    status_text.to_string(),
+                                    Style::default().fg(Color::Rgb(100, 255, 100)),
+                                ),
+                            ]
+                        }
+                    } else if has_description {
+                        let text_len = item.name.len() + item.description.len() + 4;
+                        let padding_len = (list_area_width as usize).saturating_sub(text_len);
+                        vec![
+                            Span::raw(format!("  {}  ", item.name)),
                             Span::styled(
-                                status_text.to_string(),
-                                Style::default().fg(Color::Rgb(100, 255, 100)),
+                                item.description.clone(),
+                                Style::default()
+                                    .fg(Color::Rgb(150, 150, 150))
+                                    .add_modifier(Modifier::DIM),
                             ),
-                        ])
+                            Span::raw(" ".repeat(padding_len)),
+                        ]
                     } else {
                         let text_len = item.name.len() + 2;
                         let padding_len = (list_area_width as usize).saturating_sub(text_len);
-                        Line::from(vec![
+                        vec![
                             Span::raw(format!("  {}", item.name)),
                             Span::raw(" ".repeat(padding_len)),
-                        ])
+                        ]
                     };
 
-                    content_lines.push(line.style(style));
+                    if is_selected {
+                        for span in &mut spans {
+                            let mut style = span.style.clone();
+                            style = style.fg(Color::Black).bg(Color::Rgb(255, 200, 100));
+                            span.style = style;
+                        }
+                    }
+
+                    content_lines.push(Line::from(spans));
                     item_index += 1;
                 }
             }

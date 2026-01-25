@@ -274,15 +274,21 @@ pub fn handle_models<'a>(
                             None
                         };
 
+                        let description = if group == "Favorite" || group == "Recent" {
+                            model.provider_name.clone()
+                        } else {
+                            format!(
+                                "{} | {}",
+                                model.provider_name,
+                                model.capabilities.join(", ")
+                            )
+                        };
+
                         items.push(DialogItem {
                             id: model.id.clone(),
                             name: model.name.clone(),
                             group: group.to_string(),
-                            description: format!(
-                                "{} | {}",
-                                model.provider_name,
-                                model.capabilities.join(", ")
-                            ),
+                            description,
                             connected: false,
                             tip,
                             provider_id: model.provider_id.clone(),
