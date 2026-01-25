@@ -1,6 +1,7 @@
 use crate::command::parser::ParsedCommand;
 use crate::command::registry::{Command, CommandResult, Registry};
 use crate::session::manager::SessionManager;
+use chrono::{DateTime, Local, Utc};
 use std::pin::Pin;
 
 pub fn handle_exit<'a>(
@@ -17,35 +18,52 @@ pub fn handle_sessions<'a>(
     Box::pin(async move {
         let sessions = sm.list_sessions();
 
-        if sessions.is_empty() {
-            CommandResult::Success("No active sessions".to_string())
-        } else {
-            let mut output = String::from("Active sessions:\n");
-            for session in sessions {
-                output.push_str(&format!(
-                    "  - {} ({} messages)\n",
-                    session.id, session.message_count
-                ));
-            }
-            CommandResult::Success(output)
+        let items: Vec<crate::command::registry::DialogItem> = sessions
+            .into_iter()
+            .map(|session| {
+                let date_group = format_date_group(session.created_at);
+                let time = format_time(session.created_at);
+
+                crate::command::registry::DialogItem {
+                    id: session.id.clone(),
+                    name: session.title.clone(),
+                    group: date_group,
+                    description: String::new(),
+                    connected: false,
+                    tip: Some(time),
+                }
+            })
+            .collect();
+
+        CommandResult::ShowDialog {
+            title: "Sessions".to_string(),
+            items,
         }
     })
 }
 
-pub fn handle_new<'a>(
-    parsed: &'a ParsedCommand,
-    sm: &'a mut SessionManager,
-) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
-    let name = if parsed.args.is_empty() {
-        None
-    } else {
-        Some(parsed.args[0].clone())
-    };
+fn format_date_group(created_at: std::time::SystemTime) -> String {
+    let datetime: DateTime<Local> = created_at.into();
+    let now: DateTime<Local> = Utc::now().into();
+    let duration = now.signed_duration_since(datetime);
 
-    Box::pin(async move {
-        let session_id = sm.create_session(name);
-        CommandResult::Success(format!("Created new session: {}", session_id))
-    })
+    if duration.num_days() == 0 {
+        "Today".to_string()
+    } else {
+        datetime.format("%a %b %d %Y").to_string()
+    }
+}
+
+fn format_time(created_at: std::time::SystemTime) -> String {
+    let datetime: DateTime<Local> = created_at.into();
+    datetime.format("%-I:%M %p").to_string()
+}
+
+pub fn handle_new<'a>(
+    _parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    Box::pin(async move { CommandResult::Success("Switched to home".to_string()) })
 }
 
 pub fn handle_connect<'a>(
@@ -105,6 +123,7 @@ pub fn handle_connect<'a>(
                         group: group.to_string(),
                         description: id.clone(),
                         connected: connected_providers.contains_key(&id),
+                        tip: None,
                     }
                 })
                 .collect();
@@ -206,6 +225,7 @@ pub fn handle_models<'a>(
                                 model.capabilities.join(", ")
                             ),
                             connected: false,
+                            tip: None,
                         })
                         .collect();
 
@@ -249,7 +269,13 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "new".to_string(),
-        description: "Create new session".to_string(),
+        description: "Switch to home screen".to_string(),
+        handler: handle_new,
+    });
+
+    registry.register(Command {
+        name: "home".to_string(),
+        description: "Switch to home screen".to_string(),
         handler: handle_new,
     });
 
@@ -297,10 +323,11 @@ mod tests {
         let mut session_manager = SessionManager::new();
         let result = handle_sessions(&parsed, &mut session_manager).await;
         match result {
-            CommandResult::Success(msg) => {
-                assert!(msg.contains("No active sessions"));
+            CommandResult::ShowDialog { title, items } => {
+                assert_eq!(title, "Sessions");
+                assert!(items.is_empty());
             }
-            _ => panic!("Expected Success"),
+            _ => panic!("Expected ShowDialog"),
         }
     }
 
@@ -316,12 +343,13 @@ mod tests {
         };
         let result = handle_sessions(&parsed, &mut session_manager).await;
         match result {
-            CommandResult::Success(msg) => {
-                assert!(msg.contains("Active sessions:"));
-                assert!(msg.contains("session-1"));
-                assert!(msg.contains("session-2"));
+            CommandResult::ShowDialog { title, items } => {
+                assert_eq!(title, "Sessions");
+                assert_eq!(items.len(), 2);
+                assert!(items.iter().any(|item| item.name == "session-1"), "Items: {:?}", items.iter().map(|i| &i.name).collect::<Vec<_>>());
+                assert!(items.iter().any(|item| item.name == "session-2"));
             }
-            _ => panic!("Expected Success"),
+            _ => panic!("Expected ShowDialog"),
         }
     }
 
@@ -335,7 +363,7 @@ mod tests {
         let result = handle_new(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
-                assert!(msg.contains("Created new session: session-1"));
+                assert!(msg.contains("Switched to home"));
             }
             _ => panic!("Expected Success"),
         }
@@ -351,7 +379,23 @@ mod tests {
         let result = handle_new(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
-                assert!(msg.contains("Created new session: my-session"));
+                assert!(msg.contains("Switched to home"));
+            }
+            _ => panic!("Expected Success"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_home() {
+        let parsed = ParsedCommand {
+            name: "home".to_string(),
+            args: vec![],
+        };
+        let mut session_manager = SessionManager::new();
+        let result = handle_new(&parsed, &mut session_manager).await;
+        match result {
+            CommandResult::Success(msg) => {
+                assert!(msg.contains("Switched to home"));
             }
             _ => panic!("Expected Success"),
         }
@@ -518,12 +562,13 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
         assert!(names.contains(&"connect".to_string()));
         assert!(names.contains(&"models".to_string()));
+        assert!(names.contains(&"home".to_string()));
     }
 
     #[tokio::test]

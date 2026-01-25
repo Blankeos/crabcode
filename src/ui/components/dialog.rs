@@ -22,6 +22,7 @@ pub struct DialogItem {
     pub group: String,
     pub description: String,
     pub connected: bool,
+    pub tip: Option<String>,
 }
 
 impl Clone for DialogItem {
@@ -32,8 +33,15 @@ impl Clone for DialogItem {
             group: self.group.clone(),
             description: self.description.clone(),
             connected: self.connected,
+            tip: self.tip.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct DialogAction {
+    pub label: String,
+    pub key: String,
 }
 
 #[derive(Debug)]
@@ -53,6 +61,7 @@ pub struct Dialog {
     pub scrollbar_state: ScrollbarState,
     pub is_dragging_scrollbar: bool,
     pub visible_row_count: usize,
+    pub actions: Vec<DialogAction>,
     matcher: Matcher,
 }
 
@@ -77,6 +86,7 @@ impl Dialog {
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
             visible_row_count: 0,
+            actions: Vec::new(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -85,6 +95,11 @@ impl Dialog {
         let mut dialog = Self::new(title);
         dialog.set_items(items);
         dialog
+    }
+
+    pub fn with_actions(mut self, actions: Vec<DialogAction>) -> Self {
+        self.actions = actions;
+        self
     }
 
     pub fn set_items(&mut self, items: Vec<DialogItem>) {
@@ -610,6 +625,7 @@ impl Dialog {
         let mut content_lines = Vec::new();
         let flat_items = self.get_flat_items();
         let list_area_width = chunks[3].width;
+        let filtered_items = self.filtered_items.clone();
 
         if flat_items.is_empty() {
             content_lines.push(Line::from(vec![Span::styled(
@@ -619,7 +635,7 @@ impl Dialog {
         } else {
             let mut item_index = 0;
 
-            for (group, items) in &self.filtered_items {
+            for (group, items) in &filtered_items {
                 if items.is_empty() {
                     continue;
                 }
@@ -640,7 +656,20 @@ impl Dialog {
                         Style::default().fg(Color::White)
                     };
 
-                    let line = if item.connected {
+                    let line = if let Some(tip) = &item.tip {
+                        let padding_len = (list_area_width as usize)
+                            .saturating_sub(item.name.len() + tip.len() + 4);
+                        Line::from(vec![
+                            Span::raw(format!("  {}", item.name)),
+                            Span::raw(" ".repeat(padding_len)),
+                            Span::styled(
+                                tip,
+                                Style::default()
+                                    .fg(Color::Rgb(150, 120, 100))
+                                    .add_modifier(Modifier::DIM),
+                            ),
+                        ])
+                    } else if item.connected {
                         let status_text = "🟢 Connected";
                         let padding_len = (list_area_width as usize)
                             .saturating_sub(item.name.len() + status_text.len() + 2);
@@ -691,35 +720,59 @@ impl Dialog {
             &mut self.scrollbar_state,
         );
 
-        let footer_line = Line::from(vec![
-            Span::styled(
-                "Connect provider",
+        let mut footer_spans = vec![];
+        for (i, action) in self.actions.iter().enumerate() {
+            if i > 0 {
+                footer_spans.push(Span::raw("  "));
+            }
+            footer_spans.push(Span::styled(
+                &action.label,
                 Style::default()
                     .fg(Color::Rgb(255, 180, 120))
                     .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                "ctrl+a",
+            ));
+            footer_spans.push(Span::raw("  "));
+            footer_spans.push(Span::styled(
+                &action.key,
                 Style::default()
                     .fg(Color::Rgb(150, 120, 100))
                     .add_modifier(Modifier::DIM),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                "Favorite",
-                Style::default()
-                    .fg(Color::Rgb(255, 180, 120))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                "ctrl+f",
-                Style::default()
-                    .fg(Color::Rgb(150, 120, 100))
-                    .add_modifier(Modifier::DIM),
-            ),
-        ]);
+            ));
+        }
+
+        let footer_line = if footer_spans.is_empty() {
+            Line::from(vec![
+                Span::styled(
+                    "Connect provider",
+                    Style::default()
+                        .fg(Color::Rgb(255, 180, 120))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "ctrl+a",
+                    Style::default()
+                        .fg(Color::Rgb(150, 120, 100))
+                        .add_modifier(Modifier::DIM),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "Favorite",
+                    Style::default()
+                        .fg(Color::Rgb(255, 180, 120))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "ctrl+f",
+                    Style::default()
+                        .fg(Color::Rgb(150, 120, 100))
+                        .add_modifier(Modifier::DIM),
+                ),
+            ])
+        } else {
+            Line::from(footer_spans)
+        };
 
         let footer_paragraph =
             Paragraph::new(footer_line).alignment(ratatui::layout::Alignment::Left);
@@ -751,6 +804,7 @@ impl Clone for Dialog {
             scrollbar_state: self.scrollbar_state,
             is_dragging_scrollbar: self.is_dragging_scrollbar,
             visible_row_count: self.visible_row_count,
+            actions: self.actions.clone(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -768,6 +822,7 @@ mod tests {
                 group: "Provider1".to_string(),
                 description: "Description for Model A".to_string(),
                 connected: false,
+                tip: None,
             },
             DialogItem {
                 id: "2".to_string(),
@@ -775,6 +830,7 @@ mod tests {
                 group: "Provider1".to_string(),
                 description: "Description for Model B".to_string(),
                 connected: false,
+                tip: None,
             },
             DialogItem {
                 id: "3".to_string(),
@@ -782,6 +838,7 @@ mod tests {
                 group: "Provider2".to_string(),
                 description: "Description for Model C".to_string(),
                 connected: false,
+                tip: None,
             },
         ]
     }

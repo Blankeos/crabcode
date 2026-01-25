@@ -33,6 +33,7 @@ pub struct DialogItem {
     pub group: String,
     pub description: String,
     pub connected: bool,
+    pub tip: Option<String>,
 }
 
 pub struct Registry {
@@ -99,6 +100,17 @@ mod tests {
         _sm: &'a mut SessionManager,
     ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
         Box::pin(async { CommandResult::Error("error".to_string()) })
+    }
+
+    fn create_test_dialog_item(id: &str) -> DialogItem {
+        DialogItem {
+            id: id.to_string(),
+            name: "Test Item".to_string(),
+            group: "Test Group".to_string(),
+            description: "Test description".to_string(),
+            connected: false,
+            tip: None,
+        }
     }
 
     #[test]

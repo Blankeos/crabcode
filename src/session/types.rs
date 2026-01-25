@@ -60,14 +60,42 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Session {
+    pub id: String,
+    pub title: String,
+    pub created_at: SystemTime,
+    pub updated_at: SystemTime,
     pub messages: Vec<Message>,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Session {
     pub fn new() -> Self {
-        Self::default()
+        let now = SystemTime::now();
+        Self {
+            id: cuid2::create_id(),
+            title: "New Session".to_string(),
+            created_at: now,
+            updated_at: now,
+            messages: Vec::new(),
+        }
+    }
+
+    pub fn with_title(title: impl Into<String>) -> Self {
+        let now = SystemTime::now();
+        Self {
+            id: cuid2::create_id(),
+            title: title.into(),
+            created_at: now,
+            updated_at: now,
+            messages: Vec::new(),
+        }
     }
 
     pub fn add_message(&mut self, message: Message) {
