@@ -670,9 +670,16 @@ impl Dialog {
         self.visible_row_count = chunks[3].height as usize;
         self.update_scrollbar();
 
+        let list_content_area = Rect {
+            x: chunks[3].x,
+            y: chunks[3].y,
+            width: chunks[3].width.saturating_sub(2),
+            height: chunks[3].height,
+        };
+
         let content_paragraph =
             Paragraph::new(content_lines).scroll((self.scroll_offset as u16, 0));
-        frame.render_widget(content_paragraph, chunks[3]);
+        frame.render_widget(content_paragraph, list_content_area);
 
         let scrollbar_area = chunks[3];
         frame.render_stateful_widget(
