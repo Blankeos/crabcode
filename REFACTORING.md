@@ -1,6 +1,9 @@
+[DONE]
+
 # Refactoring Plan
 
 ## Overview
+
 Refactor crabcode to follow iconmate's architecture pattern with proper view isolation and minimal app state management.
 
 ## New Folder Structure
@@ -24,6 +27,7 @@ src/
 ## Key Changes
 
 ### 1. app.rs → Minimal Root App
+
 - Contains only `AppFocus` enum with two layers: BaseFocus and OverlayFocus
 - Contains only the App struct with focus state and references to view states
 - Each view has its own state struct (like iconmate's MainState, AddPopupState)
@@ -31,25 +35,30 @@ src/
 - **No UI rendering code** - only state and routing
 
 ### 2. views/ - Self-Contained Views
+
 Each view file contains:
+
 - View-specific state struct
 - `init_*()` methods (impl App) to initialize view state
 - `handlekeys_*()` methods (impl App) for key handling
 - `render_*()` function for UI rendering
 
 **View responsibilities:**
+
 - **home.rs**: Landing page with logo, input, status bar
 - **chat.rs**: Chat interface with messages, input, status bar
 - **models_dialog.rs**: Model selection dialog (overlay)
 - **suggestions_popup.rs**: Command suggestions popup (overlay)
 
 ### 3. main.rs → Event Loop (like iconmate's tui.rs)
+
 - Runs the event loop
 - Calls `terminal.draw(|f| render_ui(f, app))`
 - Delegates key events to `app.handlekeys()`
 - Handles terminal setup/teardown
 
 ### 4. Focus Management (Two-Layer System)
+
 ```rust
 enum BaseFocus {
     Home,
@@ -69,12 +78,14 @@ enum AppFocus {
 ```
 
 **Key Behavior:**
+
 - Base views render first
 - Overlay renders on top (with Clear widget)
 - When Overlay is active, Base `handlekeys` are NOT called
 - When Overlay is None, Base `handlekeys` ARE called
 
 ### 5. Naming Changes
+
 - `Dialog` → `ModelsDialog` (specific use case)
 - `Popup` → `SuggestionsPopup` (specific use case)
 

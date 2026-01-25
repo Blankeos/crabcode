@@ -1,28 +1,37 @@
+[DONE]
+
 # Connect Dialog Feature Plan
 
 ## Overview
+
 Implement a new `/connect` dialog that allows users to view and configure API providers. The UI will be similar to the existing models dialog with some key differences, including provider connection status indicators and an API key input overlay.
 
 ## UI Requirements
 
 ### Main Dialog - "Connect a provider"
+
 - **Title**: "Connect a provider" (instead of "Available Models")
 - **ESC behavior**: Same as models dialog - closes the dialog
 - **Search**: Same UX with fuzzy search using nucleo_matcher
 - **List layout**: Grouped scrollable list (exactly the same as models dialog)
 
 ### List Items with Connection Status
+
 Each provider item displays with a connection status indicator:
+
 ```
 <Provider Name>                🟢 Connected
 ```
+
 - Provider name left-aligned
 - Connection status right-aligned (only shown when connected)
 - Uses `justify_between` layout
 - Green circle emoji (🟢) + "Connected" text
 
 ### API Key Input Overlay
+
 When Enter is pressed on a provider, opens a separate overlay:
+
 ```
 API key                  esc
 
@@ -30,6 +39,7 @@ Paste here (this is a placeholder)
 
 enter submit
 ```
+
 - Title: "API key"
 - Control tip: "esc" (right-aligned)
 - Input area: "Paste here" placeholder text
@@ -40,11 +50,13 @@ enter submit
 The connect dialog integrates with the persistence layer defined in PERSISTENCE.md:
 
 ### auth.json Location
+
 - Path: `~/.local/share/crabcode/auth.json`
 - Current implementation discrepancy: `src/config.rs::ApiKeyConfig` uses `~/.config/crabcode/api_keys.json`
 - **Action needed**: Migrate to use correct auth.json location
 
 ### auth.json Format
+
 ```json
 {
   "opencode": {
@@ -65,17 +77,21 @@ The connect dialog integrates with the persistence layer defined in PERSISTENCE.
 ```
 
 ### Connection Status Detection
+
 A provider is considered "connected" if:
+
 - Provider ID exists as a key in auth.json (HashMap<String, AuthConfig>)
 - The AuthConfig is non-empty (has valid key/access token)
 
 ### Implementation Approach
 
 The persistence layer (`src/persistence/auth.rs`) is already implemented with:
+
 - `AuthConfig` enum (Api/OAuth variants)
 - `AuthDAO` with methods: `load()`, `save()`, `set_provider()`, `remove_provider()`, `get_api_key()`
 
 **Connection Status Check**:
+
 ```rust
 fn is_provider_connected(provider_id: &str) -> bool {
     let auth_dao = AuthDAO::new().ok()?;
@@ -87,9 +103,11 @@ fn is_provider_connected(provider_id: &str) -> bool {
 ## Component Reuse Analysis
 
 ### Dialog Component (src/ui/components/dialog.rs)
+
 **Current Usage**: Used by models_dialog.rs as the base dialog widget.
 
 **Highly Reusable Parts**:
+
 - Fuzzy search functionality with nucleo_matcher
 - Grouping and filtering logic
 - Scrollbar management
@@ -97,6 +115,7 @@ fn is_provider_connected(provider_id: &str) -> bool {
 - Mouse event handling (scroll, click selection)
 
 **Modifications Needed**:
+
 1. **Connection Status**: DialogItem needs to track whether provider is connected
    - Option: Add `connected: bool` field to DialogItem
    - Option: Create new `ProviderDialogItem` type
@@ -110,6 +129,7 @@ fn is_provider_connected(provider_id: &str) -> bool {
    - New: Show "Enter to configure" or similar action hint
 
 ### Connection Status Detection Logic
+
 ```rust
 // In connect dialog initialization, check auth.json via AuthDAO:
 fn is_provider_connected(provider_id: &str) -> bool {
@@ -124,7 +144,9 @@ fn is_provider_connected(provider_id: &str) -> bool {
 ```
 
 ### Recommendation: Create Generic Dialog with Configurable Item Renderer
+
 The Dialog component is already quite generic. The main difference is the item rendering logic. Consider:
+
 - **Option A**: Add `connected` field to existing DialogItem (simpler, less code)
 - **Option B**: Make item rendering configurable via a closure/trait (more flexible, more complex)
 - **Option C**: Create new ProviderDialog component based on Dialog (clean separation)
@@ -134,7 +156,9 @@ The Dialog component is already quite generic. The main difference is the item r
 ## Implementation Plan
 
 ### Phase 1: Update Dialog Component
+
 1. **Modify DialogItem** (src/ui/components/dialog.rs):
+
    ```rust
    pub struct DialogItem {
        pub id: String,
@@ -156,6 +180,7 @@ The Dialog component is already quite generic. The main difference is the item r
    - Need to return selected item info
 
 ### Phase 2: Create Connect Dialog View
+
 1. **New file**: src/views/connect_dialog.rs
    - Similar structure to src/views/models_dialog.rs
    - Wrap Dialog component with state management
@@ -171,6 +196,7 @@ The Dialog component is already quite generic. The main difference is the item r
    - Export `ConnectDialogState`
 
 ### Phase 3: Create API Key Input Overlay
+
 1. **New file**: src/ui/components/api_key_input.rs
    - Similar structure to Dialog but simpler
    - State:
@@ -193,6 +219,7 @@ The Dialog component is already quite generic. The main difference is the item r
    - Add `mod api_key_input;`
 
 ### Phase 4: Update Command Handler
+
 1. **Modify handle_connect** (src/command/handlers.rs:51-98):
    - Get list of available providers from model/discovery or hardcoded list
    - Load auth.json to check which providers are configured
@@ -205,7 +232,9 @@ The Dialog component is already quite generic. The main difference is the item r
    - For now, could start with hardcoded list of supported providers
 
 ### Phase 5: Update App State
+
 1. **Modify App struct** (src/app.rs:38-58):
+
    ```rust
    pub struct App {
        // ... existing fields
@@ -215,6 +244,7 @@ The Dialog component is already quite generic. The main difference is the item r
    ```
 
 2. **Update OverlayFocus enum** (src/app.rs:31-36):
+
    ```rust
    pub enum OverlayFocus {
        None,
@@ -244,22 +274,23 @@ The Dialog component is already quite generic. The main difference is the item r
 The persistence layer already exists in `src/persistence/auth.rs` with `AuthDAO` and `AuthConfig`. Integration steps:
 
 1. **Add import** to connect_dialog.rs:
-    ```rust
-    use crabcode::persistence::{AuthDAO, AuthConfig};
-    ```
+
+   ```rust
+   use crabcode::persistence::{AuthDAO, AuthConfig};
+   ```
 
 2. **Integration with connect dialog**:
-    - When API key input submits:
-      - Create `AuthDAO` instance
-      - Call `auth_dao.set_provider(provider_id, AuthConfig::Api { key: api_key })`
-      - Update connection status in dialog
-      - Close API key input and return to connect dialog
+   - When API key input submits:
+     - Create `AuthDAO` instance
+     - Call `auth_dao.set_provider(provider_id, AuthConfig::Api { key: api_key })`
+     - Update connection status in dialog
+     - Close API key input and return to connect dialog
 
 3. **Optional: Migration from old ApiKeyConfig**:
-    - If existing users have `~/.config/crabcode/api_keys.json`:
-      - On startup, check if old file exists
-      - Migrate keys to new `~/.local/share/crabcode/auth.json`
-      - Optionally backup old file
+   - If existing users have `~/.config/crabcode/api_keys.json`:
+     - On startup, check if old file exists
+     - Migrate keys to new `~/.local/share/crabcode/auth.json`
+     - Optionally backup old file
 
 ## File Structure
 
@@ -289,7 +320,9 @@ src/
 ## Key Design Decisions
 
 ### 1. Persistence Layer Integration
+
 Use existing `persistence::AuthDAO` and `AuthConfig` instead of creating new structures because:
+
 - Persistence layer already implemented per PERSISTENCE.md specification
 - Uses correct file location: `~/.local/share/crabcode/auth.json`
 - Supports both API key and OAuth authentication via AuthConfig enum
@@ -297,19 +330,25 @@ Use existing `persistence::AuthDAO` and `AuthConfig` instead of creating new str
 - Existing `AuthDAO` provides `set_provider()`, `get_api_key()`, `remove_provider()` methods
 
 ### 2. DialogItem Extension
+
 Add `connected: bool` to DialogItem instead of creating ProviderDialogItem because:
+
 - Minimal code changes
 - Keeps Dialog component generic and reusable
 - Other dialogs can simply set `connected: false` or ignore the field
 
 ### 3. API Key Input as Separate Component
+
 Create dedicated ApiKeyInput component instead of reusing Dialog because:
+
 - Simpler UI (no search, no grouping, single item)
 - Different behavior (input field vs list selection)
 - Cleaner separation of concerns
 
 ### 4. OverlayFocus Management
+
 Add separate variants for ConnectDialog and ApiKeyInput because:
+
 - They need to be mutually exclusive
 - Different key handling requirements
 - Clear focus management hierarchy
@@ -317,6 +356,7 @@ Add separate variants for ConnectDialog and ApiKeyInput because:
 ## Testing Considerations
 
 ### Unit Tests Needed
+
 1. **Dialog with connected status**:
    - Test item rendering shows status when connected
    - Test item rendering hides status when not connected
@@ -333,13 +373,14 @@ Add separate variants for ConnectDialog and ApiKeyInput because:
    - Test Esc cancels input
 
 4. **Integration**:
-    - Test command handler returns ShowDialog with correct items
-    - Test API key saving via AuthDAO::set_provider()
-    - Test connection status updates using AuthDAO::load()
+   - Test command handler returns ShowDialog with correct items
+   - Test API key saving via AuthDAO::set_provider()
+   - Test connection status updates using AuthDAO::load()
 
 ## Dependencies
 
 No new dependencies required. The feature uses existing dependencies from PERSISTENCE.md:
+
 - `rusqlite` (already present for SQLite)
 - `serde`, `serde_json` (already present for JSON handling)
 - `dirs` (already present for path resolution)
@@ -358,25 +399,25 @@ dirs = "5.0"
 ## Open Questions
 
 1. **Provider Source**: Where do we get the list of available providers?
-    - Option: From `providers.json` cache via ProviderDAO
-    - Option: Hardcoded list in handlers.rs
-    - Option: New provider registry
+   - Option: From `providers.json` cache via ProviderDAO
+   - Option: Hardcoded list in handlers.rs
+   - Option: New provider registry
 
 2. **Provider Groups**: Should providers be grouped like models are?
-    - If so, what are the groups? (e.g., "OpenAI-compatible", "Custom", etc.)
+   - If so, what are the groups? (e.g., "OpenAI-compatible", "Custom", etc.)
 
 3. **Existing /connect behavior**: The current /connect command accepts args like `/connect nano-gpt sk-key`
-    - Should this still work?
-    - Or should the dialog be the only interface?
+   - Should this still work?
+   - Or should the dialog be the only interface?
 
 4. **Error Handling**: What happens if API key validation fails?
-    - Show error in toast?
-    - Keep API key input open with error message?
+   - Show error in toast?
+   - Keep API key input open with error message?
 
 5. **Default Provider**: The auth.json format doesn't include a default_provider field
-    - Should we add it to auth.json as a top-level field?
-    - Or use a different mechanism (e.g., last used provider)?
-    - Or derive it from command/config?
+   - Should we add it to auth.json as a top-level field?
+   - Or use a different mechanism (e.g., last used provider)?
+   - Or derive it from command/config?
 
 ## Success Criteria
 

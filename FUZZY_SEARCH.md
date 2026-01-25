@@ -1,9 +1,13 @@
+[DONE]
+
 # Fuzzy Search Implementation Plan (Using Nucleo)
 
 ## Overview
+
 Implement high-performance fuzzy search using the `nucleo` crate from helix-editor. This will replace simple prefix matching with intelligent fuzzy matching similar to fzf, providing faster and more intuitive results.
 
 ## Library Details
+
 - **Repo**: https://github.com/helix-editor/nucleo
 - **Crate**: `nucleo` (high-level) or `nucleo-matcher` (low-level)
 - **Performance**: ~6x faster than skim, significantly faster than fzf for low-selectivity patterns
@@ -12,10 +16,12 @@ Implement high-performance fuzzy search using the `nucleo` crate from helix-edit
 ## Integration Points
 
 ### 1. File Autocomplete (`src/autocomplete/file.rs`)
+
 **Current behavior**: Uses simple `starts_with` prefix matching
 **Target behavior**: Use fuzzy matching with scores and rankings
 
 #### Implementation Approach A: Low-level (nucleo-matcher)
+
 ```rust
 use nucleo_matcher::{Matcher, Config, pattern::{Pattern, CaseMatching, Normalization}};
 
@@ -23,7 +29,7 @@ impl FileAuto {
     fn get_fuzzy_suggestions(&self, input: &str) -> Vec<(String, u16)> {
         let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
         let pattern = Pattern::parse(input, CaseMatching::Ignore, Normalization::Smart);
-        
+
         let entries = self.get_all_files();
         let mut scored: Vec<(String, u16)> = entries
             .iter()
@@ -33,7 +39,7 @@ impl FileAuto {
                     .map(|score| (name.clone(), score))
             })
             .collect();
-        
+
         scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
         scored
     }
@@ -41,6 +47,7 @@ impl FileAuto {
 ```
 
 #### Implementation Approach B: High-level (nucleo)
+
 ```rust
 use nucleo::{Nucleo, Config, pattern::CaseMatching, Utf32String};
 use std::sync::Arc;
@@ -60,21 +67,21 @@ impl FileAuto {
             1,    // columns
         );
         let injector = matcher.injector();
-        
+
         // Pre-populate with files (lazy loading recommended)
         Self { matcher, injector }
     }
-    
+
     pub fn get_suggestions(&self, input: &str) -> Vec<String> {
         self.matcher.pattern.reparse(
             input,
             CaseMatching::Ignore,
             nucleo::pattern::Normalization::Smart,
         );
-        
+
         self.matcher.tick(10);
         let snapshot = self.matcher.snapshot();
-        
+
         snapshot
             .matched_items(..)
             .take(20)
@@ -85,19 +92,24 @@ impl FileAuto {
 ```
 
 **Recommendation**: Start with **Approach A (nucleo-matcher)** because:
+
 - Simpler integration for autocomplete
 - Less boilerplate
 - Sufficient for synchronous use cases
 - Easier to test
 
 ### 2. Command Autocomplete (`src/autocomplete/command.rs`)
+
 Apply same fuzzy matching logic to command suggestions.
 
 ### 3. Model Provider Selection (`src/model/providers/`)
+
 If there's a picker for AI model providers, add fuzzy search there.
 
 ### 4. File Browser/Picker (Future Enhancement)
+
 Create a dedicated fuzzy file picker component using nucleo's high-level API:
+
 ```rust
 pub struct FilePicker {
     nucleo: Nucleo<FileInfo>,
@@ -116,7 +128,9 @@ impl FilePicker {
 ## Implementation Steps
 
 ### Phase 1: Core Integration
+
 1. **Add dependency** to `Cargo.toml`:
+
    ```toml
    nucleo-matcher = "0.3"  # Start with low-level API
    # Later: nucleo = "0.5"  # For high-level streaming API
@@ -133,12 +147,14 @@ impl FilePicker {
    - Test case insensitivity
 
 ### Phase 2: Enhanced Features
+
 1. **Unicode support**: Leverage nucleo's grapheme-aware matching
 2. **Path-aware matching**: Use `Config::match_paths()` for better file matching
 3. **Configurable scoring**: Expose `Config` options to user settings
 4. **Index highlighting**: Use `fuzzy_indices()` to highlight matched characters in TUI
 
 ### Phase 3: Performance Optimization (if needed)
+
 1. **Streaming with high-level nucleo**:
    - Lock-free injection of file list
    - Background threadpool for matching
@@ -156,12 +172,14 @@ impl FilePicker {
 ## Key Configuration Options
 
 From `nucleo_matcher::Config`:
+
 - `match_paths()`: Better matching for file paths
 - `prefer_prefix`: Prefer matches earlier in string
 - `ignore_case`: Case-insensitive matching
 - `bonus_*`: Score bonuses for word boundaries, capitals, etc.
 
 Example:
+
 ```rust
 let config = Config {
     match_paths: true,
@@ -174,6 +192,7 @@ let config = Config {
 ## Pattern Syntax (from nucleo)
 
 Users can type special characters to control matching:
+
 - `foo` - Fuzzy match
 - `^foo` - Prefix match (anchor to start)
 - `foo$` - Postfix match (anchor to end)
@@ -196,12 +215,12 @@ mod tests {
         let mut matcher = Matcher::new(Config::DEFAULT);
         let pattern = Pattern::parse("fb", CaseMatching::Ignore, Normalization::Smart);
         let files = vec!["file_browser.rs", "foo_bar.rs", "fuzzbuzz.c"];
-        
+
         let matches: Vec<_> = pattern
             .match_list(&files, &mut matcher)
             .into_iter()
             .collect();
-            
+
         assert!(matches.len() > 0);
     }
 
@@ -228,13 +247,13 @@ mod tests {
 
 ## Potential Challenges & Solutions
 
-| Challenge | Solution |
-|-----------|----------|
-| Large file trees | Use streaming API with incremental injection |
-| Real-time typing lag | Debounce pattern updates (50-100ms) |
-| Memory overhead | Reuse `Matcher` instances, avoid recreating |
-| Unicode complexity | Rely on nucleo's built-in handling |
-| Integration with TUI | Use tick() pattern for non-blocking updates |
+| Challenge            | Solution                                     |
+| -------------------- | -------------------------------------------- |
+| Large file trees     | Use streaming API with incremental injection |
+| Real-time typing lag | Debounce pattern updates (50-100ms)          |
+| Memory overhead      | Reuse `Matcher` instances, avoid recreating  |
+| Unicode complexity   | Rely on nucleo's built-in handling           |
+| Integration with TUI | Use tick() pattern for non-blocking updates  |
 
 ## Future Enhancements
 
@@ -245,6 +264,7 @@ mod tests {
 5. **Preview window**: Show file preview in TUI while selecting
 
 ## References
+
 - Nucleo README: https://github.com/helix-editor/nucleo
 - Nucleo matcher crate: https://crates.io/crates/nucleo-matcher
 - Helix editor implementation: https://github.com/helix-editor/helix

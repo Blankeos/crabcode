@@ -1,3 +1,5 @@
+[DONE]
+
 # Persistence Layer for Crabcode
 
 ## Overview
@@ -13,11 +15,13 @@ Crabcode uses a hybrid persistence strategy combining SQLite for structured data
 ## SQLite Schema
 
 ### Versioning
+
 Database version tracked via `PRAGMA user_version`. Current version: 1.
 
 ### Tables
 
 #### `sessions`
+
 ```sql
 CREATE TABLE sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,10 +39,12 @@ CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
 ```
 
 **Session Generation Rules**:
+
 - Default name: First user message truncated to 50 characters
 - Auto-generate name using AI model if configured (future feature)
 
 #### `messages`
+
 ```sql
 CREATE TABLE messages (
     id TEXT PRIMARY KEY, -- UUID matching API response
@@ -56,6 +62,7 @@ CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
 ```
 
 **Message Parts Structure**:
+
 ```json
 {
   "parts": [
@@ -66,9 +73,8 @@ CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
 }
 ```
 
-
-
 #### `migrations`
+
 ```sql
 CREATE TABLE migrations (
     version INTEGER PRIMARY KEY,
@@ -171,6 +177,7 @@ fn migrate_to_v1(db: &Connection) -> Result<(), Error> {
 ## Key Operations
 
 ### Session Management
+
 - **Create**: Insert session with name from first message
 - **List**: Get all sessions, sorted by `updated_at DESC`
 - **Get**: Retrieve session with all messages
@@ -179,6 +186,7 @@ fn migrate_to_v1(db: &Connection) -> Result<(), Error> {
 - **Rename**: Allow manual name editing
 
 ### Message Management
+
 - **Append**: Add message with `parts` array, update session stats
 - **List**: Get messages for a session in order, deserialize `parts`
 - **Search**: Full-text search on message `parts` (future)
@@ -187,6 +195,7 @@ fn migrate_to_v1(db: &Connection) -> Result<(), Error> {
 ## Cost Estimation
 
 When saving messages, estimate cost using per-message model info:
+
 ```rust
 fn estimate_cost(tokens: u32, model: &str, provider: &str) -> f64 {
     // Load pricing from models.dev or local cache
@@ -245,43 +254,43 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
-    pub id: String,
-    pub name: String,
-    pub provider: String,
-    pub pricing: Option<Pricing>,
+pub id: String,
+pub name: String,
+pub provider: String,
+pub pricing: Option<Pricing>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pricing {
-    pub input: f64,
-    pub output: f64,
+pub input: f64,
+pub output: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCache {
-    pub providers: Vec<Provider>,
-    pub updated_at: i64,
+pub providers: Vec<Provider>,
+pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
-    pub id: String,
-    pub name: String,
-    pub models: Vec<ModelInfo>,
+pub id: String,
+pub name: String,
+pub models: Vec<ModelInfo>,
 }
 
 pub struct ProviderDAO {
-    cache_path: PathBuf,
+cache_path: PathBuf,
 }
 
 impl ProviderDAO {
-    pub fn new() -> Result<Self, Error> {
-        let cache_dir = get_cache_dir();
-        std::fs::create_dir_all(&cache_dir)?;
-        Ok(Self {
-            cache_path: cache_dir.join("providers.json"),
-        })
-    }
+pub fn new() -> Result<Self, Error> {
+let cache_dir = get_cache_dir();
+std::fs::create_dir_all(&cache_dir)?;
+Ok(Self {
+cache_path: cache_dir.join("providers.json"),
+})
+}
 
     pub fn load(&self) -> Result<Option<ProviderCache>, Error> {
         if !self.cache_path.exists() {
@@ -325,8 +334,10 @@ impl ProviderDAO {
         }
         Ok(None)
     }
+
 }
-```
+
+````
 
 ### AuthDAO - Credential Management
 
@@ -390,7 +401,7 @@ impl AuthDAO {
         }))
     }
 }
-```
+````
 
 ### HistoryDAO - Session & Message Management
 
