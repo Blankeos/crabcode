@@ -293,6 +293,13 @@ impl App {
                     }
                     SessionsDialogAction::Select(id) => {
                         self.session_manager.switch_session(&id);
+                        if let Some(session) = self.session_manager.get_session(&id) {
+                            self.chat_state.chat.clear();
+                            for message in &session.messages {
+                                self.chat_state.chat.add_message(message.clone());
+                            }
+                        }
+                        self.base_focus = BaseFocus::Chat;
                         self.sessions_dialog_state.dialog.hide();
                         self.overlay_focus = OverlayFocus::None;
                         true
@@ -436,6 +443,8 @@ impl App {
             handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::ConnectDialog {
             handle_connect_dialog_mouse_event(&mut self.connect_dialog_state, mouse);
+        } else if self.overlay_focus == OverlayFocus::SessionsDialog {
+            handle_sessions_dialog_mouse_event(&mut self.sessions_dialog_state, mouse);
         }
     }
 
