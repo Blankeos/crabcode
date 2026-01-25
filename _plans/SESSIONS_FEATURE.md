@@ -1,9 +1,13 @@
+[DONE]
+
 # Sessions Feature Plan
 
 ## Overview
+
 Implement a comprehensive session management feature with creation, deletion, renaming, and viewing sessions through a dialog interface.
 
 ## Current State
+
 - `SessionManager` exists in `src/session/manager.rs`
 - Basic session types in `src/session/types.rs`
 - `/sessions` command exists but only displays text output
@@ -17,6 +21,7 @@ Implement a comprehensive session management feature with creation, deletion, re
 **File: `Cargo.toml`**
 
 Ensure chrono is added as a dependency:
+
 ```toml
 [dependencies]
 chrono = "0.4"
@@ -127,6 +132,7 @@ for (i, action) in self.actions.iter().enumerate() {
 Update existing dialogs to use new API:
 
 **models_dialog.rs:**
+
 ```rust
 let items: Vec<DialogItem> = models
     .into_iter()
@@ -150,6 +156,7 @@ dialog = dialog.with_actions(vec![
 ```
 
 **connect_dialog.rs:**
+
 ```rust
 let items: Vec<DialogItem> = providers
     .into_iter()
@@ -184,6 +191,7 @@ pub struct SessionInfo {
 ```
 
 Add methods to `SessionManager`:
+
 - `rename_session(id: &str, new_title: &str) -> Result<(), SessionError>`
 - Update `create_session()` to set proper timestamps
 - Update `list_sessions()` to return `SessionInfo` with actual creation times
@@ -191,6 +199,7 @@ Add methods to `SessionManager`:
 **File: `src/session/types.rs`**
 
 Add title field to `Session`:
+
 ```rust
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Session {
@@ -224,6 +233,7 @@ pub struct SessionsDialogState {
 ```
 
 Key features:
+
 - Reuse existing `Dialog` component
 - Group sessions by date: "Today", "Sat Jan 24 2026", "Fri Jan 23 2026"
 - Display time next to each session: "11:21 AM", "11:00 AM" (muted color)
@@ -248,6 +258,7 @@ Create a simple input dialog for renaming sessions:
 ```
 
 The dialog should:
+
 - Show the current session title
 - Allow editing of the title
 - Submit on Enter
@@ -316,6 +327,7 @@ pub fn handle_sessions<'a>(
 ```
 
 Helper functions (add chrono imports at top of file):
+
 ```rust
 use chrono::{DateTime, Local, Utc};
 
@@ -342,6 +354,7 @@ fn format_time(created_at: SystemTime) -> String {
 **File: `src/app.rs`**
 
 Add to `OverlayFocus` enum:
+
 ```rust
 pub enum OverlayFocus {
     None,
@@ -355,6 +368,7 @@ pub enum OverlayFocus {
 ```
 
 Add state fields:
+
 ```rust
 pub struct App {
     // ... existing fields
@@ -365,12 +379,14 @@ pub struct App {
 ```
 
 Initialize in `App::new()`:
+
 ```rust
 let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
 let session_rename_dialog_state = init_session_rename_dialog();
 ```
 
 Add to handle_keys():
+
 ```rust
 OverlayFocus::SessionsDialog => {
     // Handle key events, check for ctrl+d (delete) and ctrl+r (rename)
@@ -381,6 +397,7 @@ OverlayFocus::SessionRenameDialog => {
 ```
 
 Add to render():
+
 ```rust
 if self.overlay_focus == OverlayFocus::SessionsDialog
     && self.sessions_dialog_state.dialog.is_visible()
@@ -400,6 +417,7 @@ if self.overlay_focus == OverlayFocus::SessionRenameDialog
 **File: `src/views/mod.rs`**
 
 Export new modules:
+
 ```rust
 pub mod sessions_dialog;
 pub mod session_rename_dialog;
@@ -455,6 +473,7 @@ dialog = dialog.with_actions(vec![
 **Sessions Dialog Actions:**
 
 Delete (ctrl+d):
+
 ```rust
 KeyCode::Char('d') if event.modifiers == KeyModifiers::CONTROL => {
     if let Some(selected) = dialog_state.dialog.get_selected() {
@@ -468,6 +487,7 @@ KeyCode::Char('d') if event.modifiers == KeyModifiers::CONTROL => {
 ```
 
 Rename (ctrl+r):
+
 ```rust
 KeyCode::Char('r') if event.modifiers == KeyModifiers::CONTROL => {
     if let Some(selected) = dialog_state.dialog.get_selected() {
@@ -483,6 +503,7 @@ KeyCode::Char('r') if event.modifiers == KeyModifiers::CONTROL => {
 **Session Rename Dialog:**
 
 Enter to submit:
+
 ```rust
 KeyCode::Enter => {
     if let Some((session_id, _)) = dialog_state.get_rename_info() {
@@ -496,6 +517,7 @@ KeyCode::Enter => {
 ```
 
 Esc to cancel:
+
 ```rust
 KeyCode::Esc => {
     dialog_state.hide();
@@ -537,9 +559,11 @@ KeyCode::Esc => {
 ## Dependencies
 
 **New dependencies:**
+
 - `chrono` - for date/time formatting (if not already in Cargo.toml)
 
 **Existing:**
+
 - `ratatui` for TUI
 - `tui_textarea` for input
 
