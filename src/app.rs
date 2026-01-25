@@ -131,7 +131,7 @@ impl App {
             sessions_dialog_state,
             session_rename_dialog_state,
             api_key_input,
-            agent: "PLAN".to_string(),
+            agent: "Plan".to_string(),
             model: "nano-gpt".to_string(),
             cwd,
             base_focus: BaseFocus::Home,
@@ -373,10 +373,10 @@ impl App {
     fn handle_base_keys(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Tab => {
-                if self.agent == "PLAN" {
-                    self.agent = "BUILD".to_string();
+                if self.agent == "Plan" {
+                    self.agent = "Build".to_string();
                 } else {
-                    self.agent = "PLAN".to_string();
+                    self.agent = "Plan".to_string();
                 }
                 true
             }

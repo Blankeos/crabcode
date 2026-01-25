@@ -25,11 +25,15 @@ impl Input {
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect, agent: &str, model: &str) {
+        let agent_color = if agent == "Plan" {
+            ratatui::style::Color::Rgb(255, 165, 0)
+        } else {
+            ratatui::style::Color::Rgb(147, 112, 219)
+        };
+
         let border = Block::bordered()
             .borders(ratatui::widgets::Borders::LEFT)
-            .border_style(
-                ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(255, 140, 0)),
-            )
+            .border_style(ratatui::style::Style::default().fg(agent_color))
             .border_type(ratatui::widgets::BorderType::Thick)
             .padding(ratatui::widgets::Padding::horizontal(1));
         let inner_area = border.inner(area);
@@ -52,7 +56,7 @@ impl Input {
         let info_text = ratatui::text::Line::from(vec![
             ratatui::text::Span::styled(
                 agent.to_string(),
-                ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(255, 165, 0)),
+                ratatui::style::Style::default().fg(agent_color),
             ),
             ratatui::text::Span::raw("  "),
             ratatui::text::Span::styled(
