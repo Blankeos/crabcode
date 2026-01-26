@@ -104,7 +104,7 @@ impl Popup {
 
         let popup_area = Rect {
             x: area.x,
-            y: area.y.saturating_sub(popup_height).saturating_sub(2),
+            y: area.y.saturating_sub(popup_height).saturating_sub(3),
             width: popup_width,
             height: popup_height,
         };

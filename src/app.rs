@@ -4,8 +4,8 @@ use crate::autocomplete::AutoComplete;
 use crate::command::handlers::register_all_commands;
 use crate::command::parser::InputType;
 use crate::command::registry::Registry;
-use crate::session::manager::SessionManager;
 use crate::llm::client::stream_llm_with_cancellation;
+use crate::session::manager::SessionManager;
 
 use crate::push_toast;
 use crate::ui::components::chat::Chat;
@@ -28,8 +28,8 @@ use crate::views::session_rename_dialog::{
     render_session_rename_dialog, RenameAction,
 };
 use crate::views::sessions_dialog::{
-    handle_sessions_dialog_key_event, handle_sessions_dialog_mouse_event,
-    init_sessions_dialog, render_sessions_dialog, SessionsDialogAction,
+    handle_sessions_dialog_key_event, handle_sessions_dialog_mouse_event, init_sessions_dialog,
+    render_sessions_dialog, SessionsDialogAction,
 };
 use crate::views::suggestions_popup::{
     clear_suggestions, get_selected_suggestion, handle_suggestions_popup_key_event,
@@ -136,18 +136,17 @@ impl App {
         };
 
         let active_model_info = if let Some(ref dao) = prefs_dao {
-            dao.get_active_model()
-                .ok()
-                .flatten()
+            dao.get_active_model().ok().flatten()
         } else {
             None
         };
 
-        let (active_model, active_provider_name) = if let Some((provider_id, model_id)) = active_model_info {
-            (model_id.clone(), provider_id.clone())
-        } else {
-            ("claude-3-sonnet".to_string(), "anthropic".to_string())
-        };
+        let (active_model, active_provider_name) =
+            if let Some((provider_id, model_id)) = active_model_info {
+                (model_id.clone(), provider_id.clone())
+            } else {
+                ("claude-3-sonnet".to_string(), "anthropic".to_string())
+            };
 
         Self {
             running: true,
@@ -277,34 +276,42 @@ impl App {
             }
             OverlayFocus::ModelsDialog => {
                 let action = handle_models_dialog_key_event(&mut self.models_dialog_state, key);
-                
+
                 match action {
-                    crate::views::models_dialog::ModelsDialogAction::SelectModel { provider_id, model_id } => {
+                    crate::views::models_dialog::ModelsDialogAction::SelectModel {
+                        provider_id,
+                        model_id,
+                    } => {
                         let model_id_clone = model_id.clone();
                         let provider_id_clone = provider_id.clone();
                         self.model = model_id_clone.clone();
                         self.provider_name = provider_id_clone.clone();
-                        
+
                         if let Some(ref dao) = self.prefs_dao {
-                            if let Err(e) = dao.set_active_model(provider_id.clone(), model_id_clone.clone()) {
+                            if let Err(e) =
+                                dao.set_active_model(provider_id.clone(), model_id_clone.clone())
+                            {
                                 eprintln!("Failed to save active model: {}", e);
                             }
                         }
-                        
+
                         push_toast(ratatui_toolkit::Toast::new(
                             format!("Switched to: {}", model_id_clone),
                             ratatui_toolkit::ToastLevel::Info,
                             None,
                         ));
                     }
-                    crate::views::models_dialog::ModelsDialogAction::ToggleFavorite { provider_id, model_id } => {
+                    crate::views::models_dialog::ModelsDialogAction::ToggleFavorite {
+                        provider_id,
+                        model_id,
+                    } => {
                         let is_favorite = if let Some(ref dao) = self.prefs_dao {
                             dao.toggle_favorite(provider_id.clone(), model_id.clone())
                                 .unwrap_or(false)
                         } else {
                             false
                         };
-                        
+
                         push_toast(ratatui_toolkit::Toast::new(
                             if is_favorite {
                                 "Added to favorites"
@@ -319,7 +326,7 @@ impl App {
                     }
                     crate::views::models_dialog::ModelsDialogAction::None => {}
                 }
-                
+
                 if !self.models_dialog_state.dialog.is_visible() {
                     self.overlay_focus = OverlayFocus::None;
                 }
@@ -330,9 +337,9 @@ impl App {
                     return;
                 }
                 if !self.connect_dialog_state.dialog.is_visible() {
-                    if let Some(selected_item) = get_pending_selection(
-                        &mut self.connect_dialog_state,
-                    ) {
+                    if let Some(selected_item) =
+                        get_pending_selection(&mut self.connect_dialog_state)
+                    {
                         self.api_key_input.show(&selected_item.id);
                         self.overlay_focus = OverlayFocus::ApiKeyInput;
                         return;
@@ -344,7 +351,10 @@ impl App {
             OverlayFocus::ApiKeyInput => {
                 let action = self.api_key_input.handle_key_event(key);
                 match action {
-                    crate::ui::components::api_key_input::InputAction::Submitted { api_key, provider_name } => {
+                    crate::ui::components::api_key_input::InputAction::Submitted {
+                        api_key,
+                        provider_name,
+                    } => {
                         if let Some(auth_dao) = crate::persistence::AuthDAO::new().ok() {
                             let _ = auth_dao.set_provider(
                                 provider_name,
@@ -397,7 +407,8 @@ impl App {
                         true
                     }
                     SessionsDialogAction::Rename(id, title) => {
-                        self.session_rename_dialog_state.set_colors(self.get_current_theme_colors());
+                        self.session_rename_dialog_state
+                            .set_colors(self.get_current_theme_colors());
                         self.session_rename_dialog_state.show(id, title);
                         self.overlay_focus = OverlayFocus::SessionRenameDialog;
                         true
@@ -405,7 +416,10 @@ impl App {
                 }
             }
             OverlayFocus::SessionRenameDialog => {
-                let action = handle_session_rename_dialog_key_event(&mut self.session_rename_dialog_state, key);
+                let action = handle_session_rename_dialog_key_event(
+                    &mut self.session_rename_dialog_state,
+                    key,
+                );
                 match action {
                     RenameAction::Handled => true,
                     RenameAction::NotHandled => false,
@@ -569,9 +583,13 @@ impl App {
                     .dialog
                     .search_textarea
                     .insert_str(&text);
-                self.models_dialog_state
-                    .dialog
-                    .set_search_query(self.models_dialog_state.dialog.search_textarea.lines().join(""));
+                self.models_dialog_state.dialog.set_search_query(
+                    self.models_dialog_state
+                        .dialog
+                        .search_textarea
+                        .lines()
+                        .join(""),
+                );
                 self.models_dialog_state.dialog.selected_index = 0;
             }
             (_, OverlayFocus::ConnectDialog) => {
@@ -579,9 +597,13 @@ impl App {
                     .dialog
                     .search_textarea
                     .insert_str(&text);
-                self.connect_dialog_state
-                    .dialog
-                    .set_search_query(self.connect_dialog_state.dialog.search_textarea.lines().join(""));
+                self.connect_dialog_state.dialog.set_search_query(
+                    self.connect_dialog_state
+                        .dialog
+                        .search_textarea
+                        .lines()
+                        .join(""),
+                );
                 self.connect_dialog_state.dialog.selected_index = 0;
             }
             (_, OverlayFocus::SessionsDialog) => {
@@ -589,13 +611,19 @@ impl App {
                     .dialog
                     .search_textarea
                     .insert_str(&text);
-                self.sessions_dialog_state
-                    .dialog
-                    .set_search_query(self.sessions_dialog_state.dialog.search_textarea.lines().join(""));
+                self.sessions_dialog_state.dialog.set_search_query(
+                    self.sessions_dialog_state
+                        .dialog
+                        .search_textarea
+                        .lines()
+                        .join(""),
+                );
                 self.sessions_dialog_state.dialog.selected_index = 0;
             }
             (_, OverlayFocus::SessionRenameDialog) => {
-                self.session_rename_dialog_state.input_textarea.insert_str(&text);
+                self.session_rename_dialog_state
+                    .input_textarea
+                    .insert_str(&text);
             }
             (_, OverlayFocus::ApiKeyInput) => {
                 self.api_key_input.text_area.insert_str(&text);
@@ -643,8 +671,11 @@ impl App {
                         } else if self.base_focus == BaseFocus::Home {
                             self.base_focus = BaseFocus::Chat;
                         }
-                        let assistant_message = crate::session::types::Message::assistant(msg.clone());
-                        let _ = self.session_manager.add_message_to_current_session(&assistant_message);
+                        let assistant_message =
+                            crate::session::types::Message::assistant(msg.clone());
+                        let _ = self
+                            .session_manager
+                            .add_message_to_current_session(&assistant_message);
                         self.chat_state.chat.add_assistant_message(msg);
                         if parsed.name == "exit" {
                             self.quit();
@@ -652,11 +683,12 @@ impl App {
                     }
                     crate::command::registry::CommandResult::Error(msg) => {
                         let error_msg = format!("Error: {}", msg);
-                        let error_message = crate::session::types::Message::assistant(error_msg.clone());
-                        let _ = self.session_manager.add_message_to_current_session(&error_message);
-                        self.chat_state
-                            .chat
-                            .add_assistant_message(error_msg);
+                        let error_message =
+                            crate::session::types::Message::assistant(error_msg.clone());
+                        let _ = self
+                            .session_manager
+                            .add_message_to_current_session(&error_message);
+                        self.chat_state.chat.add_assistant_message(error_msg);
                     }
                     crate::command::registry::CommandResult::ShowDialog { title, items } => {
                         if title == "Connect a provider" {
@@ -693,8 +725,7 @@ impl App {
                                         provider_id: item.provider_id.clone(),
                                     })
                                     .collect();
-                            self.sessions_dialog_state =
-                                init_sessions_dialog(title, dialog_items);
+                            self.sessions_dialog_state = init_sessions_dialog(title, dialog_items);
                             self.sessions_dialog_state.dialog.show();
                             self.overlay_focus = OverlayFocus::SessionsDialog;
                         } else {
@@ -723,7 +754,10 @@ impl App {
         }
     }
 
-    async fn process_command_input(&mut self, mut parsed: crate::command::parser::ParsedCommand<'_>) {
+    async fn process_command_input(
+        &mut self,
+        mut parsed: crate::command::parser::ParsedCommand<'_>,
+    ) {
         parsed.prefs_dao = self.prefs_dao.as_ref();
         parsed.active_model_id = Some(self.model.clone());
 
@@ -741,7 +775,9 @@ impl App {
                     self.base_focus = BaseFocus::Chat;
                 }
                 let assistant_message = crate::session::types::Message::assistant(msg.clone());
-                let _ = self.session_manager.add_message_to_current_session(&assistant_message);
+                let _ = self
+                    .session_manager
+                    .add_message_to_current_session(&assistant_message);
                 self.chat_state.chat.add_assistant_message(msg);
                 if parsed.name == "exit" {
                     self.quit();
@@ -750,63 +786,56 @@ impl App {
             crate::command::registry::CommandResult::Error(msg) => {
                 let error_msg = format!("Error: {}", msg);
                 let error_message = crate::session::types::Message::assistant(error_msg.clone());
-                let _ = self.session_manager.add_message_to_current_session(&error_message);
-                self.chat_state
-                    .chat
-                    .add_assistant_message(error_msg);
+                let _ = self
+                    .session_manager
+                    .add_message_to_current_session(&error_message);
+                self.chat_state.chat.add_assistant_message(error_msg);
             }
             crate::command::registry::CommandResult::ShowDialog { title, items } => {
                 if title == "Connect a provider" {
-                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
-                        items
-                            .into_iter()
-                            .map(|item| crate::ui::components::dialog::DialogItem {
-                                id: item.id,
-                                name: item.name,
-                                group: item.group,
-                                description: item.description,
-                                tip: item.tip,
-                                provider_id: item.provider_id.clone(),
-                            })
-                            .collect();
+                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
+                        .into_iter()
+                        .map(|item| crate::ui::components::dialog::DialogItem {
+                            id: item.id,
+                            name: item.name,
+                            group: item.group,
+                            description: item.description,
+                            tip: item.tip,
+                            provider_id: item.provider_id.clone(),
+                        })
+                        .collect();
                     self.connect_dialog_state = crate::views::ConnectDialogState::new(
-                        crate::ui::components::dialog::Dialog::with_items(
-                            title,
-                            dialog_items,
-                        ),
+                        crate::ui::components::dialog::Dialog::with_items(title, dialog_items),
                     );
                     self.connect_dialog_state.dialog.show();
                     self.overlay_focus = OverlayFocus::ConnectDialog;
                 } else if title == "Sessions" {
-                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
-                        items
-                            .into_iter()
-                            .map(|item| crate::ui::components::dialog::DialogItem {
-                                id: item.id,
-                                name: item.name,
-                                group: item.group,
-                                description: item.description,
-                                tip: item.tip,
-                                provider_id: item.provider_id.clone(),
-                            })
-                            .collect();
-                    self.sessions_dialog_state =
-                        init_sessions_dialog(title, dialog_items);
+                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
+                        .into_iter()
+                        .map(|item| crate::ui::components::dialog::DialogItem {
+                            id: item.id,
+                            name: item.name,
+                            group: item.group,
+                            description: item.description,
+                            tip: item.tip,
+                            provider_id: item.provider_id.clone(),
+                        })
+                        .collect();
+                    self.sessions_dialog_state = init_sessions_dialog(title, dialog_items);
                     self.sessions_dialog_state.dialog.show();
                     self.overlay_focus = OverlayFocus::SessionsDialog;
                 } else {
-                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
-                        items
-                            .into_iter()
-                            .map(|item| crate::ui::components::dialog::DialogItem {
-                                id: item.id,
-                                name: item.name,
-                                group: item.group,
-                                description: item.description,
-                                tip: item.tip,
-                                provider_id: item.provider_id.clone(),
-                            })
-                            .collect();
+                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
+                        .into_iter()
+                        .map(|item| crate::ui::components::dialog::DialogItem {
+                            id: item.id,
+                            name: item.name,
+                            group: item.group,
+                            description: item.description,
+                            tip: item.tip,
+                            provider_id: item.provider_id.clone(),
+                        })
+                        .collect();
                     self.models_dialog_state = init_models_dialog(title, dialog_items);
                     self.models_dialog_state.dialog.show();
                     self.overlay_focus = OverlayFocus::ModelsDialog;
@@ -816,7 +845,12 @@ impl App {
     }
 
     fn generate_title_from_message(message: &str) -> String {
-        message.chars().take(30).collect::<String>().trim_end().to_string()
+        message
+            .chars()
+            .take(30)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
     }
 
     fn refresh_sessions_dialog(&mut self) {
@@ -860,9 +894,9 @@ impl App {
     }
 
     fn refresh_models_dialog(&mut self) {
-        use crate::ui::components::dialog::DialogItem;
         use crate::model::discovery::Discovery;
         use crate::model::types::Model as ModelType;
+        use crate::ui::components::dialog::DialogItem;
 
         let auth_dao = match crate::persistence::AuthDAO::new() {
             Ok(dao) => dao,
@@ -891,19 +925,17 @@ impl App {
             Err(_) => return,
         };
 
-        let prefs = self.prefs_dao.as_ref().and_then(|dao| {
-            dao.get_model_preferences().ok()
-        });
+        let prefs = self
+            .prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_model_preferences().ok());
 
         let mut model_lookup: std::collections::HashMap<(String, String), ModelType> =
             std::collections::HashMap::new();
 
         for model in &models {
             if connected_providers.contains_key(&model.provider_id) {
-                model_lookup.insert(
-                    (model.provider_id.clone(), model.id.clone()),
-                    model.clone(),
-                );
+                model_lookup.insert((model.provider_id.clone(), model.id.clone()), model.clone());
             }
         }
 
@@ -931,7 +963,8 @@ impl App {
 
         let add_model_item = |items: &mut Vec<DialogItem>, model: &ModelType, group: &str| {
             let is_active = self.model == model.id;
-            let is_favorite = favorites_set.contains(&(model.provider_id.clone(), model.id.clone()));
+            let is_favorite =
+                favorites_set.contains(&(model.provider_id.clone(), model.id.clone()));
 
             let tip = if is_active {
                 Some("✓ Active".to_string())
@@ -968,7 +1001,8 @@ impl App {
 
         let mut favorite_models = Vec::new();
         for fav in &favorites_list {
-            if let Some(model) = model_lookup.get(&(fav.provider_id.clone(), fav.model_id.clone())) {
+            if let Some(model) = model_lookup.get(&(fav.provider_id.clone(), fav.model_id.clone()))
+            {
                 favorite_models.push(model.clone());
             }
         }
@@ -977,17 +1011,16 @@ impl App {
             add_model_item(&mut items, model, "Favorite");
         }
 
-        let recent_list = prefs
-            .as_ref()
-            .map(|p| p.recent.clone())
-            .unwrap_or_default();
+        let recent_list = prefs.as_ref().map(|p| p.recent.clone()).unwrap_or_default();
 
         let mut recent_models = Vec::new();
         for recent in &recent_list {
             if favorites_set.contains(&(recent.provider_id.clone(), recent.model_id.clone())) {
                 continue;
             }
-            if let Some(model) = model_lookup.get(&(recent.provider_id.clone(), recent.model_id.clone())) {
+            if let Some(model) =
+                model_lookup.get(&(recent.provider_id.clone(), recent.model_id.clone()))
+            {
                 recent_models.push(model.clone());
             }
         }
@@ -1078,7 +1111,9 @@ impl App {
                 crate::llm::ChunkMessage::End => {
                     if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
                         last_msg.mark_complete();
-                        let _ = self.session_manager.add_message_to_current_session(last_msg);
+                        let _ = self
+                            .session_manager
+                            .add_message_to_current_session(last_msg);
                     }
                     self.is_streaming = false;
                     self.cleanup_streaming();
@@ -1090,7 +1125,9 @@ impl App {
                         ratatui_toolkit::ToastLevel::Error,
                         None,
                     ));
-                    if self.chat_state.chat.messages.last().is_some_and(|m| m.role == crate::session::types::MessageRole::Assistant && !m.is_complete) {
+                    if self.chat_state.chat.messages.last().is_some_and(|m| {
+                        m.role == crate::session::types::MessageRole::Assistant && !m.is_complete
+                    }) {
                         self.chat_state.chat.messages.pop();
                     }
                     self.cleanup_streaming();
@@ -1102,7 +1139,9 @@ impl App {
                         ratatui_toolkit::ToastLevel::Info,
                         None,
                     ));
-                    if self.chat_state.chat.messages.last().is_some_and(|m| m.role == crate::session::types::MessageRole::Assistant && !m.is_complete) {
+                    if self.chat_state.chat.messages.last().is_some_and(|m| {
+                        m.role == crate::session::types::MessageRole::Assistant && !m.is_complete
+                    }) {
                         self.chat_state.chat.messages.pop();
                     }
                     self.cleanup_streaming();
@@ -1111,7 +1150,10 @@ impl App {
         }
     }
 
-    fn start_llm_streaming(&mut self, _user_message: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn start_llm_streaming(
+        &mut self,
+        _user_message: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use tokio::sync::mpsc;
 
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -1136,19 +1178,22 @@ impl App {
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(300),
-                stream_llm_with_cancellation(cancel_token, provider_name, model, messages, sender_clone.clone()),
-            ).await;
+                stream_llm_with_cancellation(
+                    cancel_token,
+                    provider_name,
+                    model,
+                    messages,
+                    sender_clone.clone(),
+                ),
+            )
+            .await;
 
             let _ = match result {
-                Ok(Ok(())) => {
-                    sender_clone.send(crate::llm::ChunkMessage::End)
-                }
-                Ok(Err(e)) => {
-                    sender_clone.send(crate::llm::ChunkMessage::Failed(e.to_string()))
-                }
-                Err(_) => {
-                    sender_clone.send(crate::llm::ChunkMessage::Failed("Timeout: No response within 5 minutes".to_string()))
-                }
+                Ok(Ok(())) => sender_clone.send(crate::llm::ChunkMessage::End),
+                Ok(Err(e)) => sender_clone.send(crate::llm::ChunkMessage::Failed(e.to_string())),
+                Err(_) => sender_clone.send(crate::llm::ChunkMessage::Failed(
+                    "Timeout: No response within 5 minutes".to_string(),
+                )),
             };
         });
 
@@ -1162,7 +1207,9 @@ impl App {
                 self.session_manager.create_session(Some(session_title));
             }
             let user_message = crate::session::types::Message::user(&msg);
-            let _ = self.session_manager.add_message_to_current_session(&user_message);
+            let _ = self
+                .session_manager
+                .add_message_to_current_session(&user_message);
             self.chat_state.chat.add_user_message(&msg);
             self.base_focus = BaseFocus::Chat;
 
@@ -1175,7 +1222,9 @@ impl App {
             }
         } else if !msg.is_empty() && self.base_focus == BaseFocus::Chat {
             let user_message = crate::session::types::Message::user(&msg);
-            let _ = self.session_manager.add_message_to_current_session(&user_message);
+            let _ = self
+                .session_manager
+                .add_message_to_current_session(&user_message);
             self.chat_state.chat.add_user_message(&msg);
 
             if let Err(e) = self.start_llm_streaming(&msg) {
@@ -1251,6 +1300,7 @@ impl App {
                 if is_suggestions_visible(&self.suggestions_popup_state)
                     && self.overlay_focus != OverlayFocus::ModelsDialog
                 {
+                    let input_height = self.input.get_height();
                     let main_chunks = ratatui::layout::Layout::default()
                         .direction(ratatui::layout::Direction::Vertical)
                         .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
@@ -1260,7 +1310,7 @@ impl App {
                         .constraints(
                             [
                                 ratatui::layout::Constraint::Min(0),
-                                ratatui::layout::Constraint::Length(3),
+                                ratatui::layout::Constraint::Length(input_height),
                             ]
                             .as_ref(),
                         )

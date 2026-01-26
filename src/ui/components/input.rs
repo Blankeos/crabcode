@@ -55,6 +55,7 @@ impl Input {
                 ratatui::layout::Constraint::Length(textarea_height),
                 ratatui::layout::Constraint::Length(1),
                 ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(1),
             ])
             .split(inner_area);
 
@@ -220,7 +221,7 @@ impl Input {
     pub fn get_height(&self) -> u16 {
         let line_count = self.textarea.lines().len().max(1);
         let textarea_height = line_count.min(6) as u16;
-        textarea_height + 3
+        textarea_height + 4
     }
 }
 
