@@ -669,7 +669,7 @@ impl Dialog {
                             item.name.len() + 2
                         };
                         let padding_len =
-                            (list_area_width as usize).saturating_sub(base_len + tip.len() + 2);
+                            (list_area_width as usize).saturating_sub(base_len + tip.len());
                         let padding_after_tip = (list_area_width as usize)
                             .saturating_sub(base_len + tip.len() + 2 + padding_len);
 
