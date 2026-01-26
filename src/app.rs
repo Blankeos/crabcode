@@ -5,8 +5,9 @@ use crate::command::handlers::register_all_commands;
 use crate::command::parser::InputType;
 use crate::command::registry::Registry;
 use crate::session::manager::SessionManager;
+use crate::llm::client::stream_llm_with_cancellation;
 
-use crate::{push_toast, remove_expired_toasts};
+use crate::push_toast;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
@@ -87,6 +88,10 @@ pub struct App {
     pub themes: Vec<Theme>,
     pub current_theme_index: usize,
     pub dark_mode: bool,
+    pub is_streaming: bool,
+    chunk_sender: Option<crate::llm::ChunkSender>,
+    chunk_receiver: Option<crate::llm::ChunkReceiver>,
+    streaming_cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl App {
@@ -170,6 +175,10 @@ impl App {
             themes: vec![theme],
             current_theme_index: 0,
             dark_mode: true,
+            is_streaming: false,
+            chunk_sender: None,
+            chunk_receiver: None,
+            streaming_cancel_token: None,
         }
     }
 
@@ -455,6 +464,10 @@ impl App {
                 true
             }
             KeyCode::Esc => {
+                if self.is_streaming {
+                    self.cancel_streaming();
+                    return true;
+                }
                 if self.overlay_focus == OverlayFocus::SuggestionsPopup {
                     self.input.clear();
                     clear_suggestions(&mut self.suggestions_popup_state);
@@ -481,10 +494,20 @@ impl App {
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
                 let input_text = self.input.get_text();
                 if !input_text.is_empty() {
-                    tokio::task::block_in_place(|| {
-                        let rt = tokio::runtime::Handle::current();
-                        rt.block_on(self.process_input(&input_text));
-                    });
+                    use crate::command::parser::parse_input;
+
+                    match parse_input(&input_text) {
+                        crate::command::parser::InputType::Command(mut parsed) => {
+                            tokio::task::block_in_place(|| {
+                                let rt = tokio::runtime::Handle::current();
+                                rt.block_on(self.process_command_input(parsed));
+                            });
+                        }
+                        crate::command::parser::InputType::Message(msg) => {
+                            self.handle_message_input(msg);
+                        }
+                    }
+
                     self.input.clear();
                     clear_suggestions(&mut self.suggestions_popup_state);
                 }
@@ -695,15 +718,98 @@ impl App {
                 }
             }
             InputType::Message(msg) => {
-                if !msg.is_empty() && self.base_focus == BaseFocus::Home {
-                    if self.session_manager.get_current_session_id().is_none() {
-                        let session_title = Self::generate_title_from_message(&msg);
-                        self.session_manager.create_session(Some(session_title));
-                    }
-                    let user_message = crate::session::types::Message::user(&msg);
-                    let _ = self.session_manager.add_message_to_current_session(&user_message);
-                    self.chat_state.chat.add_user_message(&msg);
+                self.handle_message_input(msg);
+            }
+        }
+    }
+
+    async fn process_command_input(&mut self, mut parsed: crate::command::parser::ParsedCommand<'_>) {
+        parsed.prefs_dao = self.prefs_dao.as_ref();
+        parsed.active_model_id = Some(self.model.clone());
+
+        let result = self
+            .command_registry
+            .execute(&parsed, &mut self.session_manager)
+            .await;
+        match result {
+            crate::command::registry::CommandResult::Success(msg) => {
+                if parsed.name == "new" || parsed.name == "home" {
+                    self.chat_state.chat.clear();
+                    self.base_focus = BaseFocus::Home;
+                    self.session_manager.clear_current_session();
+                } else if self.base_focus == BaseFocus::Home {
                     self.base_focus = BaseFocus::Chat;
+                }
+                let assistant_message = crate::session::types::Message::assistant(msg.clone());
+                let _ = self.session_manager.add_message_to_current_session(&assistant_message);
+                self.chat_state.chat.add_assistant_message(msg);
+                if parsed.name == "exit" {
+                    self.quit();
+                }
+            }
+            crate::command::registry::CommandResult::Error(msg) => {
+                let error_msg = format!("Error: {}", msg);
+                let error_message = crate::session::types::Message::assistant(error_msg.clone());
+                let _ = self.session_manager.add_message_to_current_session(&error_message);
+                self.chat_state
+                    .chat
+                    .add_assistant_message(error_msg);
+            }
+            crate::command::registry::CommandResult::ShowDialog { title, items } => {
+                if title == "Connect a provider" {
+                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
+                        items
+                            .into_iter()
+                            .map(|item| crate::ui::components::dialog::DialogItem {
+                                id: item.id,
+                                name: item.name,
+                                group: item.group,
+                                description: item.description,
+                                tip: item.tip,
+                                provider_id: item.provider_id.clone(),
+                            })
+                            .collect();
+                    self.connect_dialog_state = crate::views::ConnectDialogState::new(
+                        crate::ui::components::dialog::Dialog::with_items(
+                            title,
+                            dialog_items,
+                        ),
+                    );
+                    self.connect_dialog_state.dialog.show();
+                    self.overlay_focus = OverlayFocus::ConnectDialog;
+                } else if title == "Sessions" {
+                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
+                        items
+                            .into_iter()
+                            .map(|item| crate::ui::components::dialog::DialogItem {
+                                id: item.id,
+                                name: item.name,
+                                group: item.group,
+                                description: item.description,
+                                tip: item.tip,
+                                provider_id: item.provider_id.clone(),
+                            })
+                            .collect();
+                    self.sessions_dialog_state =
+                        init_sessions_dialog(title, dialog_items);
+                    self.sessions_dialog_state.dialog.show();
+                    self.overlay_focus = OverlayFocus::SessionsDialog;
+                } else {
+                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
+                        items
+                            .into_iter()
+                            .map(|item| crate::ui::components::dialog::DialogItem {
+                                id: item.id,
+                                name: item.name,
+                                group: item.group,
+                                description: item.description,
+                                tip: item.tip,
+                                provider_id: item.provider_id.clone(),
+                            })
+                            .collect();
+                    self.models_dialog_state = init_models_dialog(title, dialog_items);
+                    self.models_dialog_state.dialog.show();
+                    self.overlay_focus = OverlayFocus::ModelsDialog;
                 }
             }
         }
@@ -940,6 +1046,148 @@ impl App {
         self.models_dialog_state.refresh_items(items);
     }
 
+    fn cleanup_streaming(&mut self) {
+        self.chunk_sender = None;
+        self.chunk_receiver = None;
+        self.streaming_cancel_token = None;
+    }
+
+    fn cancel_streaming(&mut self) {
+        if let Some(token) = &self.streaming_cancel_token {
+            token.cancel();
+        }
+    }
+
+    pub fn process_streaming_chunks(&mut self) {
+        let mut chunks = Vec::new();
+
+        if let Some(receiver) = &mut self.chunk_receiver {
+            while let Ok(chunk) = receiver.try_recv() {
+                chunks.push(chunk);
+            }
+        }
+
+        for chunk in chunks {
+            match chunk {
+                crate::llm::ChunkMessage::Text(text) => {
+                    self.chat_state.chat.append_to_last_assistant(&text);
+                }
+                crate::llm::ChunkMessage::Reasoning(reasoning) => {
+                    self.chat_state.chat.append_to_last_assistant(&reasoning);
+                }
+                crate::llm::ChunkMessage::End => {
+                    if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
+                        last_msg.mark_complete();
+                        let _ = self.session_manager.add_message_to_current_session(last_msg);
+                    }
+                    self.is_streaming = false;
+                    self.cleanup_streaming();
+                }
+                crate::llm::ChunkMessage::Failed(error) => {
+                    self.is_streaming = false;
+                    push_toast(ratatui_toolkit::Toast::new(
+                        format!("LLM error: {}", error),
+                        ratatui_toolkit::ToastLevel::Error,
+                        None,
+                    ));
+                    if self.chat_state.chat.messages.last().is_some_and(|m| m.role == crate::session::types::MessageRole::Assistant && !m.is_complete) {
+                        self.chat_state.chat.messages.pop();
+                    }
+                    self.cleanup_streaming();
+                }
+                crate::llm::ChunkMessage::Cancelled => {
+                    self.is_streaming = false;
+                    push_toast(ratatui_toolkit::Toast::new(
+                        "Streaming cancelled",
+                        ratatui_toolkit::ToastLevel::Info,
+                        None,
+                    ));
+                    if self.chat_state.chat.messages.last().is_some_and(|m| m.role == crate::session::types::MessageRole::Assistant && !m.is_complete) {
+                        self.chat_state.chat.messages.pop();
+                    }
+                    self.cleanup_streaming();
+                }
+            }
+        }
+    }
+
+    fn start_llm_streaming(&mut self, _user_message: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::mpsc;
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let sender_clone = sender.clone();
+        self.chunk_sender = Some(sender);
+        self.chunk_receiver = Some(receiver);
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.streaming_cancel_token = Some(cancel_token.clone());
+
+        self.is_streaming = true;
+
+        self.chat_state.chat.add_assistant_message("");
+        if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
+            last_msg.is_complete = false;
+        }
+
+        let provider_name = self.provider_name.clone();
+        let model = self.model.clone();
+        let messages = self.chat_state.chat.messages.clone();
+
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                stream_llm_with_cancellation(cancel_token, provider_name, model, messages, sender_clone.clone()),
+            ).await;
+
+            let _ = match result {
+                Ok(Ok(())) => {
+                    sender_clone.send(crate::llm::ChunkMessage::End)
+                }
+                Ok(Err(e)) => {
+                    sender_clone.send(crate::llm::ChunkMessage::Failed(e.to_string()))
+                }
+                Err(_) => {
+                    sender_clone.send(crate::llm::ChunkMessage::Failed("Timeout: No response within 5 minutes".to_string()))
+                }
+            };
+        });
+
+        Ok(())
+    }
+
+    fn handle_message_input(&mut self, msg: String) {
+        if !msg.is_empty() && self.base_focus == BaseFocus::Home {
+            if self.session_manager.get_current_session_id().is_none() {
+                let session_title = Self::generate_title_from_message(&msg);
+                self.session_manager.create_session(Some(session_title));
+            }
+            let user_message = crate::session::types::Message::user(&msg);
+            let _ = self.session_manager.add_message_to_current_session(&user_message);
+            self.chat_state.chat.add_user_message(&msg);
+            self.base_focus = BaseFocus::Chat;
+
+            if let Err(e) = self.start_llm_streaming(&msg) {
+                push_toast(ratatui_toolkit::Toast::new(
+                    format!("LLM error: {}", e),
+                    ratatui_toolkit::ToastLevel::Error,
+                    None,
+                ));
+            }
+        } else if !msg.is_empty() && self.base_focus == BaseFocus::Chat {
+            let user_message = crate::session::types::Message::user(&msg);
+            let _ = self.session_manager.add_message_to_current_session(&user_message);
+            self.chat_state.chat.add_user_message(&msg);
+
+            if let Err(e) = self.start_llm_streaming(&msg) {
+                push_toast(ratatui_toolkit::Toast::new(
+                    format!("LLM error: {}", e),
+                    ratatui_toolkit::ToastLevel::Error,
+                    None,
+                ));
+            }
+        }
+    }
+
     pub fn render(&mut self, f: &mut ratatui::Frame) {
         let size = f.area();
         let colors = self.get_current_theme_colors();
@@ -997,6 +1245,7 @@ impl App {
                     self.model.clone(),
                     self.provider_name.clone(),
                     &colors,
+                    self.is_streaming,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)

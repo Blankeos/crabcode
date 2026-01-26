@@ -30,6 +30,8 @@ nucleo-matcher = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 cuid2 = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+aisdk = { version = "0.4", features = ["openai"] }
+tokio-util = "0.7"
 
 [dev-dependencies]
 tokio-test = "0.4"

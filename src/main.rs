@@ -5,6 +5,7 @@ mod app;
 mod autocomplete;
 mod command;
 mod config;
+mod llm;
 mod model;
 mod persistence;
 mod session;
@@ -107,6 +108,7 @@ async fn run_event_loop(
     app: &mut App,
 ) -> Result<()> {
     while app.running {
+        app.process_streaming_chunks();
         remove_expired_toasts();
         terminal.draw(|f| app.render(f))?;
 
