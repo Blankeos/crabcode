@@ -21,7 +21,6 @@ pub struct DialogItem {
     pub name: String,
     pub group: String,
     pub description: String,
-    pub connected: bool,
     pub tip: Option<String>,
     pub provider_id: String,
 }
@@ -33,7 +32,6 @@ impl Clone for DialogItem {
             name: self.name.clone(),
             group: self.group.clone(),
             description: self.description.clone(),
-            connected: self.connected,
             tip: self.tip.clone(),
             provider_id: self.provider_id.clone(),
         }
@@ -671,6 +669,8 @@ impl Dialog {
                         };
                         let padding_len =
                             (list_area_width as usize).saturating_sub(base_len + tip.len() + 2);
+                        let padding_after_tip = (list_area_width as usize)
+                            .saturating_sub(base_len + tip.len() + 2 + padding_len);
 
                         if has_description {
                             vec![
@@ -685,9 +685,10 @@ impl Dialog {
                                 Span::styled(
                                     tip,
                                     Style::default()
-                                        .fg(Color::Rgb(150, 120, 100))
-                                        .add_modifier(Modifier::DIM),
+                                        .fg(Color::Rgb(100, 200, 100))
+                                        .add_modifier(Modifier::BOLD),
                                 ),
+                                Span::raw(" ".repeat(padding_after_tip)),
                             ]
                         } else {
                             vec![
@@ -699,41 +700,7 @@ impl Dialog {
                                         .fg(Color::Rgb(150, 120, 100))
                                         .add_modifier(Modifier::DIM),
                                 ),
-                            ]
-                        }
-                    } else if item.connected {
-                        let base_len = if has_description {
-                            item.name.len() + item.description.len() + 4
-                        } else {
-                            item.name.len() + 2
-                        };
-                        let status_text = "🟢 Connected";
-                        let padding_len = (list_area_width as usize)
-                            .saturating_sub(base_len + status_text.len() + 2);
-
-                        if has_description {
-                            vec![
-                                Span::raw(format!("  {}  ", item.name)),
-                                Span::styled(
-                                    item.description.clone(),
-                                    Style::default()
-                                        .fg(Color::Rgb(150, 150, 150))
-                                        .add_modifier(Modifier::DIM),
-                                ),
-                                Span::raw(" ".repeat(padding_len)),
-                                Span::styled(
-                                    status_text.to_string(),
-                                    Style::default().fg(Color::Rgb(100, 255, 100)),
-                                ),
-                            ]
-                        } else {
-                            vec![
-                                Span::raw(format!("  {}", item.name)),
-                                Span::raw(" ".repeat(padding_len)),
-                                Span::styled(
-                                    status_text.to_string(),
-                                    Style::default().fg(Color::Rgb(100, 255, 100)),
-                                ),
+                                Span::raw(" ".repeat(padding_after_tip)),
                             ]
                         }
                     } else if has_description {
@@ -897,7 +864,6 @@ mod tests {
                 name: "Model A".to_string(),
                 group: "Provider1".to_string(),
                 description: "Description for Model A".to_string(),
-                connected: false,
                 tip: None,
                 provider_id: "provider1".to_string(),
             },
@@ -906,7 +872,6 @@ mod tests {
                 name: "Model B".to_string(),
                 group: "Provider1".to_string(),
                 description: "Description for Model B".to_string(),
-                connected: false,
                 tip: None,
                 provider_id: "provider1".to_string(),
             },
@@ -915,7 +880,6 @@ mod tests {
                 name: "Model C".to_string(),
                 group: "Provider2".to_string(),
                 description: "Description for Model C".to_string(),
-                connected: false,
                 tip: None,
                 provider_id: "provider2".to_string(),
             },

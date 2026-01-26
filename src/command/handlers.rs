@@ -30,7 +30,6 @@ pub fn handle_sessions<'a>(
                     name: session.title.clone(),
                     group: date_group,
                     description: String::new(),
-                    connected: false,
                     tip: Some(time),
                     provider_id: String::new(),
                 }
@@ -88,6 +87,11 @@ pub fn handle_connect<'a>(
                 Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
             };
 
+            let api_key_config = match crate::config::ApiKeyConfig::load() {
+                Ok(c) => c,
+                Err(e) => return CommandResult::Error(format!("Failed to load API key config: {}", e)),
+            };
+
             let discovery = match crate::model::discovery::Discovery::new() {
                 Ok(d) => d,
                 Err(e) => {
@@ -119,13 +123,17 @@ pub fn handle_connect<'a>(
                     } else {
                         "Other"
                     };
+                    let is_connected = connected_providers.contains_key(&id);
                     crate::command::registry::DialogItem {
                         id: id.clone(),
                         name: provider.name.clone(),
                         group: group.to_string(),
                         description: id.clone(),
-                        connected: connected_providers.contains_key(&id),
-                        tip: None,
+                        tip: if is_connected {
+                            Some("🟢 Connected".to_string())
+                        } else {
+                            None
+                        },
                         provider_id: id.clone(),
                     }
                 })
@@ -289,7 +297,6 @@ pub fn handle_models<'a>(
                             name: model.name.clone(),
                             group: group.to_string(),
                             description,
-                            connected: false,
                             tip,
                             provider_id: model.provider_id.clone(),
                         });

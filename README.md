@@ -21,7 +21,6 @@ A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interac
 - **Session Management** - Create and manage multiple chat sessions
 - **Streaming Responses** - Real-time streaming of AI responses
 - **Git Integration** - Detects and displays current git branch
-- **Config Management** - Secure API key storage in `~/.config/crabcode/api_keys.json`
 
 ## Installation
 
@@ -77,7 +76,7 @@ cargo install crabcode
 
 ## Configuration
 
-API keys are stored securely in `~/.config/crabcode/api_keys.json`.
+API keys are stored securely in `~/.config/crabcode`.
 
 ### Supported Providers
 

@@ -569,8 +569,7 @@ impl App {
                                         name: item.name,
                                         group: item.group,
                                         description: item.description,
-                                        connected: item.connected,
-                                        tip: None,
+                                        tip: item.tip,
                                         provider_id: item.provider_id.clone(),
                                     })
                                     .collect();
@@ -591,7 +590,6 @@ impl App {
                                         name: item.name,
                                         group: item.group,
                                         description: item.description,
-                                        connected: item.connected,
                                         tip: item.tip,
                                         provider_id: item.provider_id.clone(),
                                     })
@@ -609,7 +607,6 @@ impl App {
                                         name: item.name,
                                         group: item.group,
                                         description: item.description,
-                                        connected: item.connected,
                                         tip: item.tip,
                                         provider_id: item.provider_id.clone(),
                                     })
@@ -671,7 +668,6 @@ impl App {
                     name: session.title.clone(),
                     group: date_group,
                     description: String::new(),
-                    connected: false,
                     tip: Some(time),
                     provider_id: String::new(),
                 }
@@ -778,7 +774,6 @@ impl App {
                 name: model.name.clone(),
                 group: group.to_string(),
                 description,
-                connected: false,
                 tip,
                 provider_id: model.provider_id.clone(),
             });

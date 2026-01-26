@@ -32,7 +32,6 @@ pub struct DialogItem {
     pub name: String,
     pub group: String,
     pub description: String,
-    pub connected: bool,
     pub tip: Option<String>,
     pub provider_id: String,
 }
@@ -109,7 +108,6 @@ mod tests {
             name: "Test Item".to_string(),
             group: "Test Group".to_string(),
             description: "Test description".to_string(),
-            connected: false,
             tip: None,
             provider_id: String::new(),
         }
