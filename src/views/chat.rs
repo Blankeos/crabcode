@@ -35,6 +35,7 @@ pub fn render_chat(
     branch: Option<String>,
     agent: String,
     model: String,
+    provider_name: String,
     colors: &ThemeColors,
 ) {
     let size = f.area();
@@ -58,7 +59,7 @@ pub fn render_chat(
         .split(main_chunks[0]);
 
     chat_state.chat.render(f, above_status_chunks[0]);
-    input.render(f, above_status_chunks[1], &agent, &model);
+    input.render(f, above_status_chunks[1], &agent, &model, &provider_name);
 
     let help_text = vec![
         Span::styled("/", Style::default().fg(colors.info)),

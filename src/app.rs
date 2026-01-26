@@ -78,6 +78,7 @@ pub struct App {
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
     pub model: String,
+    pub provider_name: String,
     pub cwd: String,
     pub base_focus: BaseFocus,
     pub overlay_focus: OverlayFocus,
@@ -129,14 +130,18 @@ impl App {
             }
         };
 
-        let active_model = if let Some(ref dao) = prefs_dao {
+        let active_model_info = if let Some(ref dao) = prefs_dao {
             dao.get_active_model()
                 .ok()
                 .flatten()
-                .map(|(_provider_id, model_id)| model_id)
-                .unwrap_or_else(|| "claude-3-sonnet".to_string())
         } else {
-            "claude-3-sonnet".to_string()
+            None
+        };
+
+        let (active_model, active_provider_name) = if let Some((provider_id, model_id)) = active_model_info {
+            (model_id.clone(), provider_id.clone())
+        } else {
+            ("claude-3-sonnet".to_string(), "anthropic".to_string())
         };
 
         Self {
@@ -156,6 +161,7 @@ impl App {
             prefs_dao,
             agent: "Plan".to_string(),
             model: active_model,
+            provider_name: active_provider_name,
             cwd,
             base_focus: BaseFocus::Home,
             overlay_focus: OverlayFocus::None,
@@ -266,7 +272,9 @@ impl App {
                 match action {
                     crate::views::models_dialog::ModelsDialogAction::SelectModel { provider_id, model_id } => {
                         let model_id_clone = model_id.clone();
+                        let provider_id_clone = provider_id.clone();
                         self.model = model_id_clone.clone();
+                        self.provider_name = provider_id_clone.clone();
                         
                         if let Some(ref dao) = self.prefs_dao {
                             if let Err(e) = dao.set_active_model(provider_id.clone(), model_id_clone.clone()) {
@@ -883,6 +891,7 @@ impl App {
                     git::get_current_branch(),
                     self.agent.clone(),
                     self.model.clone(),
+                    self.provider_name.clone(),
                     &colors,
                 );
 
@@ -923,6 +932,7 @@ impl App {
                     git::get_current_branch(),
                     self.agent.clone(),
                     self.model.clone(),
+                    self.provider_name.clone(),
                     &colors,
                 );
 

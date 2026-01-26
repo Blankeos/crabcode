@@ -24,7 +24,14 @@ impl Input {
         self
     }
 
-    pub fn render(&self, frame: &mut ratatui::Frame, area: Rect, agent: &str, model: &str) {
+    pub fn render(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        agent: &str,
+        model: &str,
+        provider_name: &str,
+    ) {
         let agent_color = if agent == "Plan" {
             ratatui::style::Color::Rgb(255, 165, 0)
         } else {
@@ -65,7 +72,7 @@ impl Input {
             ),
             ratatui::text::Span::raw("  "),
             ratatui::text::Span::styled(
-                "OpenAI",
+                provider_name.to_string(),
                 ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
             ),
         ]);

@@ -37,6 +37,7 @@ pub fn render_home(
     branch: Option<String>,
     agent: String,
     model: String,
+    provider_name: String,
     colors: &ThemeColors,
 ) {
     let size = f.area();
@@ -89,7 +90,7 @@ pub fn render_home(
     let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
 
     f.render_widget(logo, logo_chunks[1]);
-    input.render(f, home_chunks[1], &agent, &model);
+    input.render(f, home_chunks[1], &agent, &model, &provider_name);
 
     let help_text = vec![
         Span::styled("/", Style::default().fg(colors.info)),
