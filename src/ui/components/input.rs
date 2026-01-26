@@ -200,6 +200,10 @@ impl Input {
         self.textarea.insert_str(c.to_string().as_str());
     }
 
+    pub fn insert_str(&mut self, text: &str) {
+        self.textarea.insert_str(text);
+    }
+
     pub fn get_autocomplete_suggestions(&self) -> Vec<Suggestion> {
         if let Some(autocomplete) = &self.autocomplete {
             let text = self.get_text();

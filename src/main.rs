@@ -20,7 +20,8 @@ use clap::Parser;
 use ratatui::crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags, EnableBracketedPaste,
+        DisableBracketedPaste,
     },
     execute,
     terminal::{
@@ -67,10 +68,11 @@ async fn main() -> Result<()> {
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            EnableBracketedPaste
         )?;
     } else {
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     }
 
     let backend = CrosstermBackend::new(stdout);
@@ -84,13 +86,15 @@ async fn main() -> Result<()> {
             terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture,
-            PopKeyboardEnhancementFlags
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste
         )?;
     } else {
         execute!(
             terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         )?;
     }
     terminal.show_cursor()?;
@@ -122,6 +126,9 @@ async fn run_event_loop(
                 }
                 event::Event::Mouse(mouse) => {
                     app.handle_mouse_event(mouse);
+                }
+                event::Event::Paste(text) => {
+                    app.handle_paste(text);
                 }
                 _ => {}
             }

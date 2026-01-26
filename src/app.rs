@@ -522,6 +522,69 @@ impl App {
         }
     }
 
+    pub fn handle_paste(&mut self, text: String) {
+        const MAX_PASTE_SIZE: usize = 20 * 1024 * 1024;
+
+        if text.len() > MAX_PASTE_SIZE {
+            push_toast(ratatui_toolkit::Toast::new(
+                format!(
+                    "Paste content too large ({}MB). Maximum is 20MB.",
+                    text.len() / 1024 / 1024
+                ),
+                ratatui_toolkit::ToastLevel::Warning,
+                None,
+            ));
+            return;
+        }
+
+        match (self.base_focus, self.overlay_focus) {
+            (BaseFocus::Home, OverlayFocus::None) | (BaseFocus::Chat, OverlayFocus::None) => {
+                self.input.insert_str(&text);
+            }
+            (_, OverlayFocus::ModelsDialog) => {
+                self.models_dialog_state
+                    .dialog
+                    .search_textarea
+                    .insert_str(&text);
+                self.models_dialog_state
+                    .dialog
+                    .set_search_query(self.models_dialog_state.dialog.search_textarea.lines().join(""));
+                self.models_dialog_state.dialog.selected_index = 0;
+            }
+            (_, OverlayFocus::ConnectDialog) => {
+                self.connect_dialog_state
+                    .dialog
+                    .search_textarea
+                    .insert_str(&text);
+                self.connect_dialog_state
+                    .dialog
+                    .set_search_query(self.connect_dialog_state.dialog.search_textarea.lines().join(""));
+                self.connect_dialog_state.dialog.selected_index = 0;
+            }
+            (_, OverlayFocus::SessionsDialog) => {
+                self.sessions_dialog_state
+                    .dialog
+                    .search_textarea
+                    .insert_str(&text);
+                self.sessions_dialog_state
+                    .dialog
+                    .set_search_query(self.sessions_dialog_state.dialog.search_textarea.lines().join(""));
+                self.sessions_dialog_state.dialog.selected_index = 0;
+            }
+            (_, OverlayFocus::SessionRenameDialog) => {
+                self.session_rename_dialog_state.input_textarea.insert_str(&text);
+            }
+            (_, OverlayFocus::ApiKeyInput) => {
+                self.api_key_input.text_area.insert_str(&text);
+            }
+            (_, OverlayFocus::SuggestionsPopup) => {
+                self.input.insert_str(&text);
+                self.update_suggestions();
+            }
+            _ => {}
+        }
+    }
+
     fn autocomplete_and_submit(&mut self) {
         if let Some(selected) = get_selected_suggestion(&self.suggestions_popup_state) {
             let command = format!("/{}", selected.name);
