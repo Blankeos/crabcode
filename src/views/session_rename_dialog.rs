@@ -1,3 +1,4 @@
+use crate::theme::ThemeColors;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -19,13 +20,14 @@ pub struct SessionRenameDialogState {
     pub session_id: Option<String>,
     pub original_title: String,
     is_input_focused: Arc<AtomicBool>,
+    colors: ThemeColors,
 }
 
 impl SessionRenameDialogState {
-    pub fn new() -> Self {
+    pub fn new(colors: ThemeColors) -> Self {
         let mut input_textarea = TextArea::default();
         input_textarea.set_placeholder_text("Session title");
-        input_textarea.set_cursor_line_style(Style::default().fg(Color::Rgb(255, 140, 0)));
+        input_textarea.set_cursor_line_style(Style::default().fg(colors.primary));
 
         Self {
             visible: false,
@@ -35,7 +37,12 @@ impl SessionRenameDialogState {
             session_id: None,
             original_title: String::new(),
             is_input_focused: Arc::new(AtomicBool::new(false)),
+            colors,
         }
+    }
+
+    pub fn set_colors(&mut self, colors: ThemeColors) {
+        self.colors = colors;
     }
 
     pub fn show(&mut self, session_id: String, current_title: String) {
@@ -44,7 +51,7 @@ impl SessionRenameDialogState {
         self.input_textarea = TextArea::from(vec![current_title]);
         self.input_textarea.set_placeholder_text("Session title");
         self.input_textarea
-            .set_cursor_line_style(Style::default().fg(Color::Rgb(255, 140, 0)));
+            .set_cursor_line_style(Style::default().fg(self.colors.primary));
         self.visible = true;
         self.is_input_focused.store(true, Ordering::SeqCst);
     }
@@ -75,18 +82,33 @@ impl SessionRenameDialogState {
 
 impl Default for SessionRenameDialogState {
     fn default() -> Self {
-        Self::new()
+        Self::new(ThemeColors {
+            primary: Color::Rgb(255, 140, 0),
+            background: Color::Reset,
+            text: Color::Reset,
+            text_weak: Color::Reset,
+            text_strong: Color::Reset,
+            border: Color::Reset,
+            border_weak_focus: Color::Rgb(255, 200, 100),
+            border_focus: Color::Rgb(255, 140, 0),
+            border_strong_focus: Color::Rgb(255, 100, 0),
+            success: Color::Rgb(0, 255, 0),
+            warning: Color::Rgb(255, 255, 0),
+            error: Color::Rgb(255, 0, 0),
+            info: Color::Rgb(0, 255, 255),
+        })
     }
 }
 
-pub fn init_session_rename_dialog() -> SessionRenameDialogState {
-    SessionRenameDialogState::new()
+pub fn init_session_rename_dialog(colors: ThemeColors) -> SessionRenameDialogState {
+    SessionRenameDialogState::new(colors)
 }
 
 pub fn render_session_rename_dialog(
     f: &mut Frame,
     dialog_state: &mut SessionRenameDialogState,
     area: Rect,
+    colors: ThemeColors,
 ) {
     if !dialog_state.visible {
         return;
@@ -143,7 +165,7 @@ pub fn render_session_rename_dialog(
         Span::styled(
             "esc",
             Style::default()
-                .fg(Color::Rgb(255, 140, 0))
+                .fg(colors.primary)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
     ]);

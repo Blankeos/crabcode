@@ -2,6 +2,7 @@ use ratatui::crossterm::event::KeyEvent;
 use ratatui::{layout::Rect, Frame};
 
 use crate::autocomplete::Suggestion;
+use crate::theme::ThemeColors;
 use crate::ui::components::popup::{Popup, PopupAction};
 
 pub struct SuggestionsPopupState {
@@ -23,8 +24,9 @@ pub fn render_suggestions_popup(
     popup_state: &SuggestionsPopupState,
     area: Rect,
     has_focus: bool,
+    colors: ThemeColors,
 ) {
-    popup_state.popup.render(f, area, has_focus);
+    popup_state.popup.render(f, area, has_focus, colors);
 }
 
 pub fn handle_suggestions_popup_key_event(

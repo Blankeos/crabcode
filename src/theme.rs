@@ -44,6 +44,15 @@ pub struct ThemeOverrides {
     #[serde(rename = "border-base")]
     pub border_base: String,
 
+    #[serde(rename = "border-weak-focus")]
+    pub border_weak_focus: String,
+
+    #[serde(rename = "border-focus")]
+    pub border_focus: String,
+
+    #[serde(rename = "border-strong-focus")]
+    pub border_strong_focus: String,
+
     #[serde(rename = "syntax-string")]
     pub syntax_string: String,
 }
@@ -56,6 +65,9 @@ pub struct ThemeColors {
     pub text_weak: ratatui::style::Color,
     pub text_strong: ratatui::style::Color,
     pub border: ratatui::style::Color,
+    pub border_weak_focus: ratatui::style::Color,
+    pub border_focus: ratatui::style::Color,
+    pub border_strong_focus: ratatui::style::Color,
     pub success: ratatui::style::Color,
     pub warning: ratatui::style::Color,
     pub error: ratatui::style::Color,
@@ -91,6 +103,9 @@ impl Theme {
             text_weak: parse_hex(&mode.overrides.text_weak),
             text_strong: parse_hex(&mode.overrides.text_strong),
             border: parse_hex(&mode.overrides.border_base),
+            border_weak_focus: parse_hex(&mode.overrides.border_weak_focus),
+            border_focus: parse_hex(&mode.overrides.border_focus),
+            border_strong_focus: parse_hex(&mode.overrides.border_strong_focus),
             success: parse_hex(&mode.seeds.success),
             warning: parse_hex(&mode.seeds.warning),
             error: parse_hex(&mode.seeds.error),

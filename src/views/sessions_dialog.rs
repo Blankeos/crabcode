@@ -1,3 +1,4 @@
+use crate::theme::ThemeColors;
 use crate::ui::components::dialog::{Dialog, DialogAction as FooterAction, DialogItem};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::{layout::Rect, Frame};
@@ -69,8 +70,13 @@ pub fn init_sessions_dialog(
     SessionsDialogState::with_items(title, items)
 }
 
-pub fn render_sessions_dialog(f: &mut Frame, dialog_state: &mut SessionsDialogState, area: Rect) {
-    dialog_state.dialog.render(f, area);
+pub fn render_sessions_dialog(
+    f: &mut Frame,
+    dialog_state: &mut SessionsDialogState,
+    area: Rect,
+    colors: ThemeColors,
+) {
+    dialog_state.dialog.render(f, area, colors);
 }
 
 pub fn handle_sessions_dialog_key_event(

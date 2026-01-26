@@ -99,15 +99,6 @@ impl App {
         let mut input = Input::new().with_autocomplete(autocomplete);
         input.set_placeholder(placeholder_static);
 
-        let home_state = init_home();
-        let chat_state = init_chat(Chat::new());
-        let suggestions_popup_state = init_suggestions_popup(Popup::new());
-        let models_dialog_state = init_models_dialog("Models", vec![]);
-        let connect_dialog_state = init_connect_dialog();
-        let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
-        let session_rename_dialog_state = init_session_rename_dialog();
-        let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
-
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(|s| s.to_string()))
@@ -115,6 +106,16 @@ impl App {
 
         let theme = theme::Theme::load_from_file("src/theme.json")
             .unwrap_or_else(|_| theme::Theme::load_from_file("src/themes/ayu.json").unwrap());
+        let colors = theme.get_colors(true);
+
+        let home_state = init_home();
+        let chat_state = init_chat(Chat::new());
+        let suggestions_popup_state = init_suggestions_popup(Popup::new());
+        let models_dialog_state = init_models_dialog("Models", vec![]);
+        let connect_dialog_state = init_connect_dialog();
+        let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
+        let session_rename_dialog_state = init_session_rename_dialog(colors);
+        let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
         let session_manager = SessionManager::new()
             .with_history()
@@ -205,6 +206,9 @@ impl App {
                 text_weak: ratatui::style::Color::Reset,
                 text_strong: ratatui::style::Color::Reset,
                 border: ratatui::style::Color::Reset,
+                border_weak_focus: ratatui::style::Color::Rgb(255, 200, 100),
+                border_focus: ratatui::style::Color::Rgb(255, 140, 0),
+                border_strong_focus: ratatui::style::Color::Rgb(255, 100, 0),
                 success: ratatui::style::Color::Rgb(0, 255, 0),
                 warning: ratatui::style::Color::Rgb(255, 255, 0),
                 error: ratatui::style::Color::Rgb(255, 0, 0),
@@ -376,6 +380,7 @@ impl App {
                         true
                     }
                     SessionsDialogAction::Rename(id, title) => {
+                        self.session_rename_dialog_state.set_colors(self.get_current_theme_colors());
                         self.session_rename_dialog_state.show(id, title);
                         self.overlay_focus = OverlayFocus::SessionRenameDialog;
                         true
@@ -904,6 +909,7 @@ impl App {
                         &self.suggestions_popup_state,
                         home_chunks[1],
                         self.overlay_focus == OverlayFocus::SuggestionsPopup,
+                        colors,
                     );
                 }
             }
@@ -942,6 +948,7 @@ impl App {
                         &self.suggestions_popup_state,
                         chat_chunks[1],
                         self.overlay_focus == OverlayFocus::SuggestionsPopup,
+                        colors,
                     );
                 }
             }
@@ -950,13 +957,13 @@ impl App {
         if self.overlay_focus == OverlayFocus::ModelsDialog
             && self.models_dialog_state.dialog.is_visible()
         {
-            render_models_dialog(f, &mut self.models_dialog_state, size);
+            render_models_dialog(f, &mut self.models_dialog_state, size, colors);
         }
 
         if self.overlay_focus == OverlayFocus::ConnectDialog
             && self.connect_dialog_state.dialog.is_visible()
         {
-            render_connect_dialog(f, &mut self.connect_dialog_state, size);
+            render_connect_dialog(f, &mut self.connect_dialog_state, size, colors);
         }
 
         if self.overlay_focus == OverlayFocus::ApiKeyInput && self.api_key_input.is_visible() {
@@ -966,13 +973,13 @@ impl App {
         if self.overlay_focus == OverlayFocus::SessionsDialog
             && self.sessions_dialog_state.dialog.is_visible()
         {
-            render_sessions_dialog(f, &mut self.sessions_dialog_state, size);
+            render_sessions_dialog(f, &mut self.sessions_dialog_state, size, colors);
         }
 
         if self.overlay_focus == OverlayFocus::SessionRenameDialog
             && self.session_rename_dialog_state.is_visible()
         {
-            render_session_rename_dialog(f, &mut self.session_rename_dialog_state, size);
+            render_session_rename_dialog(f, &mut self.session_rename_dialog_state, size, colors);
         }
 
         render_toasts(f, &get_toast_manager().lock().unwrap());

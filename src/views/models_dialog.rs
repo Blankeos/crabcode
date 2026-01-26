@@ -1,6 +1,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::{layout::Rect, Frame};
 
+use crate::theme::ThemeColors;
 use crate::ui::components::dialog::{Dialog, DialogItem};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,8 +55,13 @@ pub fn init_models_dialog(title: impl Into<String>, items: Vec<DialogItem>) -> M
     ModelsDialogState::with_items(title, items)
 }
 
-pub fn render_models_dialog(f: &mut Frame, dialog_state: &mut ModelsDialogState, area: Rect) {
-    dialog_state.dialog.render(f, area);
+pub fn render_models_dialog(
+    f: &mut Frame,
+    dialog_state: &mut ModelsDialogState,
+    area: Rect,
+    colors: ThemeColors,
+) {
+    dialog_state.dialog.render(f, area, colors);
 }
 
 pub fn handle_models_dialog_key_event(

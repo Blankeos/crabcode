@@ -1,3 +1,4 @@
+use crate::theme::ThemeColors;
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher,
@@ -564,7 +565,7 @@ impl Dialog {
         self.update_scrollbar();
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, colors: ThemeColors) {
         if !self.visible {
             return;
         }
@@ -621,7 +622,7 @@ impl Dialog {
             Span::styled(
                 "esc",
                 Style::default()
-                    .fg(Color::Rgb(255, 140, 0))
+                    .fg(colors.primary)
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
@@ -652,7 +653,7 @@ impl Dialog {
                 content_lines.push(Line::from(vec![Span::styled(
                     group.clone(),
                     Style::default()
-                        .fg(Color::Rgb(255, 140, 0))
+                        .fg(colors.primary)
                         .add_modifier(Modifier::BOLD),
                 )]));
 
@@ -728,7 +729,7 @@ impl Dialog {
                     if is_selected {
                         for span in &mut spans {
                             let mut style = span.style.clone();
-                            style = style.fg(Color::Black).bg(Color::Rgb(255, 200, 100));
+                            style = style.fg(Color::Black).bg(colors.primary);
                             span.style = style;
                         }
                     }
@@ -771,7 +772,7 @@ impl Dialog {
             footer_spans.push(Span::styled(
                 &action.label,
                 Style::default()
-                    .fg(Color::Rgb(255, 180, 120))
+                    .fg(colors.primary)
                     .add_modifier(Modifier::BOLD),
             ));
             footer_spans.push(Span::raw("  "));
@@ -788,7 +789,7 @@ impl Dialog {
                 Span::styled(
                     "Connect provider",
                     Style::default()
-                        .fg(Color::Rgb(255, 180, 120))
+                        .fg(colors.primary)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
@@ -802,7 +803,7 @@ impl Dialog {
                 Span::styled(
                     "Favorite",
                     Style::default()
-                        .fg(Color::Rgb(255, 180, 120))
+                        .fg(colors.primary)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),

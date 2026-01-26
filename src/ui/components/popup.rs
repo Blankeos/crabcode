@@ -1,4 +1,5 @@
 use crate::autocomplete::Suggestion;
+use crate::theme::ThemeColors;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::Rect,
@@ -93,7 +94,7 @@ impl Popup {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, has_focus: bool) {
+    pub fn render(&self, frame: &mut Frame, area: Rect, has_focus: bool, colors: ThemeColors) {
         if !self.visible || self.suggestions.is_empty() {
             return;
         }
@@ -125,7 +126,7 @@ impl Popup {
             .enumerate()
             .map(|(i, suggestion)| {
                 let (bg_style, name_fg, desc_fg) = if i == self.selected_index {
-                    (Color::Rgb(255, 200, 100), Color::Black, Color::Black)
+                    (colors.primary, colors.background, colors.background)
                 } else {
                     (Color::Reset, Color::White, Color::Rgb(150, 150, 150))
                 };
@@ -165,9 +166,9 @@ impl Popup {
             .collect();
 
         let border_style = if has_focus {
-            Style::default().fg(Color::Rgb(255, 140, 0))
+            Style::default().fg(colors.border_focus)
         } else {
-            Style::default().fg(Color::Rgb(255, 200, 100))
+            Style::default().fg(colors.border_weak_focus)
         };
 
         let list = List::new(items).block(

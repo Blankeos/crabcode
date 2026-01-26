@@ -1,3 +1,4 @@
+use crate::theme::ThemeColors;
 use crate::ui::components::dialog::{Dialog, DialogItem};
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{layout::Rect, Frame};
@@ -28,8 +29,13 @@ pub fn init_connect_dialog() -> ConnectDialogState {
     ConnectDialogState::new(Dialog::with_items("Connect a provider", vec![]))
 }
 
-pub fn render_connect_dialog(f: &mut Frame, dialog_state: &mut ConnectDialogState, area: Rect) {
-    dialog_state.dialog.render(f, area);
+pub fn render_connect_dialog(
+    f: &mut Frame,
+    dialog_state: &mut ConnectDialogState,
+    area: Rect,
+    colors: ThemeColors,
+) {
+    dialog_state.dialog.render(f, area, colors);
 }
 
 pub fn handle_connect_dialog_key_event(
