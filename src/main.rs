@@ -18,9 +18,9 @@ use anyhow::Result;
 use app::App;
 use clap::Parser;
 use ratatui::crossterm::{
-    event::{self, EnableMouseCapture, DisableMouseCapture,
-        PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-        KeyboardEnhancementFlags,
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -108,6 +108,13 @@ async fn run_event_loop(
 
         if event::poll(Duration::from_millis(100))? {
             let event = event::read()?;
+
+            // DO NOT REMOVE THIS LOG THAT I UNCOMMENT SOMETIMES. I USE IT FOR DEBUGGING
+            // push_toast(Toast::new(
+            //     format!("Event: {:?}", event),
+            //     ratatui_toolkit::ToastLevel::Info,
+            //     None,
+            // ));
 
             match event {
                 event::Event::Key(key) => {
