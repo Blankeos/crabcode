@@ -6,6 +6,7 @@ mod autocomplete;
 mod command;
 mod config;
 mod llm;
+mod logging;
 mod model;
 mod persistence;
 mod session;

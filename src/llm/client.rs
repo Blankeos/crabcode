@@ -5,6 +5,8 @@ use aisdk::{
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::logging::log;
+
 pub struct LLMClient {
     base_url: String,
     api_key: String,
@@ -115,11 +117,9 @@ pub async fn stream_llm_with_cancellation(
     let provider = providers.get(&provider_name)
         .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?;
 
-    let base_url = if provider_name == "zai-coding-plan" || provider.api.contains("coding") {
-        "https://api.z.ai/api/coding/paas/v4"
-    } else {
-        &provider.api
-    };
+    let base_url = &provider.api;
+    
+    let _ = log(&format!("I found the api! Base URL: {}", base_url));
 
     let client = LLMClient::new(
         base_url.to_string(),
@@ -161,8 +161,9 @@ pub async fn stream_llm_with_cancellation(
             }
             LanguageModelStreamChunkType::Start => {}
             LanguageModelStreamChunkType::Failed(err) => {
-                let _ = sender.send(crate::llm::ChunkMessage::Failed(format!("{:?}", err)));
-                return Err(anyhow::anyhow!("Streaming failed: {:?}", err).into());
+                let _ = sender.send(crate::llm::ChunkMessage::Failed(format!("{}", err)));
+                let _ = log(&format!("Stream Chunk Failed {}", err));
+                return Err(anyhow::anyhow!("Streaming failed: {}", err).into());
             }
             LanguageModelStreamChunkType::Incomplete(_msg) => {}
             LanguageModelStreamChunkType::NotSupported(_msg) => {}

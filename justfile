@@ -9,3 +9,6 @@ preview:
 
 gen-themes:
     bun run scripts/gen-themes.ts
+
+log:
+    tail -f app.log
