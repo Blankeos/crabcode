@@ -9,12 +9,9 @@ pub mod prefs;
 pub mod providers;
 
 pub use auth::{AuthConfig, AuthDAO};
-pub use conversions::{persistence_to_session, session_to_persistence};
+pub use conversions::persistence_to_session;
 pub use history::{HistoryDAO, Message, MessagePart, Session};
-pub use prefs::{ModelPreferences, ModelRef, PrefsDAO};
-pub use providers::{
-    AuthenticatedProvider, ModelInfo, Pricing, Provider, ProviderCache, ProviderDAO,
-};
+pub use prefs::PrefsDAO;
 
 pub fn get_data_dir() -> PathBuf {
     dirs::data_local_dir()
