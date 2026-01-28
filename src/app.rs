@@ -480,6 +480,14 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         self.quit();
                     }
+                    crate::views::which_key::WhichKeyAction::ScrollUp => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.chat_state.chat.scroll_up(1);
+                    }
+                    crate::views::which_key::WhichKeyAction::ScrollDown => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.chat_state.chat.scroll_down(1);
+                    }
                     crate::views::which_key::WhichKeyAction::None => {
                         self.overlay_focus = OverlayFocus::None;
                     }
@@ -519,6 +527,8 @@ impl App {
         match key.code {
             KeyCode::Char('x') if key.modifiers == event::KeyModifiers::CONTROL => {
                 self.overlay_focus = OverlayFocus::WhichKey;
+                self.which_key_state
+                    .set_chat_active(self.base_focus == BaseFocus::Chat);
                 self.which_key_state.show();
                 true
             }

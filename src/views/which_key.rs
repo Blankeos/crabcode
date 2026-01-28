@@ -18,6 +18,8 @@ pub enum WhichKeyAction {
     ShowSessions,
     NewSession,
     Quit,
+    ScrollUp,
+    ScrollDown,
     None,
 }
 
@@ -32,7 +34,9 @@ pub struct KeyBinding {
 pub struct WhichKeyState {
     pub visible: bool,
     pub bindings: Vec<KeyBinding>,
+    pub chat_bindings: Vec<KeyBinding>,
     pub last_key_time: Instant,
+    pub is_chat_active: bool,
 }
 
 impl WhichKeyState {
@@ -60,11 +64,30 @@ impl WhichKeyState {
             },
         ];
 
+        let chat_bindings = vec![
+            KeyBinding {
+                key: "k".to_string(),
+                description: "Scroll up".to_string(),
+                action: WhichKeyAction::ScrollUp,
+            },
+            KeyBinding {
+                key: "j".to_string(),
+                description: "Scroll down".to_string(),
+                action: WhichKeyAction::ScrollDown,
+            },
+        ];
+
         Self {
             visible: false,
             bindings,
+            chat_bindings,
             last_key_time: Instant::now(),
+            is_chat_active: false,
         }
+    }
+
+    pub fn set_chat_active(&mut self, active: bool) {
+        self.is_chat_active = active;
     }
 
     pub fn show(&mut self) {
@@ -108,6 +131,14 @@ impl WhichKeyState {
                 self.hide();
                 WhichKeyAction::Quit
             }
+            KeyCode::Char('k') | KeyCode::Char('K') if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::ScrollUp
+            }
+            KeyCode::Char('j') | KeyCode::Char('J') if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::ScrollDown
+            }
             KeyCode::Esc => {
                 self.hide();
                 WhichKeyAction::None
@@ -134,7 +165,15 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
 
     let area = f.area();
     let popup_width = 40u16;
-    let popup_height = 12u16;
+    // Base height: 2 (borders) + 1 (empty) + 4 (bindings) + 1 (empty) + 1 (ESC) = 9
+    // Add 2 more lines per chat binding when active
+    let base_height = 9u16;
+    let chat_bindings_count = if state.is_chat_active {
+        state.chat_bindings.len() as u16
+    } else {
+        0
+    };
+    let popup_height = base_height + chat_bindings_count * 1;
 
     let popup_area = Rect {
         x: area.x + (area.width.saturating_sub(popup_width)) / 2,
@@ -168,6 +207,20 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
         );
         let desc_span = Span::styled(&binding.description, Style::default().fg(colors.text));
         lines.push(Line::from(vec![key_span, Span::raw(" "), desc_span]));
+    }
+
+    // Add chat-specific bindings when on chat page
+    if state.is_chat_active {
+        for binding in &state.chat_bindings {
+            let key_span = Span::styled(
+                format!("  {}  ", binding.key),
+                Style::default()
+                    .fg(colors.primary)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let desc_span = Span::styled(&binding.description, Style::default().fg(colors.text));
+            lines.push(Line::from(vec![key_span, Span::raw(" "), desc_span]));
+        }
     }
 
     lines.push(Line::from(""));
