@@ -15,6 +15,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use tui_textarea::{Input as TuiInput, TextArea};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug)]
 pub struct DialogItem {
@@ -635,7 +636,7 @@ impl Dialog {
 
         let mut content_lines = Vec::new();
         let flat_items = self.get_flat_items();
-        let list_area_width = chunks[3].width;
+        let list_area_width = chunks[3].width.saturating_sub(2); // Subtract scrollbar width
         let filtered_items = self.filtered_items.clone();
 
         if flat_items.is_empty() {
@@ -664,14 +665,15 @@ impl Dialog {
 
                     let mut spans: Vec<Span> = if let Some(tip) = &item.tip {
                         let base_len = if has_description {
-                            item.name.len() + item.description.len() + 4
+                            item.name.width() + item.description.width() + 4
                         } else {
-                            item.name.len() + 2
+                            item.name.width() + 2
                         };
+                        let tip_width = tip.width();
                         let padding_len =
-                            (list_area_width as usize).saturating_sub(base_len + tip.len());
+                            (list_area_width as usize).saturating_sub(base_len + tip_width);
                         let padding_after_tip = (list_area_width as usize)
-                            .saturating_sub(base_len + tip.len() + 2 + padding_len);
+                            .saturating_sub(base_len + tip_width + 2 + padding_len);
 
                         if has_description {
                             vec![
@@ -705,7 +707,7 @@ impl Dialog {
                             ]
                         }
                     } else if has_description {
-                        let text_len = item.name.len() + item.description.len() + 4;
+                        let text_len = item.name.width() + item.description.width() + 4;
                         let padding_len = (list_area_width as usize).saturating_sub(text_len);
                         vec![
                             Span::raw(format!("  {}  ", item.name)),
@@ -718,7 +720,7 @@ impl Dialog {
                             Span::raw(" ".repeat(padding_len)),
                         ]
                     } else {
-                        let text_len = item.name.len() + 2;
+                        let text_len = item.name.width() + 2;
                         let padding_len = (list_area_width as usize).saturating_sub(text_len);
                         vec![
                             Span::raw(format!("  {}", item.name)),

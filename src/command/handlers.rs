@@ -1,5 +1,6 @@
 use crate::command::parser::ParsedCommand;
 use crate::command::registry::{Command, CommandResult, Registry};
+use crate::logging::log;
 use crate::session::manager::SessionManager;
 use chrono::{DateTime, Local, Utc};
 use std::pin::Pin;
@@ -56,8 +57,11 @@ fn format_date_group(created_at: std::time::SystemTime) -> String {
 }
 
 fn format_time(created_at: std::time::SystemTime) -> String {
+    use chrono::Timelike;
     let datetime: DateTime<Local> = created_at.into();
-    datetime.format("%-I:%M %p").to_string()
+    let hour = datetime.time().hour12();
+    let am_pm = if hour.0 { "PM" } else { "AM" };
+    format!("{}:{:02} {}", hour.1, datetime.time().minute(), am_pm)
 }
 
 pub fn handle_new<'a>(
@@ -279,9 +283,9 @@ pub fn handle_models<'a>(
                                 .contains(&(model.provider_id.clone(), model.id.clone()));
 
                             let tip = if is_active {
-                                Some("✓ Active".to_string())
+                                Some("Active".to_string())
                             } else if is_favorite {
-                                Some("★ Favorite".to_string())
+                                Some("♥︎ Favorite".to_string())
                             } else {
                                 None
                             };

@@ -5,6 +5,7 @@ use crate::command::handlers::register_all_commands;
 use crate::command::parser::InputType;
 use crate::command::registry::Registry;
 use crate::llm::client::stream_llm_with_cancellation;
+use crate::logging::log;
 use crate::session::manager::SessionManager;
 
 use crate::push_toast;
@@ -948,7 +949,7 @@ impl App {
     }
 
     fn refresh_sessions_dialog(&mut self) {
-        use chrono::{DateTime, Local, Utc};
+        use chrono::{DateTime, Local, Timelike, Utc};
 
         let mut sessions = self.session_manager.list_sessions();
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -970,7 +971,9 @@ impl App {
 
                 let time = {
                     let datetime: DateTime<Local> = session.updated_at.into();
-                    datetime.format("%-I:%M %p").to_string()
+                    let hour = datetime.time().hour12();
+                    let am_pm = if hour.0 { "PM" } else { "AM" };
+                    format!("{}:{:02} {}", hour.1, datetime.time().minute(), am_pm)
                 };
 
                 crate::ui::components::dialog::DialogItem {
@@ -1061,9 +1064,9 @@ impl App {
                 favorites_set.contains(&(model.provider_id.clone(), model.id.clone()));
 
             let tip = if is_active {
-                Some("✓ Active".to_string())
+                Some("Active".to_string())
             } else if is_favorite {
-                Some("★ Favorite".to_string())
+                Some("♥︎ Favorite".to_string())
             } else {
                 None
             };

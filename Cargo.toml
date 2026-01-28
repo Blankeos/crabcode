@@ -33,6 +33,7 @@ chrono = { version = "0.4", features = ["serde"] }
 aisdk = { version = "0.4", features = ["openai", "openaichatcompletions"] }
 tokio-util = "0.7"
 textwrap = "0.16"
+unicode-width = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

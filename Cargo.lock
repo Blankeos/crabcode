@@ -791,6 +791,7 @@ dependencies = [
  "tokio-test",
  "tokio-util",
  "tui-textarea",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
