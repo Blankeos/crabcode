@@ -29,7 +29,7 @@ pub fn init_chat(chat: Chat) -> ChatState {
 pub fn render_chat(
     f: &mut Frame,
     chat_state: &ChatState,
-    input: &Input,
+    input: &mut Input,
     version: String,
     cwd: String,
     branch: Option<String>,

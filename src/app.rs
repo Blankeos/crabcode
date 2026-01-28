@@ -60,6 +60,7 @@ pub enum OverlayFocus {
     SuggestionsPopup,
     SessionsDialog,
     SessionRenameDialog,
+    WhichKey,
 }
 
 pub struct App {
@@ -75,6 +76,7 @@ pub struct App {
     pub connect_dialog_state: ConnectDialogState,
     pub sessions_dialog_state: SessionsDialogState,
     pub session_rename_dialog_state: SessionRenameDialogState,
+    pub which_key_state: crate::views::which_key::WhichKeyState,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
@@ -121,6 +123,7 @@ impl App {
         let connect_dialog_state = init_connect_dialog();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
         let session_rename_dialog_state = init_session_rename_dialog(colors);
+        let which_key_state = crate::views::which_key::init_which_key();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
         let session_manager = SessionManager::new()
@@ -161,6 +164,7 @@ impl App {
             connect_dialog_state,
             sessions_dialog_state,
             session_rename_dialog_state,
+            which_key_state,
             api_key_input,
             prefs_dao,
             agent: "Plan".to_string(),
@@ -438,6 +442,40 @@ impl App {
                     }
                 }
             }
+            OverlayFocus::WhichKey => {
+                let action = self.which_key_state.handle_key_event(key);
+                match action {
+                    crate::views::which_key::WhichKeyAction::ShowModels => {
+                        self.overlay_focus = OverlayFocus::None;
+                        tokio::task::block_in_place(|| {
+                            let rt = tokio::runtime::Handle::current();
+                            rt.block_on(self.process_input("/models"));
+                        });
+                    }
+                    crate::views::which_key::WhichKeyAction::ShowSessions => {
+                        self.overlay_focus = OverlayFocus::None;
+                        tokio::task::block_in_place(|| {
+                            let rt = tokio::runtime::Handle::current();
+                            rt.block_on(self.process_input("/sessions"));
+                        });
+                    }
+                    crate::views::which_key::WhichKeyAction::NewSession => {
+                        self.overlay_focus = OverlayFocus::None;
+                        tokio::task::block_in_place(|| {
+                            let rt = tokio::runtime::Handle::current();
+                            rt.block_on(self.process_input("/new"));
+                        });
+                    }
+                    crate::views::which_key::WhichKeyAction::Quit => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.quit();
+                    }
+                    crate::views::which_key::WhichKeyAction::None => {
+                        self.overlay_focus = OverlayFocus::None;
+                    }
+                }
+                true
+            }
             OverlayFocus::None => {
                 if self.handle_base_keys(key) {
                     return;
@@ -469,6 +507,11 @@ impl App {
 
     fn handle_base_keys(&mut self, key: KeyEvent) -> bool {
         match key.code {
+            KeyCode::Char('x') if key.modifiers == event::KeyModifiers::CONTROL => {
+                self.overlay_focus = OverlayFocus::WhichKey;
+                self.which_key_state.show();
+                true
+            }
             KeyCode::Tab => {
                 if self.agent == "Plan" {
                     self.agent = "Build".to_string();
@@ -556,6 +599,11 @@ impl App {
             handle_connect_dialog_mouse_event(&mut self.connect_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::SessionsDialog {
             handle_sessions_dialog_mouse_event(&mut self.sessions_dialog_state, mouse);
+        } else if self.overlay_focus == OverlayFocus::None {
+            // Handle mouse events for the main input when no overlay is focused
+            if self.input.handle_mouse_event(mouse) {
+                self.update_suggestions();
+            }
         }
     }
 
@@ -1245,7 +1293,7 @@ impl App {
             BaseFocus::Home => {
                 render_home(
                     f,
-                    &self.input,
+                    &mut self.input,
                     self.version.clone(),
                     self.cwd.clone(),
                     git::get_current_branch(),
@@ -1286,7 +1334,7 @@ impl App {
                 render_chat(
                     f,
                     &self.chat_state,
-                    &self.input,
+                    &mut self.input,
                     self.version.clone(),
                     self.cwd.clone(),
                     git::get_current_branch(),
@@ -1352,6 +1400,10 @@ impl App {
             && self.session_rename_dialog_state.is_visible()
         {
             render_session_rename_dialog(f, &mut self.session_rename_dialog_state, size, colors);
+        }
+
+        if self.overlay_focus == OverlayFocus::WhichKey {
+            crate::views::which_key::render_which_key(f, &self.which_key_state, &colors);
         }
 
         render_toasts(f, &get_toast_manager().lock().unwrap());

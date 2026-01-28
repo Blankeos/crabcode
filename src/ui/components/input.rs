@@ -1,12 +1,16 @@
 use crate::autocomplete::{AutoComplete, Suggestion};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::prelude::{Rect, Style};
 use ratatui::widgets::{Block, Paragraph};
-use tui_textarea::{Input as TuiInput, TextArea};
+use tui_textarea::{CursorMove, Input as TuiInput, TextArea};
 
 pub struct Input {
     textarea: TextArea<'static>,
     pub autocomplete: Option<AutoComplete>,
+    textarea_area: Option<Rect>,
+    viewport_top: usize,
 }
 
 impl Input {
@@ -16,6 +20,8 @@ impl Input {
         Self {
             textarea,
             autocomplete: None,
+            textarea_area: None,
+            viewport_top: 0,
         }
     }
 
@@ -25,7 +31,7 @@ impl Input {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         frame: &mut ratatui::Frame,
         area: Rect,
         agent: &str,
@@ -58,6 +64,15 @@ impl Input {
                 ratatui::layout::Constraint::Length(1),
             ])
             .split(inner_area);
+
+        // Store the textarea area for mouse event handling
+        self.textarea_area = Some(chunks[1]);
+
+        // Ensure viewport_top stays within valid bounds
+        let line_count = self.textarea.lines().len();
+        let visible_lines = chunks[1].height as usize;
+        let max_viewport_top = line_count.saturating_sub(visible_lines);
+        self.viewport_top = self.viewport_top.min(max_viewport_top);
 
         frame.render_widget(&self.textarea, chunks[1]);
 
@@ -134,6 +149,94 @@ impl Input {
         }
     }
 
+    pub fn handle_mouse_event(&mut self, mouse: MouseEvent) -> bool {
+        let textarea_area = match self.textarea_area {
+            Some(area) => area,
+            None => return false,
+        };
+
+        let mouse_x = mouse.column;
+        let mouse_y = mouse.row;
+
+        // Check if mouse is within the textarea area
+        let within_textarea = mouse_x >= textarea_area.x
+            && mouse_x < textarea_area.x + textarea_area.width
+            && mouse_y >= textarea_area.y
+            && mouse_y < textarea_area.y + textarea_area.height;
+
+        if !within_textarea {
+            return false;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                let line_count = self.textarea.lines().len();
+                let visible_lines = textarea_area.height as usize;
+
+                // Only scroll if content exceeds viewport
+                if line_count > visible_lines {
+                    // Calculate max valid viewport top position
+                    let max_viewport_top = line_count.saturating_sub(visible_lines);
+
+                    // Only scroll down if we haven't reached the bottom yet
+                    if self.viewport_top < max_viewport_top {
+                        self.viewport_top += 1;
+                        // Move cursor to keep it visible in the viewport
+                        let target_row = self.viewport_top + visible_lines - 1;
+                        let (_, cursor_col) = self.textarea.cursor();
+                        self.textarea
+                            .move_cursor(CursorMove::Jump(target_row as u16, cursor_col as u16));
+                    }
+                }
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                let line_count = self.textarea.lines().len();
+                let visible_lines = textarea_area.height as usize;
+
+                // Only scroll if content exceeds viewport
+                if line_count > visible_lines {
+                    // Only scroll up if we're not at the top already
+                    if self.viewport_top > 0 {
+                        self.viewport_top -= 1;
+                        // Move cursor to keep it visible in the viewport
+                        let target_row = self.viewport_top;
+                        let (_, cursor_col) = self.textarea.cursor();
+                        self.textarea
+                            .move_cursor(CursorMove::Jump(target_row as u16, cursor_col as u16));
+                    }
+                }
+                true
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Calculate cursor position from mouse coordinates
+                let relative_x = mouse_x.saturating_sub(textarea_area.x);
+                let relative_y = mouse_y.saturating_sub(textarea_area.y);
+
+                // Get the lines to calculate proper column position
+                let lines = self.textarea.lines();
+                // Account for viewport offset when calculating target row
+                let target_row = self.viewport_top + relative_y as usize;
+
+                if target_row < lines.len() {
+                    let line = &lines[target_row];
+                    // Clamp column to line length
+                    let target_col = (relative_x as usize).min(line.len());
+                    self.textarea
+                        .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
+                } else {
+                    // Clicked beyond the last line, move to end of last line
+                    let last_row = lines.len().saturating_sub(1);
+                    let last_col = lines[last_row].len();
+                    self.textarea
+                        .move_cursor(CursorMove::Jump(last_row as u16, last_col as u16));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn should_show_suggestions(&self) -> bool {
         let text = self.get_text();
         !text.is_empty() && text.starts_with('/')
@@ -186,6 +289,7 @@ impl Input {
     pub fn clear(&mut self) {
         self.textarea = TextArea::default();
         self.textarea.set_cursor_line_style(Style::default());
+        self.viewport_top = 0;
     }
 
     pub fn set_placeholder(&mut self, placeholder: &'static str) {
@@ -195,6 +299,7 @@ impl Input {
     pub fn set_text(&mut self, text: &str) {
         self.textarea = TextArea::default();
         self.textarea.insert_str(text);
+        self.viewport_top = 0;
     }
 
     pub fn insert_char(&mut self, c: char) {
