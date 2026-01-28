@@ -6,12 +6,14 @@ pub mod conversions;
 pub mod history;
 pub mod migrations;
 pub mod prefs;
+pub mod prompt_history;
 pub mod providers;
 
 pub use auth::{AuthConfig, AuthDAO};
 pub use conversions::persistence_to_session;
 pub use history::{HistoryDAO, Message, MessagePart, Session};
 pub use prefs::PrefsDAO;
+pub use prompt_history::PromptHistoryCache;
 
 pub fn get_data_dir() -> PathBuf {
     dirs::data_local_dir()

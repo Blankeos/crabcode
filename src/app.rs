@@ -563,6 +563,9 @@ impl App {
                 if !input_text.is_empty() {
                     use crate::command::parser::parse_input;
 
+                    // Save the prompt to history before processing
+                    self.input.save_current_to_history();
+
                     match parse_input(&input_text) {
                         crate::command::parser::InputType::Command(mut parsed) => {
                             tokio::task::block_in_place(|| {

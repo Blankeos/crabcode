@@ -1,4 +1,5 @@
 use crate::autocomplete::{AutoComplete, Suggestion};
+use crate::persistence::PromptHistoryCache;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -11,17 +12,22 @@ pub struct Input {
     pub autocomplete: Option<AutoComplete>,
     textarea_area: Option<Rect>,
     viewport_top: usize,
+    prompt_history: Option<PromptHistoryCache>,
+    draft_text: Option<String>,
 }
 
 impl Input {
     pub fn new() -> Self {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
+        let prompt_history = PromptHistoryCache::new().ok();
         Self {
             textarea,
             autocomplete: None,
             textarea_area: None,
             viewport_top: 0,
+            prompt_history,
+            draft_text: None,
         }
     }
 
@@ -121,7 +127,70 @@ impl Input {
 
         // Regular Enter submits
         if event.code == KeyCode::Enter && event.modifiers == KeyModifiers::NONE {
+            self.save_current_to_history();
             return false;
+        }
+
+        // Handle Up arrow for prompt history navigation
+        // Trigger when cursor is on first line
+        if event.code == KeyCode::Up && event.modifiers == KeyModifiers::NONE {
+            let (cursor_row, _) = self.textarea.cursor();
+            if cursor_row == 0 {
+                let current_text = self.get_text();
+                if let Some(ref mut history) = self.prompt_history {
+                    if let Some(prompt) = history.navigate_up(&current_text) {
+                        if self.draft_text.is_none() {
+                            self.draft_text = Some(current_text);
+                        }
+                        self.set_text(&prompt);
+                        self.textarea.move_cursor(CursorMove::Head);
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Handle Down arrow for prompt history navigation
+        if event.code == KeyCode::Down && event.modifiers == KeyModifiers::NONE {
+            let line_count = self.textarea.lines().len();
+            let (cursor_row, _) = self.textarea.cursor();
+            if cursor_row == line_count.saturating_sub(1) {
+                let current_text = self.get_text();
+                let should_reset = if let Some(ref mut history) = self.prompt_history {
+                    if let Some(prompt) = history.navigate_down(&current_text) {
+                        let is_empty = prompt.is_empty();
+                        if is_empty {
+                            // Restore draft text when reaching the end of history
+                            if let Some(draft) = self.draft_text.take() {
+                                self.set_text(&draft);
+                            } else {
+                                self.set_text("");
+                            }
+                        } else {
+                            self.set_text(&prompt);
+                        }
+                        self.textarea.move_cursor(CursorMove::End);
+                        is_empty
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if should_reset {
+                    if let Some(ref mut history) = self.prompt_history {
+                        history.reset_navigation();
+                    }
+                }
+                if should_reset
+                    || self
+                        .prompt_history
+                        .as_ref()
+                        .map_or(false, |h| h.is_navigating())
+                {
+                    return true;
+                }
+            }
         }
 
         match event.code {
@@ -290,6 +359,23 @@ impl Input {
         self.textarea = TextArea::default();
         self.textarea.set_cursor_line_style(Style::default());
         self.viewport_top = 0;
+        self.draft_text = None;
+        if let Some(ref mut history) = self.prompt_history {
+            history.reset_navigation();
+        }
+    }
+
+    pub fn save_current_to_history(&mut self) {
+        let text = self.get_text();
+        if !text.trim().is_empty() {
+            if let Some(ref mut history) = self.prompt_history {
+                let _ = history.add_prompt(&text);
+            }
+        }
+        self.draft_text = None;
+        if let Some(ref mut history) = self.prompt_history {
+            history.reset_navigation();
+        }
     }
 
     pub fn set_placeholder(&mut self, placeholder: &'static str) {
@@ -298,6 +384,7 @@ impl Input {
 
     pub fn set_text(&mut self, text: &str) {
         self.textarea = TextArea::default();
+        self.textarea.set_cursor_line_style(Style::default());
         self.textarea.insert_str(text);
         self.viewport_top = 0;
     }
