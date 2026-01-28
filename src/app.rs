@@ -573,17 +573,17 @@ impl App {
                 if !input_text.is_empty() {
                     use crate::command::parser::parse_input;
 
-                    // Save the prompt to history before processing
-                    self.input.save_current_to_history();
-
                     match parse_input(&input_text) {
-                        crate::command::parser::InputType::Command(mut parsed) => {
+                        crate::command::parser::InputType::Command(parsed) => {
+                            // Don't save commands to prompt history
                             tokio::task::block_in_place(|| {
                                 let rt = tokio::runtime::Handle::current();
                                 rt.block_on(self.process_command_input(parsed));
                             });
                         }
                         crate::command::parser::InputType::Message(msg) => {
+                            // Only save messages (not commands) to prompt history
+                            self.input.save_current_to_history();
                             self.handle_message_input(msg);
                         }
                     }
@@ -776,8 +776,8 @@ impl App {
                         } else if self.base_focus == BaseFocus::Home {
                             self.base_focus = BaseFocus::Chat;
                         }
-                        // Only add non-empty messages to the chat
-                        if !msg.is_empty() {
+                        // Only add non-empty messages to the chat, and don't add exit message
+                        if parsed.name != "exit" && !msg.is_empty() {
                             let assistant_message =
                                 crate::session::types::Message::assistant(msg.clone());
                             let _ = self
@@ -790,13 +790,21 @@ impl App {
                         }
                     }
                     crate::command::registry::CommandResult::Error(msg) => {
-                        let error_msg = format!("Error: {}", msg);
-                        let error_message =
-                            crate::session::types::Message::assistant(error_msg.clone());
-                        let _ = self
-                            .session_manager
-                            .add_message_to_current_session(&error_message);
-                        self.chat_state.chat.add_assistant_message(error_msg);
+                        if msg.starts_with("Unknown command:") {
+                            push_toast(ratatui_toolkit::Toast::new(
+                                msg,
+                                ratatui_toolkit::ToastLevel::Error,
+                                Some(std::time::Duration::from_secs(3)),
+                            ));
+                        } else {
+                            let error_msg = format!("Error: {}", msg);
+                            let error_message =
+                                crate::session::types::Message::assistant(error_msg.clone());
+                            let _ = self
+                                .session_manager
+                                .add_message_to_current_session(&error_message);
+                            self.chat_state.chat.add_assistant_message(error_msg);
+                        }
                     }
                     crate::command::registry::CommandResult::ShowDialog { title, items } => {
                         if title == "Connect a provider" {
@@ -882,22 +890,33 @@ impl App {
                 } else if self.base_focus == BaseFocus::Home {
                     self.base_focus = BaseFocus::Chat;
                 }
-                let assistant_message = crate::session::types::Message::assistant(msg.clone());
-                let _ = self
-                    .session_manager
-                    .add_message_to_current_session(&assistant_message);
-                self.chat_state.chat.add_assistant_message(msg);
+                // Don't add exit message to chat
+                if parsed.name != "exit" && !msg.is_empty() {
+                    let assistant_message = crate::session::types::Message::assistant(msg.clone());
+                    let _ = self
+                        .session_manager
+                        .add_message_to_current_session(&assistant_message);
+                    self.chat_state.chat.add_assistant_message(msg);
+                }
                 if parsed.name == "exit" {
                     self.quit();
                 }
             }
             crate::command::registry::CommandResult::Error(msg) => {
-                let error_msg = format!("Error: {}", msg);
-                let error_message = crate::session::types::Message::assistant(error_msg.clone());
-                let _ = self
-                    .session_manager
-                    .add_message_to_current_session(&error_message);
-                self.chat_state.chat.add_assistant_message(error_msg);
+                if msg.starts_with("Unknown command:") {
+                    push_toast(ratatui_toolkit::Toast::new(
+                        msg,
+                        ratatui_toolkit::ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                } else {
+                    let error_msg = format!("Error: {}", msg);
+                    let error_message = crate::session::types::Message::assistant(error_msg.clone());
+                    let _ = self
+                        .session_manager
+                        .add_message_to_current_session(&error_message);
+                    self.chat_state.chat.add_assistant_message(error_msg);
+                }
             }
             crate::command::registry::CommandResult::ShowDialog { title, items } => {
                 if title == "Connect a provider" {
