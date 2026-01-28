@@ -21,9 +21,8 @@ use app::App;
 use clap::Parser;
 use ratatui::crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags, EnableBracketedPaste,
-        DisableBracketedPaste,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -74,7 +73,12 @@ async fn main() -> Result<()> {
             EnableBracketedPaste
         )?;
     } else {
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
     }
 
     let backend = CrosstermBackend::new(stdout);
@@ -110,10 +114,10 @@ async fn run_event_loop(
 ) -> Result<()> {
     // Use a shorter poll duration for smoother animations (16ms = ~60fps max)
     const POLL_DURATION: Duration = Duration::from_millis(16);
-    
+
     while app.running {
         let loop_start = std::time::Instant::now();
-        
+
         app.process_streaming_chunks();
         app.update_animations();
         remove_expired_toasts();
@@ -121,7 +125,7 @@ async fn run_event_loop(
 
         // Calculate how long the loop iteration took
         let elapsed = loop_start.elapsed();
-        
+
         // Poll for events, but with a dynamic timeout to maintain consistent frame timing
         // If we spent less than POLL_DURATION processing, wait for the remainder
         let poll_timeout = if elapsed < POLL_DURATION {

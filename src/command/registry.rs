@@ -250,8 +250,8 @@ mod tests {
 
         let handler_with_args =
             |parsed: &ParsedCommand,
-              _sm: &mut SessionManager|
-              -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + '_>> {
+             _sm: &mut SessionManager|
+             -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + '_>> {
                 let args = parsed.args.clone();
                 Box::pin(async move {
                     if !args.is_empty() {

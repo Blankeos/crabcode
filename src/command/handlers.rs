@@ -89,7 +89,9 @@ pub fn handle_connect<'a>(
 
             let api_key_config = match crate::config::ApiKeyConfig::load() {
                 Ok(c) => c,
-                Err(e) => return CommandResult::Error(format!("Failed to load API key config: {}", e)),
+                Err(e) => {
+                    return CommandResult::Error(format!("Failed to load API key config: {}", e))
+                }
             };
 
             let discovery = match crate::model::discovery::Discovery::new() {
@@ -195,15 +197,15 @@ pub fn handle_models<'a>(
     };
 
     let active_model_id = parsed.active_model_id.clone();
-    let prefs_data = parsed.prefs_dao.and_then(|dao| {
-        match dao.get_model_preferences() {
+    let prefs_data = parsed
+        .prefs_dao
+        .and_then(|dao| match dao.get_model_preferences() {
             Ok(p) => Some(p),
             Err(e) => {
                 eprintln!("DEBUG: Failed to get prefs: {}", e);
                 None
-            },
-        }
-    });
+            }
+        });
 
     Box::pin(async move {
         let auth_dao = match AuthDAO::new() {
@@ -270,37 +272,39 @@ pub fn handle_models<'a>(
 
                     let mut items: Vec<DialogItem> = Vec::new();
 
-                    let add_model_item = |items: &mut Vec<DialogItem>, model: &ModelType, group: &str| {
-                        let is_active = active_model_id.as_ref() == Some(&model.id);
-                        let is_favorite = favorites_set.contains(&(model.provider_id.clone(), model.id.clone()));
+                    let add_model_item =
+                        |items: &mut Vec<DialogItem>, model: &ModelType, group: &str| {
+                            let is_active = active_model_id.as_ref() == Some(&model.id);
+                            let is_favorite = favorites_set
+                                .contains(&(model.provider_id.clone(), model.id.clone()));
 
-                        let tip = if is_active {
-                            Some("✓ Active".to_string())
-                        } else if is_favorite {
-                            Some("★ Favorite".to_string())
-                        } else {
-                            None
+                            let tip = if is_active {
+                                Some("✓ Active".to_string())
+                            } else if is_favorite {
+                                Some("★ Favorite".to_string())
+                            } else {
+                                None
+                            };
+
+                            let description = if group == "Favorite" || group == "Recent" {
+                                model.provider_name.clone()
+                            } else {
+                                format!(
+                                    "{} | {}",
+                                    model.provider_name,
+                                    model.capabilities.join(", ")
+                                )
+                            };
+
+                            items.push(DialogItem {
+                                id: model.id.clone(),
+                                name: model.name.clone(),
+                                group: group.to_string(),
+                                description,
+                                tip,
+                                provider_id: model.provider_id.clone(),
+                            });
                         };
-
-                        let description = if group == "Favorite" || group == "Recent" {
-                            model.provider_name.clone()
-                        } else {
-                            format!(
-                                "{} | {}",
-                                model.provider_name,
-                                model.capabilities.join(", ")
-                            )
-                        };
-
-                        items.push(DialogItem {
-                            id: model.id.clone(),
-                            name: model.name.clone(),
-                            group: group.to_string(),
-                            description,
-                            tip,
-                            provider_id: model.provider_id.clone(),
-                        });
-                    };
 
                     let favorites_list = prefs
                         .as_ref()
@@ -309,7 +313,9 @@ pub fn handle_models<'a>(
 
                     let mut favorite_models = Vec::new();
                     for fav in &favorites_list {
-                        if let Some(model) = model_lookup.get(&(fav.provider_id.clone(), fav.model_id.clone())) {
+                        if let Some(model) =
+                            model_lookup.get(&(fav.provider_id.clone(), fav.model_id.clone()))
+                        {
                             favorite_models.push(model.clone());
                         }
                     }
@@ -318,17 +324,18 @@ pub fn handle_models<'a>(
                         add_model_item(&mut items, model, "Favorite");
                     }
 
-                    let recent_list = prefs
-                        .as_ref()
-                        .map(|p| p.recent.clone())
-                        .unwrap_or_default();
+                    let recent_list = prefs.as_ref().map(|p| p.recent.clone()).unwrap_or_default();
 
                     let mut recent_models = Vec::new();
                     for recent in &recent_list {
-                        if favorites_set.contains(&(recent.provider_id.clone(), recent.model_id.clone())) {
+                        if favorites_set
+                            .contains(&(recent.provider_id.clone(), recent.model_id.clone()))
+                        {
                             continue;
                         }
-                        if let Some(model) = model_lookup.get(&(recent.provider_id.clone(), recent.model_id.clone())) {
+                        if let Some(model) =
+                            model_lookup.get(&(recent.provider_id.clone(), recent.model_id.clone()))
+                        {
                             recent_models.push(model.clone());
                         }
                     }
@@ -521,7 +528,11 @@ mod tests {
             CommandResult::ShowDialog { title, items } => {
                 assert_eq!(title, "Sessions");
                 assert_eq!(items.len(), 2);
-                assert!(items.iter().any(|item| item.name == "session-1"), "Items: {:?}", items.iter().map(|i| &i.name).collect::<Vec<_>>());
+                assert!(
+                    items.iter().any(|item| item.name == "session-1"),
+                    "Items: {:?}",
+                    items.iter().map(|i| &i.name).collect::<Vec<_>>()
+                );
                 assert!(items.iter().any(|item| item.name == "session-2"));
             }
             _ => panic!("Expected ShowDialog"),

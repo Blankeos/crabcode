@@ -232,9 +232,10 @@ impl Discovery {
                     capabilities.push("structured_output".to_string());
                 }
 
-                let is_text_model = model.modalities
-                    .as_ref()
-                    .map_or(true, |m| m.output.contains(&"text".to_string()) && !m.output.contains(&"image".to_string()));
+                let is_text_model = model.modalities.as_ref().map_or(true, |m| {
+                    m.output.contains(&"text".to_string())
+                        && !m.output.contains(&"image".to_string())
+                });
 
                 if is_text_model {
                     models.push(crate::model::types::Model {

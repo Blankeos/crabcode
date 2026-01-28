@@ -11,7 +11,10 @@ pub enum ChunkMessage {
     End,
     Failed(String),
     Cancelled,
-    Metrics { token_count: usize, duration_ms: u64 },
+    Metrics {
+        token_count: usize,
+        duration_ms: u64,
+    },
 }
 
 pub type ChunkSender = mpsc::UnboundedSender<ChunkMessage>;

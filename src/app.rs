@@ -615,7 +615,13 @@ impl App {
                 // We need to calculate the chat area similar to render_chat
                 let main_chunks = ratatui::layout::Layout::default()
                     .direction(ratatui::layout::Direction::Vertical)
-                    .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(1)].as_ref())
+                    .constraints(
+                        [
+                            ratatui::layout::Constraint::Min(0),
+                            ratatui::layout::Constraint::Length(1),
+                        ]
+                        .as_ref(),
+                    )
                     .split(size);
                 let input_height = self.input.get_height() as u16;
                 let above_status_chunks = ratatui::layout::Layout::default()
@@ -631,12 +637,12 @@ impl App {
                     )
                     .split(main_chunks[0]);
                 let chat_area = above_status_chunks[0];
-                
+
                 if self.chat_state.chat.handle_mouse_event(mouse, chat_area) {
                     return;
                 }
             }
-            
+
             // Handle mouse events for the main input when no overlay is focused
             if self.input.handle_mouse_event(mouse) {
                 self.update_suggestions();
@@ -1182,7 +1188,7 @@ impl App {
     pub fn update_animations(&mut self) {
         // Only update animations at 20fps (50ms intervals) regardless of render rate
         const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-        
+
         if self.last_animation_update.elapsed() >= ANIMATION_INTERVAL {
             self.chat_state.wave_spinner.update();
             self.last_animation_update = std::time::Instant::now();
@@ -1204,7 +1210,9 @@ impl App {
                     self.chat_state.chat.append_to_last_assistant(&text);
                 }
                 crate::llm::ChunkMessage::Reasoning(reasoning) => {
-                    self.chat_state.chat.append_reasoning_to_last_assistant(&reasoning);
+                    self.chat_state
+                        .chat
+                        .append_reasoning_to_last_assistant(&reasoning);
                 }
                 crate::llm::ChunkMessage::End => {
                     // Finalize streaming metrics from the chat's tracked values
@@ -1259,7 +1267,6 @@ impl App {
                     // Metrics are now calculated locally from streaming data
                     // This arm is kept for backward compatibility but ignored
                 }
-
             }
         }
     }
@@ -1332,7 +1339,9 @@ impl App {
             let _ = self
                 .session_manager
                 .add_message_to_current_session(&user_message);
-            self.chat_state.chat.add_user_message_with_agent_mode(&msg, self.agent.clone());
+            self.chat_state
+                .chat
+                .add_user_message_with_agent_mode(&msg, self.agent.clone());
             self.base_focus = BaseFocus::Chat;
 
             if let Err(e) = self.start_llm_streaming(&msg) {
@@ -1350,7 +1359,9 @@ impl App {
             let _ = self
                 .session_manager
                 .add_message_to_current_session(&user_message);
-            self.chat_state.chat.add_user_message_with_agent_mode(&msg, self.agent.clone());
+            self.chat_state
+                .chat
+                .add_user_message_with_agent_mode(&msg, self.agent.clone());
 
             if let Err(e) = self.start_llm_streaming(&msg) {
                 push_toast(ratatui_toolkit::Toast::new(
