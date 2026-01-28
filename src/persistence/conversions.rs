@@ -56,6 +56,7 @@ impl TryFrom<Message> for SessionMessage {
         Ok(SessionMessage {
             role,
             content,
+            reasoning: None,
             timestamp: std::time::UNIX_EPOCH + std::time::Duration::from_secs(msg.timestamp as u64),
             is_complete: true,
         })

@@ -48,8 +48,7 @@ dependencies = [
 [[package]]
 name = "aisdk"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe2e434e2017f4754909557dca53dac29ad7fa46368dbdf164e54902442607b6"
+source = "git+https://github.com/Blankeos/aisdk-rs?branch=oai-compat-fix#5866c1a21e8a96581d0e5ec6a23a062f2d4dbcac"
 dependencies = [
  "aisdk-macros",
  "async-trait",
@@ -70,8 +69,7 @@ dependencies = [
 [[package]]
 name = "aisdk-macros"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd761489be667a139955e51bdd3731bf15aa6102e25c9e56da8e7ad8dd5bcf9e"
+source = "git+https://github.com/Blankeos/aisdk-rs?branch=oai-compat-fix#5866c1a21e8a96581d0e5ec6a23a062f2d4dbcac"
 dependencies = [
  "proc-macro2",
  "quote",

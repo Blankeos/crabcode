@@ -1,6 +1,6 @@
 use aisdk::{
     core::{LanguageModelRequest, LanguageModelStreamChunkType, Message as AisdkMessage},
-    providers::OpenAI,
+    providers::{OpenAI, OpenAICompatible},
 };
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -12,26 +12,29 @@ pub struct LLMClient {
     api_key: String,
     model_name: String,
     provider_name: String,
+    npm_package: String,
 }
 
 impl LLMClient {
-    pub fn new(base_url: String, api_key: String, model_name: String, provider_name: String) -> Self {
+    pub fn new(
+        base_url: String,
+        api_key: String,
+        model_name: String,
+        provider_name: String,
+        npm_package: String,
+    ) -> Self {
         Self {
             base_url,
             api_key,
             model_name,
             provider_name,
+            npm_package,
         }
     }
 
-    fn build_provider(&self) -> Result<OpenAI<aisdk::core::DynamicModel>, Box<dyn std::error::Error>> {
-        OpenAI::<aisdk::core::DynamicModel>::builder()
-            .base_url(&self.base_url)
-            .api_key(&self.api_key)
-            .model_name(&self.model_name)
-            .provider_name(&self.provider_name)
-            .build()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    fn uses_openai_compatible(&self) -> bool {
+        // Check if the npm package indicates OpenAI-compatible API
+        self.npm_package == "@ai-sdk/openai-compatible"
     }
 
     pub async fn stream_chat(
@@ -39,16 +42,39 @@ impl LLMClient {
         messages: &[crate::session::types::Message],
         mut on_chunk: impl FnMut(LanguageModelStreamChunkType),
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let provider = self.build_provider()?;
-
         let aisdk_messages = self.convert_messages(messages);
 
-        let response = LanguageModelRequest::builder()
-            .model(provider)
-            .messages(aisdk_messages)
-            .build()
-            .stream_text()
-            .await?;
+        let response = if self.uses_openai_compatible() {
+            let provider = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
+                .base_url(&self.base_url)
+                .api_key(&self.api_key)
+                .model_name(&self.model_name)
+                .provider_name(&self.provider_name)
+                .build()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            LanguageModelRequest::builder()
+                .model(provider)
+                .messages(aisdk_messages)
+                .build()
+                .stream_text()
+                .await?
+        } else {
+            let provider = OpenAI::<aisdk::core::DynamicModel>::builder()
+                .base_url(&self.base_url)
+                .api_key(&self.api_key)
+                .model_name(&self.model_name)
+                .provider_name(&self.provider_name)
+                .build()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            LanguageModelRequest::builder()
+                .model(provider)
+                .messages(aisdk_messages)
+                .build()
+                .stream_text()
+                .await?
+        };
 
         let mut stream = response.stream;
 
@@ -107,37 +133,62 @@ pub async fn stream_llm_with_cancellation(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let auth_dao = crate::persistence::AuthDAO::new()?;
 
-    let api_key = auth_dao.get_api_key(&provider_name)?
+    let api_key = auth_dao
+        .get_api_key(&provider_name)?
         .ok_or_else(|| anyhow::anyhow!("No API key found for {}", provider_name))?;
 
     let discovery = crate::model::discovery::Discovery::new()?;
 
     let providers = discovery.fetch_providers().await?;
 
-    let provider = providers.get(&provider_name)
+    let provider = providers
+        .get(&provider_name)
         .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?;
 
     let base_url = &provider.api;
-    
-    let _ = log(&format!("I found the api! Base URL: {}", base_url));
+    let npm_package = &provider.npm;
 
-    let client = LLMClient::new(
-        base_url.to_string(),
-        api_key,
-        model,
-        provider.name.clone(),
-    );
+    let _ = log(&format!(
+        "Provider: {}, NPM: {}, Base URL: {}",
+        provider_name, npm_package, base_url
+    ));
 
-    let provider_config = client.build_provider()?;
+    // Determine which provider to use based on npm package
+    let uses_openai_compatible = npm_package == "@ai-sdk/openai-compatible";
 
-    let aisdk_messages = client.convert_messages(&messages);
+    let aisdk_messages = convert_messages(&messages);
 
-    let response = LanguageModelRequest::builder()
-        .model(provider_config)
-        .messages(aisdk_messages)
-        .build()
-        .stream_text()
-        .await?;
+    let response = if uses_openai_compatible {
+        let provider_config = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
+            .base_url(base_url)
+            .api_key(&api_key)
+            .model_name(&model)
+            .provider_name(&provider.name)
+            .build()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        LanguageModelRequest::builder()
+            .model(provider_config)
+            .messages(aisdk_messages)
+            .build()
+            .stream_text()
+            .await?
+    } else {
+        let provider_config = OpenAI::<aisdk::core::DynamicModel>::builder()
+            .base_url(base_url)
+            .api_key(&api_key)
+            .model_name(&model)
+            .provider_name(&provider.name)
+            .build()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        LanguageModelRequest::builder()
+            .model(provider_config)
+            .messages(aisdk_messages)
+            .build()
+            .stream_text()
+            .await?
+    };
 
     let mut stream = response.stream;
 
@@ -171,4 +222,29 @@ pub async fn stream_llm_with_cancellation(
     }
 
     Ok(())
+}
+
+fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMessage> {
+    use aisdk::core::Message::{Assistant, System, User};
+
+    let mut aisdk_messages = Vec::new();
+
+    for msg in messages {
+        match msg.role {
+            crate::session::types::MessageRole::System => {
+                aisdk_messages.push(System(msg.content.clone().into()));
+            }
+            crate::session::types::MessageRole::User => {
+                aisdk_messages.push(User(msg.content.clone().into()));
+            }
+            crate::session::types::MessageRole::Assistant => {
+                aisdk_messages.push(Assistant(msg.content.clone().into()));
+            }
+            crate::session::types::MessageRole::Tool => {
+                continue;
+            }
+        }
+    }
+
+    aisdk_messages
 }

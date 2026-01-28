@@ -1106,7 +1106,7 @@ impl App {
                     self.chat_state.chat.append_to_last_assistant(&text);
                 }
                 crate::llm::ChunkMessage::Reasoning(reasoning) => {
-                    self.chat_state.chat.append_to_last_assistant(&reasoning);
+                    self.chat_state.chat.append_reasoning_to_last_assistant(&reasoning);
                 }
                 crate::llm::ChunkMessage::End => {
                     if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {

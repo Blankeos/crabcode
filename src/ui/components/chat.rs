@@ -52,6 +52,24 @@ impl Chat {
         }
     }
 
+    pub fn append_reasoning_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
+        if self
+            .messages
+            .last()
+            .is_some_and(|m| m.role == MessageRole::Assistant)
+        {
+            if let Some(msg) = self.messages.last_mut() {
+                msg.append_reasoning(chunk);
+                self.scroll_to_bottom();
+            }
+        } else {
+            // Create a new assistant message with reasoning
+            let mut msg = Message::incomplete("");
+            msg.append_reasoning(chunk);
+            self.add_message(msg);
+        }
+    }
+
     pub fn clear(&mut self) {
         self.messages.clear();
         self.scroll_offset = 0;
@@ -99,6 +117,26 @@ impl Chat {
             MessageRole::System => ("System", Color::Yellow),
             MessageRole::Tool => ("Tool", Color::Gray),
         };
+
+        // Display reasoning if present (for reasoning models)
+        if let Some(ref reasoning) = message.reasoning {
+            if !reasoning.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("[{} - thinking] ", prefix),
+                        Style::default()
+                            .fg(Color::Gray)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        reasoning,
+                        Style::default()
+                            .fg(Color::Gray)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+            }
+        }
 
         lines.push(Line::from(vec![
             Span::styled(

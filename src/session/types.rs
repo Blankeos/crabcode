@@ -12,6 +12,7 @@ pub enum MessageRole {
 pub struct Message {
     pub role: MessageRole,
     pub content: String,
+    pub reasoning: Option<String>,
     pub timestamp: SystemTime,
     pub is_complete: bool,
 }
@@ -21,6 +22,7 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            reasoning: None,
             timestamp: SystemTime::now(),
             is_complete: true,
         }
@@ -46,6 +48,7 @@ impl Message {
         Self {
             role: MessageRole::Assistant,
             content: content.into(),
+            reasoning: None,
             timestamp: SystemTime::now(),
             is_complete: false,
         }
@@ -53,6 +56,14 @@ impl Message {
 
     pub fn append(&mut self, chunk: impl AsRef<str>) {
         self.content.push_str(chunk.as_ref());
+    }
+
+    pub fn append_reasoning(&mut self, chunk: impl AsRef<str>) {
+        if let Some(ref mut reasoning) = self.reasoning {
+            reasoning.push_str(chunk.as_ref());
+        } else {
+            self.reasoning = Some(chunk.as_ref().to_string());
+        }
     }
 
     pub fn mark_complete(&mut self) {
@@ -133,6 +144,23 @@ impl Session {
             }
         } else {
             self.add_assistant_message(chunk.as_ref());
+        }
+    }
+
+    pub fn append_reasoning_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
+        if self
+            .messages
+            .last()
+            .is_some_and(|m| m.role == MessageRole::Assistant)
+        {
+            if let Some(msg) = self.messages.last_mut() {
+                msg.append_reasoning(chunk);
+            }
+        } else {
+            // Create a new assistant message with reasoning
+            let mut msg = Message::incomplete("");
+            msg.append_reasoning(chunk);
+            self.add_message(msg);
         }
     }
 
