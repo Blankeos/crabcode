@@ -10,20 +10,34 @@ use crate::theme::ThemeColors;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
+use crate::ui::components::wave_spinner::WaveSpinner;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ChatState {
     pub chat: Chat,
+    pub wave_spinner: WaveSpinner,
 }
 
 impl ChatState {
-    pub fn new(chat: Chat) -> Self {
-        Self { chat }
+    pub fn new(chat: Chat, agent_color: ratatui::style::Color) -> Self {
+        Self {
+            chat,
+            wave_spinner: WaveSpinner::with_speed(agent_color, 40),
+        }
     }
 }
 
-pub fn init_chat(chat: Chat) -> ChatState {
-    ChatState::new(chat)
+pub fn init_chat(chat: Chat, agent: &str) -> ChatState {
+    let agent_color = get_agent_color(agent);
+    ChatState::new(chat, agent_color)
+}
+
+fn get_agent_color(agent: &str) -> ratatui::style::Color {
+    match agent {
+        "Plan" => ratatui::style::Color::Rgb(255, 165, 0), // Orange
+        "Build" => ratatui::style::Color::Rgb(147, 112, 219), // Purple
+        _ => ratatui::style::Color::Gray,
+    }
 }
 
 pub fn render_chat(
@@ -73,10 +87,13 @@ pub fn render_chat(
         .split(above_status_chunks[4]);
 
     if is_streaming {
-        let mut streaming_text = vec![Span::styled(
-            "Streaming...",
-            Style::default().fg(colors.info),
-        )];
+        // Update spinner color based on current agent (only if changed)
+        let agent_color = get_agent_color(&agent);
+        chat_state.wave_spinner.set_color(agent_color);
+
+        // Animation update is now handled in the main event loop at a fixed rate
+        // to prevent speed issues when mouse movement causes frequent redraws
+        let mut streaming_text = chat_state.wave_spinner.spans();
 
         // Add tokens/second if available
         if let Some(tps) = chat_state.chat.get_streaming_tokens_per_sec() {

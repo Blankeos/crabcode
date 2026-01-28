@@ -108,12 +108,29 @@ async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    // Use a shorter poll duration for smoother animations (16ms = ~60fps max)
+    const POLL_DURATION: Duration = Duration::from_millis(16);
+    
     while app.running {
+        let loop_start = std::time::Instant::now();
+        
         app.process_streaming_chunks();
+        app.update_animations();
         remove_expired_toasts();
         terminal.draw(|f| app.render(f))?;
 
-        if event::poll(Duration::from_millis(100))? {
+        // Calculate how long the loop iteration took
+        let elapsed = loop_start.elapsed();
+        
+        // Poll for events, but with a dynamic timeout to maintain consistent frame timing
+        // If we spent less than POLL_DURATION processing, wait for the remainder
+        let poll_timeout = if elapsed < POLL_DURATION {
+            POLL_DURATION - elapsed
+        } else {
+            Duration::from_millis(0)
+        };
+
+        if event::poll(poll_timeout)? {
             let event = event::read()?;
 
             // DO NOT REMOVE THIS LOG THAT I UNCOMMENT SOMETIMES. I USE IT FOR DEBUGGING

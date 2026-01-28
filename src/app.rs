@@ -97,6 +97,7 @@ pub struct App {
     last_frame_size: ratatui::layout::Rect,
     streaming_model: Option<String>,
     streaming_provider: Option<String>,
+    last_animation_update: std::time::Instant,
 }
 
 impl App {
@@ -120,7 +121,8 @@ impl App {
         let colors = theme.get_colors(true);
 
         let home_state = init_home();
-        let chat_state = init_chat(Chat::new());
+        let agent = "Plan".to_string();
+        let chat_state = init_chat(Chat::new(), &agent);
         let suggestions_popup_state = init_suggestions_popup(Popup::new());
         let models_dialog_state = init_models_dialog("Models", vec![]);
         let connect_dialog_state = init_connect_dialog();
@@ -170,7 +172,7 @@ impl App {
             which_key_state,
             api_key_input,
             prefs_dao,
-            agent: "Plan".to_string(),
+            agent,
             model: active_model,
             provider_name: active_provider_name,
             cwd,
@@ -188,6 +190,7 @@ impl App {
             last_frame_size: ratatui::layout::Rect::default(),
             streaming_model: None,
             streaming_provider: None,
+            last_animation_update: std::time::Instant::now(),
         }
     }
 
@@ -1173,6 +1176,16 @@ impl App {
     fn cancel_streaming(&mut self) {
         if let Some(token) = &self.streaming_cancel_token {
             token.cancel();
+        }
+    }
+
+    pub fn update_animations(&mut self) {
+        // Only update animations at 20fps (50ms intervals) regardless of render rate
+        const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        
+        if self.last_animation_update.elapsed() >= ANIMATION_INTERVAL {
+            self.chat_state.wave_spinner.update();
+            self.last_animation_update = std::time::Instant::now();
         }
     }
 

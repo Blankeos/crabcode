@@ -25,6 +25,10 @@ pub struct Chat {
     pub autoscroll_enabled: bool,
     /// Track if user has manually scrolled up (away from bottom)
     user_scrolled_up: bool,
+    /// Last calculated tokens per second value (for throttling display updates)
+    cached_tokens_per_sec: Option<f64>,
+    /// Last time tokens per second was calculated (for throttling updates)
+    last_tps_calculated: Option<std::time::Instant>,
 }
 
 // Minimum elapsed time before showing tokens/s (250ms)
@@ -44,6 +48,8 @@ impl Chat {
             streaming_token_count: 0,
             autoscroll_enabled: true,
             user_scrolled_up: false,
+            cached_tokens_per_sec: None,
+            last_tps_calculated: None,
         }
     }
 
@@ -60,6 +66,8 @@ impl Chat {
             streaming_token_count: 0,
             autoscroll_enabled: true,
             user_scrolled_up: false,
+            cached_tokens_per_sec: None,
+            last_tps_calculated: None,
         }
     }
 
@@ -171,20 +179,43 @@ impl Chat {
         self.streaming_token_count = 0;
     }
 
-    pub fn get_streaming_tokens_per_sec(&self) -> Option<f64> {
+    pub fn get_streaming_tokens_per_sec(&mut self) -> Option<f64> {
+        // Throttle token calculation to prevent excessive updates during high-frequency renders
+        // caused by mouse movement. Only recalculate every 100ms.
+        const TPS_THROTTLE_MS: u128 = 100;
+
+        let now = std::time::Instant::now();
+        if let Some(last_calc) = self.last_tps_calculated {
+            if now.duration_since(last_calc).as_millis() < TPS_THROTTLE_MS {
+                // Still within throttle window, return cached value
+                return self.cached_tokens_per_sec;
+            }
+        }
+        // Update timestamp for next throttle check
+        self.last_tps_calculated = Some(now);
+
         // Use first_token_time for more accurate measurement (like PR #5497)
-        if let Some(first_token_time) = self.streaming_first_token_time {
+        let result = if let Some(first_token_time) = self.streaming_first_token_time {
             let elapsed_ms = first_token_time.elapsed().as_millis();
             // Only show after minimum elapsed time to avoid inaccurate early readings
             if elapsed_ms >= MIN_TOKENS_PER_SECOND_ELAPSED_MS && self.streaming_token_count > 0 {
                 let tokens_per_sec =
                     (self.streaming_token_count as f64) / (elapsed_ms as f64 / 1000.0);
                 if tokens_per_sec.is_finite() {
-                    return Some(tokens_per_sec);
+                    Some(tokens_per_sec)
+                } else {
+                    None
                 }
+            } else {
+                None
             }
-        }
-        None
+        } else {
+            None
+        };
+
+        // Cache the result for throttled returns
+        self.cached_tokens_per_sec = result;
+        result
     }
 
     pub fn is_streaming(&self) -> bool {
