@@ -1,4 +1,5 @@
 use crate::session::types::{Message, MessageRole};
+use crate::theme::ThemeColors;
 use ratatui::{
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::Rect,
@@ -17,12 +18,33 @@ pub struct Chat {
     pub content_height: usize,
     pub viewport_height: usize,
     pub streaming_start_time: Option<std::time::Instant>,
+    pub streaming_first_token_time: Option<std::time::Instant>,
     pub streaming_token_count: usize,
+    /// Whether to autoscroll to bottom when new content arrives
+    /// Only autoscrolls if user is already near the bottom
+    pub autoscroll_enabled: bool,
+    /// Track if user has manually scrolled up (away from bottom)
+    user_scrolled_up: bool,
 }
+
+// Minimum elapsed time before showing tokens/s (250ms)
+const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
 
 impl Chat {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            messages: Vec::new(),
+            scroll_offset: 0,
+            scrollbar_state: ScrollbarState::default(),
+            is_dragging_scrollbar: false,
+            content_height: 0,
+            viewport_height: 0,
+            streaming_start_time: None,
+            streaming_first_token_time: None,
+            streaming_token_count: 0,
+            autoscroll_enabled: true,
+            user_scrolled_up: false,
+        }
     }
 
     pub fn with_messages(messages: Vec<Message>) -> Self {
@@ -34,13 +56,25 @@ impl Chat {
             content_height: 0,
             viewport_height: 0,
             streaming_start_time: None,
+            streaming_first_token_time: None,
             streaming_token_count: 0,
+            autoscroll_enabled: true,
+            user_scrolled_up: false,
         }
     }
 
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message);
-        self.scroll_to_bottom();
+        if self.should_autoscroll() {
+            // Reset scroll to show new content at bottom
+            // Content height will be recalculated on next render
+            self.scroll_offset = usize::MAX;
+            self.user_scrolled_up = false;
+        }
+    }
+
+    fn should_autoscroll(&self) -> bool {
+        self.autoscroll_enabled
     }
 
     pub fn add_user_message(&mut self, content: impl Into<String>) {
@@ -70,35 +104,59 @@ impl Chat {
         {
             if let Some(msg) = self.messages.last_mut() {
                 msg.append(chunk_str);
-                // Track streaming metrics
-                if self.streaming_start_time.is_none() {
-                    self.streaming_start_time = Some(std::time::Instant::now());
+                // Track streaming metrics - record first token time
+                if self.streaming_first_token_time.is_none() {
+                    self.streaming_first_token_time = Some(std::time::Instant::now());
                 }
-                self.streaming_token_count += chunk_str.split_whitespace().count();
-                self.scroll_to_bottom();
+                // Estimate tokens: ~4 characters per token on average
+                self.streaming_token_count += chunk_str.chars().count().max(1) / 4;
+                if self.should_autoscroll() {
+                    // Reset scroll to show new content at bottom
+                    self.scroll_offset = usize::MAX;
+                    self.user_scrolled_up = false;
+                }
             }
         } else {
             // Starting a new assistant message
-            self.streaming_start_time = Some(std::time::Instant::now());
-            self.streaming_token_count = chunk_str.split_whitespace().count();
+            let now = std::time::Instant::now();
+            self.streaming_start_time = Some(now);
+            self.streaming_first_token_time = Some(now);
+            // Estimate tokens: ~4 characters per token on average
+            self.streaming_token_count = chunk_str.chars().count().max(1) / 4;
             self.add_assistant_message(chunk_str);
         }
     }
 
     pub fn append_reasoning_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
+        let chunk_str = chunk.as_ref();
         if self
             .messages
             .last()
             .is_some_and(|m| m.role == MessageRole::Assistant)
         {
             if let Some(msg) = self.messages.last_mut() {
-                msg.append_reasoning(chunk);
-                self.scroll_to_bottom();
+                msg.append_reasoning(chunk_str);
+                // Track streaming metrics for reasoning tokens too
+                if self.streaming_first_token_time.is_none() {
+                    self.streaming_first_token_time = Some(std::time::Instant::now());
+                }
+                // Estimate tokens: ~4 characters per token on average
+                self.streaming_token_count += chunk_str.chars().count().max(1) / 4;
+                if self.should_autoscroll() {
+                    // Reset scroll to show new content at bottom
+                    self.scroll_offset = usize::MAX;
+                    self.user_scrolled_up = false;
+                }
             }
         } else {
             // Create a new assistant message with reasoning
             let mut msg = Message::incomplete("");
-            msg.append_reasoning(chunk);
+            msg.append_reasoning(chunk_str);
+            // Track streaming metrics
+            let now = std::time::Instant::now();
+            self.streaming_start_time = Some(now);
+            self.streaming_first_token_time = Some(now);
+            self.streaming_token_count = chunk_str.chars().count().max(1) / 4;
             self.add_message(msg);
         }
     }
@@ -109,41 +167,70 @@ impl Chat {
         self.scrollbar_state = ScrollbarState::default();
         self.content_height = 0;
         self.streaming_start_time = None;
+        self.streaming_first_token_time = None;
         self.streaming_token_count = 0;
     }
 
     pub fn get_streaming_tokens_per_sec(&self) -> Option<f64> {
-        if let Some(start_time) = self.streaming_start_time {
-            let elapsed_ms = start_time.elapsed().as_millis() as f64;
-            if elapsed_ms > 0.0 {
-                let tokens_per_sec = (self.streaming_token_count as f64) / (elapsed_ms / 1000.0);
-                return Some(tokens_per_sec);
+        // Use first_token_time for more accurate measurement (like PR #5497)
+        if let Some(first_token_time) = self.streaming_first_token_time {
+            let elapsed_ms = first_token_time.elapsed().as_millis();
+            // Only show after minimum elapsed time to avoid inaccurate early readings
+            if elapsed_ms >= MIN_TOKENS_PER_SECOND_ELAPSED_MS && self.streaming_token_count > 0 {
+                let tokens_per_sec =
+                    (self.streaming_token_count as f64) / (elapsed_ms as f64 / 1000.0);
+                if tokens_per_sec.is_finite() {
+                    return Some(tokens_per_sec);
+                }
             }
         }
         None
     }
 
     pub fn is_streaming(&self) -> bool {
-        self.streaming_start_time.is_some()
+        self.streaming_first_token_time.is_some()
             && self
                 .messages
                 .last()
                 .is_some_and(|m| m.role == MessageRole::Assistant && !m.is_complete)
     }
 
+    pub fn finalize_streaming_metrics(&mut self) {
+        if let Some(first_token_time) = self.streaming_first_token_time {
+            let duration_ms = first_token_time.elapsed().as_millis() as u64;
+            let token_count = self.streaming_token_count;
+
+            if let Some(last_msg) = self.messages.last_mut() {
+                if last_msg.role == MessageRole::Assistant {
+                    last_msg.token_count = Some(token_count);
+                    last_msg.duration_ms = Some(duration_ms);
+                }
+            }
+        }
+
+        // Reset streaming state
+        self.streaming_start_time = None;
+        self.streaming_first_token_time = None;
+        self.streaming_token_count = 0;
+    }
+
     pub fn scroll_down(&mut self, amount: usize) {
         let max_offset = self.content_height.saturating_sub(self.viewport_height);
         self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
+        // Check if we're now at the bottom
+        self.user_scrolled_up = self.scroll_offset < max_offset;
         self.update_scrollbar();
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        self.user_scrolled_up = true;
         self.update_scrollbar();
     }
 
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = self.content_height.saturating_sub(self.viewport_height);
+        self.user_scrolled_up = false;
         self.update_scrollbar();
     }
 
@@ -226,10 +313,19 @@ impl Chat {
             0
         };
         self.scroll_offset = new_offset.min(max_offset);
+        // Track if user scrolled away from bottom
+        self.user_scrolled_up = self.scroll_offset < max_offset;
         self.update_scrollbar();
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, _agent: &str, model: &str) {
+    pub fn render(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        _agent: &str,
+        model: &str,
+        colors: &ThemeColors,
+    ) {
         self.viewport_height = area.height as usize;
 
         // Calculate content area (leave space for scrollbar)
@@ -241,7 +337,8 @@ impl Chat {
         };
 
         // Calculate total content height first
-        let total_height = self.calculate_content_height(content_area.width as usize, model);
+        let total_height =
+            self.calculate_content_height(content_area.width as usize, model, colors);
         self.content_height = total_height;
 
         // Clamp scroll offset
@@ -250,7 +347,8 @@ impl Chat {
         self.update_scrollbar();
 
         // Now render the visible content
-        let content_lines = self.render_visible_messages(content_area.width as usize, model);
+        let content_lines =
+            self.render_visible_messages(content_area.width as usize, model, colors);
 
         // Render content
         let paragraph = Paragraph::new(Text::from(content_lines))
@@ -270,28 +368,40 @@ impl Chat {
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .track_symbol(Some(" "))
+                .begin_symbol(Some(" "))
+                .end_symbol(Some(" "))
                 .thumb_symbol("█"),
             scrollbar_area,
             &mut self.scrollbar_state,
         );
     }
 
-    fn calculate_content_height(&self, max_width: usize, model: &str) -> usize {
+    fn calculate_content_height(
+        &self,
+        max_width: usize,
+        model: &str,
+        colors: &ThemeColors,
+    ) -> usize {
         let mut total_height = 0;
 
         for (idx, message) in self.messages.iter().enumerate() {
-            let message_lines = self.format_message(message, max_width, idx, model);
+            let message_lines = self.format_message(message, max_width, idx, model, colors);
             total_height += message_lines.len();
         }
 
         total_height
     }
 
-    fn render_visible_messages(&self, max_width: usize, model: &str) -> Vec<Line> {
+    fn render_visible_messages(
+        &self,
+        max_width: usize,
+        model: &str,
+        colors: &ThemeColors,
+    ) -> Vec<Line> {
         let mut all_lines: Vec<Line> = Vec::new();
 
         for (idx, message) in self.messages.iter().enumerate() {
-            let message_lines = self.format_message(message, max_width, idx, model);
+            let message_lines = self.format_message(message, max_width, idx, model, colors);
             all_lines.extend(message_lines);
         }
 
@@ -304,6 +414,7 @@ impl Chat {
         max_width: usize,
         _idx: usize,
         model: &str,
+        colors: &ThemeColors,
     ) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
 
@@ -342,7 +453,7 @@ impl Chat {
                         lines.push(Line::from(vec![Span::styled(
                             reasoning_prefix,
                             Style::default()
-                                .fg(Color::Gray)
+                                .fg(colors.text_weak)
                                 .add_modifier(Modifier::ITALIC),
                         )]));
 
@@ -351,7 +462,7 @@ impl Chat {
                             lines.push(Line::from(Span::styled(
                                 line.to_string(),
                                 Style::default()
-                                    .fg(Color::Gray)
+                                    .fg(colors.text_weak)
                                     .add_modifier(Modifier::ITALIC),
                             )));
                         }
@@ -372,11 +483,9 @@ impl Chat {
                 // Add empty line before metadata for spacing
                 lines.push(Line::from(""));
 
-                // Add metadata line if message is complete
-                if message.is_complete {
-                    let metadata = self.format_metadata(message, model);
-                    lines.push(Line::from(metadata));
-                }
+                // Add metadata line (always show for assistant messages)
+                let metadata = self.format_metadata(message, model, colors);
+                lines.push(Line::from(metadata));
 
                 // Add empty line after AI message
                 lines.push(Line::from(""));
@@ -422,7 +531,7 @@ impl Chat {
         }
     }
 
-    fn format_metadata(&self, message: &Message, model: &str) -> Vec<Span> {
+    fn format_metadata(&self, message: &Message, _model: &str, colors: &ThemeColors) -> Vec<Span> {
         let mut spans = Vec::new();
 
         // Get agent mode from previous user message or default to "Plan"
@@ -445,34 +554,46 @@ impl Chat {
                 .add_modifier(Modifier::BOLD),
         ));
 
-        // Separator
-        spans.push(Span::styled(" • ", Style::default().fg(Color::Gray)));
+        // Separator (bullet)
+        spans.push(Span::styled(" • ", Style::default().fg(colors.text_weak)));
 
-        // Model ID
+        // Model ID - use persisted model from message, fallback to current model
+        let model_display = message.model.as_deref().unwrap_or(_model);
         spans.push(Span::styled(
-            model.to_string(),
-            Style::default().fg(Color::Gray),
+            model_display.to_string(),
+            Style::default().fg(colors.text_weak),
         ));
 
-        // Tokens/second if available
-        if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
-            // Always show metrics if we have them, even if duration is 0
-            let tokens_per_sec = if duration_ms > 0 {
-                (token_count as f64) / (duration_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-            spans.push(Span::styled(
-                format!(" • {:.0}t/s", tokens_per_sec),
-                Style::default().fg(Color::Gray),
-            ));
+        // Duration and tokens/second if available (only show for completed messages)
+        if message.is_complete {
+            if let (Some(token_count), Some(duration_ms)) =
+                (message.token_count, message.duration_ms)
+            {
+                // Duration
+                let duration_sec = duration_ms as f64 / 1000.0;
+                spans.push(Span::styled(
+                    format!(" • {:.1}s", duration_sec),
+                    Style::default().fg(colors.text_weak),
+                ));
 
-            // Duration
-            let duration_sec = duration_ms as f64 / 1000.0;
-            spans.push(Span::styled(
-                format!(" • {:.1}s", duration_sec),
-                Style::default().fg(Color::Gray),
-            ));
+                // Tokens/second
+                let tokens_per_sec = if duration_ms > 0 {
+                    (token_count as f64) / (duration_ms as f64 / 1000.0)
+                } else {
+                    0.0
+                };
+                spans.push(Span::styled(
+                    format!(" • {:.0}t/s", tokens_per_sec),
+                    Style::default().fg(colors.text_weak),
+                ));
+            } else {
+                // Show 0s and 0t/s when metrics not yet available
+                spans.push(Span::styled(" • 0s", Style::default().fg(colors.text_weak)));
+                spans.push(Span::styled(
+                    " • 0t/s",
+                    Style::default().fg(colors.text_weak),
+                ));
+            }
         }
 
         spans
@@ -621,10 +742,41 @@ mod tests {
     fn test_chat_scroll_to_bottom_after_add() {
         let mut chat = Chat::new();
         chat.viewport_height = 20;
-        chat.scroll_down(10);
+        chat.content_height = 100;
+        // When already at bottom, adding a message should autoscroll
+        chat.scroll_to_bottom();
         chat.add_user_message("test");
-        // After adding, should scroll to bottom
-        assert_eq!(chat.scroll_offset, 0);
+        // scroll_offset should be MAX (will be clamped to actual bottom on render)
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+    }
+
+    #[test]
+    fn test_chat_no_autoscroll_when_scrolled_up() {
+        let mut chat = Chat::new();
+        chat.viewport_height = 20;
+        chat.content_height = 100;
+        // Scroll up (not at bottom) - this sets user_scrolled_up = true
+        chat.scroll_up(10);
+        let offset_before = chat.scroll_offset;
+        chat.add_user_message("test");
+        // Should NOT scroll to bottom - should stay at offset
+        assert_eq!(chat.scroll_offset, offset_before);
+        assert!(chat.user_scrolled_up);
+    }
+
+    #[test]
+    fn test_chat_autoscroll_when_not_scrolled_up() {
+        let mut chat = Chat::new();
+        chat.viewport_height = 20;
+        chat.content_height = 100;
+        // At bottom, user_scrolled_up should be false
+        chat.scroll_to_bottom();
+        assert!(!chat.user_scrolled_up);
+        chat.add_user_message("test");
+        // Should autoscroll (scroll_offset set to MAX)
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
     }
 
     #[test]

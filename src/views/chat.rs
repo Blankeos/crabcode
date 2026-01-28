@@ -64,12 +64,12 @@ pub fn render_chat(
 
     chat_state
         .chat
-        .render(f, above_status_chunks[1], &agent, &model);
+        .render(f, above_status_chunks[1], &agent, &model, colors);
     input.render(f, above_status_chunks[3], &agent, &model, &provider_name);
 
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(30)])
+        .constraints([Constraint::Min(0), Constraint::Length(35)])
         .split(above_status_chunks[4]);
 
     if is_streaming {

@@ -94,6 +94,9 @@ pub struct App {
     chunk_sender: Option<crate::llm::ChunkSender>,
     chunk_receiver: Option<crate::llm::ChunkReceiver>,
     streaming_cancel_token: Option<tokio_util::sync::CancellationToken>,
+    last_frame_size: ratatui::layout::Rect,
+    streaming_model: Option<String>,
+    streaming_provider: Option<String>,
 }
 
 impl App {
@@ -182,6 +185,9 @@ impl App {
             chunk_sender: None,
             chunk_receiver: None,
             streaming_cancel_token: None,
+            last_frame_size: ratatui::layout::Rect::default(),
+            streaming_model: None,
+            streaming_provider: None,
         }
     }
 
@@ -334,7 +340,7 @@ impl App {
                 if !self.models_dialog_state.dialog.is_visible() {
                     self.overlay_focus = OverlayFocus::None;
                 }
-                false
+                true
             }
             OverlayFocus::ConnectDialog => {
                 if handle_connect_dialog_key_event(&mut self.connect_dialog_state, key) {
@@ -602,7 +608,7 @@ impl App {
         } else if self.overlay_focus == OverlayFocus::None {
             // Handle mouse events for chat scrolling when in chat mode
             if self.base_focus == BaseFocus::Chat {
-                let size = ratatui::layout::Rect::new(0, 0, 80, 24); // Placeholder, actual size from frame
+                let size = self.last_frame_size;
                 // We need to calculate the chat area similar to render_chat
                 let main_chunks = ratatui::layout::Layout::default()
                     .direction(ratatui::layout::Direction::Vertical)
@@ -747,12 +753,15 @@ impl App {
                         } else if self.base_focus == BaseFocus::Home {
                             self.base_focus = BaseFocus::Chat;
                         }
-                        let assistant_message =
-                            crate::session::types::Message::assistant(msg.clone());
-                        let _ = self
-                            .session_manager
-                            .add_message_to_current_session(&assistant_message);
-                        self.chat_state.chat.add_assistant_message(msg);
+                        // Only add non-empty messages to the chat
+                        if !msg.is_empty() {
+                            let assistant_message =
+                                crate::session::types::Message::assistant(msg.clone());
+                            let _ = self
+                                .session_manager
+                                .add_message_to_current_session(&assistant_message);
+                            self.chat_state.chat.add_assistant_message(msg);
+                        }
                         if parsed.name == "exit" {
                             self.quit();
                         }
@@ -1185,21 +1194,27 @@ impl App {
                     self.chat_state.chat.append_reasoning_to_last_assistant(&reasoning);
                 }
                 crate::llm::ChunkMessage::End => {
+                    // Finalize streaming metrics from the chat's tracked values
+                    self.chat_state.chat.finalize_streaming_metrics();
+
                     if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
                         last_msg.mark_complete();
+                        // Set model and provider metadata before persisting
+                        // Use the captured values from when streaming started
+                        last_msg.model = self.streaming_model.clone();
+                        last_msg.provider = self.streaming_provider.clone();
                         let _ = self
                             .session_manager
                             .add_message_to_current_session(last_msg);
                     }
                     self.is_streaming = false;
-                    self.chat_state.chat.streaming_start_time = None;
-                    self.chat_state.chat.streaming_token_count = 0;
+                    self.streaming_model = None;
+                    self.streaming_provider = None;
                     self.cleanup_streaming();
                 }
                 crate::llm::ChunkMessage::Failed(error) => {
                     self.is_streaming = false;
-                    self.chat_state.chat.streaming_start_time = None;
-                    self.chat_state.chat.streaming_token_count = 0;
+                    self.chat_state.chat.finalize_streaming_metrics();
                     push_toast(ratatui_toolkit::Toast::new(
                         format!("LLM error: {}", error),
                         ratatui_toolkit::ToastLevel::Error,
@@ -1214,8 +1229,7 @@ impl App {
                 }
                 crate::llm::ChunkMessage::Cancelled => {
                     self.is_streaming = false;
-                    self.chat_state.chat.streaming_start_time = None;
-                    self.chat_state.chat.streaming_token_count = 0;
+                    self.chat_state.chat.finalize_streaming_metrics();
                     push_toast(ratatui_toolkit::Toast::new(
                         "Streaming cancelled",
                         ratatui_toolkit::ToastLevel::Info,
@@ -1228,20 +1242,11 @@ impl App {
                     }
                     self.cleanup_streaming();
                 }
-                crate::llm::ChunkMessage::Metrics {
-                    token_count,
-                    duration_ms,
-                } => {
-                    if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
-                        last_msg.token_count = Some(token_count);
-                        last_msg.duration_ms = Some(duration_ms);
-                        // Debug logging
-                        let _ = crate::logging::log(&format!(
-                            "Metrics received: token_count={}, duration_ms={}",
-                            token_count, duration_ms
-                        ));
-                    }
+                crate::llm::ChunkMessage::Metrics { .. } => {
+                    // Metrics are now calculated locally from streaming data
+                    // This arm is kept for backward compatibility but ignored
                 }
+
             }
         }
     }
@@ -1261,6 +1266,11 @@ impl App {
         self.streaming_cancel_token = Some(cancel_token.clone());
 
         self.is_streaming = true;
+
+        // Capture the current model and provider at the start of streaming
+        // so they don't change if the user switches models during streaming
+        self.streaming_model = Some(self.model.clone());
+        self.streaming_provider = Some(self.provider_name.clone());
 
         self.chat_state.chat.add_assistant_message("");
         if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
@@ -1304,6 +1314,8 @@ impl App {
             }
             let mut user_message = crate::session::types::Message::user(&msg);
             user_message.agent_mode = Some(self.agent.clone());
+            user_message.model = Some(self.model.clone());
+            user_message.provider = Some(self.provider_name.clone());
             let _ = self
                 .session_manager
                 .add_message_to_current_session(&user_message);
@@ -1320,6 +1332,8 @@ impl App {
         } else if !msg.is_empty() && self.base_focus == BaseFocus::Chat {
             let mut user_message = crate::session::types::Message::user(&msg);
             user_message.agent_mode = Some(self.agent.clone());
+            user_message.model = Some(self.model.clone());
+            user_message.provider = Some(self.provider_name.clone());
             let _ = self
                 .session_manager
                 .add_message_to_current_session(&user_message);
@@ -1337,6 +1351,7 @@ impl App {
 
     pub fn render(&mut self, f: &mut ratatui::Frame) {
         let size = f.area();
+        self.last_frame_size = size;
         let colors = self.get_current_theme_colors();
 
         match self.base_focus {

@@ -34,6 +34,8 @@ pub struct Message {
     pub tokens_used: i32,
     pub model: Option<String>,
     pub provider: Option<String>,
+    pub agent_mode: Option<String>,
+    pub duration_ms: i64,
 }
 
 pub struct HistoryDAO {
@@ -108,8 +110,8 @@ impl HistoryDAO {
         let parts_json = serde_json::to_string(&msg.parts)?;
 
         self.conn.execute(
-            "INSERT INTO messages (id, session_id, role, parts, tokens_used, model, provider)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages (id, session_id, role, parts, tokens_used, model, provider, agent_mode, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &msg.id,
                 msg.session_id,
@@ -118,6 +120,8 @@ impl HistoryDAO {
                 msg.tokens_used,
                 msg.model.as_deref(),
                 msg.provider.as_deref(),
+                msg.agent_mode.as_deref(),
+                msg.duration_ms,
             ],
         )?;
 
@@ -127,7 +131,7 @@ impl HistoryDAO {
 
     pub fn get_messages(&self, session_id: i64) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, role, parts, timestamp, tokens_used, model, provider
+            "SELECT id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms
              FROM messages WHERE session_id = ?1 ORDER BY timestamp ASC",
         )?;
 
@@ -144,6 +148,8 @@ impl HistoryDAO {
                 tokens_used: row.get(5)?,
                 model: row.get(6)?,
                 provider: row.get(7)?,
+                agent_mode: row.get(8)?,
+                duration_ms: row.get(9)?,
             })
         })?;
 

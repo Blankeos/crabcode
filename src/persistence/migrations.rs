@@ -8,6 +8,10 @@ pub fn run_migrations(db: &mut Connection) -> Result<()> {
         migrate_to_v1(db)?;
     }
 
+    if current_version < 2 {
+        migrate_to_v2(db)?;
+    }
+
     Ok(())
 }
 
@@ -78,6 +82,25 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
 
     tx.execute(
         "INSERT INTO migrations (version, applied_at) VALUES (1, strftime('%s', 'now'))",
+        params![],
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_v2(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction()?;
+
+    // Add duration_ms column to messages table
+    tx.execute_batch(
+        r#"
+        ALTER TABLE messages ADD COLUMN duration_ms INTEGER DEFAULT 0;
+        "#,
+    )?;
+
+    tx.execute(
+        "INSERT INTO migrations (version, applied_at) VALUES (2, strftime('%s', 'now'))",
         params![],
     )?;
 

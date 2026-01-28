@@ -18,6 +18,8 @@ pub struct Message {
     pub agent_mode: Option<String>,
     pub token_count: Option<usize>,
     pub duration_ms: Option<u64>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
 }
 
 impl Message {
@@ -31,6 +33,8 @@ impl Message {
             agent_mode: None,
             token_count: None,
             duration_ms: None,
+            model: None,
+            provider: None,
         }
     }
 
@@ -60,6 +64,8 @@ impl Message {
             agent_mode: None,
             token_count: None,
             duration_ms: None,
+            model: None,
+            provider: None,
         }
     }
 

@@ -204,11 +204,13 @@ pub async fn stream_llm_with_cancellation(
 
         match chunk {
             LanguageModelStreamChunkType::Text(text) => {
-                token_count += text.split_whitespace().count();
+                // Estimate tokens: ~4 characters per token on average
+                token_count += text.chars().count().max(1) / 4;
                 let _ = sender.send(crate::llm::ChunkMessage::Text(text));
             }
             LanguageModelStreamChunkType::Reasoning(reasoning) => {
-                token_count += reasoning.split_whitespace().count();
+                // Estimate tokens: ~4 characters per token on average
+                token_count += reasoning.chars().count().max(1) / 4;
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
             LanguageModelStreamChunkType::ToolCall(_tool_call) => {}

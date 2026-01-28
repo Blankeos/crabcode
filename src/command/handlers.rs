@@ -64,7 +64,7 @@ pub fn handle_new<'a>(
     _parsed: &'a ParsedCommand<'a>,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move { CommandResult::Success("Switched to home".to_string()) })
+    Box::pin(async move { CommandResult::Success("".to_string()) })
 }
 
 pub fn handle_connect<'a>(
@@ -543,7 +543,7 @@ mod tests {
         let result = handle_new(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
-                assert!(msg.contains("Switched to home"));
+                assert!(msg.is_empty());
             }
             _ => panic!("Expected Success"),
         }
@@ -564,7 +564,7 @@ mod tests {
         let result = handle_new(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
-                assert!(msg.contains("Switched to home"));
+                assert!(msg.is_empty());
             }
             _ => panic!("Expected Success"),
         }
@@ -585,7 +585,7 @@ mod tests {
         let result = handle_new(&parsed, &mut session_manager).await;
         match result {
             CommandResult::Success(msg) => {
-                assert!(msg.contains("Switched to home"));
+                assert!(msg.is_empty());
             }
             _ => panic!("Expected Success"),
         }
