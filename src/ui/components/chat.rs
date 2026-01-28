@@ -1,5 +1,6 @@
 use crate::session::types::{Message, MessageRole};
 use crate::theme::ThemeColors;
+use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
 use ratatui::{
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::Rect,
@@ -29,6 +30,10 @@ pub struct Chat {
     cached_tokens_per_sec: Option<f64>,
     /// Last time tokens per second was calculated (for throttling updates)
     last_tps_calculated: Option<std::time::Instant>,
+    /// Markdown renderer for the last (streaming) message
+    streaming_renderer: Option<SimpleStreamingRenderer>,
+    /// Index of the message currently being rendered by streaming_renderer
+    streaming_message_idx: Option<usize>,
 }
 
 // Minimum elapsed time before showing tokens/s (250ms)
@@ -50,6 +55,8 @@ impl Chat {
             user_scrolled_up: false,
             cached_tokens_per_sec: None,
             last_tps_calculated: None,
+            streaming_renderer: None,
+            streaming_message_idx: None,
         }
     }
 
@@ -68,6 +75,8 @@ impl Chat {
             user_scrolled_up: false,
             cached_tokens_per_sec: None,
             last_tps_calculated: None,
+            streaming_renderer: None,
+            streaming_message_idx: None,
         }
     }
 
@@ -243,6 +252,47 @@ impl Chat {
         self.streaming_start_time = None;
         self.streaming_first_token_time = None;
         self.streaming_token_count = 0;
+        self.streaming_renderer = None;
+        self.streaming_message_idx = None;
+    }
+
+    /// Update the streaming markdown renderer for the current streaming message
+    /// This should be called before render() to ensure the renderer is up to date
+    fn update_streaming_renderer(&mut self) {
+        // Check if we're streaming and have messages
+        if !self.is_streaming() || self.messages.is_empty() {
+            // Not streaming, clear renderer if it exists
+            if self.streaming_renderer.is_some() {
+                self.streaming_renderer = None;
+                self.streaming_message_idx = None;
+            }
+            return;
+        }
+
+        let last_idx = self.messages.len() - 1;
+
+        // Check if we're still rendering the same message
+        if let Some(renderer_idx) = self.streaming_message_idx {
+            if renderer_idx != last_idx {
+                // Different message, reset renderer
+                self.streaming_renderer = Some(SimpleStreamingRenderer::new());
+                self.streaming_message_idx = Some(last_idx);
+            }
+        } else {
+            // No renderer yet, create one
+            self.streaming_renderer = Some(SimpleStreamingRenderer::new());
+            self.streaming_message_idx = Some(last_idx);
+        }
+
+        // Update the renderer content if needed
+        if let Some(ref mut renderer) = self.streaming_renderer {
+            if let Some(last_msg) = self.messages.last() {
+                if renderer.content() != last_msg.content {
+                    renderer.reset();
+                    renderer.append(&last_msg.content);
+                }
+            }
+        }
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
@@ -359,6 +409,9 @@ impl Chat {
     ) {
         self.viewport_height = area.height as usize;
 
+        // Update streaming renderer before calculating heights
+        self.update_streaming_renderer();
+
         // Calculate content area (leave space for scrollbar)
         let content_area = Rect {
             x: area.x,
@@ -381,10 +434,13 @@ impl Chat {
         let content_lines =
             self.render_visible_messages(content_area.width as usize, model, colors);
 
+        // Store scroll_offset before creating paragraph
+        let scroll_offset = self.scroll_offset;
+
         // Render content
         let paragraph = Paragraph::new(Text::from(content_lines))
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset as u16, 0));
+            .scroll((scroll_offset as u16, 0));
 
         f.render_widget(paragraph, content_area);
 
@@ -414,40 +470,62 @@ impl Chat {
         colors: &ThemeColors,
     ) -> usize {
         let mut total_height = 0;
+        let message_count = self.messages.len();
+        let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
 
         for (idx, message) in self.messages.iter().enumerate() {
-            let message_lines = self.format_message(message, max_width, idx, model, colors);
+            let message_lines = self.format_message(
+                message,
+                max_width,
+                idx,
+                message_count,
+                streaming_content,
+                model,
+                colors,
+            );
             total_height += message_lines.len();
         }
 
         total_height
     }
 
-    fn render_visible_messages(
-        &self,
+    fn render_visible_messages<'a>(
+        &'a self,
         max_width: usize,
-        model: &str,
-        colors: &ThemeColors,
-    ) -> Vec<Line> {
-        let mut all_lines: Vec<Line> = Vec::new();
+        model: &'a str,
+        colors: &'a ThemeColors,
+    ) -> Vec<Line<'a>> {
+        let mut all_lines: Vec<Line<'a>> = Vec::new();
+        let message_count = self.messages.len();
+        let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
 
         for (idx, message) in self.messages.iter().enumerate() {
-            let message_lines = self.format_message(message, max_width, idx, model, colors);
+            let message_lines = self.format_message(
+                message,
+                max_width,
+                idx,
+                message_count,
+                streaming_content,
+                model,
+                colors,
+            );
             all_lines.extend(message_lines);
         }
 
         all_lines
     }
 
-    fn format_message(
-        &self,
-        message: &Message,
+    fn format_message<'a>(
+        &'a self,
+        message: &'a Message,
         max_width: usize,
-        _idx: usize,
-        model: &str,
-        colors: &ThemeColors,
-    ) -> Vec<Line> {
-        let mut lines: Vec<Line> = Vec::new();
+        idx: usize,
+        message_count: usize,
+        streaming_content: Option<&'a str>,
+        model: &'a str,
+        colors: &'a ThemeColors,
+    ) -> Vec<Line<'a>> {
+        let mut lines: Vec<Line<'a>> = Vec::new();
 
         match message.role {
             MessageRole::User => {
@@ -503,12 +581,27 @@ impl Chat {
                     }
                 }
 
-                // AI message: No box, display content directly
-                let content = message.content.clone();
-                let wrapped_lines = textwrap::wrap(&content, max_width);
+                // Check if this is the streaming message (last incomplete assistant message)
+                let is_last = idx == message_count.saturating_sub(1);
+                let is_streaming = is_last && !message.is_complete;
 
-                for line in wrapped_lines {
-                    lines.push(Line::from(line.to_string()));
+                if is_streaming {
+                    // Use the streaming renderer content for markdown
+                    if let Some(content) = streaming_content {
+                        let markdown_lines = render_markdown(content, max_width);
+                        lines.extend(markdown_lines);
+                    } else {
+                        // Fallback to plain text if renderer not available
+                        let content = message.content.clone();
+                        let wrapped_lines = textwrap::wrap(&content, max_width);
+                        for line in wrapped_lines {
+                            lines.push(Line::from(line.to_string()));
+                        }
+                    }
+                } else {
+                    // For complete messages, use tui-markdown directly
+                    let markdown_lines = render_markdown(&message.content, max_width);
+                    lines.extend(markdown_lines);
                 }
 
                 // Add empty line before metadata for spacing
