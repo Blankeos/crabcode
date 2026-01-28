@@ -28,7 +28,7 @@ pub fn init_chat(chat: Chat) -> ChatState {
 
 pub fn render_chat(
     f: &mut Frame,
-    chat_state: &ChatState,
+    chat_state: &mut ChatState,
     input: &mut Input,
     version: String,
     cwd: String,
@@ -51,7 +51,9 @@ pub fn render_chat(
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Min(0),
+                Constraint::Length(1), // Top padding
+                Constraint::Min(0),    // Chat content
+                Constraint::Length(1), // Bottom padding
                 Constraint::Length(input_height),
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -60,25 +62,39 @@ pub fn render_chat(
         )
         .split(main_chunks[0]);
 
-    chat_state.chat.render(f, above_status_chunks[0]);
-    input.render(f, above_status_chunks[1], &agent, &model, &provider_name);
+    chat_state
+        .chat
+        .render(f, above_status_chunks[1], &agent, &model);
+    input.render(f, above_status_chunks[3], &agent, &model, &provider_name);
 
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(30)])
-        .split(above_status_chunks[2]);
+        .split(above_status_chunks[4]);
 
     if is_streaming {
-        let streaming_text = vec![
-            Span::styled("Streaming...", Style::default().fg(colors.info)),
-            Span::raw(" "),
-            Span::styled(
-                "esc to stop",
-                Style::default()
-                    .fg(colors.text_weak)
-                    .add_modifier(Modifier::DIM),
-            ),
-        ];
+        let mut streaming_text = vec![Span::styled(
+            "Streaming...",
+            Style::default().fg(colors.info),
+        )];
+
+        // Add tokens/second if available
+        if let Some(tps) = chat_state.chat.get_streaming_tokens_per_sec() {
+            streaming_text.push(Span::raw(" "));
+            streaming_text.push(Span::styled(
+                format!("{:.0}t/s", tps),
+                Style::default().fg(colors.info),
+            ));
+        }
+
+        streaming_text.push(Span::raw("  "));
+        streaming_text.push(Span::styled(
+            "esc to stop",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+
         let streaming_paragraph = Paragraph::new(Line::from(streaming_text));
         f.render_widget(streaming_paragraph, status_chunks[0]);
     }
@@ -95,7 +111,7 @@ pub fn render_chat(
     f.render_widget(help, status_chunks[1]);
 
     let blank = Block::default();
-    f.render_widget(blank, above_status_chunks[3]);
+    f.render_widget(blank, above_status_chunks[5]);
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
     status_bar.render(f, main_chunks[1]);

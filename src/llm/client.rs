@@ -131,6 +131,8 @@ pub async fn stream_llm_with_cancellation(
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Instant;
+
     let auth_dao = crate::persistence::AuthDAO::new()?;
 
     let api_key = auth_dao
@@ -191,6 +193,8 @@ pub async fn stream_llm_with_cancellation(
     };
 
     let mut stream = response.stream;
+    let start_time = Instant::now();
+    let mut token_count: usize = 0;
 
     while let Some(chunk) = stream.next().await {
         if cancel_token.is_cancelled() {
@@ -200,13 +204,20 @@ pub async fn stream_llm_with_cancellation(
 
         match chunk {
             LanguageModelStreamChunkType::Text(text) => {
+                token_count += text.split_whitespace().count();
                 let _ = sender.send(crate::llm::ChunkMessage::Text(text));
             }
             LanguageModelStreamChunkType::Reasoning(reasoning) => {
+                token_count += reasoning.split_whitespace().count();
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
             LanguageModelStreamChunkType::ToolCall(_tool_call) => {}
             LanguageModelStreamChunkType::End(_msg) => {
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                let _ = sender.send(crate::llm::ChunkMessage::Metrics {
+                    token_count,
+                    duration_ms,
+                });
                 let _ = sender.send(crate::llm::ChunkMessage::End);
                 break;
             }

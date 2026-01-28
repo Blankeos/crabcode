@@ -59,6 +59,9 @@ impl TryFrom<Message> for SessionMessage {
             reasoning: None,
             timestamp: std::time::UNIX_EPOCH + std::time::Duration::from_secs(msg.timestamp as u64),
             is_complete: true,
+            agent_mode: None,
+            token_count: None,
+            duration_ms: None,
         })
     }
 }

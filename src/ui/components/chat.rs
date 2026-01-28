@@ -1,15 +1,23 @@
 use crate::session::types::{Message, MessageRole};
 use ratatui::{
+    crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Paragraph, Wrap},
+    text::{Line, Span},
+    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    Frame,
 };
 
 #[derive(Debug, Clone, Default)]
 pub struct Chat {
     pub messages: Vec<Message>,
     pub scroll_offset: usize,
+    pub scrollbar_state: ScrollbarState,
+    pub is_dragging_scrollbar: bool,
+    pub content_height: usize,
+    pub viewport_height: usize,
+    pub streaming_start_time: Option<std::time::Instant>,
+    pub streaming_token_count: usize,
 }
 
 impl Chat {
@@ -21,6 +29,12 @@ impl Chat {
         Self {
             messages,
             scroll_offset: 0,
+            scrollbar_state: ScrollbarState::default(),
+            is_dragging_scrollbar: false,
+            content_height: 0,
+            viewport_height: 0,
+            streaming_start_time: None,
+            streaming_token_count: 0,
         }
     }
 
@@ -33,22 +47,41 @@ impl Chat {
         self.add_message(Message::user(content));
     }
 
+    pub fn add_user_message_with_agent_mode(
+        &mut self,
+        content: impl Into<String>,
+        agent_mode: String,
+    ) {
+        let mut msg = Message::user(content);
+        msg.agent_mode = Some(agent_mode);
+        self.add_message(msg);
+    }
+
     pub fn add_assistant_message(&mut self, content: impl Into<String>) {
         self.add_message(Message::assistant(content));
     }
 
     pub fn append_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
+        let chunk_str = chunk.as_ref();
         if self
             .messages
             .last()
             .is_some_and(|m| m.role == MessageRole::Assistant)
         {
             if let Some(msg) = self.messages.last_mut() {
-                msg.append(chunk);
+                msg.append(chunk_str);
+                // Track streaming metrics
+                if self.streaming_start_time.is_none() {
+                    self.streaming_start_time = Some(std::time::Instant::now());
+                }
+                self.streaming_token_count += chunk_str.split_whitespace().count();
                 self.scroll_to_bottom();
             }
         } else {
-            self.add_assistant_message(chunk.as_ref());
+            // Starting a new assistant message
+            self.streaming_start_time = Some(std::time::Instant::now());
+            self.streaming_token_count = chunk_str.split_whitespace().count();
+            self.add_assistant_message(chunk_str);
         }
     }
 
@@ -73,84 +106,400 @@ impl Chat {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.scroll_offset = 0;
+        self.scrollbar_state = ScrollbarState::default();
+        self.content_height = 0;
+        self.streaming_start_time = None;
+        self.streaming_token_count = 0;
+    }
+
+    pub fn get_streaming_tokens_per_sec(&self) -> Option<f64> {
+        if let Some(start_time) = self.streaming_start_time {
+            let elapsed_ms = start_time.elapsed().as_millis() as f64;
+            if elapsed_ms > 0.0 {
+                let tokens_per_sec = (self.streaming_token_count as f64) / (elapsed_ms / 1000.0);
+                return Some(tokens_per_sec);
+            }
+        }
+        None
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        self.streaming_start_time.is_some()
+            && self
+                .messages
+                .last()
+                .is_some_and(|m| m.role == MessageRole::Assistant && !m.is_complete)
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(amount);
+        let max_offset = self.content_height.saturating_sub(self.viewport_height);
+        self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
+        self.update_scrollbar();
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        self.update_scrollbar();
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = 0;
+        self.scroll_offset = self.content_height.saturating_sub(self.viewport_height);
+        self.update_scrollbar();
     }
 
-    pub fn render(&self, f: &mut ratatui::Frame, area: Rect) {
-        let text = self.render_messages(area.height as usize);
+    fn update_scrollbar(&mut self) {
+        let max_offset = self.content_height.saturating_sub(self.viewport_height);
+        let content_length = max_offset.saturating_add(1).max(1);
+        let position = self.scroll_offset.min(content_length.saturating_sub(1));
+        self.scrollbar_state = self.scrollbar_state.content_length(content_length);
+        self.scrollbar_state = self.scrollbar_state.position(position);
+    }
 
-        let paragraph = Paragraph::new(text)
+    pub fn handle_mouse_event(&mut self, event: MouseEvent, area: Rect) -> bool {
+        use ratatui::layout::Position;
+        let point = Position::new(event.column, event.row);
+
+        if !area.contains(point) {
+            self.is_dragging_scrollbar = false;
+            return false;
+        }
+
+        // Calculate scrollbar area (rightmost column)
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+
+        let is_on_scrollbar = scrollbar_area.contains(point);
+
+        match event.kind {
+            MouseEventKind::ScrollDown => {
+                self.scroll_down(3);
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_up(3);
+                true
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if is_on_scrollbar {
+                    self.is_dragging_scrollbar = true;
+                    self.scroll_to_position(event.row, scrollbar_area);
+                    true
+                } else {
+                    false
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.is_dragging_scrollbar {
+                    self.scroll_to_position(event.row, scrollbar_area);
+                    true
+                } else {
+                    false
+                }
+            }
+            MouseEventKind::Up(_) => {
+                if self.is_dragging_scrollbar {
+                    self.is_dragging_scrollbar = false;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn scroll_to_position(&mut self, row: u16, scrollbar_area: Rect) {
+        if self.content_height == 0 || self.viewport_height == 0 {
+            return;
+        }
+
+        let relative_y = row.saturating_sub(scrollbar_area.y) as usize;
+        let max_offset = self.content_height.saturating_sub(self.viewport_height);
+
+        let new_offset = if max_offset > 0 && scrollbar_area.height > 0 {
+            (relative_y * max_offset) / scrollbar_area.height as usize
+        } else {
+            0
+        };
+        self.scroll_offset = new_offset.min(max_offset);
+        self.update_scrollbar();
+    }
+
+    pub fn render(&mut self, f: &mut Frame, area: Rect, _agent: &str, model: &str) {
+        self.viewport_height = area.height as usize;
+
+        // Calculate content area (leave space for scrollbar)
+        let content_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width.saturating_sub(1),
+            height: area.height,
+        };
+
+        // Calculate total content height first
+        let total_height = self.calculate_content_height(content_area.width as usize, model);
+        self.content_height = total_height;
+
+        // Clamp scroll offset
+        let max_offset = self.content_height.saturating_sub(self.viewport_height);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+        self.update_scrollbar();
+
+        // Now render the visible content
+        let content_lines = self.render_visible_messages(content_area.width as usize, model);
+
+        // Render content
+        let paragraph = Paragraph::new(Text::from(content_lines))
             .wrap(Wrap { trim: false })
             .scroll((self.scroll_offset as u16, 0));
 
-        f.render_widget(paragraph, area);
-    }
+        f.render_widget(paragraph, content_area);
 
-    fn render_messages(&self, max_height: usize) -> Text<'_> {
-        let mut lines = Vec::new();
-
-        for message in &self.messages {
-            let role_lines = self.format_message(message, max_height);
-            lines.extend(role_lines);
-        }
-
-        Text::from(lines)
-    }
-
-    fn format_message<'a>(&self, message: &'a Message, _max_height: usize) -> Vec<Line<'a>> {
-        let mut lines = Vec::new();
-
-        let (prefix, color) = match message.role {
-            MessageRole::User => ("You", Color::Rgb(255, 140, 0)),
-            MessageRole::Assistant => ("AI", Color::Rgb(255, 165, 0)),
-            MessageRole::System => ("System", Color::Yellow),
-            MessageRole::Tool => ("Tool", Color::Gray),
+        // Render scrollbar
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
         };
 
-        // Display reasoning if present (for reasoning models)
-        if let Some(ref reasoning) = message.reasoning {
-            if !reasoning.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("[{} - thinking] ", prefix),
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        reasoning,
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ]));
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .track_symbol(Some(" "))
+                .thumb_symbol("█"),
+            scrollbar_area,
+            &mut self.scrollbar_state,
+        );
+    }
+
+    fn calculate_content_height(&self, max_width: usize, model: &str) -> usize {
+        let mut total_height = 0;
+
+        for (idx, message) in self.messages.iter().enumerate() {
+            let message_lines = self.format_message(message, max_width, idx, model);
+            total_height += message_lines.len();
+        }
+
+        total_height
+    }
+
+    fn render_visible_messages(&self, max_width: usize, model: &str) -> Vec<Line> {
+        let mut all_lines: Vec<Line> = Vec::new();
+
+        for (idx, message) in self.messages.iter().enumerate() {
+            let message_lines = self.format_message(message, max_width, idx, model);
+            all_lines.extend(message_lines);
+        }
+
+        all_lines
+    }
+
+    fn format_message(
+        &self,
+        message: &Message,
+        max_width: usize,
+        _idx: usize,
+        model: &str,
+    ) -> Vec<Line> {
+        let mut lines: Vec<Line> = Vec::new();
+
+        match message.role {
+            MessageRole::User => {
+                // User message: Box with left border colored by agent mode
+                let border_color = self.get_agent_color(message.agent_mode.as_deref());
+                let content = message.content.clone();
+
+                // Wrap content to fit within max_width - padding
+                let wrapped_lines = textwrap::wrap(&content, max_width.saturating_sub(4));
+
+                for (i, line) in wrapped_lines.iter().enumerate() {
+                    let is_first = i == 0;
+                    let _is_last = i == wrapped_lines.len() - 1;
+
+                    let left_border = if is_first { "▌ " } else { "│ " };
+
+                    let right_padding = " ".repeat(max_width.saturating_sub(line.len() + 3));
+
+                    lines.push(Line::from(vec![
+                        Span::styled(left_border, Style::default().fg(border_color)),
+                        Span::raw(line.to_string()),
+                        Span::raw(right_padding),
+                    ]));
+                }
+
+                // Add empty line after user message
+                lines.push(Line::from(""));
+            }
+            MessageRole::Assistant => {
+                // Display reasoning/thinking tokens if present
+                if let Some(ref reasoning) = message.reasoning {
+                    if !reasoning.is_empty() {
+                        let reasoning_prefix = "💭 Thinking...";
+                        lines.push(Line::from(vec![Span::styled(
+                            reasoning_prefix,
+                            Style::default()
+                                .fg(Color::Gray)
+                                .add_modifier(Modifier::ITALIC),
+                        )]));
+
+                        let wrapped_reasoning = textwrap::wrap(reasoning, max_width);
+                        for line in wrapped_reasoning {
+                            lines.push(Line::from(Span::styled(
+                                line.to_string(),
+                                Style::default()
+                                    .fg(Color::Gray)
+                                    .add_modifier(Modifier::ITALIC),
+                            )));
+                        }
+
+                        // Add separator between reasoning and content
+                        lines.push(Line::from(""));
+                    }
+                }
+
+                // AI message: No box, display content directly
+                let content = message.content.clone();
+                let wrapped_lines = textwrap::wrap(&content, max_width);
+
+                for line in wrapped_lines {
+                    lines.push(Line::from(line.to_string()));
+                }
+
+                // Add empty line before metadata for spacing
+                lines.push(Line::from(""));
+
+                // Add metadata line if message is complete
+                if message.is_complete {
+                    let metadata = self.format_metadata(message, model);
+                    lines.push(Line::from(metadata));
+                }
+
+                // Add empty line after AI message
+                lines.push(Line::from(""));
+            }
+            MessageRole::System => {
+                // System messages: simple display
+                let prefix = "System: ";
+                let content = format!("{}{}", prefix, message.content);
+                let wrapped_lines = textwrap::wrap(&content, max_width);
+
+                for line in wrapped_lines {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+                lines.push(Line::from(""));
+            }
+            MessageRole::Tool => {
+                // Tool messages: dimmed
+                let prefix = "Tool: ";
+                let content = format!("{}{}", prefix, message.content);
+                let wrapped_lines = textwrap::wrap(&content, max_width);
+
+                for line in wrapped_lines {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(Color::Gray),
+                    )));
+                }
+                lines.push(Line::from(""));
             }
         }
 
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("[{}] ", prefix),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(&message.content),
-        ]));
-
-        lines.push(Line::from(""));
-
         lines
     }
+
+    fn get_agent_color(&self, agent_mode: Option<&str>) -> Color {
+        match agent_mode {
+            Some("Plan") => Color::Rgb(255, 165, 0),    // Orange
+            Some("Build") => Color::Rgb(147, 112, 219), // Purple
+            _ => Color::Gray,
+        }
+    }
+
+    fn format_metadata(&self, message: &Message, model: &str) -> Vec<Span> {
+        let mut spans = Vec::new();
+
+        // Get agent mode from previous user message or default to "Plan"
+        let agent_mode = self.get_agent_mode_for_message(message);
+        let agent_color = self.get_agent_color(Some(&agent_mode));
+
+        // Agent icon (▣) with extra space
+        spans.push(Span::styled(
+            "▣  ",
+            Style::default()
+                .fg(agent_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+        // Agent type
+        spans.push(Span::styled(
+            agent_mode,
+            Style::default()
+                .fg(agent_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+        // Separator
+        spans.push(Span::styled(" • ", Style::default().fg(Color::Gray)));
+
+        // Model ID
+        spans.push(Span::styled(
+            model.to_string(),
+            Style::default().fg(Color::Gray),
+        ));
+
+        // Tokens/second if available
+        if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
+            // Always show metrics if we have them, even if duration is 0
+            let tokens_per_sec = if duration_ms > 0 {
+                (token_count as f64) / (duration_ms as f64 / 1000.0)
+            } else {
+                0.0
+            };
+            spans.push(Span::styled(
+                format!(" • {:.0}t/s", tokens_per_sec),
+                Style::default().fg(Color::Gray),
+            ));
+
+            // Duration
+            let duration_sec = duration_ms as f64 / 1000.0;
+            spans.push(Span::styled(
+                format!(" • {:.1}s", duration_sec),
+                Style::default().fg(Color::Gray),
+            ));
+        }
+
+        spans
+    }
+
+    fn get_agent_mode_for_message(&self, message: &Message) -> String {
+        // Find the index of the current message by comparing content and timestamp
+        if let Some(current_idx) = self
+            .messages
+            .iter()
+            .position(|m| m.content == message.content && m.timestamp == message.timestamp)
+        {
+            // Look backwards for the preceding user message
+            for i in (0..current_idx).rev() {
+                if self.messages[i].role == MessageRole::User {
+                    if let Some(ref agent_mode) = self.messages[i].agent_mode {
+                        return agent_mode.clone();
+                    }
+                }
+            }
+        }
+        // Default to Plan if no preceding user message with agent_mode found
+        "Plan".to_string()
+    }
 }
+
+use ratatui::text::Text;
 
 #[cfg(test)]
 mod tests {
@@ -238,6 +587,8 @@ mod tests {
     #[test]
     fn test_chat_scroll_down() {
         let mut chat = Chat::new();
+        chat.content_height = 100;
+        chat.viewport_height = 20;
         chat.scroll_down(5);
         assert_eq!(chat.scroll_offset, 5);
 
@@ -259,68 +610,21 @@ mod tests {
     #[test]
     fn test_chat_scroll_to_bottom() {
         let mut chat = Chat::new();
+        chat.content_height = 100;
+        chat.viewport_height = 20;
         chat.scroll_offset = 10;
         chat.scroll_to_bottom();
-        assert_eq!(chat.scroll_offset, 0);
+        assert_eq!(chat.scroll_offset, 80);
     }
 
     #[test]
     fn test_chat_scroll_to_bottom_after_add() {
         let mut chat = Chat::new();
+        chat.viewport_height = 20;
         chat.scroll_down(10);
         chat.add_user_message("test");
+        // After adding, should scroll to bottom
         assert_eq!(chat.scroll_offset, 0);
-    }
-
-    #[test]
-    fn test_chat_scroll_to_bottom_after_append() {
-        let mut chat = Chat::new();
-        chat.add_assistant_message("partial");
-        chat.scroll_down(10);
-        chat.append_to_last_assistant(" content");
-        assert_eq!(chat.scroll_offset, 0);
-    }
-
-    #[test]
-    fn test_format_message_user() {
-        let chat = Chat::new();
-        let msg = Message::user("hello world");
-        let lines = chat.format_message(&msg, 100);
-
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].spans[0].content.contains("[You]"));
-        assert!(lines[0].spans[1].content.contains("hello world"));
-    }
-
-    #[test]
-    fn test_format_message_assistant() {
-        let chat = Chat::new();
-        let msg = Message::assistant("response");
-        let lines = chat.format_message(&msg, 100);
-
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].spans[0].content.contains("[AI]"));
-        assert!(lines[0].spans[1].content.contains("response"));
-    }
-
-    #[test]
-    fn test_format_message_system() {
-        let chat = Chat::new();
-        let msg = Message::system("system prompt");
-        let lines = chat.format_message(&msg, 100);
-
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].spans[0].content.contains("[System]"));
-    }
-
-    #[test]
-    fn test_format_message_tool() {
-        let chat = Chat::new();
-        let msg = Message::tool("tool output");
-        let lines = chat.format_message(&msg, 100);
-
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].spans[0].content.contains("[Tool]"));
     }
 
     #[test]

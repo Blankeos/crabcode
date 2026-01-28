@@ -600,6 +600,34 @@ impl App {
         } else if self.overlay_focus == OverlayFocus::SessionsDialog {
             handle_sessions_dialog_mouse_event(&mut self.sessions_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::None {
+            // Handle mouse events for chat scrolling when in chat mode
+            if self.base_focus == BaseFocus::Chat {
+                let size = ratatui::layout::Rect::new(0, 0, 80, 24); // Placeholder, actual size from frame
+                // We need to calculate the chat area similar to render_chat
+                let main_chunks = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints([ratatui::layout::Constraint::Min(0), ratatui::layout::Constraint::Length(1)].as_ref())
+                    .split(size);
+                let input_height = self.input.get_height() as u16;
+                let above_status_chunks = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints(
+                        [
+                            ratatui::layout::Constraint::Min(0),
+                            ratatui::layout::Constraint::Length(input_height),
+                            ratatui::layout::Constraint::Length(1),
+                            ratatui::layout::Constraint::Length(1),
+                        ]
+                        .as_ref(),
+                    )
+                    .split(main_chunks[0]);
+                let chat_area = above_status_chunks[0];
+                
+                if self.chat_state.chat.handle_mouse_event(mouse, chat_area) {
+                    return;
+                }
+            }
+            
             // Handle mouse events for the main input when no overlay is focused
             if self.input.handle_mouse_event(mouse) {
                 self.update_suggestions();
@@ -1164,10 +1192,14 @@ impl App {
                             .add_message_to_current_session(last_msg);
                     }
                     self.is_streaming = false;
+                    self.chat_state.chat.streaming_start_time = None;
+                    self.chat_state.chat.streaming_token_count = 0;
                     self.cleanup_streaming();
                 }
                 crate::llm::ChunkMessage::Failed(error) => {
                     self.is_streaming = false;
+                    self.chat_state.chat.streaming_start_time = None;
+                    self.chat_state.chat.streaming_token_count = 0;
                     push_toast(ratatui_toolkit::Toast::new(
                         format!("LLM error: {}", error),
                         ratatui_toolkit::ToastLevel::Error,
@@ -1182,6 +1214,8 @@ impl App {
                 }
                 crate::llm::ChunkMessage::Cancelled => {
                     self.is_streaming = false;
+                    self.chat_state.chat.streaming_start_time = None;
+                    self.chat_state.chat.streaming_token_count = 0;
                     push_toast(ratatui_toolkit::Toast::new(
                         "Streaming cancelled",
                         ratatui_toolkit::ToastLevel::Info,
@@ -1193,6 +1227,20 @@ impl App {
                         self.chat_state.chat.messages.pop();
                     }
                     self.cleanup_streaming();
+                }
+                crate::llm::ChunkMessage::Metrics {
+                    token_count,
+                    duration_ms,
+                } => {
+                    if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
+                        last_msg.token_count = Some(token_count);
+                        last_msg.duration_ms = Some(duration_ms);
+                        // Debug logging
+                        let _ = crate::logging::log(&format!(
+                            "Metrics received: token_count={}, duration_ms={}",
+                            token_count, duration_ms
+                        ));
+                    }
                 }
             }
         }
@@ -1254,11 +1302,12 @@ impl App {
                 let session_title = Self::generate_title_from_message(&msg);
                 self.session_manager.create_session(Some(session_title));
             }
-            let user_message = crate::session::types::Message::user(&msg);
+            let mut user_message = crate::session::types::Message::user(&msg);
+            user_message.agent_mode = Some(self.agent.clone());
             let _ = self
                 .session_manager
                 .add_message_to_current_session(&user_message);
-            self.chat_state.chat.add_user_message(&msg);
+            self.chat_state.chat.add_user_message_with_agent_mode(&msg, self.agent.clone());
             self.base_focus = BaseFocus::Chat;
 
             if let Err(e) = self.start_llm_streaming(&msg) {
@@ -1269,11 +1318,12 @@ impl App {
                 ));
             }
         } else if !msg.is_empty() && self.base_focus == BaseFocus::Chat {
-            let user_message = crate::session::types::Message::user(&msg);
+            let mut user_message = crate::session::types::Message::user(&msg);
+            user_message.agent_mode = Some(self.agent.clone());
             let _ = self
                 .session_manager
                 .add_message_to_current_session(&user_message);
-            self.chat_state.chat.add_user_message(&msg);
+            self.chat_state.chat.add_user_message_with_agent_mode(&msg, self.agent.clone());
 
             if let Err(e) = self.start_llm_streaming(&msg) {
                 push_toast(ratatui_toolkit::Toast::new(
@@ -1333,7 +1383,7 @@ impl App {
             BaseFocus::Chat => {
                 render_chat(
                     f,
-                    &self.chat_state,
+                    &mut self.chat_state,
                     &mut self.input,
                     self.version.clone(),
                     self.cwd.clone(),

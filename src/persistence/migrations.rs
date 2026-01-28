@@ -46,7 +46,16 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
             tokens_used INTEGER DEFAULT 0,
             model TEXT,
             provider TEXT,
+            agent_mode TEXT,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL,
+            token_count INTEGER DEFAULT 0,
+            duration_ms INTEGER DEFAULT 0,
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS migrations (

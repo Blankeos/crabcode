@@ -15,6 +15,9 @@ pub struct Message {
     pub reasoning: Option<String>,
     pub timestamp: SystemTime,
     pub is_complete: bool,
+    pub agent_mode: Option<String>,
+    pub token_count: Option<usize>,
+    pub duration_ms: Option<u64>,
 }
 
 impl Message {
@@ -25,6 +28,9 @@ impl Message {
             reasoning: None,
             timestamp: SystemTime::now(),
             is_complete: true,
+            agent_mode: None,
+            token_count: None,
+            duration_ms: None,
         }
     }
 
@@ -51,6 +57,9 @@ impl Message {
             reasoning: None,
             timestamp: SystemTime::now(),
             is_complete: false,
+            agent_mode: None,
+            token_count: None,
+            duration_ms: None,
         }
     }
 
