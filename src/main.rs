@@ -12,6 +12,7 @@ mod persistence;
 mod session;
 mod streaming;
 mod theme;
+mod tools;
 mod ui;
 mod utils;
 mod views;
