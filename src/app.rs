@@ -99,6 +99,9 @@ pub struct App {
     streaming_model: Option<String>,
     streaming_provider: Option<String>,
     last_animation_update: std::time::Instant,
+    streaming_chat_len_before_assistant: usize,
+    tool_call_message_indices: std::collections::HashMap<String, usize>,
+    tool_call_order: Vec<String>,
 }
 
 impl App {
@@ -192,6 +195,9 @@ impl App {
             streaming_model: None,
             streaming_provider: None,
             last_animation_update: std::time::Instant::now(),
+            streaming_chat_len_before_assistant: 0,
+            tool_call_message_indices: std::collections::HashMap::new(),
+            tool_call_order: Vec::new(),
         }
     }
 
@@ -556,6 +562,9 @@ impl App {
             }
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
                 if self.overlay_focus == OverlayFocus::SuggestionsPopup {
+                    if self.is_streaming {
+                        return true;
+                    }
                     self.autocomplete_and_submit();
                     true
                 } else {
@@ -569,6 +578,9 @@ impl App {
     fn handle_input_and_app_keys(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
+                if self.is_streaming {
+                    return;
+                }
                 let input_text = self.input.get_text();
                 if !input_text.is_empty() {
                     use crate::command::parser::parse_input;
@@ -742,6 +754,9 @@ impl App {
     }
 
     fn autocomplete_and_submit(&mut self) {
+        if self.is_streaming {
+            return;
+        }
         if let Some(selected) = get_selected_suggestion(&self.suggestions_popup_state) {
             let command = format!("/{}", selected.name);
 
@@ -773,7 +788,9 @@ impl App {
                             self.chat_state.chat.clear();
                             self.base_focus = BaseFocus::Home;
                             self.session_manager.clear_current_session();
-                        } else if self.base_focus == BaseFocus::Home {
+                        } else if self.base_focus == BaseFocus::Home
+                            && parsed.name != "refreshmodels"
+                        {
                             self.base_focus = BaseFocus::Chat;
                         }
                         // Only add non-empty messages to the chat, and don't add exit message
@@ -887,7 +904,7 @@ impl App {
                     self.chat_state.chat.clear();
                     self.base_focus = BaseFocus::Home;
                     self.session_manager.clear_current_session();
-                } else if self.base_focus == BaseFocus::Home {
+                } else if self.base_focus == BaseFocus::Home && parsed.name != "refreshmodels" {
                     self.base_focus = BaseFocus::Chat;
                 }
                 // Don't add exit message to chat
@@ -1250,18 +1267,29 @@ impl App {
                         .append_reasoning_to_last_assistant(&reasoning);
                 }
                 crate::llm::ChunkMessage::End => {
+                    // Capture end timestamp for TTFT/TPS/latency calculations.
+                    self.chat_state.chat.mark_streaming_end();
+
                     // Finalize streaming metrics from the chat's tracked values
                     self.chat_state.chat.finalize_streaming_metrics();
 
-                    if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
-                        last_msg.mark_complete();
-                        // Set model and provider metadata before persisting
-                        // Use the captured values from when streaming started
-                        last_msg.model = self.streaming_model.clone();
-                        last_msg.provider = self.streaming_provider.clone();
-                        let _ = self
-                            .session_manager
-                            .add_message_to_current_session(last_msg);
+                    // Persist all new assistant/tool messages for this streaming turn.
+                    let start = self.streaming_chat_len_before_assistant;
+                    for msg in self.chat_state.chat.messages.iter_mut().skip(start) {
+                        match msg.role {
+                            crate::session::types::MessageRole::Assistant => {
+                                if !msg.is_complete {
+                                    msg.mark_complete();
+                                }
+                                msg.model = self.streaming_model.clone();
+                                msg.provider = self.streaming_provider.clone();
+                                let _ = self.session_manager.add_message_to_current_session(msg);
+                            }
+                            crate::session::types::MessageRole::Tool => {
+                                let _ = self.session_manager.add_message_to_current_session(msg);
+                            }
+                            _ => {}
+                        }
                     }
                     self.is_streaming = false;
                     self.streaming_model = None;
@@ -1270,37 +1298,138 @@ impl App {
                 }
                 crate::llm::ChunkMessage::Failed(error) => {
                     self.is_streaming = false;
+                    self.chat_state.chat.mark_streaming_end();
                     self.chat_state.chat.finalize_streaming_metrics();
                     push_toast(ratatui_toolkit::Toast::new(
                         format!("LLM error: {}", error),
                         ratatui_toolkit::ToastLevel::Error,
                         None,
                     ));
-                    if self.chat_state.chat.messages.last().is_some_and(|m| {
-                        m.role == crate::session::types::MessageRole::Assistant && !m.is_complete
-                    }) {
-                        self.chat_state.chat.messages.pop();
-                    }
+                    self.chat_state
+                        .chat
+                        .messages
+                        .truncate(self.streaming_chat_len_before_assistant);
                     self.cleanup_streaming();
                 }
                 crate::llm::ChunkMessage::Cancelled => {
                     self.is_streaming = false;
+                    self.chat_state.chat.mark_streaming_end();
                     self.chat_state.chat.finalize_streaming_metrics();
                     push_toast(ratatui_toolkit::Toast::new(
                         "Streaming cancelled",
                         ratatui_toolkit::ToastLevel::Info,
                         None,
                     ));
-                    if self.chat_state.chat.messages.last().is_some_and(|m| {
-                        m.role == crate::session::types::MessageRole::Assistant && !m.is_complete
-                    }) {
-                        self.chat_state.chat.messages.pop();
-                    }
+                    self.chat_state
+                        .chat
+                        .messages
+                        .truncate(self.streaming_chat_len_before_assistant);
                     self.cleanup_streaming();
                 }
                 crate::llm::ChunkMessage::Metrics { .. } => {
                     // Metrics are now calculated locally from streaming data
                     // This arm is kept for backward compatibility but ignored
+                }
+                crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
+                    // Seal the current assistant segment so subsequent model text can appear
+                    // after tool rows (interleaved timeline).
+                    if let Some(idx) = self
+                        .chat_state
+                        .chat
+                        .messages
+                        .iter()
+                        .rposition(|m| m.role == crate::session::types::MessageRole::Assistant)
+                    {
+                        if let Some(msg) = self.chat_state.chat.messages.get_mut(idx) {
+                            if !msg.is_complete {
+                                msg.mark_complete();
+                            }
+                        }
+                    }
+
+                    for call in tool_calls {
+                        let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
+                            .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()));
+
+                        let content = serde_json::json!({
+                            "id": call.id,
+                            "name": call.function.name,
+                            "status": "running",
+                            "args": args_value,
+                        })
+                        .to_string();
+
+                        self.chat_state
+                            .chat
+                            .add_message(crate::session::types::Message::tool(content));
+
+                        let idx = self.chat_state.chat.messages.len().saturating_sub(1);
+                        self.tool_call_message_indices.insert(call.id.clone(), idx);
+                        self.tool_call_order.push(call.id);
+                    }
+                }
+                crate::llm::ChunkMessage::ToolResult(result) => {
+                    if let Some(idx) = self.tool_call_message_indices.get(&result.tool_call_id).copied() {
+                        if let Some(msg) = self.chat_state.chat.messages.get_mut(idx) {
+                            let mut v: serde_json::Value = serde_json::from_str(&msg.content)
+                                .unwrap_or_else(|_| serde_json::json!({}));
+                            v["id"] = serde_json::Value::String(result.tool_call_id.clone());
+                            v["name"] = serde_json::Value::String(result.name.clone());
+
+                            // Merge structured payloads from the AISDK bridge if present.
+                            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&result.content) {
+                                if payload.is_object() {
+                                    if v.get("status").is_none() {
+                                        v["status"] = payload
+                                            .get("status")
+                                            .cloned()
+                                            .unwrap_or_else(|| serde_json::Value::String("ok".to_string()));
+                                    } else {
+                                        v["status"] = payload
+                                            .get("status")
+                                            .cloned()
+                                            .unwrap_or_else(|| v["status"].clone());
+                                    }
+                                    if let Some(title) = payload.get("title") {
+                                        v["title"] = title.clone();
+                                    }
+                                    if let Some(meta) = payload.get("metadata") {
+                                        v["metadata"] = meta.clone();
+                                    }
+                                    if let Some(line_count) = payload.get("line_count") {
+                                        v["line_count"] = line_count.clone();
+                                    }
+                                    if let Some(out) = payload.get("output_preview") {
+                                        v["output_preview"] = out.clone();
+                                    }
+                                } else {
+                                    v["status"] = serde_json::Value::String("ok".to_string());
+                                    v["output_preview"] = serde_json::Value::String(result.content.clone());
+                                }
+                            } else {
+                                let status = if result.content.trim_start().starts_with("Error:") {
+                                    "error"
+                                } else {
+                                    "ok"
+                                };
+                                v["status"] = serde_json::Value::String(status.to_string());
+                                v["output_preview"] = serde_json::Value::String(result.content.clone());
+                            }
+
+                            msg.content = v.to_string();
+                        }
+                    } else {
+                        let content = serde_json::json!({
+                            "id": result.tool_call_id,
+                            "name": result.name,
+                            "status": "ok",
+                            "output_preview": result.content,
+                        })
+                        .to_string();
+                        self.chat_state
+                            .chat
+                            .add_message(crate::session::types::Message::tool(content));
+                    }
                 }
             }
         }
@@ -1322,6 +1451,12 @@ impl App {
 
         self.is_streaming = true;
 
+        // Track the message boundary for this streaming turn so we can cleanly
+        // roll back assistant/tool messages on failure or cancellation.
+        self.streaming_chat_len_before_assistant = self.chat_state.chat.messages.len();
+        self.tool_call_message_indices.clear();
+        self.tool_call_order.clear();
+
         // Capture the current model and provider at the start of streaming
         // so they don't change if the user switches models during streaming
         self.streaming_model = Some(self.model.clone());
@@ -1332,9 +1467,39 @@ impl App {
             last_msg.is_complete = false;
         }
 
+        // Initialize per-turn streaming timing primitives (T0).
+        self.chat_state.chat.begin_streaming_turn();
+
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();
-        let messages = self.chat_state.chat.messages.clone();
+        let cwd = self.cwd.clone();
+        let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
+        
+        // Build messages with system prompt
+        let mut messages = self.chat_state.chat.messages.clone();
+        
+        // Check if we already have a system message
+        let has_system = messages.iter().any(|m| {
+            m.role == crate::session::types::MessageRole::System
+        });
+        
+        if !has_system {
+            // Create system prompt with tools
+            let composer = crate::prompt::SystemPromptComposer::new(
+                &model,
+                &cwd,
+                is_git_repo,
+                std::env::consts::OS,
+            );
+            
+            let system_prompt = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    composer.compose().await
+                })
+            });
+            let system_msg = crate::session::types::Message::system(system_prompt);
+            messages.insert(0, system_msg);
+        }
 
         tokio::spawn(async move {
             let result = tokio::time::timeout(

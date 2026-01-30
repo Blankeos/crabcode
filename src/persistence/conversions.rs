@@ -38,6 +38,10 @@ impl From<SessionMessage> for Message {
             provider: msg.provider.clone(),
             agent_mode: msg.agent_mode.clone(),
             duration_ms: msg.duration_ms.map(|d| d as i64).unwrap_or(0),
+            t0_ms: msg.t0_ms.map(|v| v as i64),
+            t1_ms: msg.t1_ms.map(|v| v as i64),
+            tn_ms: msg.tn_ms.map(|v| v as i64),
+            output_tokens: msg.output_tokens.map(|v| v as i64),
         }
     }
 }
@@ -93,6 +97,18 @@ impl TryFrom<Message> for SessionMessage {
             } else {
                 None
             },
+            t0_ms: msg
+                .t0_ms
+                .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
+            t1_ms: msg
+                .t1_ms
+                .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
+            tn_ms: msg
+                .tn_ms
+                .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
+            output_tokens: msg
+                .output_tokens
+                .and_then(|v| if v > 0 { Some(v as usize) } else { None }),
             model: msg.model.clone(),
             provider: msg.provider.clone(),
         })

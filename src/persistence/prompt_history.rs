@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-use super::{ensure_data_dir, get_data_dir};
+use super::{ensure_data_dir, get_data_dir, migrations::run_migrations};
 
 const MAX_HISTORY_SIZE: usize = 100;
 
@@ -24,24 +24,10 @@ impl PromptHistoryDAO {
         ensure_data_dir()?;
         let db_path = data_dir.join("data.db");
 
-        let conn = Connection::open(&db_path)?;
-        Self::ensure_table(&conn)?;
+        let mut conn = Connection::open(&db_path)?;
+        run_migrations(&mut conn)?;
 
         Ok(Self { conn })
-    }
-
-    fn ensure_table(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS prompt_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                prompt TEXT NOT NULL,
-                timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-            );
-            CREATE INDEX IF NOT EXISTS idx_prompt_history_timestamp ON prompt_history(timestamp DESC);
-            "#,
-        )?;
-        Ok(())
     }
 
     pub fn add_prompt(&self, prompt: &str) -> Result<()> {

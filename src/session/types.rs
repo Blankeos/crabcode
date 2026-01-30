@@ -18,6 +18,12 @@ pub struct Message {
     pub agent_mode: Option<String>,
     pub token_count: Option<usize>,
     pub duration_ms: Option<u64>,
+    // Streaming timing primitives (epoch milliseconds)
+    // Used to derive TTFT/TPS/full latency.
+    pub t0_ms: Option<u64>,
+    pub t1_ms: Option<u64>,
+    pub tn_ms: Option<u64>,
+    pub output_tokens: Option<usize>,
     pub model: Option<String>,
     pub provider: Option<String>,
 }
@@ -33,6 +39,10 @@ impl Message {
             agent_mode: None,
             token_count: None,
             duration_ms: None,
+            t0_ms: None,
+            t1_ms: None,
+            tn_ms: None,
+            output_tokens: None,
             model: None,
             provider: None,
         }
@@ -64,6 +74,10 @@ impl Message {
             agent_mode: None,
             token_count: None,
             duration_ms: None,
+            t0_ms: None,
+            t1_ms: None,
+            tn_ms: None,
+            output_tokens: None,
             model: None,
             provider: None,
         }

@@ -9,6 +9,7 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Default)]
 pub struct Chat {
@@ -18,8 +19,13 @@ pub struct Chat {
     pub is_dragging_scrollbar: bool,
     pub content_height: usize,
     pub viewport_height: usize,
+    // Streaming metrics tracking (per streaming turn)
     pub streaming_start_time: Option<std::time::Instant>,
     pub streaming_first_token_time: Option<std::time::Instant>,
+    pub streaming_end_time: Option<std::time::Instant>,
+    pub streaming_t0_ms: Option<u64>,
+    pub streaming_t1_ms: Option<u64>,
+    pub streaming_tn_ms: Option<u64>,
     pub streaming_token_count: usize,
     /// Whether to autoscroll to bottom when new content arrives
     /// Only autoscrolls if user is already near the bottom
@@ -39,6 +45,14 @@ pub struct Chat {
 // Minimum elapsed time before showing tokens/s (250ms)
 const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
 
+fn now_epoch_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 impl Chat {
     pub fn new() -> Self {
         Self {
@@ -50,6 +64,10 @@ impl Chat {
             viewport_height: 0,
             streaming_start_time: None,
             streaming_first_token_time: None,
+            streaming_end_time: None,
+            streaming_t0_ms: None,
+            streaming_t1_ms: None,
+            streaming_tn_ms: None,
             streaming_token_count: 0,
             autoscroll_enabled: true,
             user_scrolled_up: false,
@@ -70,6 +88,10 @@ impl Chat {
             viewport_height: 0,
             streaming_start_time: None,
             streaming_first_token_time: None,
+            streaming_end_time: None,
+            streaming_t0_ms: None,
+            streaming_t1_ms: None,
+            streaming_tn_ms: None,
             streaming_token_count: 0,
             autoscroll_enabled: true,
             user_scrolled_up: false,
@@ -91,7 +113,7 @@ impl Chat {
     }
 
     fn should_autoscroll(&self) -> bool {
-        self.autoscroll_enabled
+        self.autoscroll_enabled && !self.user_scrolled_up
     }
 
     pub fn add_user_message(&mut self, content: impl Into<String>) {
@@ -112,69 +134,78 @@ impl Chat {
         self.add_message(Message::assistant(content));
     }
 
+    fn streaming_assistant_idx(&self) -> Option<usize> {
+        self.messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::Assistant && !m.is_complete)
+    }
+
     pub fn append_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
         let chunk_str = chunk.as_ref();
+
+        // Append only if the last message is the current streaming assistant segment.
         if self
             .messages
             .last()
-            .is_some_and(|m| m.role == MessageRole::Assistant)
+            .is_some_and(|m| m.role == MessageRole::Assistant && !m.is_complete)
         {
             if let Some(msg) = self.messages.last_mut() {
                 msg.append(chunk_str);
-                // Track streaming metrics - record first token time
-                if self.streaming_first_token_time.is_none() {
-                    self.streaming_first_token_time = Some(std::time::Instant::now());
-                }
-                // Estimate tokens: ~4 characters per token on average
-                self.streaming_token_count += chunk_str.chars().count().max(1) / 4;
-                if self.should_autoscroll() {
-                    // Reset scroll to show new content at bottom
-                    self.scroll_offset = usize::MAX;
-                    self.user_scrolled_up = false;
-                }
             }
         } else {
-            // Starting a new assistant message
-            let now = std::time::Instant::now();
+            // Start a new assistant segment (e.g. after tool rows).
+            self.add_message(Message::incomplete(chunk_str));
+        }
+
+        let now = std::time::Instant::now();
+        if self.streaming_start_time.is_none() {
+            // Fallback: streaming should normally be initialized by begin_streaming_turn().
             self.streaming_start_time = Some(now);
+            self.streaming_t0_ms = Some(now_epoch_ms());
+        }
+        if self.streaming_first_token_time.is_none() {
             self.streaming_first_token_time = Some(now);
-            // Estimate tokens: ~4 characters per token on average
-            self.streaming_token_count = chunk_str.chars().count().max(1) / 4;
-            self.add_assistant_message(chunk_str);
+            self.streaming_t1_ms = Some(now_epoch_ms());
+        }
+
+        // Estimate tokens: ~4 characters per token on average
+        self.streaming_token_count += chunk_str.chars().count().max(1) / 4;
+        if self.should_autoscroll() {
+            self.scroll_offset = usize::MAX;
+            self.user_scrolled_up = false;
         }
     }
 
     pub fn append_reasoning_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
         let chunk_str = chunk.as_ref();
+
         if self
             .messages
             .last()
-            .is_some_and(|m| m.role == MessageRole::Assistant)
+            .is_some_and(|m| m.role == MessageRole::Assistant && !m.is_complete)
         {
             if let Some(msg) = self.messages.last_mut() {
                 msg.append_reasoning(chunk_str);
-                // Track streaming metrics for reasoning tokens too
-                if self.streaming_first_token_time.is_none() {
-                    self.streaming_first_token_time = Some(std::time::Instant::now());
-                }
-                // Estimate tokens: ~4 characters per token on average
-                self.streaming_token_count += chunk_str.chars().count().max(1) / 4;
-                if self.should_autoscroll() {
-                    // Reset scroll to show new content at bottom
-                    self.scroll_offset = usize::MAX;
-                    self.user_scrolled_up = false;
-                }
             }
         } else {
-            // Create a new assistant message with reasoning
             let mut msg = Message::incomplete("");
             msg.append_reasoning(chunk_str);
-            // Track streaming metrics
-            let now = std::time::Instant::now();
-            self.streaming_start_time = Some(now);
-            self.streaming_first_token_time = Some(now);
-            self.streaming_token_count = chunk_str.chars().count().max(1) / 4;
             self.add_message(msg);
+        }
+
+        let now = std::time::Instant::now();
+        if self.streaming_start_time.is_none() {
+            self.streaming_start_time = Some(now);
+            self.streaming_t0_ms = Some(now_epoch_ms());
+        }
+        if self.streaming_first_token_time.is_none() {
+            self.streaming_first_token_time = Some(now);
+            self.streaming_t1_ms = Some(now_epoch_ms());
+        }
+        self.streaming_token_count += chunk_str.chars().count().max(1) / 4;
+        if self.should_autoscroll() {
+            self.scroll_offset = usize::MAX;
+            self.user_scrolled_up = false;
         }
     }
 
@@ -185,7 +216,40 @@ impl Chat {
         self.content_height = 0;
         self.streaming_start_time = None;
         self.streaming_first_token_time = None;
+        self.streaming_end_time = None;
+        self.streaming_t0_ms = None;
+        self.streaming_t1_ms = None;
+        self.streaming_tn_ms = None;
         self.streaming_token_count = 0;
+    }
+
+    pub fn begin_streaming_turn(&mut self) {
+        let now = std::time::Instant::now();
+        let t0_ms = now_epoch_ms();
+
+        self.streaming_start_time = Some(now);
+        self.streaming_first_token_time = None;
+        self.streaming_end_time = None;
+        self.streaming_t0_ms = Some(t0_ms);
+        self.streaming_t1_ms = None;
+        self.streaming_tn_ms = None;
+        self.streaming_token_count = 0;
+        self.cached_tokens_per_sec = None;
+        self.last_tps_calculated = None;
+
+        if let Some(msg) = self
+            .messages
+            .last_mut()
+            .filter(|m| m.role == MessageRole::Assistant && !m.is_complete)
+        {
+            msg.t0_ms = Some(t0_ms);
+        }
+    }
+
+    pub fn mark_streaming_end(&mut self) {
+        let now = std::time::Instant::now();
+        self.streaming_end_time = Some(now);
+        self.streaming_tn_ms = Some(now_epoch_ms());
     }
 
     pub fn get_streaming_tokens_per_sec(&mut self) -> Option<f64> {
@@ -228,29 +292,51 @@ impl Chat {
     }
 
     pub fn is_streaming(&self) -> bool {
-        self.streaming_first_token_time.is_some()
-            && self
-                .messages
-                .last()
-                .is_some_and(|m| m.role == MessageRole::Assistant && !m.is_complete)
+        self.streaming_first_token_time.is_some() && self.streaming_assistant_idx().is_some()
     }
 
     pub fn finalize_streaming_metrics(&mut self) {
-        if let Some(first_token_time) = self.streaming_first_token_time {
-            let duration_ms = first_token_time.elapsed().as_millis() as u64;
-            let token_count = self.streaming_token_count;
+        let token_count = self.streaming_token_count;
 
-            if let Some(last_msg) = self.messages.last_mut() {
-                if last_msg.role == MessageRole::Assistant {
-                    last_msg.token_count = Some(token_count);
-                    last_msg.duration_ms = Some(duration_ms);
-                }
+        let t0_ms = self.streaming_t0_ms;
+        let t1_ms = self.streaming_t1_ms;
+        let tn_ms = self.streaming_tn_ms.or_else(|| {
+            // Fallback: if caller didn't mark end, compute an end timestamp now.
+            Some(now_epoch_ms())
+        });
+
+        let decode_duration_ms = if let (Some(t1), Some(tn)) =
+            (self.streaming_first_token_time, self.streaming_end_time)
+        {
+            tn.duration_since(t1).as_millis() as u64
+        } else if let Some(t1) = self.streaming_first_token_time {
+            t1.elapsed().as_millis() as u64
+        } else {
+            0
+        };
+
+        if let Some(idx) = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::Assistant)
+        {
+            if let Some(msg) = self.messages.get_mut(idx) {
+                msg.output_tokens = Some(token_count);
+                msg.token_count = Some(token_count);
+                msg.duration_ms = Some(decode_duration_ms);
+                msg.t0_ms = t0_ms;
+                msg.t1_ms = t1_ms;
+                msg.tn_ms = tn_ms;
             }
         }
 
         // Reset streaming state
         self.streaming_start_time = None;
         self.streaming_first_token_time = None;
+        self.streaming_end_time = None;
+        self.streaming_t0_ms = None;
+        self.streaming_t1_ms = None;
+        self.streaming_tn_ms = None;
         self.streaming_token_count = 0;
         self.streaming_renderer = None;
         self.streaming_message_idx = None;
@@ -269,7 +355,13 @@ impl Chat {
             return;
         }
 
-        let last_idx = self.messages.len() - 1;
+        let Some(last_idx) = self.streaming_assistant_idx() else {
+            if self.streaming_renderer.is_some() {
+                self.streaming_renderer = None;
+                self.streaming_message_idx = None;
+            }
+            return;
+        };
 
         // Check if we're still rendering the same message
         if let Some(renderer_idx) = self.streaming_message_idx {
@@ -286,10 +378,10 @@ impl Chat {
 
         // Update the renderer content if needed
         if let Some(ref mut renderer) = self.streaming_renderer {
-            if let Some(last_msg) = self.messages.last() {
-                if renderer.content() != last_msg.content {
+            if let Some(msg) = self.messages.get(last_idx) {
+                if renderer.content() != msg.content {
                     renderer.reset();
-                    renderer.append(&last_msg.content);
+                    renderer.append(&msg.content);
                 }
             }
         }
@@ -471,17 +563,22 @@ impl Chat {
     ) -> usize {
         let mut total_height = 0;
         let message_count = self.messages.len();
+        let streaming_idx = self.streaming_assistant_idx();
         let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
 
         for (idx, message) in self.messages.iter().enumerate() {
+            let attached_to_assistant =
+                idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
             let message_lines = self.format_message(
                 message,
                 max_width,
                 idx,
                 message_count,
                 streaming_content,
+                streaming_idx,
                 model,
                 colors,
+                attached_to_assistant,
             );
             total_height += message_lines.len();
         }
@@ -497,17 +594,22 @@ impl Chat {
     ) -> Vec<Line<'a>> {
         let mut all_lines: Vec<Line<'a>> = Vec::new();
         let message_count = self.messages.len();
+        let streaming_idx = self.streaming_assistant_idx();
         let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
 
         for (idx, message) in self.messages.iter().enumerate() {
+            let attached_to_assistant =
+                idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
             let message_lines = self.format_message(
                 message,
                 max_width,
                 idx,
                 message_count,
                 streaming_content,
+                streaming_idx,
                 model,
                 colors,
+                attached_to_assistant,
             );
             all_lines.extend(message_lines);
         }
@@ -522,10 +624,14 @@ impl Chat {
         idx: usize,
         message_count: usize,
         streaming_content: Option<&'a str>,
+        streaming_idx: Option<usize>,
         model: &'a str,
         colors: &'a ThemeColors,
+        attached_to_assistant: bool,
     ) -> Vec<Line<'a>> {
         let mut lines: Vec<Line<'a>> = Vec::new();
+
+        let _ = message_count;
 
         match message.role {
             MessageRole::User => {
@@ -581,9 +687,7 @@ impl Chat {
                     }
                 }
 
-                // Check if this is the streaming message (last incomplete assistant message)
-                let is_last = idx == message_count.saturating_sub(1);
-                let is_streaming = is_last && !message.is_complete;
+                let is_streaming = streaming_idx == Some(idx) && !message.is_complete;
 
                 if is_streaming {
                     // Use the streaming renderer content for markdown
@@ -605,14 +709,22 @@ impl Chat {
                 }
 
                 // Add empty line before metadata for spacing
-                lines.push(Line::from(""));
+                let next_role = self.messages.get(idx + 1).map(|m| m.role.clone());
+                let show_metadata = message.is_complete
+                    && !matches!(
+                        next_role,
+                        Some(MessageRole::Tool) | Some(MessageRole::Assistant)
+                    );
 
-                // Add metadata line (always show for assistant messages)
-                let metadata = self.format_metadata(message, model, colors);
-                lines.push(Line::from(metadata));
-
-                // Add empty line after AI message
-                lines.push(Line::from(""));
+                if show_metadata {
+                    lines.push(Line::from(""));
+                    let metadata = self.format_metadata(message, model, colors);
+                    lines.push(Line::from(metadata));
+                    lines.push(Line::from(""));
+                } else {
+                    // Keep spacing consistent between segments.
+                    lines.push(Line::from(""));
+                }
             }
             MessageRole::System => {
                 // System messages: simple display
@@ -629,22 +741,182 @@ impl Chat {
                 lines.push(Line::from(""));
             }
             MessageRole::Tool => {
-                // Tool messages: dimmed
-                let prefix = "Tool: ";
-                let content = format!("{}{}", prefix, message.content);
-                let wrapped_lines = textwrap::wrap(&content, max_width);
-
-                for line in wrapped_lines {
-                    lines.push(Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default().fg(Color::Gray),
-                    )));
-                }
+                lines.extend(self.format_tool_row(
+                    message,
+                    max_width,
+                    colors,
+                    attached_to_assistant,
+                ));
                 lines.push(Line::from(""));
             }
         }
 
         lines
+    }
+
+    fn format_tool_row<'a>(
+        &'a self,
+        message: &'a Message,
+        max_width: usize,
+        colors: &'a ThemeColors,
+        attached: bool,
+    ) -> Vec<Line<'a>> {
+        fn preview_value(v: &JsonValue, max_len: usize) -> String {
+            let mut s = match v {
+                JsonValue::String(s) => s.clone(),
+                JsonValue::Number(n) => n.to_string(),
+                JsonValue::Bool(b) => b.to_string(),
+                JsonValue::Null => "null".to_string(),
+                other => other.to_string(),
+            };
+            if s.len() > max_len {
+                s.truncate(max_len);
+                s.push_str("…");
+            }
+            if matches!(v, JsonValue::String(_)) {
+                format!("\"{}\"", s)
+            } else {
+                s
+            }
+        }
+
+        fn args_preview(args: &JsonValue) -> String {
+            if let Some(obj) = args.as_object() {
+                let mut keys: Vec<&String> = obj.keys().collect();
+                keys.sort();
+                let mut parts = Vec::new();
+                for key in keys.into_iter().take(3) {
+                    if let Some(val) = obj.get(key) {
+                        parts.push(format!("{}={}", key, preview_value(val, 24)));
+                    }
+                }
+                parts.join(" ")
+            } else {
+                preview_value(args, 64)
+            }
+        }
+
+        let _ = attached;
+        let indent = "";
+        let mut out: Vec<Line<'a>> = Vec::new();
+
+        let parsed: Option<JsonValue> = serde_json::from_str(&message.content).ok();
+        let (name, status, args, metadata, output_preview) =
+            if let Some(JsonValue::Object(obj)) = parsed {
+                let name = obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let status = obj
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ok")
+                    .to_string();
+                let args = obj.get("args").cloned();
+                let metadata = obj.get("metadata").cloned();
+                let output_preview = obj
+                    .get("output_preview")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                (name, status, args, metadata, output_preview)
+            } else {
+                (
+                    "tool".to_string(),
+                    "ok".to_string(),
+                    None,
+                    None,
+                    Some(message.content.clone()),
+                )
+            };
+
+        let icon = match status.as_str() {
+            "running" => "~",
+            "ok" => "✓",
+            "error" => "✗",
+            _ => "•",
+        };
+
+        let tool_label = match name.as_str() {
+            "glob" => "Glob",
+            "read" => "Read",
+            "write" => "Write",
+            "edit" => "Edit",
+            "bash" => "Bash",
+            "list" => "List",
+            "grep" => "Grep",
+            other => other,
+        };
+
+        let args_obj = args.as_ref().and_then(|v| v.as_object());
+        let args_str = if name == "glob" {
+            let pat = args_obj
+                .and_then(|o| o.get("pattern"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let base = args_obj
+                .and_then(|o| o.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let mut s = String::new();
+            if !pat.is_empty() {
+                s.push_str(&format!("\"{}\"", pat));
+            }
+            if !base.is_empty() && base != "." {
+                if !s.is_empty() {
+                    s.push(' ');
+                }
+                s.push_str(&format!("in \"{}\"", base));
+            }
+            s
+        } else {
+            args.as_ref().map(args_preview).unwrap_or_default()
+        };
+
+        let mut header = format!("{}{} {}", indent, icon, tool_label);
+        if !args_str.is_empty() {
+            header.push(' ');
+            header.push_str(&args_str);
+        }
+
+        if name == "glob" {
+            if let Some(mc) = metadata
+                .as_ref()
+                .and_then(|m| m.get("match_count"))
+                .and_then(|v| v.as_i64())
+            {
+                header.push_str(&format!(" ({} matches)", mc));
+            }
+        }
+
+        let wrapped = textwrap::wrap(&header, max_width);
+        for line in wrapped {
+            out.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            )));
+        }
+
+        if status == "error" {
+            if let Some(preview) = output_preview {
+                let first = preview.lines().next().unwrap_or("").trim();
+                if !first.is_empty() {
+                    let mut line = first.to_string();
+                    if line.len() > max_width.saturating_sub(6) {
+                        line.truncate(max_width.saturating_sub(6));
+                        line.push_str("…");
+                    }
+                    out.push(Line::from(Span::styled(
+                        format!("{}    {}", indent, line),
+                        Style::default().fg(colors.error),
+                    )));
+                }
+            }
+        }
+
+        out
     }
 
     fn get_agent_color(&self, agent_mode: Option<&str>) -> Color {
@@ -688,21 +960,29 @@ impl Chat {
             Style::default().fg(colors.text_weak),
         ));
 
-        // Duration and tokens/second if available (only show for completed messages)
+        // Timing + throughput metrics (only show for completed messages)
         if message.is_complete {
-            if let (Some(token_count), Some(duration_ms)) =
-                (message.token_count, message.duration_ms)
-            {
-                // Duration
-                let duration_sec = duration_ms as f64 / 1000.0;
+            if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
+                let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
+
+                let total_ms = tn.saturating_sub(t0);
+                let ttft_ms = t1.saturating_sub(t0);
+                let decode_ms = tn.saturating_sub(t1);
+
+                let total_sec = total_ms as f64 / 1000.0;
+                let ttft_sec = ttft_ms as f64 / 1000.0;
+
                 spans.push(Span::styled(
-                    format!(" • {:.1}s", duration_sec),
+                    format!(" • {:.1}s", total_sec),
+                    Style::default().fg(colors.text_weak),
+                ));
+                spans.push(Span::styled(
+                    format!(" • ttft {:.1}s", ttft_sec),
                     Style::default().fg(colors.text_weak),
                 ));
 
-                // Tokens/second
-                let tokens_per_sec = if duration_ms > 0 {
-                    (token_count as f64) / (duration_ms as f64 / 1000.0)
+                let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
+                    (output_tokens as f64) / (decode_ms as f64 / 1000.0)
                 } else {
                     0.0
                 };
@@ -710,11 +990,22 @@ impl Chat {
                     format!(" • {:.0}t/s", tokens_per_sec),
                     Style::default().fg(colors.text_weak),
                 ));
-            } else {
-                // Show 0s and 0t/s when metrics not yet available
-                spans.push(Span::styled(" • 0s", Style::default().fg(colors.text_weak)));
+            } else if let (Some(token_count), Some(duration_ms)) =
+                (message.token_count, message.duration_ms)
+            {
+                // Backward-compatible fallback: duration_ms reflects decode time.
+                let duration_sec = duration_ms as f64 / 1000.0;
                 spans.push(Span::styled(
-                    " • 0t/s",
+                    format!(" • {:.1}s", duration_sec),
+                    Style::default().fg(colors.text_weak),
+                ));
+                let tokens_per_sec = if duration_ms > 0 {
+                    (token_count as f64) / (duration_ms as f64 / 1000.0)
+                } else {
+                    0.0
+                };
+                spans.push(Span::styled(
+                    format!(" • {:.0}t/s", tokens_per_sec),
                     Style::default().fg(colors.text_weak),
                 ));
             }
