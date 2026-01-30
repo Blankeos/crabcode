@@ -113,12 +113,8 @@ impl Discovery {
                 cache_path,
             })
         } else {
-            let cache_dir = dirs::home_dir()
-                .context("Could not find home directory")?
-                .join(".cache")
-                .join("crabcode");
-
-            fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
+            crate::persistence::ensure_cache_dir().context("Failed to create cache directory")?;
+            let cache_dir = crate::persistence::get_cache_dir();
 
             let cache_path = cache_dir.join("models_dev_cache.json");
 
@@ -132,8 +128,35 @@ impl Discovery {
         }
     }
 
+    pub fn cache_path(&self) -> &PathBuf {
+        &self.cache_path
+    }
+
     fn get_cache_path(&self) -> &PathBuf {
         &self.cache_path
+    }
+
+    async fn fetch_from_api(&self) -> Result<HashMap<String, Provider>> {
+        let response = self
+            .client
+            .get(MODELS_DEV_API_URL)
+            .send()
+            .await
+            .context("Failed to fetch from models.dev API")?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Models.dev API returned error status: {}",
+                response.status()
+            ));
+        }
+
+        let providers: HashMap<String, Provider> = response
+            .json()
+            .await
+            .context("Failed to parse models.dev API response")?;
+
+        Ok(providers)
     }
 
     fn load_from_cache(&self) -> Result<Option<HashMap<String, Provider>>> {
@@ -186,27 +209,16 @@ impl Discovery {
             return Ok(cached);
         }
 
-        let response = self
-            .client
-            .get(MODELS_DEV_API_URL)
-            .send()
-            .await
-            .context("Failed to fetch from models.dev API")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Models.dev API returned error status: {}",
-                response.status()
-            ));
-        }
-
-        let providers: HashMap<String, Provider> = response
-            .json()
-            .await
-            .context("Failed to parse models.dev API response")?;
+        let providers = self.fetch_from_api().await?;
 
         self.save_to_cache(&providers)?;
 
+        Ok(providers)
+    }
+
+    pub async fn refresh_cache(&self) -> Result<HashMap<String, Provider>> {
+        let providers = self.fetch_from_api().await?;
+        self.save_to_cache(&providers)?;
         Ok(providers)
     }
 

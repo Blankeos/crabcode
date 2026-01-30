@@ -788,7 +788,9 @@ impl App {
                             self.chat_state.chat.clear();
                             self.base_focus = BaseFocus::Home;
                             self.session_manager.clear_current_session();
-                        } else if self.base_focus == BaseFocus::Home {
+                        } else if self.base_focus == BaseFocus::Home
+                            && parsed.name != "refreshmodels"
+                        {
                             self.base_focus = BaseFocus::Chat;
                         }
                         // Only add non-empty messages to the chat, and don't add exit message
@@ -902,7 +904,7 @@ impl App {
                     self.chat_state.chat.clear();
                     self.base_focus = BaseFocus::Home;
                     self.session_manager.clear_current_session();
-                } else if self.base_focus == BaseFocus::Home {
+                } else if self.base_focus == BaseFocus::Home && parsed.name != "refreshmodels" {
                     self.base_focus = BaseFocus::Chat;
                 }
                 // Don't add exit message to chat

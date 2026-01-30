@@ -1,6 +1,6 @@
 use crate::command::parser::ParsedCommand;
 use crate::command::registry::{Command, CommandResult, Registry};
-use crate::logging::log;
+use crate::push_toast;
 use crate::session::manager::SessionManager;
 use chrono::{DateTime, Local, Utc};
 use std::pin::Pin;
@@ -425,6 +425,51 @@ pub fn handle_models<'a>(
     })
 }
 
+pub fn handle_refreshmodels<'a>(
+    _parsed: &'a ParsedCommand<'a>,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    Box::pin(async move {
+        let discovery = match crate::model::discovery::Discovery::new() {
+            Ok(d) => d,
+            Err(e) => {
+                push_toast(ratatui_toolkit::Toast::new(
+                    format!("Failed to initialize model discovery: {}", e),
+                    ratatui_toolkit::ToastLevel::Error,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+                return CommandResult::Success(String::new());
+            }
+        };
+
+        let providers = match discovery.refresh_cache().await {
+            Ok(p) => p,
+            Err(e) => {
+                push_toast(ratatui_toolkit::Toast::new(
+                    format!("Failed to refresh models cache: {}", e),
+                    ratatui_toolkit::ToastLevel::Error,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+                return CommandResult::Success(String::new());
+            }
+        };
+
+        let provider_count = providers.len();
+        let model_count: usize = providers.values().map(|p| p.models.len()).sum();
+
+        push_toast(ratatui_toolkit::Toast::new(
+            format!(
+                "Models cache refreshed: {} providers, {} models",
+                provider_count, model_count
+            ),
+            ratatui_toolkit::ToastLevel::Info,
+            Some(std::time::Duration::from_secs(3)),
+        ));
+
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn register_all_commands(registry: &mut Registry) {
     registry.register(Command {
         name: "exit".to_string(),
@@ -460,6 +505,12 @@ pub fn register_all_commands(registry: &mut Registry) {
         name: "models".to_string(),
         description: "List available models".to_string(),
         handler: handle_models,
+    });
+
+    registry.register(Command {
+        name: "refreshmodels".to_string(),
+        description: "Refresh the models.dev cache".to_string(),
+        handler: handle_refreshmodels,
     });
 }
 
@@ -773,16 +824,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handle_refreshmodels() {
+        let _ = crate::model::discovery::Discovery::cleanup_test();
+        let parsed = ParsedCommand {
+            name: "refreshmodels".to_string(),
+            args: vec![],
+            raw: "/refreshmodels".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
+        };
+        let mut session_manager = SessionManager::new();
+        let result = handle_refreshmodels(&parsed, &mut session_manager).await;
+        assert_eq!(result, CommandResult::Success(String::new()));
+        let _ = crate::model::discovery::Discovery::cleanup_test();
+    }
+
+    #[tokio::test]
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
         assert!(names.contains(&"connect".to_string()));
         assert!(names.contains(&"models".to_string()));
         assert!(names.contains(&"home".to_string()));
+        assert!(names.contains(&"refreshmodels".to_string()));
     }
 
     #[tokio::test]
