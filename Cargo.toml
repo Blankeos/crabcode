@@ -47,6 +47,6 @@ tokio-test = "0.4"
 
 [patch.crates-io]
 # Local
-aisdk = { path = "/Users/carlo/Desktop/Projects/aisdk-rs" }
+# aisdk = { path = "/Users/carlo/Desktop/Projects/aisdk-rs" }
 # After pushing
-# aisdk = { git = "https://github.com/Blankeos/aisdk-rs", branch = "oai-compat-fix" }
+aisdk = { git = "https://github.com/Blankeos/aisdk-rs", branch = "apikey-not-required" }

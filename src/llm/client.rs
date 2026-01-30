@@ -13,7 +13,7 @@ use crate::tools::aisdk_bridge::convert_to_aisdk_tools;
 
 pub struct LLMClient {
     base_url: String,
-    api_key: String,
+    api_key: Option<String>,
     model_name: String,
     provider_name: String,
     npm_package: String,
@@ -22,7 +22,7 @@ pub struct LLMClient {
 impl LLMClient {
     pub fn new(
         base_url: String,
-        api_key: String,
+        api_key: Option<String>,
         model_name: String,
         provider_name: String,
         npm_package: String,
@@ -55,11 +55,16 @@ impl LLMClient {
 
         let response = match provider_kind {
             ProviderKind::OpenAICompatible => {
-                let provider = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
+                let mut provider_builder = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
                     .base_url(&base_url)
-                    .api_key(&self.api_key)
                     .model_name(&self.model_name)
-                    .provider_name(&self.provider_name)
+                    .provider_name(&self.provider_name);
+
+                if let Some(key) = self.api_key.as_deref() {
+                    provider_builder = provider_builder.api_key(key);
+                }
+
+                let provider = provider_builder
                     .build()
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
@@ -75,11 +80,16 @@ impl LLMClient {
                 builder.build().stream_text().await?
             }
             ProviderKind::Anthropic => {
-                let provider = Anthropic::<aisdk::core::DynamicModel>::builder()
+                let mut provider_builder = Anthropic::<aisdk::core::DynamicModel>::builder()
                     .base_url(&base_url)
-                    .api_key(&self.api_key)
                     .model_name(&self.model_name)
-                    .provider_name(&self.provider_name)
+                    .provider_name(&self.provider_name);
+
+                if let Some(key) = self.api_key.as_deref() {
+                    provider_builder = provider_builder.api_key(key);
+                }
+
+                let provider = provider_builder
                     .build()
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
@@ -95,11 +105,16 @@ impl LLMClient {
                 builder.build().stream_text().await?
             }
             ProviderKind::OpenAI => {
-                let provider = OpenAI::<aisdk::core::DynamicModel>::builder()
+                let mut provider_builder = OpenAI::<aisdk::core::DynamicModel>::builder()
                     .base_url(&base_url)
-                    .api_key(&self.api_key)
                     .model_name(&self.model_name)
-                    .provider_name(&self.provider_name)
+                    .provider_name(&self.provider_name);
+
+                if let Some(key) = self.api_key.as_deref() {
+                    provider_builder = provider_builder.api_key(key);
+                }
+
+                let provider = provider_builder
                     .build()
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
@@ -176,9 +191,13 @@ pub async fn stream_llm_with_cancellation(
 
     let auth_dao = crate::persistence::AuthDAO::new()?;
 
-    let api_key = auth_dao
-        .get_api_key(&provider_name)?
-        .ok_or_else(|| anyhow::anyhow!("No API key found for {}", provider_name))?;
+    let api_key = auth_dao.get_api_key(&provider_name)?;
+    if api_key.is_none() {
+        let _ = sender.send(crate::llm::ChunkMessage::Warning(format!(
+            "No API key configured for '{}'. Trying anyway.",
+            provider_name
+        )));
+    }
 
     let discovery = crate::model::discovery::Discovery::new()?;
 
@@ -205,16 +224,16 @@ pub async fn stream_llm_with_cancellation(
 
     let response = match provider_kind {
         ProviderKind::OpenAICompatible => {
-            log(&format!(
-                "USING OPENAICOMPAT | {:?} | {:?}",
-                &base_url, &model
-            ));
-
-            let provider_config = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
+            let mut provider_builder = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
                 .base_url(&base_url)
-                .api_key(&api_key)
                 .model_name(&model)
-                .provider_name(&provider.name)
+                .provider_name(&provider.name);
+
+            if let Some(key) = api_key.as_deref() {
+                provider_builder = provider_builder.api_key(key);
+            }
+
+            let provider_config = provider_builder
                 .build()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
@@ -230,13 +249,16 @@ pub async fn stream_llm_with_cancellation(
             builder.build().stream_text().await?
         }
         ProviderKind::Anthropic => {
-            log(&format!("USING ANTHROPIC | {:?} | {:?}", &base_url, &model));
-
-            let provider_config = Anthropic::<aisdk::core::DynamicModel>::builder()
+            let mut provider_builder = Anthropic::<aisdk::core::DynamicModel>::builder()
                 .base_url(&base_url)
-                .api_key(&api_key)
                 .model_name(&model)
-                .provider_name(&provider.name)
+                .provider_name(&provider.name);
+
+            if let Some(key) = api_key.as_deref() {
+                provider_builder = provider_builder.api_key(key);
+            }
+
+            let provider_config = provider_builder
                 .build()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
@@ -252,11 +274,16 @@ pub async fn stream_llm_with_cancellation(
             builder.build().stream_text().await?
         }
         ProviderKind::OpenAI => {
-            let provider_config = OpenAI::<aisdk::core::DynamicModel>::builder()
+            let mut provider_builder = OpenAI::<aisdk::core::DynamicModel>::builder()
                 .base_url(&base_url)
-                .api_key(&api_key)
                 .model_name(&model)
-                .provider_name(&provider.name)
+                .provider_name(&provider.name);
+
+            if let Some(key) = api_key.as_deref() {
+                provider_builder = provider_builder.api_key(key);
+            }
+
+            let provider_config = provider_builder
                 .build()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 

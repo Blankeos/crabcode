@@ -157,7 +157,7 @@ impl App {
             if let Some((provider_id, model_id)) = active_model_info {
                 (model_id.clone(), provider_id.clone())
             } else {
-                ("claude-3-sonnet".to_string(), "anthropic".to_string())
+                ("big-pickle".to_string(), "opencode".to_string())
             };
 
         Self {
@@ -1265,6 +1265,13 @@ impl App {
                     self.chat_state
                         .chat
                         .append_reasoning_to_last_assistant(&reasoning);
+                }
+                crate::llm::ChunkMessage::Warning(msg) => {
+                    push_toast(ratatui_toolkit::Toast::new(
+                        msg,
+                        ratatui_toolkit::ToastLevel::Warning,
+                        None,
+                    ));
                 }
                 crate::llm::ChunkMessage::End => {
                     // Capture end timestamp for TTFT/TPS/latency calculations.

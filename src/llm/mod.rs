@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 pub enum ChunkMessage {
     Text(String),
     Reasoning(String),
+    Warning(String),
     ToolCalls(Vec<ToolCall>),
     ToolResult(ToolCallResult),
     End,
