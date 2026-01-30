@@ -1267,6 +1267,9 @@ impl App {
                         .append_reasoning_to_last_assistant(&reasoning);
                 }
                 crate::llm::ChunkMessage::End => {
+                    // Capture end timestamp for TTFT/TPS/latency calculations.
+                    self.chat_state.chat.mark_streaming_end();
+
                     // Finalize streaming metrics from the chat's tracked values
                     self.chat_state.chat.finalize_streaming_metrics();
 
@@ -1295,6 +1298,7 @@ impl App {
                 }
                 crate::llm::ChunkMessage::Failed(error) => {
                     self.is_streaming = false;
+                    self.chat_state.chat.mark_streaming_end();
                     self.chat_state.chat.finalize_streaming_metrics();
                     push_toast(ratatui_toolkit::Toast::new(
                         format!("LLM error: {}", error),
@@ -1309,6 +1313,7 @@ impl App {
                 }
                 crate::llm::ChunkMessage::Cancelled => {
                     self.is_streaming = false;
+                    self.chat_state.chat.mark_streaming_end();
                     self.chat_state.chat.finalize_streaming_metrics();
                     push_toast(ratatui_toolkit::Toast::new(
                         "Streaming cancelled",
@@ -1461,6 +1466,9 @@ impl App {
         if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
             last_msg.is_complete = false;
         }
+
+        // Initialize per-turn streaming timing primitives (T0).
+        self.chat_state.chat.begin_streaming_turn();
 
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();

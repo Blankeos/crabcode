@@ -8,10 +8,6 @@ pub fn run_migrations(db: &mut Connection) -> Result<()> {
         migrate_to_v1(db)?;
     }
 
-    if current_version < 2 {
-        migrate_to_v2(db)?;
-    }
-
     Ok(())
 }
 
@@ -51,6 +47,11 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
             model TEXT,
             provider TEXT,
             agent_mode TEXT,
+            duration_ms INTEGER DEFAULT 0,
+            t0_ms INTEGER,
+            t1_ms INTEGER,
+            tn_ms INTEGER,
+            output_tokens INTEGER,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         );
 
@@ -73,34 +74,22 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         );
 
+        CREATE TABLE IF NOT EXISTS prompt_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prompt TEXT NOT NULL,
+            timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_prefs_updated ON prefs(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_prompt_history_timestamp ON prompt_history(timestamp DESC);
         "#,
     )?;
 
     tx.execute(
         "INSERT INTO migrations (version, applied_at) VALUES (1, strftime('%s', 'now'))",
-        params![],
-    )?;
-
-    tx.commit()?;
-    Ok(())
-}
-
-fn migrate_to_v2(db: &mut Connection) -> Result<()> {
-    let tx = db.transaction()?;
-
-    // Add duration_ms column to messages table
-    tx.execute_batch(
-        r#"
-        ALTER TABLE messages ADD COLUMN duration_ms INTEGER DEFAULT 0;
-        "#,
-    )?;
-
-    tx.execute(
-        "INSERT INTO migrations (version, applied_at) VALUES (2, strftime('%s', 'now'))",
         params![],
     )?;
 

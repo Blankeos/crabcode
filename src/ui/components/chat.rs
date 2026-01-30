@@ -19,8 +19,13 @@ pub struct Chat {
     pub is_dragging_scrollbar: bool,
     pub content_height: usize,
     pub viewport_height: usize,
+    // Streaming metrics tracking (per streaming turn)
     pub streaming_start_time: Option<std::time::Instant>,
     pub streaming_first_token_time: Option<std::time::Instant>,
+    pub streaming_end_time: Option<std::time::Instant>,
+    pub streaming_t0_ms: Option<u64>,
+    pub streaming_t1_ms: Option<u64>,
+    pub streaming_tn_ms: Option<u64>,
     pub streaming_token_count: usize,
     /// Whether to autoscroll to bottom when new content arrives
     /// Only autoscrolls if user is already near the bottom
@@ -40,6 +45,14 @@ pub struct Chat {
 // Minimum elapsed time before showing tokens/s (250ms)
 const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
 
+fn now_epoch_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 impl Chat {
     pub fn new() -> Self {
         Self {
@@ -51,6 +64,10 @@ impl Chat {
             viewport_height: 0,
             streaming_start_time: None,
             streaming_first_token_time: None,
+            streaming_end_time: None,
+            streaming_t0_ms: None,
+            streaming_t1_ms: None,
+            streaming_tn_ms: None,
             streaming_token_count: 0,
             autoscroll_enabled: true,
             user_scrolled_up: false,
@@ -71,6 +88,10 @@ impl Chat {
             viewport_height: 0,
             streaming_start_time: None,
             streaming_first_token_time: None,
+            streaming_end_time: None,
+            streaming_t0_ms: None,
+            streaming_t1_ms: None,
+            streaming_tn_ms: None,
             streaming_token_count: 0,
             autoscroll_enabled: true,
             user_scrolled_up: false,
@@ -138,10 +159,13 @@ impl Chat {
 
         let now = std::time::Instant::now();
         if self.streaming_start_time.is_none() {
+            // Fallback: streaming should normally be initialized by begin_streaming_turn().
             self.streaming_start_time = Some(now);
+            self.streaming_t0_ms = Some(now_epoch_ms());
         }
         if self.streaming_first_token_time.is_none() {
             self.streaming_first_token_time = Some(now);
+            self.streaming_t1_ms = Some(now_epoch_ms());
         }
 
         // Estimate tokens: ~4 characters per token on average
@@ -172,9 +196,11 @@ impl Chat {
         let now = std::time::Instant::now();
         if self.streaming_start_time.is_none() {
             self.streaming_start_time = Some(now);
+            self.streaming_t0_ms = Some(now_epoch_ms());
         }
         if self.streaming_first_token_time.is_none() {
             self.streaming_first_token_time = Some(now);
+            self.streaming_t1_ms = Some(now_epoch_ms());
         }
         self.streaming_token_count += chunk_str.chars().count().max(1) / 4;
         if self.should_autoscroll() {
@@ -190,7 +216,40 @@ impl Chat {
         self.content_height = 0;
         self.streaming_start_time = None;
         self.streaming_first_token_time = None;
+        self.streaming_end_time = None;
+        self.streaming_t0_ms = None;
+        self.streaming_t1_ms = None;
+        self.streaming_tn_ms = None;
         self.streaming_token_count = 0;
+    }
+
+    pub fn begin_streaming_turn(&mut self) {
+        let now = std::time::Instant::now();
+        let t0_ms = now_epoch_ms();
+
+        self.streaming_start_time = Some(now);
+        self.streaming_first_token_time = None;
+        self.streaming_end_time = None;
+        self.streaming_t0_ms = Some(t0_ms);
+        self.streaming_t1_ms = None;
+        self.streaming_tn_ms = None;
+        self.streaming_token_count = 0;
+        self.cached_tokens_per_sec = None;
+        self.last_tps_calculated = None;
+
+        if let Some(msg) = self
+            .messages
+            .last_mut()
+            .filter(|m| m.role == MessageRole::Assistant && !m.is_complete)
+        {
+            msg.t0_ms = Some(t0_ms);
+        }
+    }
+
+    pub fn mark_streaming_end(&mut self) {
+        let now = std::time::Instant::now();
+        self.streaming_end_time = Some(now);
+        self.streaming_tn_ms = Some(now_epoch_ms());
     }
 
     pub fn get_streaming_tokens_per_sec(&mut self) -> Option<f64> {
@@ -237,25 +296,47 @@ impl Chat {
     }
 
     pub fn finalize_streaming_metrics(&mut self) {
-        if let Some(first_token_time) = self.streaming_first_token_time {
-            let duration_ms = first_token_time.elapsed().as_millis() as u64;
-            let token_count = self.streaming_token_count;
+        let token_count = self.streaming_token_count;
 
-            if let Some(idx) = self
-                .messages
-                .iter()
-                .rposition(|m| m.role == MessageRole::Assistant)
-            {
-                if let Some(msg) = self.messages.get_mut(idx) {
-                    msg.token_count = Some(token_count);
-                    msg.duration_ms = Some(duration_ms);
-                }
+        let t0_ms = self.streaming_t0_ms;
+        let t1_ms = self.streaming_t1_ms;
+        let tn_ms = self.streaming_tn_ms.or_else(|| {
+            // Fallback: if caller didn't mark end, compute an end timestamp now.
+            Some(now_epoch_ms())
+        });
+
+        let decode_duration_ms = if let (Some(t1), Some(tn)) =
+            (self.streaming_first_token_time, self.streaming_end_time)
+        {
+            tn.duration_since(t1).as_millis() as u64
+        } else if let Some(t1) = self.streaming_first_token_time {
+            t1.elapsed().as_millis() as u64
+        } else {
+            0
+        };
+
+        if let Some(idx) = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == MessageRole::Assistant)
+        {
+            if let Some(msg) = self.messages.get_mut(idx) {
+                msg.output_tokens = Some(token_count);
+                msg.token_count = Some(token_count);
+                msg.duration_ms = Some(decode_duration_ms);
+                msg.t0_ms = t0_ms;
+                msg.t1_ms = t1_ms;
+                msg.tn_ms = tn_ms;
             }
         }
 
         // Reset streaming state
         self.streaming_start_time = None;
         self.streaming_first_token_time = None;
+        self.streaming_end_time = None;
+        self.streaming_t0_ms = None;
+        self.streaming_t1_ms = None;
+        self.streaming_tn_ms = None;
         self.streaming_token_count = 0;
         self.streaming_renderer = None;
         self.streaming_message_idx = None;
@@ -879,21 +960,29 @@ impl Chat {
             Style::default().fg(colors.text_weak),
         ));
 
-        // Duration and tokens/second if available (only show for completed messages)
+        // Timing + throughput metrics (only show for completed messages)
         if message.is_complete {
-            if let (Some(token_count), Some(duration_ms)) =
-                (message.token_count, message.duration_ms)
-            {
-                // Duration
-                let duration_sec = duration_ms as f64 / 1000.0;
+            if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
+                let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
+
+                let total_ms = tn.saturating_sub(t0);
+                let ttft_ms = t1.saturating_sub(t0);
+                let decode_ms = tn.saturating_sub(t1);
+
+                let total_sec = total_ms as f64 / 1000.0;
+                let ttft_sec = ttft_ms as f64 / 1000.0;
+
                 spans.push(Span::styled(
-                    format!(" • {:.1}s", duration_sec),
+                    format!(" • {:.1}s", total_sec),
+                    Style::default().fg(colors.text_weak),
+                ));
+                spans.push(Span::styled(
+                    format!(" • ttft {:.1}s", ttft_sec),
                     Style::default().fg(colors.text_weak),
                 ));
 
-                // Tokens/second
-                let tokens_per_sec = if duration_ms > 0 {
-                    (token_count as f64) / (duration_ms as f64 / 1000.0)
+                let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
+                    (output_tokens as f64) / (decode_ms as f64 / 1000.0)
                 } else {
                     0.0
                 };
@@ -901,11 +990,22 @@ impl Chat {
                     format!(" • {:.0}t/s", tokens_per_sec),
                     Style::default().fg(colors.text_weak),
                 ));
-            } else {
-                // Show 0s and 0t/s when metrics not yet available
-                spans.push(Span::styled(" • 0s", Style::default().fg(colors.text_weak)));
+            } else if let (Some(token_count), Some(duration_ms)) =
+                (message.token_count, message.duration_ms)
+            {
+                // Backward-compatible fallback: duration_ms reflects decode time.
+                let duration_sec = duration_ms as f64 / 1000.0;
                 spans.push(Span::styled(
-                    " • 0t/s",
+                    format!(" • {:.1}s", duration_sec),
+                    Style::default().fg(colors.text_weak),
+                ));
+                let tokens_per_sec = if duration_ms > 0 {
+                    (token_count as f64) / (duration_ms as f64 / 1000.0)
+                } else {
+                    0.0
+                };
+                spans.push(Span::styled(
+                    format!(" • {:.0}t/s", tokens_per_sec),
                     Style::default().fg(colors.text_weak),
                 ));
             }
