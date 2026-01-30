@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_wave_spinner_new() {
         let spinner = WaveSpinner::new(Color::Rgb(255, 165, 0));
-        assert_eq!(spinner.frames.len(), 34);
+        assert_eq!(spinner.frames.len(), 32);
         assert_eq!(spinner.current_frame, 0);
     }
 

@@ -482,8 +482,6 @@ mod tests {
             raw: "/exit".to_string(),
             prefs_dao: None,
             active_model_id: None,
-            name: "exit".to_string(),
-            args: vec![],
         };
         let mut session_manager = SessionManager::new();
         let result = handle_exit(&parsed, &mut session_manager).await;
@@ -493,13 +491,11 @@ mod tests {
     #[tokio::test]
     async fn test_handle_sessions() {
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "sessions".to_string(),
             args: vec![],
+            raw: "/sessions".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_sessions(&parsed, &mut session_manager).await;
@@ -519,13 +515,11 @@ mod tests {
         session_manager.create_session(Some("session-2".to_string()));
 
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "sessions".to_string(),
             args: vec![],
+            raw: "/sessions".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let result = handle_sessions(&parsed, &mut session_manager).await;
         match result {
@@ -546,13 +540,11 @@ mod tests {
     #[tokio::test]
     async fn test_handle_new_no_args() {
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "new".to_string(),
             args: vec![],
+            raw: "/new".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_new(&parsed, &mut session_manager).await;
@@ -567,13 +559,11 @@ mod tests {
     #[tokio::test]
     async fn test_handle_new_with_name() {
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "new".to_string(),
             args: vec!["my-session".to_string()],
+            raw: "/new my-session".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_new(&parsed, &mut session_manager).await;
@@ -588,13 +578,11 @@ mod tests {
     #[tokio::test]
     async fn test_handle_home() {
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "home".to_string(),
             args: vec![],
+            raw: "/home".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_new(&parsed, &mut session_manager).await;
@@ -612,13 +600,11 @@ mod tests {
         let _ = crate::model::discovery::Discovery::cleanup_test();
 
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "connect".to_string(),
             args: vec![],
+            raw: "/connect".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_connect(&parsed, &mut session_manager).await;
@@ -645,13 +631,11 @@ mod tests {
         let _ = crate::config::ApiKeyConfig::cleanup_test();
 
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "connect".to_string(),
             args: vec!["nano-gpt".to_string()],
+            raw: "/connect nano-gpt".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_connect(&parsed, &mut session_manager).await;
@@ -670,13 +654,11 @@ mod tests {
         let _ = crate::config::ApiKeyConfig::cleanup_test();
 
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "connect".to_string(),
             args: vec!["nano-gpt".to_string(), "sk-test-key".to_string()],
+            raw: "/connect nano-gpt sk-test-key".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_connect(&parsed, &mut session_manager).await;
@@ -697,13 +679,11 @@ mod tests {
         let mut session_manager = SessionManager::new();
 
         let parsed1 = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "connect".to_string(),
             args: vec!["nano-gpt".to_string(), "sk-test-key".to_string()],
+            raw: "/connect nano-gpt sk-test-key".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let result1 = handle_connect(&parsed1, &mut session_manager).await;
         match result1 {
@@ -725,13 +705,11 @@ mod tests {
     async fn test_handle_models() {
         let _ = crate::model::discovery::Discovery::cleanup_test();
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "models".to_string(),
             args: vec![],
+            raw: "/models".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_models(&parsed, &mut session_manager).await;
@@ -750,13 +728,11 @@ mod tests {
     async fn test_handle_models_with_filter() {
         let _ = crate::model::discovery::Discovery::cleanup_test();
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "models".to_string(),
             args: vec!["open".to_string()],
+            raw: "/models open".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_models(&parsed, &mut session_manager).await;
@@ -776,13 +752,11 @@ mod tests {
         let _ = crate::config::ApiKeyConfig::cleanup_test();
         let _ = crate::model::discovery::Discovery::cleanup_test();
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "models".to_string(),
             args: vec![],
+            raw: "/models".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = handle_models(&parsed, &mut session_manager).await;
@@ -820,8 +794,6 @@ mod tests {
             raw: "/exit".to_string(),
             prefs_dao: None,
             active_model_id: None,
-            name: "exit".to_string(),
-            args: vec![],
         };
         let mut session_manager = SessionManager::new();
         let result = registry.execute(&parsed, &mut session_manager).await;
@@ -832,13 +804,11 @@ mod tests {
     async fn test_execute_unknown_command() {
         let registry = create_registry();
         let parsed = ParsedCommand {
-            name: "exit".to_string(),
-            args: vec![],
-            raw: "/exit".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
             name: "unknown".to_string(),
             args: vec![],
+            raw: "/unknown".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
         let result = registry.execute(&parsed, &mut session_manager).await;

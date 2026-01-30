@@ -171,10 +171,8 @@ mod tests {
     use super::*;
 
     fn setup_test_dao() -> PrefsDAO {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let conn = Connection::open(&db_path).unwrap();
-        super::super::migrations::run_migrations(&conn).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::super::migrations::run_migrations(&mut conn).unwrap();
         PrefsDAO { conn }
     }
 

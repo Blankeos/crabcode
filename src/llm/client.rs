@@ -205,6 +205,11 @@ pub async fn stream_llm_with_cancellation(
 
     let response = match provider_kind {
         ProviderKind::OpenAICompatible => {
+            log(&format!(
+                "USING OPENAICOMPAT | {:?} | {:?}",
+                &base_url, &model
+            ));
+
             let provider_config = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
                 .base_url(&base_url)
                 .api_key(&api_key)

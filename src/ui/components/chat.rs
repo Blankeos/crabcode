@@ -92,7 +92,7 @@ impl Chat {
     }
 
     fn should_autoscroll(&self) -> bool {
-        self.autoscroll_enabled
+        self.autoscroll_enabled && !self.user_scrolled_up
     }
 
     pub fn add_user_message(&mut self, content: impl Into<String>) {

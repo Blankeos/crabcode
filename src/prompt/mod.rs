@@ -1,5 +1,7 @@
 use crate::tools::ToolRegistry;
 
+mod rules;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderType {
     OpenAI,
@@ -68,7 +70,7 @@ impl SystemPromptComposer {
             parts.push(self.get_tools_context(registry).await);
         }
 
-        parts.push(self.get_custom_instructions());
+        parts.push(self.get_custom_instructions().await);
 
         parts
             .into_iter()
@@ -261,8 +263,8 @@ Tool use:
         )
     }
 
-    fn get_custom_instructions(&self) -> String {
-        String::new()
+    async fn get_custom_instructions(&self) -> String {
+        rules::get_custom_instructions(&self.working_directory).await
     }
 }
 
