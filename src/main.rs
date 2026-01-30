@@ -9,6 +9,7 @@ mod llm;
 mod logging;
 mod model;
 mod persistence;
+mod prompt;
 mod session;
 mod streaming;
 mod theme;

@@ -1,11 +1,15 @@
 use aisdk::{
-    core::{LanguageModelRequest, LanguageModelStreamChunkType, Message as AisdkMessage},
+    core::{
+        utils::step_count_is, LanguageModelRequest, LanguageModelStreamChunkType,
+        Message as AisdkMessage,
+    },
     providers::{OpenAI, OpenAICompatible},
 };
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::logging::log;
+use crate::tools::aisdk_bridge::convert_to_aisdk_tools;
 
 pub struct LLMClient {
     base_url: String,
@@ -44,6 +48,9 @@ impl LLMClient {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let aisdk_messages = self.convert_messages(messages);
 
+        let tool_registry = crate::tools::initialize_tool_registry().await;
+        let aisdk_tools = convert_to_aisdk_tools(&tool_registry, None).await;
+
         let response = if self.uses_openai_compatible() {
             let provider = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
                 .base_url(&self.base_url)
@@ -53,12 +60,16 @@ impl LLMClient {
                 .build()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-            LanguageModelRequest::builder()
+            let mut builder = LanguageModelRequest::builder()
                 .model(provider)
                 .messages(aisdk_messages)
-                .build()
-                .stream_text()
-                .await?
+                .stop_when(step_count_is(15));
+
+            for tool in aisdk_tools {
+                builder = builder.with_tool(tool);
+            }
+
+            builder.build().stream_text().await?
         } else {
             let provider = OpenAI::<aisdk::core::DynamicModel>::builder()
                 .base_url(&self.base_url)
@@ -68,12 +79,16 @@ impl LLMClient {
                 .build()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-            LanguageModelRequest::builder()
+            let mut builder = LanguageModelRequest::builder()
                 .model(provider)
                 .messages(aisdk_messages)
-                .build()
-                .stream_text()
-                .await?
+                .stop_when(step_count_is(15));
+
+            for tool in aisdk_tools {
+                builder = builder.with_tool(tool);
+            }
+
+            builder.build().stream_text().await?
         };
 
         let mut stream = response.stream;
@@ -160,6 +175,9 @@ pub async fn stream_llm_with_cancellation(
 
     let aisdk_messages = convert_messages(&messages);
 
+    let tool_registry = crate::tools::initialize_tool_registry().await;
+    let aisdk_tools = convert_to_aisdk_tools(&tool_registry, Some(sender.clone())).await;
+
     let response = if uses_openai_compatible {
         let provider_config = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
             .base_url(base_url)
@@ -169,12 +187,16 @@ pub async fn stream_llm_with_cancellation(
             .build()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-        LanguageModelRequest::builder()
+        let mut builder = LanguageModelRequest::builder()
             .model(provider_config)
             .messages(aisdk_messages)
-            .build()
-            .stream_text()
-            .await?
+            .stop_when(step_count_is(15));
+
+        for tool in aisdk_tools {
+            builder = builder.with_tool(tool);
+        }
+
+        builder.build().stream_text().await?
     } else {
         let provider_config = OpenAI::<aisdk::core::DynamicModel>::builder()
             .base_url(base_url)
@@ -184,12 +206,16 @@ pub async fn stream_llm_with_cancellation(
             .build()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-        LanguageModelRequest::builder()
+        let mut builder = LanguageModelRequest::builder()
             .model(provider_config)
             .messages(aisdk_messages)
-            .build()
-            .stream_text()
-            .await?
+            .stop_when(step_count_is(15));
+
+        for tool in aisdk_tools {
+            builder = builder.with_tool(tool);
+        }
+
+        builder.build().stream_text().await?
     };
 
     let mut stream = response.stream;
@@ -213,7 +239,10 @@ pub async fn stream_llm_with_cancellation(
                 token_count += reasoning.chars().count().max(1) / 4;
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
-            LanguageModelStreamChunkType::ToolCall(_tool_call) => {}
+            LanguageModelStreamChunkType::ToolCall(_tool_call) => {
+                // Tool execution is handled internally by aisdk::stream_text().
+                // We intentionally don't surface argument deltas here.
+            }
             LanguageModelStreamChunkType::End(_msg) => {
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 let _ = sender.send(crate::llm::ChunkMessage::Metrics {

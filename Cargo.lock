@@ -48,7 +48,6 @@ dependencies = [
 [[package]]
 name = "aisdk"
 version = "0.4.0"
-source = "git+https://github.com/Blankeos/aisdk-rs?branch=oai-compat-fix#5866c1a21e8a96581d0e5ec6a23a062f2d4dbcac"
 dependencies = [
  "aisdk-macros",
  "async-trait",
@@ -69,7 +68,6 @@ dependencies = [
 [[package]]
 name = "aisdk-macros"
 version = "0.3.0"
-source = "git+https://github.com/Blankeos/aisdk-rs?branch=oai-compat-fix#5866c1a21e8a96581d0e5ec6a23a062f2d4dbcac"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -811,8 +809,10 @@ dependencies = [
  "ratatui",
  "ratatui-core",
  "ratatui-toolkit",
+ "regex",
  "reqwest",
  "rusqlite",
+ "schemars",
  "serde",
  "serde_json",
  "strsim",

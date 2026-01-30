@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 pub mod bash;
+pub mod aisdk_bridge;
 pub mod context;
 pub mod edit;
 pub mod fs;

@@ -1,13 +1,17 @@
 pub mod client;
 pub mod provider;
+pub mod tool_calls;
 
 pub use client::LLMClient;
+pub use tool_calls::{FunctionCall, ToolCall, ToolCallResult};
 
 use tokio::sync::mpsc;
 
 pub enum ChunkMessage {
     Text(String),
     Reasoning(String),
+    ToolCalls(Vec<ToolCall>),
+    ToolResult(ToolCallResult),
     End,
     Failed(String),
     Cancelled,

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 pub fn get_current_branch() -> Option<String> {
@@ -17,6 +18,15 @@ pub fn get_current_branch() -> Option<String> {
     } else {
         None
     }
+}
+
+pub fn is_git_repo(path: &str) -> Option<bool> {
+    let output = Command::new("git")
+        .args(["-C", path, "rev-parse", "--git-dir"])
+        .output()
+        .ok()?;
+
+    Some(output.status.success())
 }
 
 #[cfg(test)]

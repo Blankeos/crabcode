@@ -17,6 +17,7 @@ tokio = { version = "1.40", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+schemars = "1.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 ignore = "0.4"
@@ -30,11 +31,12 @@ nucleo-matcher = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 cuid2 = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-aisdk = { version = "0.4", features = ["openai", "openaichatcompletions"] }
+aisdk = { version = "0.4", features = ["openai", "openaichatcompletions", "openaicompatible"] }
 tokio-util = "0.7"
 glob = "0.3"
 strsim = "0.11"
 thiserror = "1.0"
+regex = "1.10"
 textwrap = "0.16"
 unicode-width = "0.1"
 tui-markdown = "0.3"
@@ -44,4 +46,7 @@ ratatui-core = "0.1"
 tokio-test = "0.4"
 
 [patch.crates-io]
-aisdk = { git = "https://github.com/Blankeos/aisdk-rs", branch = "oai-compat-fix" }
+# Local
+aisdk = { path = "/Users/carlo/Desktop/Projects/aisdk-rs" }
+# After pushing
+# aisdk = { git = "https://github.com/Blankeos/aisdk-rs", branch = "oai-compat-fix" }

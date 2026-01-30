@@ -98,10 +98,11 @@ impl ToolHandler for GlobTool {
                     text
                 };
 
-                Ok(ToolResult::new(
-                    format!("Glob: {}", pattern),
-                    result_text
-                ))
+                Ok(ToolResult::new(format!("Glob: {}", pattern), result_text)
+                    .with_metadata("match_count", serde_json::Value::Number((total as i64).into()))
+                    .with_metadata("shown_count", serde_json::Value::Number(((total.min(limit)) as i64).into()))
+                    .with_metadata("limit", serde_json::Value::Number((limit as i64).into()))
+                    .with_metadata("truncated", serde_json::Value::Bool(truncated)))
             }
             Err(e) => Err(ToolError::Execution(format!("Invalid glob pattern: {}", e))),
         }
