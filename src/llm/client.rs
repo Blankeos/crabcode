@@ -225,7 +225,8 @@ pub async fn stream_llm_with_cancellation(
             builder.build().stream_text().await?
         }
         ProviderKind::Anthropic => {
-            log("USING ANTHROPIC");
+            log(&format!("USING ANTHROPIC | {:?} | {:?}", &base_url, &model));
+
             let provider_config = Anthropic::<aisdk::core::DynamicModel>::builder()
                 .base_url(&base_url)
                 .api_key(&api_key)

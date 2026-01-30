@@ -562,6 +562,9 @@ impl App {
             }
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
                 if self.overlay_focus == OverlayFocus::SuggestionsPopup {
+                    if self.is_streaming {
+                        return true;
+                    }
                     self.autocomplete_and_submit();
                     true
                 } else {
@@ -575,6 +578,9 @@ impl App {
     fn handle_input_and_app_keys(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
+                if self.is_streaming {
+                    return;
+                }
                 let input_text = self.input.get_text();
                 if !input_text.is_empty() {
                     use crate::command::parser::parse_input;
@@ -748,6 +754,9 @@ impl App {
     }
 
     fn autocomplete_and_submit(&mut self) {
+        if self.is_streaming {
+            return;
+        }
         if let Some(selected) = get_selected_suggestion(&self.suggestions_popup_state) {
             let command = format!("/{}", selected.name);
 
