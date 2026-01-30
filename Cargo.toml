@@ -31,7 +31,7 @@ nucleo-matcher = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 cuid2 = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-aisdk = { version = "0.4", features = ["openai", "openaichatcompletions", "openaicompatible"] }
+aisdk = { version = "0.4", features = ["openai", "openaichatcompletions", "openaicompatible", "anthropic"] }
 tokio-util = "0.7"
 glob = "0.3"
 strsim = "0.11"
