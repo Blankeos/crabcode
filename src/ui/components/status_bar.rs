@@ -1,9 +1,4 @@
-use ratatui::{
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    Frame,
-};
+use ratatui::{layout::Rect, style::Modifier, style::Style, text::Line, text::Span, Frame};
 
 use crate::theme::ThemeColors;
 
@@ -56,14 +51,12 @@ impl StatusBar {
         )];
 
         if let Some(ref branch) = self.branch {
-            left_spans.push(Span::raw(" ("));
             left_spans.push(Span::styled(
-                branch,
+                format!(":{}", branch),
                 Style::default()
                     .fg(colors.text_weak)
                     .add_modifier(Modifier::DIM),
             ));
-            left_spans.push(Span::raw(")"));
         }
 
         let right_spans = vec![Span::styled(
