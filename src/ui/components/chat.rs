@@ -636,7 +636,8 @@ impl Chat {
         match message.role {
             MessageRole::User => {
                 // User message: Box with left border colored by agent mode
-                let border_color = self.get_agent_color(message.agent_mode.as_deref());
+                let border_color =
+                    crate::theme::agent_mode_color(message.agent_mode.as_deref(), colors);
                 let content = message.content.clone();
 
                 // Wrap content to fit within max_width - padding
@@ -919,20 +920,12 @@ impl Chat {
         out
     }
 
-    fn get_agent_color(&self, agent_mode: Option<&str>) -> Color {
-        match agent_mode {
-            Some("Plan") => Color::Rgb(255, 165, 0),    // Orange
-            Some("Build") => Color::Rgb(147, 112, 219), // Purple
-            _ => Color::Gray,
-        }
-    }
-
     fn format_metadata(&self, message: &Message, _model: &str, colors: &ThemeColors) -> Vec<Span> {
         let mut spans = Vec::new();
 
         // Get agent mode from previous user message or default to "Plan"
         let agent_mode = self.get_agent_mode_for_message(message);
-        let agent_color = self.get_agent_color(Some(&agent_mode));
+        let agent_color = crate::theme::agent_color(&agent_mode, colors);
 
         // Agent icon (▣) with extra space
         spans.push(Span::styled(
@@ -957,7 +950,7 @@ impl Chat {
         let model_display = message.model.as_deref().unwrap_or(_model);
         spans.push(Span::styled(
             model_display.to_string(),
-            Style::default().fg(colors.text_weak),
+            Style::default().fg(colors.text),
         ));
 
         // Timing + throughput metrics (only show for completed messages)

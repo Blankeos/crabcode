@@ -27,16 +27,20 @@ impl ChatState {
     }
 }
 
-pub fn init_chat(chat: Chat, agent: &str) -> ChatState {
-    let agent_color = get_agent_color(agent);
+pub fn init_chat(chat: Chat, agent: &str, colors: &ThemeColors) -> ChatState {
+    let agent_color = crate::theme::agent_color(agent, colors);
     ChatState::new(chat, agent_color)
 }
 
-fn get_agent_color(agent: &str) -> ratatui::style::Color {
-    match agent {
-        "Plan" => ratatui::style::Color::Rgb(255, 165, 0), // Orange
-        "Build" => ratatui::style::Color::Rgb(147, 112, 219), // Purple
-        _ => ratatui::style::Color::Gray,
+pub fn agent_color_for_tab(agent_index: usize, colors: &ThemeColors) -> ratatui::style::Color {
+    // Matches OpenCode's rotation: primary/secondary/accent/success/warning/error
+    match agent_index % 6 {
+        0 => colors.primary,
+        1 => colors.secondary,
+        2 => colors.accent,
+        3 => colors.success,
+        4 => colors.warning,
+        _ => colors.error,
     }
 }
 
@@ -79,7 +83,14 @@ pub fn render_chat(
     chat_state
         .chat
         .render(f, above_status_chunks[1], &agent, &model, colors);
-    input.render(f, above_status_chunks[3], &agent, &model, &provider_name);
+    input.render(
+        f,
+        above_status_chunks[3],
+        &agent,
+        &model,
+        &provider_name,
+        colors,
+    );
 
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -88,7 +99,7 @@ pub fn render_chat(
 
     if is_streaming {
         // Update spinner color based on current agent (only if changed)
-        let agent_color = get_agent_color(&agent);
+        let agent_color = crate::theme::agent_color(&agent, colors);
         chat_state.wave_spinner.set_color(agent_color);
 
         // Animation update is now handled in the main event loop at a fixed rate
@@ -131,5 +142,5 @@ pub fn render_chat(
     f.render_widget(blank, above_status_chunks[5]);
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
-    status_bar.render(f, main_chunks[1]);
+    status_bar.render(f, main_chunks[1], colors);
 }

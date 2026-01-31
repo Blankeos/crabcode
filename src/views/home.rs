@@ -90,7 +90,7 @@ pub fn render_home(
     let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
 
     f.render_widget(logo, logo_chunks[1]);
-    input.render(f, home_chunks[1], &agent, &model, &provider_name);
+    input.render(f, home_chunks[1], &agent, &model, &provider_name, colors);
 
     let help_text = vec![
         Span::styled("/", Style::default().fg(colors.info)),
@@ -109,5 +109,5 @@ pub fn render_home(
     f.render_widget(blank, home_chunks[3]);
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
-    status_bar.render(f, main_chunks[1]);
+    status_bar.render(f, main_chunks[1], colors);
 }

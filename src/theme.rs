@@ -7,7 +7,11 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeColors {
     pub primary: ratatui::style::Color,
+    pub secondary: ratatui::style::Color,
+    pub accent: ratatui::style::Color,
+    pub interactive: ratatui::style::Color,
     pub background: ratatui::style::Color,
+    pub dialog_background: ratatui::style::Color,
     pub text: ratatui::style::Color,
     pub text_weak: ratatui::style::Color,
     pub text_strong: ratatui::style::Color,
@@ -46,6 +50,21 @@ pub fn contrast_text(background: ratatui::style::Color) -> ratatui::style::Color
         }
         _ => ratatui::style::Color::White,
     }
+}
+
+pub fn agent_color(agent: &str, colors: &ThemeColors) -> ratatui::style::Color {
+    match agent {
+        // OpenCode tokens:
+        // - Plan: info (icon-agent-plan-base)
+        // - Build: interactive (icon-agent-build-base)
+        "Plan" => colors.info,
+        "Build" => colors.interactive,
+        _ => colors.primary,
+    }
+}
+
+pub fn agent_mode_color(agent_mode: Option<&str>, colors: &ThemeColors) -> ratatui::style::Color {
+    agent_color(agent_mode.unwrap_or("Plan"), colors)
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +110,14 @@ struct DesktopThemeSeeds {
 struct DesktopThemeOverrides {
     #[serde(rename = "background-base")]
     pub background_base: String,
+
+    #[serde(rename = "background-stronger")]
+    #[serde(default)]
+    pub background_stronger: Option<String>,
+
+    #[serde(rename = "surface-raised-stronger-non-alpha")]
+    #[serde(default)]
+    pub surface_raised_stronger_non_alpha: Option<String>,
 
     #[serde(rename = "text-base")]
     pub text_base: String,
@@ -182,9 +209,23 @@ impl Theme {
         match &self.data {
             ThemeData::Desktop(theme) => {
                 let mode = if dark { &theme.dark } else { &theme.light };
+
+                let dialog_background = mode
+                    .overrides
+                    .surface_raised_stronger_non_alpha
+                    .as_deref()
+                    .or(mode.overrides.background_stronger.as_deref())
+                    .unwrap_or(mode.overrides.background_base.as_str());
+
+                let primary = parse_hex(&mode.seeds.primary);
+                let interactive = parse_hex(&mode.seeds.interactive);
                 ThemeColors {
-                    primary: parse_hex(&mode.seeds.primary),
+                    primary,
+                    secondary: primary,
+                    accent: interactive,
+                    interactive,
                     background: parse_hex(&mode.overrides.background_base),
+                    dialog_background: parse_hex(dialog_background),
                     text: parse_hex(&mode.overrides.text_base),
                     text_weak: parse_hex(&mode.overrides.text_weak),
                     text_strong: parse_hex(&mode.overrides.text_strong),
@@ -202,7 +243,27 @@ impl Theme {
                 let resolve = |key: &str| resolve_tui_color(theme, key, dark);
 
                 let primary = resolve("primary");
+                let secondary = resolve("secondary");
+                let accent = resolve("accent");
+                let interactive = {
+                    // OpenCode theme.json doesn't always include an explicit interactive token.
+                    // Map it to primary so we still get a theme-driven value.
+                    let v = resolve_tui_color(theme, "interactive", dark);
+                    if v == ratatui::style::Color::Reset {
+                        primary
+                    } else {
+                        v
+                    }
+                };
                 let background = resolve("background");
+                let dialog_background = {
+                    let v = resolve("backgroundPanel");
+                    if v == ratatui::style::Color::Reset {
+                        background
+                    } else {
+                        v
+                    }
+                };
                 let text = resolve("text");
                 let text_weak = resolve("textMuted");
                 let border = resolve("border");
@@ -211,7 +272,11 @@ impl Theme {
 
                 ThemeColors {
                     primary,
+                    secondary,
+                    accent,
+                    interactive,
                     background,
+                    dialog_background,
                     text,
                     text_weak,
                     text_strong: text,

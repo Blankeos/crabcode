@@ -145,7 +145,7 @@ impl App {
 
         let home_state = init_home();
         let agent = "Plan".to_string();
-        let chat_state = init_chat(Chat::new(), &agent);
+        let chat = Chat::new();
         let suggestions_popup_state = init_suggestions_popup(Popup::new());
         let models_dialog_state = init_models_dialog("Models", vec![]);
         let themes_dialog_state = init_themes_dialog("Themes", vec![]);
@@ -229,6 +229,7 @@ impl App {
             });
         let colors = theme_for_colors.get_colors(true);
 
+        let chat_state = init_chat(chat, &agent, &colors);
         let session_rename_dialog_state = init_session_rename_dialog(colors);
 
         Ok(Self {
@@ -325,7 +326,11 @@ impl App {
         if self.themes.is_empty() {
             return theme::ThemeColors {
                 primary: ratatui::style::Color::Rgb(255, 140, 0),
+                secondary: ratatui::style::Color::Rgb(255, 140, 0),
+                accent: ratatui::style::Color::Rgb(255, 140, 0),
+                interactive: ratatui::style::Color::Rgb(255, 140, 0),
                 background: ratatui::style::Color::Reset,
+                dialog_background: ratatui::style::Color::Reset,
                 text: ratatui::style::Color::Reset,
                 text_weak: ratatui::style::Color::Reset,
                 text_strong: ratatui::style::Color::Reset,
@@ -683,6 +688,10 @@ impl App {
                 } else {
                     self.agent = "Plan".to_string();
                 }
+
+                let colors = self.get_current_theme_colors();
+                let agent_color = crate::theme::agent_color(&self.agent, &colors);
+                self.chat_state.wave_spinner.set_color(agent_color);
                 true
             }
             KeyCode::Esc => {
@@ -1939,7 +1948,7 @@ impl App {
         }
 
         if self.overlay_focus == OverlayFocus::ApiKeyInput && self.api_key_input.is_visible() {
-            self.api_key_input.render(f, size);
+            self.api_key_input.render(f, size, &colors);
         }
 
         if self.overlay_focus == OverlayFocus::SessionsDialog

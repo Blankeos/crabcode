@@ -606,7 +606,7 @@ impl Dialog {
 
         frame.render_widget(
             ratatui::widgets::Paragraph::new("")
-                .style(ratatui::style::Style::default().bg(Color::Rgb(20, 20, 30))),
+                .style(ratatui::style::Style::default().bg(colors.dialog_background)),
             self.dialog_area,
         );
 
@@ -626,7 +626,7 @@ impl Dialog {
             Span::styled(
                 &self.title,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(colors.text)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
@@ -652,7 +652,7 @@ impl Dialog {
         if flat_items.is_empty() {
             content_lines.push(Line::from(vec![Span::styled(
                 "No results found",
-                Style::default().fg(Color::Gray),
+                Style::default().fg(colors.text_weak),
             )]));
         } else {
             let mut item_index = 0;
@@ -694,14 +694,14 @@ impl Dialog {
                                 Span::styled(
                                     item.description.clone(),
                                     Style::default()
-                                        .fg(Color::Rgb(150, 150, 150))
+                                        .fg(colors.text_weak)
                                         .add_modifier(Modifier::DIM),
                                 ),
                                 Span::raw(" ".repeat(padding_len)),
                                 Span::styled(
                                     tip,
                                     Style::default()
-                                        .fg(Color::Rgb(100, 200, 100))
+                                        .fg(colors.text)
                                         .add_modifier(Modifier::BOLD),
                                 ),
                                 Span::raw(" ".repeat(padding_after_tip)),
@@ -713,7 +713,7 @@ impl Dialog {
                                 Span::styled(
                                     tip,
                                     Style::default()
-                                        .fg(Color::Rgb(150, 120, 100))
+                                        .fg(colors.text_weak)
                                         .add_modifier(Modifier::DIM),
                                 ),
                                 Span::raw(" ".repeat(padding_after_tip)),
@@ -727,7 +727,7 @@ impl Dialog {
                             Span::styled(
                                 item.description.clone(),
                                 Style::default()
-                                    .fg(Color::Rgb(150, 150, 150))
+                                    .fg(colors.text_weak)
                                     .add_modifier(Modifier::DIM),
                             ),
                             Span::raw(" ".repeat(padding_len)),
@@ -795,7 +795,7 @@ impl Dialog {
             footer_spans.push(Span::styled(
                 &action.key,
                 Style::default()
-                    .fg(Color::Rgb(150, 120, 100))
+                    .fg(colors.text_weak)
                     .add_modifier(Modifier::DIM),
             ));
         }
@@ -812,7 +812,7 @@ impl Dialog {
                 Span::styled(
                     "ctrl+a",
                     Style::default()
-                        .fg(Color::Rgb(150, 120, 100))
+                        .fg(colors.text_weak)
                         .add_modifier(Modifier::DIM),
                 ),
                 Span::raw("  "),
@@ -826,7 +826,7 @@ impl Dialog {
                 Span::styled(
                     "ctrl+f",
                     Style::default()
-                        .fg(Color::Rgb(150, 120, 100))
+                        .fg(colors.text_weak)
                         .add_modifier(Modifier::DIM),
                 ),
             ])

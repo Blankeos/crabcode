@@ -1,12 +1,14 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     prelude::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
     Frame,
 };
 use tui_textarea::{Input as TuiInput, TextArea};
+
+use crate::theme::ThemeColors;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputAction {
@@ -92,7 +94,7 @@ impl ApiKeyInput {
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, colors: &ThemeColors) {
         if !self.visible {
             return;
         }
@@ -121,7 +123,7 @@ impl ApiKeyInput {
         };
 
         frame.render_widget(
-            Paragraph::new("").style(Style::default().bg(Color::Rgb(20, 20, 30))),
+            Paragraph::new("").style(Style::default().bg(colors.dialog_background)),
             dialog_area,
         );
 
@@ -138,14 +140,14 @@ impl ApiKeyInput {
             Span::styled(
                 "API key",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(colors.text)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" ".repeat(40)),
             Span::styled(
                 "esc",
                 Style::default()
-                    .fg(Color::Rgb(255, 140, 0))
+                    .fg(colors.primary)
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
@@ -156,7 +158,7 @@ impl ApiKeyInput {
         let footer_line = Line::from(vec![Span::styled(
             "enter submit",
             Style::default()
-                .fg(Color::Rgb(150, 120, 100))
+                .fg(colors.text_weak)
                 .add_modifier(Modifier::DIM),
         )]);
 

@@ -1,5 +1,6 @@
 use crate::autocomplete::{AutoComplete, Suggestion};
 use crate::persistence::PromptHistoryCache;
+use crate::theme::{agent_color, ThemeColors};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -43,12 +44,9 @@ impl Input {
         agent: &str,
         model: &str,
         provider_name: &str,
+        colors: &ThemeColors,
     ) {
-        let agent_color = if agent == "Plan" {
-            ratatui::style::Color::Rgb(255, 165, 0)
-        } else {
-            ratatui::style::Color::Rgb(147, 112, 219)
-        };
+        let agent_color = agent_color(agent, colors);
 
         let border = Block::bordered()
             .borders(ratatui::widgets::Borders::LEFT)
@@ -90,12 +88,14 @@ impl Input {
             ratatui::text::Span::raw("  "),
             ratatui::text::Span::styled(
                 model.to_string(),
-                ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(255, 200, 100)),
+                ratatui::style::Style::default().fg(colors.text),
             ),
             ratatui::text::Span::raw("  "),
             ratatui::text::Span::styled(
                 provider_name.to_string(),
-                ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
+                ratatui::style::Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(ratatui::style::Modifier::DIM),
             ),
         ]);
 

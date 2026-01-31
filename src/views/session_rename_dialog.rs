@@ -84,7 +84,11 @@ impl Default for SessionRenameDialogState {
     fn default() -> Self {
         Self::new(ThemeColors {
             primary: Color::Rgb(255, 140, 0),
+            secondary: Color::Rgb(255, 140, 0),
+            accent: Color::Rgb(255, 140, 0),
+            interactive: Color::Rgb(255, 140, 0),
             background: Color::Reset,
+            dialog_background: Color::Reset,
             text: Color::Reset,
             text_weak: Color::Reset,
             text_strong: Color::Reset,
@@ -139,7 +143,7 @@ pub fn render_session_rename_dialog(
 
     f.render_widget(
         ratatui::widgets::Paragraph::new("")
-            .style(ratatui::style::Style::default().bg(Color::Rgb(20, 20, 30))),
+            .style(ratatui::style::Style::default().bg(colors.dialog_background)),
         dialog_state.dialog_area,
     );
 
@@ -158,7 +162,7 @@ pub fn render_session_rename_dialog(
         Span::styled(
             "Rename session",
             Style::default()
-                .fg(Color::White)
+                .fg(colors.text)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
         Span::raw(" "),
@@ -178,7 +182,7 @@ pub fn render_session_rename_dialog(
     let footer_line = Line::from(vec![Span::styled(
         "enter submit",
         Style::default()
-            .fg(Color::Rgb(150, 120, 100))
+            .fg(colors.text_weak)
             .add_modifier(ratatui::style::Modifier::DIM),
     )]);
 
