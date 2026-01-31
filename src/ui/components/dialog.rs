@@ -179,20 +179,16 @@ impl Dialog {
     pub fn set_search_query(&mut self, query: impl Into<String>) {
         self.search_query = query.into();
         self.apply_filter();
-        self.selected_index = 0;
-        self.scroll_offset = 0;
-        self.update_scrollbar();
     }
 
     pub fn clear_search(&mut self) {
         self.search_query.clear();
         self.apply_filter();
-        self.selected_index = 0;
-        self.scroll_offset = 0;
-        self.update_scrollbar();
     }
 
     fn apply_filter(&mut self) {
+        let preferred_selected_id = self.get_selected().map(|item| item.id.clone());
+
         if self.search_query.is_empty() {
             self.filtered_items = self
                 .groups
@@ -246,7 +242,32 @@ impl Dialog {
             }
             self.filtered_items = filtered;
         }
-        self.update_scrollbar();
+
+        self.reconcile_selection_after_filter(preferred_selected_id);
+    }
+
+    fn reconcile_selection_after_filter(&mut self, preferred_selected_id: Option<String>) {
+        let flat_items = self.get_flat_items();
+        if flat_items.is_empty() {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.update_scrollbar();
+            return;
+        }
+
+        if let Some(id) = preferred_selected_id {
+            if let Some(pos) = flat_items.iter().position(|item| item.id == id) {
+                self.selected_index = pos;
+                self.adjust_scroll();
+                return;
+            }
+        }
+
+        if self.selected_index >= flat_items.len() {
+            self.selected_index = 0;
+        }
+
+        self.adjust_scroll();
     }
 
     fn update_scrollbar(&mut self) {
@@ -267,7 +288,17 @@ impl Dialog {
 
     pub fn next(&mut self) {
         let flat_items = self.get_flat_items();
-        if !flat_items.is_empty() && self.selected_index < flat_items.len() - 1 {
+        if flat_items.is_empty() {
+            return;
+        }
+
+        if self.selected_index >= flat_items.len() {
+            self.selected_index = 0;
+            self.adjust_scroll();
+            return;
+        }
+
+        if self.selected_index < flat_items.len() - 1 {
             self.selected_index += 1;
             self.adjust_scroll();
         }
@@ -275,7 +306,17 @@ impl Dialog {
 
     pub fn previous(&mut self) {
         let flat_items = self.get_flat_items();
-        if !flat_items.is_empty() && self.selected_index > 0 {
+        if flat_items.is_empty() {
+            return;
+        }
+
+        if self.selected_index >= flat_items.len() {
+            self.selected_index = flat_items.len().saturating_sub(1);
+            self.adjust_scroll();
+            return;
+        }
+
+        if self.selected_index > 0 {
             self.selected_index -= 1;
             self.adjust_scroll();
         }
@@ -903,6 +944,35 @@ mod tests {
         ]
     }
 
+    fn create_fuzzy_test_items() -> Vec<DialogItem> {
+        vec![
+            DialogItem {
+                id: "1".to_string(),
+                name: "gitlab".to_string(),
+                group: "Other".to_string(),
+                description: "".to_string(),
+                tip: None,
+                provider_id: "p".to_string(),
+            },
+            DialogItem {
+                id: "2".to_string(),
+                name: "github".to_string(),
+                group: "Other".to_string(),
+                description: "".to_string(),
+                tip: None,
+                provider_id: "p".to_string(),
+            },
+            DialogItem {
+                id: "3".to_string(),
+                name: "gruvbox".to_string(),
+                group: "Other".to_string(),
+                description: "".to_string(),
+                tip: None,
+                provider_id: "p".to_string(),
+            },
+        ]
+    }
+
     #[test]
     fn test_dialog_creation() {
         let dialog = Dialog::new("Test Dialog");
@@ -1000,6 +1070,29 @@ mod tests {
 
         dialog.next();
         assert_eq!(dialog.selected_index, 2);
+    }
+
+    #[test]
+    fn test_dialog_next_from_invalid_selection_focuses_first() {
+        let mut dialog = Dialog::with_items("Providers", create_fuzzy_test_items());
+        dialog.set_search_query("gu");
+        assert!(!dialog.get_flat_items().is_empty());
+
+        dialog.selected_index = 999;
+        dialog.next();
+        assert_eq!(dialog.selected_index, 0);
+        assert!(dialog.get_selected().is_some());
+    }
+
+    #[test]
+    fn test_dialog_search_preserves_selected_item_if_still_present() {
+        let mut dialog = Dialog::with_items("Providers", create_fuzzy_test_items());
+
+        dialog.selected_index = 1;
+        assert_eq!(dialog.get_selected().unwrap().name, "github");
+
+        dialog.set_search_query("gu");
+        assert_eq!(dialog.get_selected().unwrap().name, "github");
     }
 
     #[test]
