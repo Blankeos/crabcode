@@ -663,25 +663,33 @@ impl Dialog {
             ])
             .split(self.content_area);
 
-        let title_line = Line::from(vec![
-            Span::styled(
-                &self.title,
-                Style::default()
-                    .fg(colors.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                "esc",
-                Style::default()
-                    .fg(colors.primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
+        let esc_text = "esc";
+        let esc_area_width = (esc_text.width() as u16).saturating_add(1);
+        let header_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(esc_area_width),
+            ])
+            .split(chunks[0]);
 
-        let title_paragraph =
-            Paragraph::new(title_line).alignment(ratatui::layout::Alignment::Left);
-        frame.render_widget(title_paragraph, chunks[0]);
+        let title_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            &self.title,
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(ratatui::layout::Alignment::Left);
+        frame.render_widget(title_paragraph, header_chunks[0]);
+
+        let esc_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            esc_text,
+            Style::default()
+                .fg(colors.primary)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(ratatui::layout::Alignment::Right);
+        frame.render_widget(esc_paragraph, header_chunks[1]);
 
         frame.render_widget(&self.search_textarea, chunks[2]);
 
