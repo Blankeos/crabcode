@@ -11,6 +11,7 @@ mod model;
 mod persistence;
 mod prompt;
 mod session;
+mod sound;
 mod streaming;
 mod theme;
 mod tools;
@@ -61,7 +62,7 @@ struct Args {}
 #[tokio::main]
 async fn main() -> Result<()> {
     let _args = Args::parse();
-    let mut app = App::new();
+    let mut app = App::new()?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

@@ -5,7 +5,6 @@ use crate::command::handlers::register_all_commands;
 use crate::command::parser::InputType;
 use crate::command::registry::Registry;
 use crate::llm::client::stream_llm_with_cancellation;
-use crate::logging::log;
 use crate::session::manager::SessionManager;
 
 use crate::push_toast;
@@ -45,6 +44,20 @@ use crate::{
     get_toast_manager, render_toasts,
     theme::{self, Theme},
 };
+
+use anyhow::Result;
+
+fn parse_model_ref(model: &str) -> (String, String) {
+    let model = model.trim();
+    if let Some((provider_id, model_id)) = model.split_once('/') {
+        let provider_id = provider_id.trim();
+        let model_id = model_id.trim();
+        if !provider_id.is_empty() && !model_id.is_empty() {
+            return (provider_id.to_string(), model_id.to_string());
+        }
+    }
+    ("opencode".to_string(), model.to_string())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BaseFocus {
@@ -91,6 +104,7 @@ pub struct App {
     pub themes: Vec<Theme>,
     pub current_theme_index: usize,
     pub dark_mode: bool,
+    pub sounds: crate::config::SoundsConfig,
     pub is_streaming: bool,
     chunk_sender: Option<crate::llm::ChunkSender>,
     chunk_receiver: Option<crate::llm::ChunkReceiver>,
@@ -105,7 +119,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
@@ -115,14 +129,11 @@ impl App {
         let mut input = Input::new().with_autocomplete(autocomplete);
         input.set_placeholder(placeholder_static);
 
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.to_str().map(|s| s.to_string()))
+        let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = cwd_path
+            .to_str()
+            .map(|s| s.to_string())
             .unwrap_or_else(|| "?".to_string());
-
-        let theme = theme::Theme::load_from_file("src/theme.json")
-            .unwrap_or_else(|_| theme::Theme::load_from_file("src/themes/ayu.json").unwrap());
-        let colors = theme.get_colors(true);
 
         let home_state = init_home();
         let agent = "Plan".to_string();
@@ -131,7 +142,6 @@ impl App {
         let models_dialog_state = init_models_dialog("Models", vec![]);
         let connect_dialog_state = init_connect_dialog();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
-        let session_rename_dialog_state = init_session_rename_dialog(colors);
         let which_key_state = crate::views::which_key::init_which_key();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
@@ -147,20 +157,72 @@ impl App {
             }
         };
 
+        let loaded_config = crate::config::ConfigLoader::load()?;
+        if !loaded_config.diagnostics.info.is_empty() {
+            for msg in &loaded_config.diagnostics.info {
+                eprintln!("Config: {}", msg);
+            }
+        }
+        if !loaded_config.diagnostics.warnings.is_empty() {
+            for msg in &loaded_config.diagnostics.warnings {
+                eprintln!("Config warning: {}", msg);
+            }
+        }
+        if !loaded_config.diagnostics.unimplemented_keys.is_empty() {
+            eprintln!(
+                "Config: unimplemented keys present: {}",
+                loaded_config.diagnostics.unimplemented_keys.join(", ")
+            );
+        }
+
         let active_model_info = if let Some(ref dao) = prefs_dao {
             dao.get_active_model().ok().flatten()
         } else {
             None
         };
 
-        let (active_model, active_provider_name) =
-            if let Some((provider_id, model_id)) = active_model_info {
-                (model_id.clone(), provider_id.clone())
-            } else {
-                ("big-pickle".to_string(), "opencode".to_string())
-            };
+        if active_model_info.is_none() {
+            if let (Some(ref dao), Some(model_str)) = (prefs_dao.as_ref(), loaded_config.merged_config.model.clone()) {
+                let (provider_id, model_id) = parse_model_ref(&model_str);
+                let _ = dao.set_active_model(provider_id, model_id);
+            }
+        }
 
-        Self {
+        let active_model_info = if let Some(ref dao) = prefs_dao {
+            dao.get_active_model().ok().flatten()
+        } else {
+            None
+        };
+
+        let (active_model, active_provider_name) = if let Some((provider_id, model_id)) = active_model_info {
+            (model_id.clone(), provider_id.clone())
+        } else if let Some(model_str) = loaded_config.merged_config.model.clone() {
+            let (provider_id, model_id) = parse_model_ref(&model_str);
+            (model_id, provider_id)
+        } else {
+            ("big-pickle".to_string(), "opencode".to_string())
+        };
+
+        let (themes, current_theme_index) = crate::config::discover_themes(
+            &loaded_config.xdg_config_home,
+            &loaded_config.project_root,
+            &loaded_config.cwd,
+            loaded_config.merged_config.theme.as_deref(),
+        );
+
+        let theme_for_colors = themes
+            .get(current_theme_index)
+            .or_else(|| themes.first())
+            .cloned()
+            .unwrap_or_else(|| {
+                theme::Theme::load_from_file("src/theme.json")
+                    .unwrap_or_else(|_| theme::Theme::load_from_file("src/generated_themes/ayu.json").unwrap())
+            });
+        let colors = theme_for_colors.get_colors(true);
+
+        let session_rename_dialog_state = init_session_rename_dialog(colors);
+
+        Ok(Self {
             running: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
             input,
@@ -184,9 +246,10 @@ impl App {
             overlay_focus: OverlayFocus::None,
             ctrl_c_press_count: 0,
             last_ctrl_c_time: std::time::Instant::now(),
-            themes: vec![theme],
-            current_theme_index: 0,
+            themes,
+            current_theme_index,
             dark_mode: true,
+            sounds: loaded_config.merged_config.sounds.clone(),
             is_streaming: false,
             chunk_sender: None,
             chunk_receiver: None,
@@ -198,6 +261,21 @@ impl App {
             streaming_chat_len_before_assistant: 0,
             tool_call_message_indices: std::collections::HashMap::new(),
             tool_call_order: Vec::new(),
+        })
+    }
+
+    fn play_sound_event(&self, event: crate::sound::SoundEvent) {
+        use crate::sound::SoundEvent;
+        let effect = match event {
+            SoundEvent::Error => &self.sounds.error,
+            SoundEvent::Complete => &self.sounds.complete,
+            SoundEvent::Permission => &self.sounds.permission,
+            SoundEvent::Question => &self.sounds.question,
+        };
+        if effect.is_effectively_enabled() {
+            if let Some(ref path) = effect.file {
+                crate::sound::play_file(path);
+            }
         }
     }
 
@@ -287,12 +365,18 @@ impl App {
 
         let handled = match self.overlay_focus {
             OverlayFocus::SuggestionsPopup => {
-                let handled = self.handle_suggestions_popup_keys(key);
-                if !handled {
-                    self.input.handle_event(key);
+                // When the suggestions popup is open, the keystroke should be handled either by the
+                // popup itself (navigation/autocomplete) or by the input. If we return `false` here
+                // and the popup closes during `update_suggestions()`, the same key event can be
+                // processed again by the base input handler, resulting in duplicated characters.
+                let popup_handled = self.handle_suggestions_popup_keys(key);
+                if popup_handled {
+                    true
+                } else {
+                    let input_handled = self.input.handle_event(key);
                     self.update_suggestions();
+                    input_handled
                 }
-                handled
             }
             OverlayFocus::ModelsDialog => {
                 let action = handle_models_dialog_key_event(&mut self.models_dialog_state, key);
@@ -807,6 +891,7 @@ impl App {
                         }
                     }
                     crate::command::registry::CommandResult::Error(msg) => {
+                        self.play_sound_event(crate::sound::SoundEvent::Error);
                         if msg.starts_with("Unknown command:") {
                             push_toast(ratatui_toolkit::Toast::new(
                                 msg,
@@ -919,11 +1004,12 @@ impl App {
                     self.quit();
                 }
             }
-            crate::command::registry::CommandResult::Error(msg) => {
-                if msg.starts_with("Unknown command:") {
-                    push_toast(ratatui_toolkit::Toast::new(
-                        msg,
-                        ratatui_toolkit::ToastLevel::Error,
+                    crate::command::registry::CommandResult::Error(msg) => {
+                        self.play_sound_event(crate::sound::SoundEvent::Error);
+                        if msg.starts_with("Unknown command:") {
+                            push_toast(ratatui_toolkit::Toast::new(
+                                msg,
+                                ratatui_toolkit::ToastLevel::Error,
                         Some(std::time::Duration::from_secs(3)),
                     ));
                 } else {
@@ -1302,11 +1388,14 @@ impl App {
                     self.streaming_model = None;
                     self.streaming_provider = None;
                     self.cleanup_streaming();
+
+                    self.play_sound_event(crate::sound::SoundEvent::Complete);
                 }
                 crate::llm::ChunkMessage::Failed(error) => {
                     self.is_streaming = false;
                     self.chat_state.chat.mark_streaming_end();
                     self.chat_state.chat.finalize_streaming_metrics();
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
                     push_toast(ratatui_toolkit::Toast::new(
                         format!("LLM error: {}", error),
                         ratatui_toolkit::ToastLevel::Error,
@@ -1708,6 +1797,6 @@ impl App {
 
 impl Default for App {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("Failed to initialize App")
     }
 }

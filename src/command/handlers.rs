@@ -78,24 +78,20 @@ pub fn handle_connect<'a>(
     let args = parsed.args.clone();
 
     Box::pin(async move {
-        if args.is_empty() {
-            let auth_dao = match crate::persistence::AuthDAO::new() {
-                Ok(dao) => dao,
-                Err(e) => {
-                    return CommandResult::Error(format!("Failed to load auth config: {}", e))
-                }
-            };
+        if !args.is_empty() {
+            return CommandResult::Error(
+                "This command only opens the connect dialog. Usage: /connect".to_string(),
+            );
+        }
+
+        let auth_dao = match crate::persistence::AuthDAO::new() {
+            Ok(dao) => dao,
+            Err(e) => return CommandResult::Error(format!("Failed to load auth config: {}", e)),
+        };
 
             let connected_providers = match auth_dao.load() {
                 Ok(providers) => providers,
                 Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
-            };
-
-            let api_key_config = match crate::config::ApiKeyConfig::load() {
-                Ok(c) => c,
-                Err(e) => {
-                    return CommandResult::Error(format!("Failed to load API key config: {}", e))
-                }
             };
 
             let discovery = match crate::model::discovery::Discovery::new() {
@@ -147,40 +143,9 @@ pub fn handle_connect<'a>(
 
             items.sort_by(|a, b| a.name.cmp(&b.name));
 
-            CommandResult::ShowDialog {
-                title: "Connect a provider".to_string(),
-                items,
-            }
-        } else {
-            let config = match crate::config::ApiKeyConfig::load() {
-                Ok(c) => c,
-                Err(e) => return CommandResult::Error(format!("Failed to load config: {}", e)),
-            };
-
-            if args.len() == 1 {
-                let provider = &args[0];
-                if let Some(_api_key) = config.get_api_key(provider) {
-                    CommandResult::Success(format!("Provider '{}' is configured", provider))
-                } else {
-                    CommandResult::Success(format!(
-                        "Provider '{}' is not configured. Usage: /connect {} <api_key>",
-                        provider, provider
-                    ))
-                }
-            } else {
-                let provider = &args[0];
-                let api_key = &args[1];
-                let mut config = config;
-                config.set_api_key(provider.clone(), api_key.clone());
-                if let Err(e) = config.save() {
-                    CommandResult::Error(format!("Failed to save config: {}", e))
-                } else {
-                    CommandResult::Success(format!(
-                        "API key configured for provider '{}'",
-                        provider
-                    ))
-                }
-            }
+        CommandResult::ShowDialog {
+            title: "Connect a provider".to_string(),
+            items,
         }
     })
 }
@@ -647,7 +612,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_connect_no_args() {
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let _ = crate::persistence::AuthDAO::cleanup_test();
         let _ = crate::model::discovery::Discovery::cleanup_test();
 
         let parsed = ParsedCommand {
@@ -673,13 +638,13 @@ mod tests {
             _ => panic!("Expected ShowDialog"),
         }
 
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let _ = crate::persistence::AuthDAO::cleanup_test();
         let _ = crate::model::discovery::Discovery::cleanup_test();
     }
 
     #[tokio::test]
-    async fn test_handle_connect_provider_only() {
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
+    async fn test_handle_connect_with_args_errors() {
+        let _ = crate::persistence::AuthDAO::cleanup_test();
 
         let parsed = ParsedCommand {
             name: "connect".to_string(),
@@ -691,65 +656,11 @@ mod tests {
         let mut session_manager = SessionManager::new();
         let result = handle_connect(&parsed, &mut session_manager).await;
         match result {
-            CommandResult::Success(msg) => {
-                assert!(msg.contains("not configured") || msg.contains("is not configured"));
-            }
-            _ => panic!("Expected Success"),
+            CommandResult::Error(msg) => assert!(msg.contains("Usage: /connect")),
+            _ => panic!("Expected Error"),
         }
 
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
-    }
-
-    #[tokio::test]
-    async fn test_handle_connect_with_api_key() {
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
-
-        let parsed = ParsedCommand {
-            name: "connect".to_string(),
-            args: vec!["nano-gpt".to_string(), "sk-test-key".to_string()],
-            raw: "/connect nano-gpt sk-test-key".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
-        };
-        let mut session_manager = SessionManager::new();
-        let result = handle_connect(&parsed, &mut session_manager).await;
-        match result {
-            CommandResult::Success(msg) => {
-                assert!(msg.contains("API key configured"));
-            }
-            _ => panic!("Expected Success"),
-        }
-
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
-    }
-
-    #[tokio::test]
-    async fn test_handle_connect_and_retrieve() {
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
-
-        let mut session_manager = SessionManager::new();
-
-        let parsed1 = ParsedCommand {
-            name: "connect".to_string(),
-            args: vec!["nano-gpt".to_string(), "sk-test-key".to_string()],
-            raw: "/connect nano-gpt sk-test-key".to_string(),
-            prefs_dao: None,
-            active_model_id: None,
-        };
-        let result1 = handle_connect(&parsed1, &mut session_manager).await;
-        match result1 {
-            CommandResult::Success(msg) => {
-                assert!(msg.contains("API key configured"));
-            }
-            _ => panic!("Expected Success"),
-        }
-
-        let config = crate::config::ApiKeyConfig::load_test().unwrap();
-        if let Some(api_key) = config.get_api_key("nano-gpt") {
-            assert_eq!(api_key, "sk-test-key");
-        }
-
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let _ = crate::persistence::AuthDAO::cleanup_test();
     }
 
     #[tokio::test]
@@ -800,7 +711,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_models_cleanup() {
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let _ = crate::persistence::AuthDAO::cleanup_test();
         let _ = crate::model::discovery::Discovery::cleanup_test();
         let parsed = ParsedCommand {
             name: "models".to_string(),
@@ -819,7 +730,7 @@ mod tests {
             CommandResult::Error(_) => {}
             _ => panic!("Expected ShowDialog or Error"),
         }
-        let _ = crate::config::ApiKeyConfig::cleanup_test();
+        let _ = crate::persistence::AuthDAO::cleanup_test();
         let _ = crate::model::discovery::Discovery::cleanup_test();
     }
 

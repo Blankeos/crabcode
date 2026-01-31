@@ -1,9 +1,10 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
 use std::path::PathBuf;
 
-use super::{ensure_data_dir, get_data_dir};
+use super::get_data_dir;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -24,14 +25,69 @@ pub struct AuthDAO {
 
 impl AuthDAO {
     pub fn new() -> Result<Self> {
-        let data_dir = get_data_dir();
-        ensure_data_dir()?;
-        Ok(Self {
-            auth_path: data_dir.join("auth.json"),
-        })
+        let auth_path = Self::auth_path();
+        if let Some(parent) = auth_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(Self { auth_path })
+    }
+
+    fn auth_path() -> PathBuf {
+        if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+            PathBuf::from("/tmp/crabcode_test_data").join("auth.json")
+        } else {
+            let data_dir = get_data_dir();
+            data_dir.join("auth.json")
+        }
+    }
+
+    fn legacy_api_keys_path() -> PathBuf {
+        if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+            PathBuf::from("/tmp/crabcode_test_api_keys.json")
+        } else {
+            dirs::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("crabcode")
+                .join("api_keys.json")
+        }
+    }
+
+    fn try_migrate_legacy_api_keys(&self) -> Result<()> {
+        if self.auth_path.exists() {
+            return Ok(());
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct LegacyApiKeyConfig {
+            api_keys: HashMap<String, String>,
+        }
+
+        let legacy_path = Self::legacy_api_keys_path();
+        if !legacy_path.exists() {
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&legacy_path)?;
+        let legacy: LegacyApiKeyConfig = serde_json::from_str(&content)?;
+        if legacy.api_keys.is_empty() {
+            return Ok(());
+        }
+
+        let mut providers: HashMap<String, AuthConfig> = HashMap::new();
+        for (name, key) in legacy.api_keys {
+            providers.insert(name, AuthConfig::Api { key });
+        }
+
+        self.save(&providers)?;
+
+        // Best-effort cleanup: once migrated, avoid keeping two sources of truth.
+        let _ = std::fs::remove_file(&legacy_path);
+        Ok(())
     }
 
     pub fn load(&self) -> Result<HashMap<String, AuthConfig>> {
+        self.try_migrate_legacy_api_keys()?;
+
         if !self.auth_path.exists() {
             return Ok(HashMap::new());
         }
@@ -40,6 +96,9 @@ impl AuthDAO {
     }
 
     pub fn save(&self, providers: &HashMap<String, AuthConfig>) -> Result<()> {
+        if let Some(parent) = self.auth_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let content = serde_json::to_string_pretty(providers)?;
         std::fs::write(&self.auth_path, content)?;
         Ok(())
@@ -63,5 +122,22 @@ impl AuthDAO {
             AuthConfig::Api { key } => Some(key.clone()),
             AuthConfig::OAuth { access, .. } => Some(access.clone()),
         }))
+    }
+}
+
+#[cfg(test)]
+impl AuthDAO {
+    pub fn cleanup_test() -> Result<()> {
+        let auth_path = Self::auth_path();
+        if auth_path.exists() {
+            std::fs::remove_file(&auth_path)?;
+        }
+
+        let legacy_path = Self::legacy_api_keys_path();
+        if legacy_path.exists() {
+            std::fs::remove_file(&legacy_path)?;
+        }
+
+        Ok(())
     }
 }
