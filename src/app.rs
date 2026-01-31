@@ -93,6 +93,8 @@ pub struct App {
     pub suggestions_popup_state: SuggestionsPopupState,
     pub models_dialog_state: ModelsDialogState,
     pub themes_dialog_state: ThemesDialogState,
+    themes_dialog_original_theme_index: usize,
+    themes_dialog_committed: bool,
     pub connect_dialog_state: ConnectDialogState,
     pub sessions_dialog_state: SessionsDialogState,
     pub session_rename_dialog_state: SessionRenameDialogState,
@@ -240,6 +242,8 @@ impl App {
             suggestions_popup_state,
             models_dialog_state,
             themes_dialog_state,
+            themes_dialog_original_theme_index: 0,
+            themes_dialog_committed: false,
             connect_dialog_state,
             sessions_dialog_state,
             session_rename_dialog_state,
@@ -449,11 +453,19 @@ impl App {
                     handle_themes_dialog_key_event(&mut self.themes_dialog_state, key);
 
                 match action {
+                    crate::views::themes_dialog::ThemesDialogAction::PreviewTheme { theme_id } => {
+                        if let Some((idx, _)) =
+                            self.themes.iter().enumerate().find(|(_, t)| t.id == theme_id)
+                        {
+                            self.current_theme_index = idx;
+                        }
+                    }
                     crate::views::themes_dialog::ThemesDialogAction::SelectTheme { theme_id } => {
                         if let Some((idx, theme)) =
                             self.themes.iter().enumerate().find(|(_, t)| t.id == theme_id)
                         {
                             self.current_theme_index = idx;
+                            self.themes_dialog_committed = true;
                             push_toast(ratatui_toolkit::Toast::new(
                                 format!("Theme: {}", theme.id),
                                 ratatui_toolkit::ToastLevel::Info,
@@ -465,6 +477,9 @@ impl App {
                 }
 
                 if !self.themes_dialog_state.dialog.is_visible() {
+                    if !self.themes_dialog_committed {
+                        self.current_theme_index = self.themes_dialog_original_theme_index;
+                    }
                     self.overlay_focus = OverlayFocus::None;
                 }
                 true
@@ -755,7 +770,29 @@ impl App {
         if self.overlay_focus == OverlayFocus::ModelsDialog {
             handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::ThemesDialog {
+            let before = self
+                .themes_dialog_state
+                .dialog
+                .get_selected()
+                .map(|it| it.id.clone());
+
             handle_themes_dialog_mouse_event(&mut self.themes_dialog_state, mouse);
+
+            let after = self
+                .themes_dialog_state
+                .dialog
+                .get_selected()
+                .map(|it| it.id.clone());
+
+            if before != after {
+                if let Some(theme_id) = after {
+                    if let Some((idx, _)) =
+                        self.themes.iter().enumerate().find(|(_, t)| t.id == theme_id)
+                    {
+                        self.current_theme_index = idx;
+                    }
+                }
+            }
         } else if self.overlay_focus == OverlayFocus::ConnectDialog {
             handle_connect_dialog_mouse_event(&mut self.connect_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::SessionsDialog {
@@ -848,6 +885,19 @@ impl App {
                         .join(""),
                 );
                 self.themes_dialog_state.dialog.selected_index = 0;
+
+                if let Some(theme_id) = self
+                    .themes_dialog_state
+                    .dialog
+                    .get_selected()
+                    .map(|it| it.id.clone())
+                {
+                    if let Some((idx, _)) =
+                        self.themes.iter().enumerate().find(|(_, t)| t.id == theme_id)
+                    {
+                        self.current_theme_index = idx;
+                    }
+                }
             }
             (_, OverlayFocus::ConnectDialog) => {
                 self.connect_dialog_state
@@ -1415,6 +1465,8 @@ impl App {
         self.themes_dialog_state = init_themes_dialog("Themes", items);
         self.themes_dialog_state.dialog.show();
         self.themes_dialog_state.dialog.selected_index = selected_index;
+        self.themes_dialog_original_theme_index = self.current_theme_index;
+        self.themes_dialog_committed = false;
         self.overlay_focus = OverlayFocus::ThemesDialog;
     }
 

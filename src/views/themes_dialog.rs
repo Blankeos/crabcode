@@ -6,6 +6,7 @@ use crate::ui::components::dialog::{Dialog, DialogItem};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThemesDialogAction {
+    PreviewTheme { theme_id: String },
     SelectTheme { theme_id: String },
     None,
 }
@@ -65,6 +66,8 @@ pub fn handle_themes_dialog_key_event(
         return ThemesDialogAction::None;
     }
 
+    let before = dialog_state.dialog.get_selected().map(|it| it.id.clone());
+
     match event.code {
         KeyCode::Enter => {
             dialog_state.dialog.hide();
@@ -76,6 +79,16 @@ pub fn handle_themes_dialog_key_event(
         }
         _ => {
             dialog_state.dialog.handle_key_event(event);
+        }
+    }
+
+    if dialog_state.dialog.is_visible() {
+        let after = dialog_state.dialog.get_selected().map(|it| it.id.clone());
+
+        if before != after {
+            if let Some(theme_id) = after {
+                return ThemesDialogAction::PreviewTheme { theme_id };
+            }
         }
     }
 
