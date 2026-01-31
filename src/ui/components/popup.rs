@@ -1,5 +1,5 @@
 use crate::autocomplete::Suggestion;
-use crate::theme::ThemeColors;
+use crate::theme::{contrast_text, ThemeColors};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::Rect,
@@ -126,7 +126,8 @@ impl Popup {
             .enumerate()
             .map(|(i, suggestion)| {
                 let (bg_style, name_fg, desc_fg) = if i == self.selected_index {
-                    (colors.primary, colors.background, colors.background)
+                    let fg = contrast_text(colors.primary);
+                    (colors.primary, fg, fg)
                 } else {
                     (Color::Reset, Color::White, Color::Rgb(150, 150, 150))
                 };

@@ -1,42 +1,44 @@
 {
   "$schema": "https://opencode.ai/theme.json",
   "defs": {
-    "darkStep1": "#1a1b26",
-    "darkStep2": "#1e2030",
-    "darkStep3": "#222436",
-    "darkStep4": "#292e42",
-    "darkStep5": "#3b4261",
-    "darkStep6": "#545c7e",
-    "darkStep7": "#737aa2",
-    "darkStep8": "#9099b2",
-    "darkStep9": "#82aaff",
-    "darkStep10": "#89b4fa",
-    "darkStep11": "#828bb8",
-    "darkStep12": "#c8d3f5",
-    "darkRed": "#ff757f",
-    "darkOrange": "#ff966c",
-    "darkYellow": "#ffc777",
-    "darkGreen": "#c3e88d",
-    "darkCyan": "#86e1fc",
-    "darkPurple": "#c099ff",
-    "lightStep1": "#e1e2e7",
-    "lightStep2": "#d5d6db",
-    "lightStep3": "#c8c9ce",
-    "lightStep4": "#b9bac1",
-    "lightStep5": "#a8aecb",
-    "lightStep6": "#9699a8",
-    "lightStep7": "#737a8c",
-    "lightStep8": "#5a607d",
-    "lightStep9": "#2e7de9",
-    "lightStep10": "#1a6ce7",
-    "lightStep11": "#8990a3",
-    "lightStep12": "#3760bf",
-    "lightRed": "#f52a65",
-    "lightOrange": "#b15c00",
-    "lightYellow": "#8c6c3e",
-    "lightGreen": "#587539",
-    "lightCyan": "#007197",
-    "lightPurple": "#9854f1"
+    "darkStep1": "#0a0a0a",
+    "darkStep2": "#141414",
+    "darkStep3": "#1e1e1e",
+    "darkStep4": "#282828",
+    "darkStep5": "#323232",
+    "darkStep6": "#3c3c3c",
+    "darkStep7": "#484848",
+    "darkStep8": "#606060",
+    "darkStep9": "#EC5B2B",
+    "darkStep10": "#EE7948",
+    "darkStep11": "#808080",
+    "darkStep12": "#eeeeee",
+    "darkSecondary": "#EE7948",
+    "darkAccent": "#FFF7F1",
+    "darkRed": "#e06c75",
+    "darkOrange": "#EC5B2B",
+    "darkBlue": "#6ba1e6",
+    "darkCyan": "#56b6c2",
+    "darkYellow": "#e5c07b",
+    "lightStep1": "#ffffff",
+    "lightStep2": "#FFF7F1",
+    "lightStep3": "#f5f0eb",
+    "lightStep4": "#ebebeb",
+    "lightStep5": "#e1e1e1",
+    "lightStep6": "#d4d4d4",
+    "lightStep7": "#b8b8b8",
+    "lightStep8": "#a0a0a0",
+    "lightStep9": "#EC5B2B",
+    "lightStep10": "#c94d24",
+    "lightStep11": "#8a8a8a",
+    "lightStep12": "#1a1a1a",
+    "lightSecondary": "#EE7948",
+    "lightAccent": "#c94d24",
+    "lightRed": "#d1383d",
+    "lightOrange": "#EC5B2B",
+    "lightBlue": "#0062d1",
+    "lightCyan": "#318795",
+    "lightYellow": "#b0851f"
   },
   "theme": {
     "primary": {
@@ -44,12 +46,12 @@
       "light": "lightStep9"
     },
     "secondary": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
+      "dark": "darkSecondary",
+      "light": "lightSecondary"
     },
     "accent": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
+      "dark": "darkAccent",
+      "light": "lightAccent"
     },
     "error": {
       "dark": "darkRed",
@@ -60,12 +62,12 @@
       "light": "lightOrange"
     },
     "success": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
+      "dark": "darkBlue",
+      "light": "lightBlue"
     },
     "info": {
-      "dark": "darkStep9",
-      "light": "lightStep9"
+      "dark": "darkCyan",
+      "light": "lightCyan"
     },
     "text": {
       "dark": "darkStep12",
@@ -74,6 +76,10 @@
     "textMuted": {
       "dark": "darkStep11",
       "light": "lightStep11"
+    },
+    "selectedListItemText": {
+      "dark": "#0a0a0a",
+      "light": "#ffffff"
     },
     "background": {
       "dark": "darkStep1",
@@ -88,20 +94,20 @@
       "light": "lightStep3"
     },
     "border": {
-      "dark": "darkStep7",
-      "light": "lightStep7"
+      "dark": "#EC5B2B",
+      "light": "#EC5B2B"
     },
     "borderActive": {
-      "dark": "darkStep8",
-      "light": "lightStep8"
+      "dark": "#EE7948",
+      "light": "#c94d24"
     },
     "borderSubtle": {
       "dark": "darkStep6",
       "light": "lightStep6"
     },
     "diffAdded": {
-      "dark": "#4fd6be",
-      "light": "#1e725c"
+      "dark": "#6ba1e6",
+      "light": "#0062d1"
     },
     "diffRemoved": {
       "dark": "#c53b53",
@@ -116,16 +122,16 @@
       "light": "#7086b5"
     },
     "diffHighlightAdded": {
-      "dark": "#b8db87",
-      "light": "#4db380"
+      "dark": "#6ba1e6",
+      "light": "#0062d1"
     },
     "diffHighlightRemoved": {
       "dark": "#e26a75",
       "light": "#f52a65"
     },
     "diffAddedBg": {
-      "dark": "#20303b",
-      "light": "#d5e5d5"
+      "dark": "#1a2a3d",
+      "light": "#e0edfa"
     },
     "diffRemovedBg": {
       "dark": "#37222c",
@@ -140,8 +146,8 @@
       "light": "lightStep3"
     },
     "diffAddedLineNumberBg": {
-      "dark": "#1b2b34",
-      "light": "#c5d5c5"
+      "dark": "#162535",
+      "light": "#d0e5f5"
     },
     "diffRemovedLineNumberBg": {
       "dark": "#2d1f26",
@@ -152,8 +158,8 @@
       "light": "lightStep12"
     },
     "markdownHeading": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
+      "dark": "#EC5B2B",
+      "light": "#EC5B2B"
     },
     "markdownLink": {
       "dark": "darkStep9",
@@ -164,11 +170,11 @@
       "light": "lightCyan"
     },
     "markdownCode": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
+      "dark": "darkBlue",
+      "light": "lightBlue"
     },
     "markdownBlockQuote": {
-      "dark": "darkYellow",
+      "dark": "#FFF7F1",
       "light": "lightYellow"
     },
     "markdownEmph": {
@@ -176,8 +182,8 @@
       "light": "lightYellow"
     },
     "markdownStrong": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
+      "dark": "#EE7948",
+      "light": "#EC5B2B"
     },
     "markdownHorizontalRule": {
       "dark": "darkStep11",
@@ -208,24 +214,24 @@
       "light": "lightStep11"
     },
     "syntaxKeyword": {
-      "dark": "darkPurple",
-      "light": "lightPurple"
+      "dark": "#EC5B2B",
+      "light": "#EC5B2B"
     },
     "syntaxFunction": {
-      "dark": "darkStep9",
-      "light": "lightStep9"
+      "dark": "#EE7948",
+      "light": "#c94d24"
     },
     "syntaxVariable": {
       "dark": "darkRed",
       "light": "lightRed"
     },
     "syntaxString": {
-      "dark": "darkGreen",
-      "light": "lightGreen"
+      "dark": "darkBlue",
+      "light": "lightBlue"
     },
     "syntaxNumber": {
-      "dark": "darkOrange",
-      "light": "lightOrange"
+      "dark": "#FFF7F1",
+      "light": "#EC5B2B"
     },
     "syntaxType": {
       "dark": "darkYellow",

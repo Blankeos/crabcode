@@ -15,6 +15,7 @@ const TIMEOUT_SECONDS: u64 = 5;
 #[derive(Debug, Clone, PartialEq)]
 pub enum WhichKeyAction {
     ShowModels,
+    ShowThemes,
     ShowSessions,
     NewSession,
     Quit,
@@ -46,6 +47,11 @@ impl WhichKeyState {
                 key: "m".to_string(),
                 description: "Open Models dialog".to_string(),
                 action: WhichKeyAction::ShowModels,
+            },
+            KeyBinding {
+                key: "t".to_string(),
+                description: "Open Themes dialog".to_string(),
+                action: WhichKeyAction::ShowThemes,
             },
             KeyBinding {
                 key: "l".to_string(),
@@ -119,6 +125,10 @@ impl WhichKeyState {
                 self.hide();
                 WhichKeyAction::ShowModels
             }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                self.hide();
+                WhichKeyAction::ShowThemes
+            }
             KeyCode::Char('l') | KeyCode::Char('L') => {
                 self.hide();
                 WhichKeyAction::ShowSessions
@@ -165,15 +175,14 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
 
     let area = f.area();
     let popup_width = 40u16;
-    // Base height: 2 (borders) + 1 (empty) + 4 (bindings) + 1 (empty) + 1 (ESC) = 9
-    // Add 2 more lines per chat binding when active
-    let base_height = 9u16;
     let chat_bindings_count = if state.is_chat_active {
-        state.chat_bindings.len() as u16
+        state.chat_bindings.len()
     } else {
         0
     };
-    let popup_height = base_height + chat_bindings_count * 1;
+    // Content lines: 1 (empty) + bindings + chat bindings + 1 (empty) + 1 (ESC)
+    // Add 2 for top/bottom borders.
+    let popup_height = (state.bindings.len() + chat_bindings_count + 5) as u16;
 
     let popup_area = Rect {
         x: area.x + (area.width.saturating_sub(popup_width)) / 2,

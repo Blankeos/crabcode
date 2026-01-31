@@ -1,4 +1,4 @@
-use crate::theme::ThemeColors;
+use crate::theme::{contrast_text, ThemeColors};
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher,
@@ -68,6 +68,10 @@ pub struct Dialog {
 }
 
 impl Dialog {
+    fn group_has_header(group: &str) -> bool {
+        !group.is_empty()
+    }
+
     pub fn new(title: impl Into<String>) -> Self {
         let title = title.into();
         let mut search_textarea = TextArea::default();
@@ -309,8 +313,9 @@ impl Dialog {
             return 1;
         }
         let mut count = 0;
-        for (_, items) in &self.filtered_items {
-            count += items.len() + 1;
+        for (group, items) in &self.filtered_items {
+            let header = if Self::group_has_header(group) { 1 } else { 0 };
+            count += items.len() + header;
         }
         count
     }
@@ -319,12 +324,14 @@ impl Dialog {
         let mut line_index = 0;
         let mut current_item_index = 0;
 
-        for (_, items) in &self.filtered_items {
+        for (group, items) in &self.filtered_items {
             if items.is_empty() {
                 continue;
             }
 
-            line_index += 1;
+            if Self::group_has_header(group) {
+                line_index += 1;
+            }
 
             for _item in items {
                 if current_item_index == item_index {
@@ -518,13 +525,16 @@ impl Dialog {
         let mut current_line = 0;
         let mut item_index = 0;
 
-        for (_, items) in &self.filtered_items {
+        for (group, items) in &self.filtered_items {
             if items.is_empty() {
                 continue;
             }
 
-            let group_header_line = current_line;
-            let items_start_line = group_header_line + 1;
+            let items_start_line = if Self::group_has_header(group) {
+                current_line + 1
+            } else {
+                current_line
+            };
             let items_end_line = items_start_line + items.len();
 
             if line >= items_start_line && line < items_end_line {
@@ -651,12 +661,15 @@ impl Dialog {
                 if items.is_empty() {
                     continue;
                 }
-                content_lines.push(Line::from(vec![Span::styled(
-                    group.clone(),
-                    Style::default()
-                        .fg(colors.primary)
-                        .add_modifier(Modifier::BOLD),
-                )]));
+
+                if Self::group_has_header(group) {
+                    content_lines.push(Line::from(vec![Span::styled(
+                        group.clone(),
+                        Style::default()
+                            .fg(colors.primary)
+                            .add_modifier(Modifier::BOLD),
+                    )]));
+                }
 
                 for item in items {
                     let is_selected = item_index == self.selected_index;
@@ -729,9 +742,10 @@ impl Dialog {
                     };
 
                     if is_selected {
+                        let fg = contrast_text(colors.primary);
                         for span in &mut spans {
                             let mut style = span.style.clone();
-                            style = style.fg(Color::Black).bg(colors.primary);
+                            style = style.fg(fg).bg(colors.primary);
                             span.style = style;
                         }
                     }

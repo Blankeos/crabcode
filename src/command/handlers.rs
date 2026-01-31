@@ -94,19 +94,39 @@ pub fn handle_connect<'a>(
                 Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
             };
 
-            let discovery = match crate::model::discovery::Discovery::new() {
-                Ok(d) => d,
-                Err(e) => {
-                    return CommandResult::Error(format!(
-                        "Failed to initialize provider discovery: {}",
-                        e
-                    ))
-                }
-            };
+            fn fallback_providers() -> std::collections::HashMap<String, crate::model::discovery::Provider> {
+                use crate::model::discovery::Provider;
+                use std::collections::HashMap;
 
-            let providers_map = match discovery.fetch_providers().await {
-                Ok(p) => p,
-                Err(e) => return CommandResult::Error(format!("Failed to fetch providers: {}", e)),
+                let mut out: HashMap<String, Provider> = HashMap::new();
+                for (id, name) in [
+                    ("opencode", "OpenCode"),
+                    ("anthropic", "Anthropic"),
+                    ("openai", "OpenAI"),
+                    ("google", "Google"),
+                ] {
+                    out.insert(
+                        id.to_string(),
+                        Provider {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            api: String::new(),
+                            doc: String::new(),
+                            env: Vec::new(),
+                            npm: String::new(),
+                            models: HashMap::new(),
+                        },
+                    );
+                }
+                out
+            }
+
+            let providers_map = match crate::model::discovery::Discovery::new() {
+                Ok(discovery) => match discovery.fetch_providers().await {
+                    Ok(p) => p,
+                    Err(_) => fallback_providers(),
+                },
+                Err(_) => fallback_providers(),
             };
 
             const POPULAR_PROVIDERS: &[&str] = &[
@@ -390,6 +410,24 @@ pub fn handle_models<'a>(
     })
 }
 
+pub fn handle_themes<'a>(
+    parsed: &'a ParsedCommand<'a>,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error(
+                "This command only opens the themes dialog. Usage: /themes".to_string(),
+            );
+        }
+
+        // The app intercepts /themes to show the dialog.
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_refreshmodels<'a>(
     _parsed: &'a ParsedCommand<'a>,
     _sm: &'a mut SessionManager,
@@ -470,6 +508,12 @@ pub fn register_all_commands(registry: &mut Registry) {
         name: "models".to_string(),
         description: "List available models".to_string(),
         handler: handle_models,
+    });
+
+    registry.register(Command {
+        name: "themes".to_string(),
+        description: "Choose a theme".to_string(),
+        handler: handle_themes,
     });
 
     registry.register(Command {
@@ -754,12 +798,13 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 7);
+        assert_eq!(names.len(), 8);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
         assert!(names.contains(&"connect".to_string()));
         assert!(names.contains(&"models".to_string()));
+        assert!(names.contains(&"themes".to_string()));
         assert!(names.contains(&"home".to_string()));
         assert!(names.contains(&"refreshmodels".to_string()));
     }

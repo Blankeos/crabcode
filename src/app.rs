@@ -23,6 +23,10 @@ use crate::views::models_dialog::{
     handle_models_dialog_key_event, handle_models_dialog_mouse_event, init_models_dialog,
     render_models_dialog,
 };
+use crate::views::themes_dialog::{
+    handle_themes_dialog_key_event, handle_themes_dialog_mouse_event, init_themes_dialog,
+    render_themes_dialog,
+};
 use crate::views::session_rename_dialog::{
     handle_session_rename_dialog_key_event, init_session_rename_dialog,
     render_session_rename_dialog, RenameAction,
@@ -37,7 +41,7 @@ use crate::views::suggestions_popup::{
 };
 use crate::views::{
     ChatState, ConnectDialogState, HomeState, ModelsDialogState, SessionRenameDialogState,
-    SessionsDialogState, SuggestionsPopupState,
+    SessionsDialogState, SuggestionsPopupState, ThemesDialogState,
 };
 
 use crate::{
@@ -69,6 +73,7 @@ pub enum BaseFocus {
 pub enum OverlayFocus {
     None,
     ModelsDialog,
+    ThemesDialog,
     ConnectDialog,
     ApiKeyInput,
     SuggestionsPopup,
@@ -87,6 +92,7 @@ pub struct App {
     pub chat_state: ChatState,
     pub suggestions_popup_state: SuggestionsPopupState,
     pub models_dialog_state: ModelsDialogState,
+    pub themes_dialog_state: ThemesDialogState,
     pub connect_dialog_state: ConnectDialogState,
     pub sessions_dialog_state: SessionsDialogState,
     pub session_rename_dialog_state: SessionRenameDialogState,
@@ -140,6 +146,7 @@ impl App {
         let chat_state = init_chat(Chat::new(), &agent);
         let suggestions_popup_state = init_suggestions_popup(Popup::new());
         let models_dialog_state = init_models_dialog("Models", vec![]);
+        let themes_dialog_state = init_themes_dialog("Themes", vec![]);
         let connect_dialog_state = init_connect_dialog();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
         let which_key_state = crate::views::which_key::init_which_key();
@@ -232,6 +239,7 @@ impl App {
             chat_state,
             suggestions_popup_state,
             models_dialog_state,
+            themes_dialog_state,
             connect_dialog_state,
             sessions_dialog_state,
             session_rename_dialog_state,
@@ -436,6 +444,31 @@ impl App {
                 }
                 true
             }
+            OverlayFocus::ThemesDialog => {
+                let action =
+                    handle_themes_dialog_key_event(&mut self.themes_dialog_state, key);
+
+                match action {
+                    crate::views::themes_dialog::ThemesDialogAction::SelectTheme { theme_id } => {
+                        if let Some((idx, theme)) =
+                            self.themes.iter().enumerate().find(|(_, t)| t.id == theme_id)
+                        {
+                            self.current_theme_index = idx;
+                            push_toast(ratatui_toolkit::Toast::new(
+                                format!("Theme: {}", theme.id),
+                                ratatui_toolkit::ToastLevel::Info,
+                                None,
+                            ));
+                        }
+                    }
+                    crate::views::themes_dialog::ThemesDialogAction::None => {}
+                }
+
+                if !self.themes_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
             OverlayFocus::ConnectDialog => {
                 if handle_connect_dialog_key_event(&mut self.connect_dialog_state, key) {
                     return;
@@ -550,6 +583,13 @@ impl App {
                         tokio::task::block_in_place(|| {
                             let rt = tokio::runtime::Handle::current();
                             rt.block_on(self.process_input("/models"));
+                        });
+                    }
+                    crate::views::which_key::WhichKeyAction::ShowThemes => {
+                        self.overlay_focus = OverlayFocus::None;
+                        tokio::task::block_in_place(|| {
+                            let rt = tokio::runtime::Handle::current();
+                            rt.block_on(self.process_input("/themes"));
                         });
                     }
                     crate::views::which_key::WhichKeyAction::ShowSessions => {
@@ -714,6 +754,8 @@ impl App {
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if self.overlay_focus == OverlayFocus::ModelsDialog {
             handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
+        } else if self.overlay_focus == OverlayFocus::ThemesDialog {
+            handle_themes_dialog_mouse_event(&mut self.themes_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::ConnectDialog {
             handle_connect_dialog_mouse_event(&mut self.connect_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::SessionsDialog {
@@ -793,6 +835,20 @@ impl App {
                 );
                 self.models_dialog_state.dialog.selected_index = 0;
             }
+            (_, OverlayFocus::ThemesDialog) => {
+                self.themes_dialog_state
+                    .dialog
+                    .search_textarea
+                    .insert_str(&text);
+                self.themes_dialog_state.dialog.set_search_query(
+                    self.themes_dialog_state
+                        .dialog
+                        .search_textarea
+                        .lines()
+                        .join(""),
+                );
+                self.themes_dialog_state.dialog.selected_index = 0;
+            }
             (_, OverlayFocus::ConnectDialog) => {
                 self.connect_dialog_state
                     .dialog
@@ -859,6 +915,10 @@ impl App {
 
         match parse_input(input) {
             InputType::Command(mut parsed) => {
+                if parsed.name == "themes" {
+                    self.show_themes_dialog();
+                    return;
+                }
                 parsed.prefs_dao = self.prefs_dao.as_ref();
                 parsed.active_model_id = Some(self.model.clone());
 
@@ -976,6 +1036,10 @@ impl App {
         &mut self,
         mut parsed: crate::command::parser::ParsedCommand<'_>,
     ) {
+        if parsed.name == "themes" {
+            self.show_themes_dialog();
+            return;
+        }
         parsed.prefs_dao = self.prefs_dao.as_ref();
         parsed.active_model_id = Some(self.model.clone());
 
@@ -1309,6 +1373,49 @@ impl App {
         });
 
         self.models_dialog_state.refresh_items(items);
+    }
+
+    fn show_themes_dialog(&mut self) {
+        use crate::ui::components::dialog::DialogItem;
+
+        let current_id = self
+            .themes
+            .get(self.current_theme_index)
+            .map(|t| t.id.clone());
+
+        let mut items: Vec<DialogItem> = self
+            .themes
+            .iter()
+            .map(|t| {
+                let is_active = current_id.as_deref() == Some(t.id.as_str());
+                DialogItem {
+                    id: t.id.clone(),
+                    name: t.id.clone(),
+                    group: String::new(),
+                    description: String::new(),
+                    tip: if is_active {
+                        Some("Active".to_string())
+                    } else {
+                        None
+                    },
+                    provider_id: String::new(),
+                }
+            })
+            .collect();
+
+        items.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let mut selected_index = 0usize;
+        if let Some(ref id) = current_id {
+            if let Some((idx, _)) = items.iter().enumerate().find(|(_, it)| &it.id == id) {
+                selected_index = idx;
+            }
+        }
+
+        self.themes_dialog_state = init_themes_dialog("Themes", items);
+        self.themes_dialog_state.dialog.show();
+        self.themes_dialog_state.dialog.selected_index = selected_index;
+        self.overlay_focus = OverlayFocus::ThemesDialog;
     }
 
     fn cleanup_streaming(&mut self) {
@@ -1690,6 +1797,7 @@ impl App {
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
                     && self.overlay_focus != OverlayFocus::ModelsDialog
+                    && self.overlay_focus != OverlayFocus::ThemesDialog
                 {
                     let main_chunks = ratatui::layout::Layout::default()
                         .direction(ratatui::layout::Direction::Vertical)
@@ -1732,6 +1840,7 @@ impl App {
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
                     && self.overlay_focus != OverlayFocus::ModelsDialog
+                    && self.overlay_focus != OverlayFocus::ThemesDialog
                 {
                     let input_height = self.input.get_height();
                     let main_chunks = ratatui::layout::Layout::default()
@@ -1763,6 +1872,12 @@ impl App {
             && self.models_dialog_state.dialog.is_visible()
         {
             render_models_dialog(f, &mut self.models_dialog_state, size, colors);
+        }
+
+        if self.overlay_focus == OverlayFocus::ThemesDialog
+            && self.themes_dialog_state.dialog.is_visible()
+        {
+            render_themes_dialog(f, &mut self.themes_dialog_state, size, colors);
         }
 
         if self.overlay_focus == OverlayFocus::ConnectDialog

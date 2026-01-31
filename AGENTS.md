@@ -2,6 +2,10 @@
 
 This file contains important information about the codebase that the AI agent should be aware of.
 
+## Common Project Commands
+
+Before adding/changing scripts, make sure to check `justfile` for existing recipes (this repo uses `just` and typically runs scripts via `bun`).
+
 ## File Locations
 
 ### SQLite Database
