@@ -1,0 +1,105 @@
+---
+title: Configuration
+description: Crabcode configur/ation keys and merge behavior.
+---
+
+# Configuration
+
+Crabcode reads up to 4 config files (JSON or JSONC) and deep-merges them with increasing priority:
+
+1. OpenCode global
+2. Crabcode global
+3. OpenCode local
+4. Crabcode local
+
+Only these keys are implemented in phase 1: `theme`, `model`, `sounds`.
+
+## File Format
+
+- `.json`: strict JSON
+- `.jsonc`: JSON with comments + trailing commas
+
+Recommended filename: `crabcode.jsonc`.
+
+## Quick Example
+
+```jsonc
+{
+  // Optional; enables editor tooling when you host a schema file
+  "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/schema/crabcode.schema.json",
+
+  "theme": "default",
+  "model": "openai/gpt-5.2",
+
+  "sounds": {
+    "complete": { "enabled": true, "file": "/absolute/path.wav" },
+    "error": { "enabled": false },
+  },
+}
+```
+
+## Default Template
+
+If you want a fully-commented starting point, copy:
+
+- `defaults/crabcode.jsonc`
+
+## Source Of Truth (Prompt)
+
+Treat this section as the authoritative contract for `crabcode.json(c)`.
+
+### Top-Level Properties
+
+- `$schema` (string, optional)
+  - A URL to a JSON Schema for this config.
+
+- `theme` (string, optional)
+  - Theme ID (not a path).
+
+- `model` (string, optional)
+  - Default model ID, e.g. `openai/gpt-5.2`.
+
+- `sounds` (object, optional)
+  - Keys: `error`, `complete`, `permission`, `question` (each optional)
+  - Each sound event value is an object:
+    - `enabled` (boolean, optional)
+    - `file` (string, optional)
+      - Must be an absolute path. If not absolute, it is treated as disabled.
+  - Defaults:
+    - `complete.enabled = true`
+    - all other `*.enabled = false`
+    - if `file` is missing, the sound is disabled
+
+### Accepted (Merged) But Not Implemented Yet
+
+These keys are accepted and merged (for forward compatibility), but may have no runtime effect yet:
+
+- `agent`
+- `instructions`
+- `tools`
+- `mcp`
+- `provider`
+- `command`
+- `permission`
+- `compaction`
+- `watcher`
+- `default_agent`
+- `formatter`
+- `disabled_providers`
+- `enabled_providers`
+
+## Merge Rules
+
+- Object + object: recursively merge
+- Array + array: override entire array
+- Primitive or type mismatch: higher priority replaces lower
+- `null`: unset (removes the key from the merged result)
+
+## Variable Substitution
+
+After merging, Crabcode expands placeholders inside string values:
+
+- `{env:VAR_NAME}`: environment variable value (or empty if unset)
+- `{file:path}`: file contents (trims trailing newlines)
+  - `~` expands to home
+  - relative paths resolve relative to the config file containing the winning value

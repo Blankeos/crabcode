@@ -1,0 +1,20 @@
+{
+  "site": {
+    "name": "crabcode",
+    "repo": {
+      "owner": "blankeos",
+      "name": "crabcode",
+      "ref": "main",
+      "docsPath": "_docs",
+    },
+  },
+  "nav": [
+    {
+      "label": "Docs",
+      "items": [
+        { "label": "Overview", "path": "/" },
+        { "label": "Configuration", "path": "/config" },
+      ],
+    },
+  ],
+}

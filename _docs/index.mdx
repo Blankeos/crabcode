@@ -1,0 +1,72 @@
+---
+title: Docs Index
+description: Overview and entry points for crabcode documentation.
+---
+
+# crabcode docs
+
+crabcode is a Rust-first, terminal UI coding agent inspired by OpenCode, built for fast startup, interactive workflows, and configurable model support.
+
+## Start here
+
+- Project overview: `README.md`
+- Configuration reference: `_docs/config.mdx`
+
+## What crabcode includes
+
+- Ratatui TUI with keyboard-first workflows
+- Streaming responses and session management
+- Agent modes (PLAN for analysis, BUILD for implementation)
+- Model discovery and provider integration via models.dev + aisdk.rs
+- Optional sound effects for events (complete/error/permission/question)
+
+## Quick start
+
+```bash
+cargo install crabcode
+crabcode
+```
+
+Then run `/connect` inside the app to add a provider and choose a model.
+
+## Configuration
+
+Crabcode reads up to four JSON/JSONC config files and merges them in priority order. The canonical contract lives in `_docs/config.mdx`.
+
+Common keys (phase 1):
+
+- `theme`
+- `model`
+- `sounds`
+
+## Data locations
+
+These are OS-specific paths for local data.
+
+- Credentials: `~/Library/Application Support/crabcode/auth.json` (macOS), `~/.local/share/crabcode/auth.json` (Linux)
+- Preferences DB: `~/Library/Application Support/crabcode/data.db` (macOS), `~/.local/share/crabcode/data.db` (Linux)
+- models.dev cache: `~/Library/Caches/crabcode/models_dev_cache.json` (macOS), `~/.cache/crabcode/models_dev_cache.json` (Linux)
+
+## Commands
+
+Common in-app commands:
+
+- `/sessions`
+- `/new`
+- `/connect`
+- `/models`
+- `/exit`
+
+## Development
+
+```bash
+git clone https://github.com/blankeos/crabcode.git
+cd crabcode
+cargo build --release
+```
+
+Run tests:
+
+```bash
+cargo test
+```

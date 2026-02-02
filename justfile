@@ -10,5 +10,8 @@ preview:
 gen-themes:
     bun run scripts/gen-themes.ts
 
+devdocs:
+    gittydocs dev _docs
+
 log:
     tail -f app.log

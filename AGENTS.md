@@ -8,6 +8,10 @@ Before adding/changing scripts, make sure to check `justfile` for existing recip
 
 ## File Locations
 
+### Configuration Docs
+- **Location**: `_docs/config.mdx`
+- **Purpose**: Source-of-truth, human/AI-readable contract for `crabcode.json(c)`
+
 ### SQLite Database
 - **Location**: 
   - macOS: `~/Library/Application Support/crabcode/data.db`
