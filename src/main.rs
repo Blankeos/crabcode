@@ -148,11 +148,54 @@ async fn run_event_loop(
             // ));
 
             match event {
+                event::Event::Mouse(mouse) => {
+                    if matches!(
+                        mouse.kind,
+                        event::MouseEventKind::ScrollDown | event::MouseEventKind::ScrollUp
+                    ) {
+                        const MAX_SCROLL_PER_FRAME: usize = 6;
+                        let mut last_scroll = mouse;
+                        let mut scroll_count = 1usize;
+
+                        while event::poll(Duration::from_millis(0))? {
+                            let next = event::read()?;
+                            match next {
+                                event::Event::Mouse(next_mouse) => {
+                                    if matches!(
+                                        next_mouse.kind,
+                                        event::MouseEventKind::ScrollDown
+                                            | event::MouseEventKind::ScrollUp
+                                    ) {
+                                        if next_mouse.kind == last_scroll.kind {
+                                            scroll_count = scroll_count.saturating_add(1);
+                                        } else {
+                                            last_scroll = next_mouse;
+                                            scroll_count = 1;
+                                        }
+                                    } else {
+                                        app.handle_mouse_event(next_mouse);
+                                    }
+                                }
+                                event::Event::Key(key) => {
+                                    app.handle_keys(key);
+                                }
+                                event::Event::Paste(text) => {
+                                    app.handle_paste(text);
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        let repeat = scroll_count.min(MAX_SCROLL_PER_FRAME);
+                        for _ in 0..repeat {
+                            app.handle_mouse_event(last_scroll);
+                        }
+                    } else {
+                        app.handle_mouse_event(mouse);
+                    }
+                }
                 event::Event::Key(key) => {
                     app.handle_keys(key);
-                }
-                event::Event::Mouse(mouse) => {
-                    app.handle_mouse_event(mouse);
                 }
                 event::Event::Paste(text) => {
                     app.handle_paste(text);

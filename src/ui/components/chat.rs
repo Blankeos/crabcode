@@ -436,11 +436,11 @@ impl Chat {
 
         match event.kind {
             MouseEventKind::ScrollDown => {
-                self.scroll_down(3);
+                self.scroll_down(1);
                 true
             }
             MouseEventKind::ScrollUp => {
-                self.scroll_up(3);
+                self.scroll_up(1);
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
