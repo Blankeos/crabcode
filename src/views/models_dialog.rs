@@ -2,7 +2,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::{layout::Rect, Frame};
 
 use crate::theme::ThemeColors;
-use crate::ui::components::dialog::{Dialog, DialogItem};
+use crate::ui::components::dialog::{Dialog, DialogAction, DialogItem};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelsDialogAction {
@@ -29,7 +29,16 @@ impl ModelsDialogState {
 
     pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
         Self {
-            dialog: Dialog::with_items(title, items),
+            dialog: Dialog::with_items(title, items).with_actions(vec![
+                DialogAction {
+                    label: "Connect provider".to_string(),
+                    key: "ctrl+a".to_string(),
+                },
+                DialogAction {
+                    label: "Favorite".to_string(),
+                    key: "ctrl+f".to_string(),
+                },
+            ]),
         }
     }
 

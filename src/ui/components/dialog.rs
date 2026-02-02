@@ -850,35 +850,7 @@ impl Dialog {
         }
 
         let footer_line = if footer_spans.is_empty() {
-            Line::from(vec![
-                Span::styled(
-                    "Connect provider",
-                    Style::default()
-                        .fg(colors.primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    "ctrl+a",
-                    Style::default()
-                        .fg(colors.text_weak)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    "Favorite",
-                    Style::default()
-                        .fg(colors.primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    "ctrl+f",
-                    Style::default()
-                        .fg(colors.text_weak)
-                        .add_modifier(Modifier::DIM),
-                ),
-            ])
+            Line::from(vec![])
         } else {
             Line::from(footer_spans)
         };

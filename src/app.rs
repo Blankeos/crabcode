@@ -396,6 +396,20 @@ impl App {
                 }
             }
             OverlayFocus::ModelsDialog => {
+                if key.code == KeyCode::Char('a')
+                    && key.modifiers == event::KeyModifiers::CONTROL
+                {
+                    self.models_dialog_state.dialog.hide();
+                    if let crate::command::parser::InputType::Command(parsed) =
+                        crate::command::parser::parse_input("/connect")
+                    {
+                        tokio::task::block_in_place(|| {
+                            let rt = tokio::runtime::Handle::current();
+                            rt.block_on(self.process_command_input(parsed));
+                        });
+                    }
+                    return;
+                }
                 let action = handle_models_dialog_key_event(&mut self.models_dialog_state, key);
 
                 match action {
