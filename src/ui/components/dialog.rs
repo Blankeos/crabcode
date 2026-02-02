@@ -187,7 +187,9 @@ impl Dialog {
     }
 
     fn apply_filter(&mut self) {
-        let preferred_selected_id = self.get_selected().map(|item| item.id.clone());
+        let preferred_selected = self
+            .get_selected()
+            .map(|item| (item.id.clone(), item.provider_id.clone()));
 
         if self.search_query.is_empty() {
             self.filtered_items = self
@@ -243,10 +245,10 @@ impl Dialog {
             self.filtered_items = filtered;
         }
 
-        self.reconcile_selection_after_filter(preferred_selected_id);
+        self.reconcile_selection_after_filter(preferred_selected);
     }
 
-    fn reconcile_selection_after_filter(&mut self, preferred_selected_id: Option<String>) {
+    fn reconcile_selection_after_filter(&mut self, preferred_selected: Option<(String, String)>) {
         let flat_items = self.get_flat_items();
         if flat_items.is_empty() {
             self.selected_index = 0;
@@ -255,7 +257,16 @@ impl Dialog {
             return;
         }
 
-        if let Some(id) = preferred_selected_id {
+        if let Some((id, provider_id)) = preferred_selected {
+            if let Some(pos) = flat_items
+                .iter()
+                .position(|item| item.id == id && item.provider_id == provider_id)
+            {
+                self.selected_index = pos;
+                self.adjust_scroll();
+                return;
+            }
+
             if let Some(pos) = flat_items.iter().position(|item| item.id == id) {
                 self.selected_index = pos;
                 self.adjust_scroll();
@@ -424,6 +435,19 @@ impl Dialog {
     pub fn get_selected(&self) -> Option<&DialogItem> {
         let flat_items = self.get_flat_items();
         flat_items.get(self.selected_index).copied()
+    }
+
+    pub fn select_item_by_key(&mut self, id: &str, provider_id: &str) -> bool {
+        let flat_items = self.get_flat_items();
+        if let Some(pos) = flat_items
+            .iter()
+            .position(|item| item.id == id && item.provider_id == provider_id)
+        {
+            self.selected_index = pos;
+            self.adjust_scroll();
+            return true;
+        }
+        false
     }
 
     pub fn is_visible(&self) -> bool {

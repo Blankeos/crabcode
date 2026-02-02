@@ -45,17 +45,26 @@ impl ModelsDialogState {
     pub fn refresh_items(&mut self, items: Vec<DialogItem>) {
         let title = self.dialog.title.clone();
         let was_visible = self.dialog.is_visible();
-        let selected_index = self.dialog.selected_index;
-        let items_clone = items.clone();
+        let selected_item = self
+            .dialog
+            .get_selected()
+            .map(|item| (item.id.clone(), item.provider_id.clone()));
+        let search_query = self.dialog.search_textarea.lines().join("");
+        let actions = self.dialog.actions.clone();
 
-        self.dialog = Dialog::with_items(title, items);
+        self.dialog = Dialog::with_items(title, items).with_actions(actions);
 
         if was_visible {
             self.dialog.show();
         }
 
-        if selected_index < items_clone.len() {
-            self.dialog.selected_index = selected_index;
+        if !search_query.is_empty() {
+            self.dialog.search_textarea.insert_str(&search_query);
+            self.dialog.set_search_query(search_query);
+        }
+
+        if let Some((id, provider_id)) = selected_item {
+            self.dialog.select_item_by_key(&id, &provider_id);
         }
     }
 }
