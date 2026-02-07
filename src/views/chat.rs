@@ -121,11 +121,21 @@ pub fn render_chat(
         // to prevent speed issues when mouse movement causes frequent redraws
         let mut streaming_text = chat_state.wave_spinner.spans();
 
+        let tps = chat_state.chat.get_streaming_tokens_per_sec();
+
         // Add tokens/second if available
-        if let Some(tps) = chat_state.chat.get_streaming_tokens_per_sec() {
+        if let Some(tps) = tps {
             streaming_text.push(Span::raw(" "));
             streaming_text.push(Span::styled(
                 format!("{:.0}t/s", tps),
+                Style::default().fg(colors.info),
+            ));
+        }
+
+        if let Some(elapsed) = chat_state.chat.get_streaming_elapsed_seconds() {
+            streaming_text.push(Span::raw(if tps.is_some() { " • " } else { " " }));
+            streaming_text.push(Span::styled(
+                format!("{:.1}s", elapsed),
                 Style::default().fg(colors.info),
             ));
         }

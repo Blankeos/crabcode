@@ -1739,6 +1739,9 @@ impl App {
         // so they don't change if the user switches models during streaming
         self.streaming_model = Some(self.model.clone());
         self.streaming_provider = Some(self.provider_name.clone());
+        self.chat_state
+            .chat
+            .prepare_streaming_token_counter(&self.model);
 
         self.chat_state.chat.add_assistant_message("");
         if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {

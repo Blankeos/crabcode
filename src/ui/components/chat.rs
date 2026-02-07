@@ -1,6 +1,7 @@
 use crate::session::types::{Message, MessageRole};
 use crate::theme::ThemeColors;
 use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
+use crate::utils::token_counter::StreamingTokenCounter;
 use ratatui::{
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::Rect,
@@ -27,6 +28,7 @@ pub struct Chat {
     pub streaming_t1_ms: Option<u64>,
     pub streaming_tn_ms: Option<u64>,
     pub streaming_token_count: usize,
+    streaming_token_counter: Option<StreamingTokenCounter>,
     /// Whether to autoscroll to bottom when new content arrives
     /// Only autoscrolls if user is already near the bottom
     pub autoscroll_enabled: bool,
@@ -53,6 +55,11 @@ fn now_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn estimate_tokens(text: &str) -> usize {
+    let chars = text.chars().count();
+    (chars.saturating_add(3)) / 4
+}
+
 impl Chat {
     pub fn new() -> Self {
         Self {
@@ -69,6 +76,7 @@ impl Chat {
             streaming_t1_ms: None,
             streaming_tn_ms: None,
             streaming_token_count: 0,
+            streaming_token_counter: None,
             autoscroll_enabled: true,
             user_scrolled_up: false,
             cached_tokens_per_sec: None,
@@ -93,6 +101,7 @@ impl Chat {
             streaming_t1_ms: None,
             streaming_tn_ms: None,
             streaming_token_count: 0,
+            streaming_token_counter: None,
             autoscroll_enabled: true,
             user_scrolled_up: false,
             cached_tokens_per_sec: None,
@@ -168,8 +177,7 @@ impl Chat {
             self.streaming_t1_ms = Some(now_epoch_ms());
         }
 
-        // Estimate tokens: ~4 characters per token on average
-        self.streaming_token_count += chunk_str.chars().count().max(1) / 4;
+        self.update_streaming_token_count(chunk_str);
         if self.should_autoscroll() {
             self.scroll_offset = usize::MAX;
             self.user_scrolled_up = false;
@@ -202,7 +210,7 @@ impl Chat {
             self.streaming_first_token_time = Some(now);
             self.streaming_t1_ms = Some(now_epoch_ms());
         }
-        self.streaming_token_count += chunk_str.chars().count().max(1) / 4;
+        self.update_streaming_token_count(chunk_str);
         if self.should_autoscroll() {
             self.scroll_offset = usize::MAX;
             self.user_scrolled_up = false;
@@ -221,6 +229,7 @@ impl Chat {
         self.streaming_t1_ms = None;
         self.streaming_tn_ms = None;
         self.streaming_token_count = 0;
+        self.streaming_token_counter = None;
     }
 
     pub fn begin_streaming_turn(&mut self) {
@@ -237,6 +246,10 @@ impl Chat {
         self.cached_tokens_per_sec = None;
         self.last_tps_calculated = None;
 
+        if let Some(counter) = self.streaming_token_counter.as_mut() {
+            counter.reset();
+        }
+
         if let Some(msg) = self
             .messages
             .last_mut()
@@ -252,43 +265,13 @@ impl Chat {
         self.streaming_tn_ms = Some(now_epoch_ms());
     }
 
-    pub fn get_streaming_tokens_per_sec(&mut self) -> Option<f64> {
-        // Throttle token calculation to prevent excessive updates during high-frequency renders
-        // caused by mouse movement. Only recalculate every 100ms.
-        const TPS_THROTTLE_MS: u128 = 100;
+    pub fn get_streaming_tokens_per_sec(&self) -> Option<f64> {
+        self.cached_tokens_per_sec
+    }
 
-        let now = std::time::Instant::now();
-        if let Some(last_calc) = self.last_tps_calculated {
-            if now.duration_since(last_calc).as_millis() < TPS_THROTTLE_MS {
-                // Still within throttle window, return cached value
-                return self.cached_tokens_per_sec;
-            }
-        }
-        // Update timestamp for next throttle check
-        self.last_tps_calculated = Some(now);
-
-        // Use first_token_time for more accurate measurement (like PR #5497)
-        let result = if let Some(first_token_time) = self.streaming_first_token_time {
-            let elapsed_ms = first_token_time.elapsed().as_millis();
-            // Only show after minimum elapsed time to avoid inaccurate early readings
-            if elapsed_ms >= MIN_TOKENS_PER_SECOND_ELAPSED_MS && self.streaming_token_count > 0 {
-                let tokens_per_sec =
-                    (self.streaming_token_count as f64) / (elapsed_ms as f64 / 1000.0);
-                if tokens_per_sec.is_finite() {
-                    Some(tokens_per_sec)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Cache the result for throttled returns
-        self.cached_tokens_per_sec = result;
-        result
+    pub fn get_streaming_elapsed_seconds(&self) -> Option<f64> {
+        self.streaming_start_time
+            .map(|start| start.elapsed().as_secs_f64())
     }
 
     pub fn is_streaming(&self) -> bool {
@@ -340,6 +323,54 @@ impl Chat {
         self.streaming_token_count = 0;
         self.streaming_renderer = None;
         self.streaming_message_idx = None;
+        self.streaming_token_counter = None;
+    }
+
+    pub fn prepare_streaming_token_counter(&mut self, model: &str) {
+        self.streaming_token_counter = Some(StreamingTokenCounter::new(model));
+    }
+
+    fn update_streaming_token_count(&mut self, chunk: &str) {
+        if let Some(counter) = self.streaming_token_counter.as_mut() {
+            self.streaming_token_count = counter.add_text(chunk);
+        } else {
+            self.streaming_token_count = self
+                .streaming_token_count
+                .saturating_add(estimate_tokens(chunk));
+        }
+
+        self.update_streaming_tokens_per_sec();
+    }
+
+    fn update_streaming_tokens_per_sec(&mut self) {
+        const TPS_THROTTLE_MS: u128 = 100;
+
+        let now = std::time::Instant::now();
+        if let Some(last_calc) = self.last_tps_calculated {
+            if now.duration_since(last_calc).as_millis() < TPS_THROTTLE_MS {
+                return;
+            }
+        }
+        self.last_tps_calculated = Some(now);
+
+        let result = if let Some(first_token_time) = self.streaming_first_token_time {
+            let elapsed_ms = first_token_time.elapsed().as_millis();
+            if elapsed_ms >= MIN_TOKENS_PER_SECOND_ELAPSED_MS && self.streaming_token_count > 0 {
+                let tokens_per_sec =
+                    (self.streaming_token_count as f64) / (elapsed_ms as f64 / 1000.0);
+                if tokens_per_sec.is_finite() {
+                    Some(tokens_per_sec)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        self.cached_tokens_per_sec = result;
     }
 
     /// Update the streaming markdown renderer for the current streaming message

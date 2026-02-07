@@ -42,6 +42,7 @@ textwrap = "0.16"
 unicode-width = "0.1"
 tui-markdown = "0.3"
 ratatui-core = "0.1"
+tiktoken-rs = "0.9.1"
 
 [dev-dependencies]
 tokio-test = "0.4"
