@@ -493,6 +493,14 @@ impl Dialog {
         use ratatui::layout::Position;
         let point = Position::new(event.column, event.row);
 
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            && !self.dialog_area.contains(point)
+        {
+            self.hide();
+            self.is_dragging_scrollbar = false;
+            return true;
+        }
+
         const PADDING: u16 = 3;
         let content_area = Rect {
             x: self.dialog_area.x + PADDING,
@@ -1020,6 +1028,50 @@ mod tests {
 
         dialog.hide();
         assert!(!dialog.is_visible());
+    }
+
+    #[test]
+    fn test_dialog_click_outside_closes_modal() {
+        let mut dialog = Dialog::new("Test");
+        dialog.show();
+        dialog.dialog_area = Rect {
+            x: 10,
+            y: 10,
+            width: 30,
+            height: 10,
+        };
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(handled);
+        assert!(!dialog.is_visible());
+    }
+
+    #[test]
+    fn test_dialog_click_inside_keeps_modal_open() {
+        let mut dialog = Dialog::new("Test");
+        dialog.show();
+        dialog.dialog_area = Rect {
+            x: 10,
+            y: 10,
+            width: 30,
+            height: 10,
+        };
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(!handled);
+        assert!(dialog.is_visible());
     }
 
     #[test]

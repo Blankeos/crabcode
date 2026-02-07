@@ -792,6 +792,9 @@ impl App {
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if self.overlay_focus == OverlayFocus::ModelsDialog {
             handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
+            if !self.models_dialog_state.dialog.is_visible() {
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::ThemesDialog {
             let before = self
                 .themes_dialog_state
@@ -800,6 +803,14 @@ impl App {
                 .map(|it| it.id.clone());
 
             handle_themes_dialog_mouse_event(&mut self.themes_dialog_state, mouse);
+
+            if !self.themes_dialog_state.dialog.is_visible() {
+                if !self.themes_dialog_committed {
+                    self.current_theme_index = self.themes_dialog_original_theme_index;
+                }
+                self.overlay_focus = OverlayFocus::None;
+                return;
+            }
 
             let after = self
                 .themes_dialog_state
@@ -818,8 +829,19 @@ impl App {
             }
         } else if self.overlay_focus == OverlayFocus::ConnectDialog {
             handle_connect_dialog_mouse_event(&mut self.connect_dialog_state, mouse);
+            if !self.connect_dialog_state.dialog.is_visible() {
+                if let Some(selected_item) = get_pending_selection(&mut self.connect_dialog_state) {
+                    self.api_key_input.show(&selected_item.id);
+                    self.overlay_focus = OverlayFocus::ApiKeyInput;
+                    return;
+                }
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::SessionsDialog {
             handle_sessions_dialog_mouse_event(&mut self.sessions_dialog_state, mouse);
+            if !self.sessions_dialog_state.dialog.is_visible() {
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::None {
             // Handle mouse events for chat scrolling when in chat mode
             if self.base_focus == BaseFocus::Chat {
