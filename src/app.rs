@@ -112,7 +112,7 @@ pub struct App {
     pub themes: Vec<Theme>,
     pub current_theme_index: usize,
     pub dark_mode: bool,
-    pub sounds: crate::config::SoundsConfig,
+    pub sounds: crate::sound::ResolvedSoundsConfig,
     pub is_streaming: bool,
     chunk_sender: Option<crate::llm::ChunkSender>,
     chunk_receiver: Option<crate::llm::ChunkReceiver>,
@@ -182,6 +182,14 @@ impl App {
                 "Config: unimplemented keys present: {}",
                 loaded_config.diagnostics.unimplemented_keys.join(", ")
             );
+        }
+
+        let (resolved_sounds, sound_warnings) =
+            crate::sound::resolve_effective_sounds(&loaded_config.merged_config.sounds);
+        if !sound_warnings.is_empty() {
+            for msg in &sound_warnings {
+                eprintln!("Sound warning: {}", msg);
+            }
         }
 
         let active_model_info = if let Some(ref dao) = prefs_dao {
@@ -262,7 +270,7 @@ impl App {
             themes,
             current_theme_index,
             dark_mode: true,
-            sounds: loaded_config.merged_config.sounds.clone(),
+            sounds: resolved_sounds,
             is_streaming: false,
             chunk_sender: None,
             chunk_receiver: None,
@@ -278,17 +286,8 @@ impl App {
     }
 
     fn play_sound_event(&self, event: crate::sound::SoundEvent) {
-        use crate::sound::SoundEvent;
-        let effect = match event {
-            SoundEvent::Error => &self.sounds.error,
-            SoundEvent::Complete => &self.sounds.complete,
-            SoundEvent::Permission => &self.sounds.permission,
-            SoundEvent::Question => &self.sounds.question,
-        };
-        if effect.is_effectively_enabled() {
-            if let Some(ref path) = effect.file {
-                crate::sound::play_file(path);
-            }
+        if let Some(path) = self.sounds.path_for_event(event) {
+            crate::sound::play_file(path);
         }
     }
 

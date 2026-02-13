@@ -124,12 +124,6 @@ pub struct SoundEffectConfig {
     pub enabled: bool,
 }
 
-impl SoundEffectConfig {
-    pub fn is_effectively_enabled(&self) -> bool {
-        self.enabled && self.file.is_some()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct SoundsConfig {
     pub error: SoundEffectConfig,
@@ -143,7 +137,7 @@ impl Default for SoundsConfig {
         Self {
             error: SoundEffectConfig {
                 file: None,
-                enabled: false,
+                enabled: true,
             },
             complete: SoundEffectConfig {
                 file: None,
@@ -823,10 +817,6 @@ fn apply_sound_event(
             target.file = None;
             target.enabled = false;
         }
-    }
-
-    if target.file.is_none() {
-        target.enabled = false;
     }
 }
 
