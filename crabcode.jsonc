@@ -1,0 +1,10 @@
+{
+  // Crabcode theme id (see src/generated_themes/carbonfox.json)
+  "theme": "dracula",
+  // "sounds": {
+  //   "complete": {
+  //     "enabled": true,
+  //     "file": "/Users/carlo/Desktop/Projects/crabcode/sounds/complete.wav",
+  //   },
+  // },
+}

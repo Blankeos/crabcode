@@ -32,8 +32,9 @@ Recommended filename: `crabcode.jsonc`.
   "model": "openai/gpt-5.2",
 
   "sounds": {
-    "complete": { "enabled": true, "file": "/absolute/path.wav" },
-    "error": { "enabled": false },
+    "complete": { "enabled": true },
+    "error": { "enabled": true },
+    "question": { "enabled": true, "file": "/absolute/path/question.mp3" }
   },
 }
 ```
@@ -65,10 +66,18 @@ Treat this section as the authoritative contract for `crabcode.json(c)`.
     - `enabled` (boolean, optional)
     - `file` (string, optional)
       - Must be an absolute path. If not absolute, it is treated as disabled.
+      - If provided but the file is missing, the event stays silent.
   - Defaults:
     - `complete.enabled = true`
-    - all other `*.enabled = false`
-    - if `file` is missing, the sound is disabled
+    - `error.enabled = true`
+    - `permission.enabled = false`
+    - `question.enabled = false`
+  - Fallback behavior when `enabled = true` and `file` is omitted:
+    - `complete` and `error` use bundled default sounds
+    - `permission` and `question` stay silent
+  - Bundled sounds are materialized at runtime under the app data dir:
+    - macOS: `~/Library/Application Support/crabcode/sounds`
+    - Linux: `~/.local/share/crabcode/sounds`
 
 ### Accepted (Merged) But Not Implemented Yet
 

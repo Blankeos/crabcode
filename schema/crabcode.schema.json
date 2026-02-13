@@ -1,0 +1,116 @@
+{
+  "$defs": {
+    "SoundEffectConfigFile": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SoundsConfigFile": {
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SoundEffectConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SoundEffectConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "permission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SoundEffectConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "question": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SoundEffectConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/blankeos/crabcode/main/schema/crabcode.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agent": true,
+    "command": true,
+    "compaction": true,
+    "default_agent": true,
+    "disabled_providers": true,
+    "enabled_providers": true,
+    "formatter": true,
+    "instructions": true,
+    "mcp": true,
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "permission": true,
+    "provider": true,
+    "sounds": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SoundsConfigFile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "theme": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tools": true,
+    "watcher": true
+  },
+  "title": "CrabcodeConfigFile",
+  "type": "object"
+}

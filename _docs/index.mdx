@@ -18,7 +18,7 @@ crabcode is a Rust-first, terminal UI coding agent inspired by OpenCode, built f
 - Streaming responses and session management
 - Agent modes (PLAN for analysis, BUILD for implementation)
 - Model discovery and provider integration via models.dev + aisdk.rs
-- Optional sound effects for events (complete/error/permission/question)
+- Bundled complete/error sounds with configurable overrides (plus permission/question)
 
 ## Quick start
 
@@ -46,6 +46,7 @@ These are OS-specific paths for local data.
 - Credentials: `~/Library/Application Support/crabcode/auth.json` (macOS), `~/.local/share/crabcode/auth.json` (Linux)
 - Preferences DB: `~/Library/Application Support/crabcode/data.db` (macOS), `~/.local/share/crabcode/data.db` (Linux)
 - models.dev cache: `~/Library/Caches/crabcode/models_dev_cache.json` (macOS), `~/.cache/crabcode/models_dev_cache.json` (Linux)
+- Built-in sounds cache: `~/Library/Application Support/crabcode/sounds` (macOS), `~/.local/share/crabcode/sounds` (Linux)
 
 ## Commands
 

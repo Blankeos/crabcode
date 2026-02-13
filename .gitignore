@@ -3,3 +3,4 @@ src/themes/
 !src/theme.json
 !src/theme.json
 app.log
+sounds/complete.wav

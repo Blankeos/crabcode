@@ -1,0 +1,55 @@
+{
+  // Optional: enables editor completion/validation.
+  "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/schema/crabcode.schema.json",
+
+  // Theme ID (not a path). Crabcode resolves theme IDs from built-ins and theme folders.
+  // Example built-ins live under `src/generated_themes/*.json`.
+  "theme": "default",
+
+  // Default model (used only when you don't have an active model persisted yet).
+  "model": "openai/gpt-5.2",
+
+  // Sounds are optional.
+  // - `enabled` toggles each event.
+  // - `file` must be an absolute path (no `~`, no relative).
+  // - If `enabled` is true and `file` is omitted:
+  //   - `complete` and `error` use bundled defaults
+  //   - `permission` and `question` stay silent
+  "sounds": {
+    "error": {
+      "enabled": true,
+      // Optional override:
+      // "file": "/absolute/path/to/error.mp3"
+    },
+    "complete": {
+      "enabled": true,
+      // Optional override:
+      // "file": "/absolute/path/to/complete.mp3"
+    },
+    "permission": {
+      "enabled": false,
+      // "file": "/absolute/path/to/permission.wav"
+    },
+    "question": {
+      "enabled": false,
+      // "file": "/absolute/path/to/question.wav"
+    }
+  },
+
+  // --- Accepted (merged) but not implemented yet (phase 1) ---
+  // These keys are preserved for forward compatibility.
+  //
+  // "agent": { ... },
+  // "instructions": [ ... ],
+  // "tools": { "bash": true, "read": true },
+  // "mcp": { ... },
+  // "provider": { ... },
+  // "command": { ... },
+  // "permission": { ... },
+  // "compaction": { ... },
+  // "watcher": { ... },
+  // "default_agent": "...",
+  // "formatter": { ... },
+  // "disabled_providers": [ ... ],
+  // "enabled_providers": [ ... ]
+}
