@@ -1,73 +1,34 @@
 ---
-title: Docs Index
-description: Overview and entry points for crabcode documentation.
+title: crabcode
+description: A fast, terminal-first coding agent built in Rust.
 ---
 
-# crabcode docs
+# Build faster in your terminal
 
-crabcode is a Rust-first, terminal UI coding agent inspired by OpenCode, built for fast startup, interactive workflows, and configurable model support.
-
-## Start here
-
-- Project overview: `README.md`
-- Configuration reference: `_docs/config.mdx`
-
-## What crabcode includes
-
-- Ratatui TUI with keyboard-first workflows
-- Streaming responses and session management
-- Agent modes (PLAN for analysis, BUILD for implementation)
-- Model discovery and provider integration via models.dev + aisdk.rs
-- Bundled complete/error sounds with configurable overrides (plus permission/question)
-
-## Quick start
+crabcode is a Rust-first coding agent that lives in your terminal. No context switching, no heavy IDE—just fast startup, keyboard-driven workflows, and the AI models you already use.
 
 ```bash
 cargo install crabcode
-crabcode
 ```
 
-Then run `/connect` inside the app to add a provider and choose a model.
+---
 
-## Configuration
+## What is crabcode?
 
-Crabcode reads up to four JSON/JSONC config files and merges them in priority order. The canonical contract lives in `_docs/config.mdx`.
+|                | OpenCode                     | crabcode                     |
+| -------------- | ---------------------------- | ---------------------------- |
+| **Platforms**  | Terminal, Desktop, Web       | Terminal only                |
+| **Built with** | TypeScript/Zig/Tauri         | Rust                         |
+| **Focus**      | Multi-platform, feature-rich | Terminal-native, lightweight |
 
-Common keys (phase 1):
+crabcode is a focused, terminal-only coding agent—just the TUI, built in Rust for speed. OpenCode gives you options across multiple platforms; crabcode picks one and does it well.
 
-- `theme`
-- `model`
-- `sounds`
+**Coming from OpenCode?** Your existing config at `~/.config/opencode/config.json` is automatically picked up.
 
-## Data locations
+---
 
-These are OS-specific paths for local data.
+## Where to next
 
-- Credentials: `~/Library/Application Support/crabcode/auth.json` (macOS), `~/.local/share/crabcode/auth.json` (Linux)
-- Preferences DB: `~/Library/Application Support/crabcode/data.db` (macOS), `~/.local/share/crabcode/data.db` (Linux)
-- models.dev cache: `~/Library/Caches/crabcode/models_dev_cache.json` (macOS), `~/.cache/crabcode/models_dev_cache.json` (Linux)
-- Built-in sounds cache: `~/Library/Application Support/crabcode/sounds` (macOS), `~/.local/share/crabcode/sounds` (Linux)
-
-## Commands
-
-Common in-app commands:
-
-- `/sessions`
-- `/new`
-- `/connect`
-- `/models`
-- `/exit`
-
-## Development
-
-```bash
-git clone https://github.com/blankeos/crabcode.git
-cd crabcode
-cargo build --release
-```
-
-Run tests:
-
-```bash
-cargo test
-```
+- [Quickstart](/quickstart) – Get up and running in 5 minutes
+- [Configuration](/config) – OpenCode-compatible config with a few additions
+- [GitHub](https://github.com/blankeos/crabcode) – Source code and issues

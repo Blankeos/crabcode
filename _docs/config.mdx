@@ -1,114 +1,138 @@
 ---
 title: Configuration
-description: Crabcode configuration keys and merge behavior.
+description: crabcode configuration—OpenCode-compatible with a few additions.
 ---
 
-# Configuration
+# Configure crabcode
 
-Crabcode reads up to 4 config files (JSON or JSONC) and deep-merges them with increasing priority:
+crabcode is designed to be a drop-in replacement for OpenCode. It reads the same config files, uses the same merge rules, and respects most of the same settings. If you're coming from OpenCode, your existing config just works.
 
-1. OpenCode global
-2. Crabcode global
-3. OpenCode local
-4. Crabcode local
+The only difference: crabcode adds a couple terminal-specific settings that OpenCode doesn't have (sounds, theme selection).
 
-Only these keys are implemented in phase 1: `theme`, `model`, `sounds`.
+For everything else, refer to the [OpenCode configuration docs](https://opencode.ai/docs/config/).
 
-## File Format
+---
 
-- `.json`: strict JSON
-- `.jsonc`: JSON with comments + trailing commas
+## Quick start
 
-Recommended filename: `crabcode.jsonc`.
-
-## Quick Example
+Create a `crabcode.jsonc` in your project root:
 
 ```jsonc
 {
-  // Optional; enables editor tooling when you host a schema file
-  "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/schema/crabcode.schema.json",
-
   "theme": "default",
-  "model": "openai/gpt-5.2",
-
-  "sounds": {
-    "complete": { "enabled": true },
-    "error": { "enabled": true },
-    "question": { "enabled": true, "file": "/absolute/path/question.mp3" }
-  },
+  "model": "openai/gpt-5.2"
 }
 ```
 
-## Default Template
+That's it. crabcode validates on startup and tells you if something's wrong.
 
-If you want a fully-commented starting point, copy:
+---
 
-- `defaults/crabcode.jsonc`
+## Config sources
 
-## Source Of Truth (Prompt)
+crabcode reads up to four files and merges them (higher priority overrides lower):
 
-Treat this section as the authoritative contract for `crabcode.json(c)`.
+1. **OpenCode global** – `~/.config/opencode/opencode.json(c)`
+2. **crabcode global** – `~/.config/crabcode/crabcode.json(c)`
+3. **OpenCode local** – `.opencode/opencode.json(c)` in your project
+4. **crabcode local** – `crabcode.json(c)` or `.crabcode/crabcode.json(c)` in your project
 
-### Top-Level Properties
+Set your defaults globally, override per-project when needed.
 
-- `$schema` (string, optional)
-  - A URL to a JSON Schema for this config.
+---
 
-- `theme` (string, optional)
-  - Theme ID (not a path).
+## crabcode-specific settings
 
-- `model` (string, optional)
-  - Default model ID, e.g. `openai/gpt-5.2`.
+These only work in crabcode config files. They'll be silently ignored if placed in OpenCode configs.
 
-- `sounds` (object, optional)
-  - Keys: `error`, `complete`, `permission`, `question` (each optional)
-  - Each sound event value is an object:
-    - `enabled` (boolean, optional)
-    - `file` (string, optional)
-      - Must be an absolute path. If not absolute, it is treated as disabled.
-      - If provided but the file is missing, the event stays silent.
-  - Defaults:
-    - `complete.enabled = true`
-    - `error.enabled = true`
-    - `permission.enabled = false`
-    - `question.enabled = false`
-  - Fallback behavior when `enabled = true` and `file` is omitted:
-    - `complete` and `error` use bundled default sounds
-    - `permission` and `question` stay silent
-  - Bundled sounds are materialized at runtime under the app data dir:
-    - macOS: `~/Library/Application Support/crabcode/sounds`
-    - Linux: `~/.local/share/crabcode/sounds`
+### `theme`
 
-### Accepted (Merged) But Not Implemented Yet
+Sets the terminal UI theme:
 
-These keys are accepted and merged (for forward compatibility), but may have no runtime effect yet:
+```jsonc
+{
+  "theme": "default"
+}
+```
 
-- `agent`
-- `instructions`
-- `tools`
-- `mcp`
-- `provider`
-- `command`
-- `permission`
-- `compaction`
-- `watcher`
-- `default_agent`
-- `formatter`
-- `disabled_providers`
-- `enabled_providers`
+crabcode uses OpenCode's theme JSON format and can load themes from OpenCode's `themes/` folders. See [OpenCode's theme docs](https://opencode.ai/docs/themes/) for how to create custom themes.
 
-## Merge Rules
+### `sounds`
 
-- Object + object: recursively merge
-- Array + array: override entire array
-- Primitive or type mismatch: higher priority replaces lower
-- `null`: unset (removes the key from the merged result)
+Audio feedback for events (terminal-only, so crabcode-only):
 
-## Variable Substitution
+```jsonc
+{
+  "sounds": {
+    "complete": { "enabled": true },
+    "error": { "enabled": true },
+    "permission": { "enabled": false },
+    "question": { "enabled": false }
+  }
+}
+```
 
-After merging, Crabcode expands placeholders inside string values:
+**Custom sounds:** Provide an absolute path to a sound file:
 
-- `{env:VAR_NAME}`: environment variable value (or empty if unset)
-- `{file:path}`: file contents (trims trailing newlines)
-  - `~` expands to home
-  - relative paths resolve relative to the config file containing the winning value
+```jsonc
+{
+  "sounds": {
+    "complete": {
+      "enabled": true,
+      "file": "/Users/you/sounds/done.wav"
+    }
+  }
+}
+```
+
+If `file` is omitted, `complete` and `error` use bundled defaults. `permission` and `question` stay silent by default.
+
+---
+
+## What's supported from OpenCode
+
+crabcode parses and merges these OpenCode settings (some are functional now, others reserved for future implementation):
+
+| Setting | Status |
+|---------|--------|
+| `model` | ✅ Works |
+| `theme` | ✅ Works (crabcode config only) |
+| `sounds` | ✅ Works (crabcode-only) |
+| `agent`, `instructions`, `tools`, `mcp`, `provider`, `command`, `permission`, `compaction`, `watcher`, `default_agent`, `formatter`, `disabled_providers`, `enabled_providers` | ⏳ Merged but not yet implemented |
+
+These OpenCode settings are intentionally ignored (they don't apply to a terminal UI):
+
+- `keybinds`, `share`, `tui`, `server`, `plugin`
+- Custom tools (the `tool` / `tools` schema extension)
+
+---
+
+## Variable substitution
+
+crabcode supports OpenCode's placeholder syntax:
+
+```jsonc
+{
+  "model": "{env:CRABCODE_DEFAULT_MODEL}",
+  "instructions": "{file:~/prompts/system.txt}"
+}
+```
+
+- `{env:VAR}` – Environment variable value
+- `{file:path}` – File contents. `~` expands to home; relative paths resolve from the config file's directory.
+
+---
+
+## Troubleshooting
+
+**Multiple config files detected?** Each layer (global OpenCode, global crabcode, local OpenCode, local crabcode) can only have one config file. If you have both `opencode.json` and `opencode.jsonc`, crabcode errors and asks you to pick one.
+
+**Config changes not applying?** crabcode loads config at startup. Restart the app to pick up changes.
+
+**Want IDE autocomplete?** Add this to get validation in VS Code:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json"
+}
+```

@@ -1,4 +1,8 @@
 {
+  "$schema": "https://raw.githubusercontent.com/blankeos/gittydocs/main/gittydocs.schema.json",
+  "theme": {
+    "preset": "ember",
+  },
   "site": {
     "name": "crabcode",
     "repo": {
@@ -13,6 +17,7 @@
       "label": "Docs",
       "items": [
         { "label": "Overview", "path": "/" },
+        { "label": "Quickstart", "path": "/quickstart" },
         { "label": "Configuration", "path": "/config" },
       ],
     },

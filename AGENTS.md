@@ -9,11 +9,13 @@ Before adding/changing scripts, make sure to check `justfile` for existing recip
 ## File Locations
 
 ### Configuration Docs
+
 - **Location**: `_docs/config.mdx`
 - **Purpose**: Source-of-truth, human/AI-readable contract for `crabcode.json(c)`
 
 ### SQLite Database
-- **Location**: 
+
+- **Location**:
   - macOS: `~/Library/Application Support/crabcode/data.db`
   - Linux: `~/.local/share/crabcode/data.db`
 - **Implementation**: `src/persistence/prefs.rs`
@@ -22,7 +24,8 @@ Before adding/changing scripts, make sure to check `justfile` for existing recip
   - Preference keys and values with timestamps
 
 ### Authentication Credentials
-- **Location**: 
+
+- **Location**:
   - macOS: `~/Library/Application Support/crabcode/auth.json`
   - Linux: `~/.local/share/crabcode/auth.json`
 - **Implementation**: `src/persistence/auth.rs`
@@ -39,7 +42,8 @@ Before adding/changing scripts, make sure to check `justfile` for existing recip
   ```
 
 ### Models.dev API Cache
-- **Location**: 
+
+- **Location**:
   - macOS: `~/Library/Caches/crabcode/models_dev_cache.json`
   - Linux: `~/.cache/crabcode/models_dev_cache.json`
   - Test mode: `/tmp/crabcode_test_cache/models_dev_cache.json`
@@ -48,5 +52,13 @@ Before adding/changing scripts, make sure to check `justfile` for existing recip
 - **Implementation**: `src/model/discovery.rs`
 
 The cache stores provider and model information from models.dev and expires after 24 hours. The cached data includes:
+
 - Provider information (id, name, API endpoints, documentation, env vars, npm packages)
 - Model information per provider (id, name, family, capabilities, modalities, cost, limits)
+
+### Writing official documentation
+
+Traverse this llms.txt as ofsten as you can if you write docs: https://gittydocs.carlo.tl/llms.txt
+
+- Write the dcocs in `config.mdx`
+- When writing titles + first text in the body, never use the same 'title' (in mdx data) and '# <title>` (in the body).
