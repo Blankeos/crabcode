@@ -50,7 +50,7 @@ tokio-test = "0.4"
 # Local
 # aisdk = { path = "/Users/carlo/Desktop/Projects/aisdk-rs" }
 # After pushing
-aisdk = { git = "https://github.com/Blankeos/aisdk-rs", branch = "apikey-not-required" }
+aisdk = { git = "https://github.com/Blankeos/aisdk-rs", branch = "crabcode" }
 
 # The profile that 'dist' will build with
 [profile.dist]
