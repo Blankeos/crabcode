@@ -146,18 +146,18 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 This project was inspired by [anomalyco/opencode](https://github.com/anomalyco/opencode). Also made this project w/ OpenCode btw, so thank you OpenCode! 🙏
 
-## Scope
+## Scope and Limits
 
 - [x] Chat, switch models, agents
 - [x] Minimal configurations (I want it to just feel at least like vanilla opencode)
 - [x] The cheapest model providers (GLM, etc.)
-- [ ] A ding sound, my only opencode plugin at the moment.
+- [x] A ding sound, my only opencode plugin at the moment.
 - [x] No reverse-engineering oauth from big AI (Codex, Claude Code, Gemini), at least for now (Don't wanna get in trouble).
 - [ ] Possibly ralphy? (very far, idk how to do that)
 - [ ] ACP w/ Zed? (very far, idk how to do that)
-- [x] No plugin ecosystem
+- [x] No plugin ecosystem (If I think it's worth building, just make it built-in and configurable)
 - [x] No desktop app
-- [x] No web sharing thing
+- [x] No web sharing thing (Might be a dealbreaker for vibecoders w/ tailscale, but I haven't reached these levels yet, when I do, I might)
 
 ## Why?
 
