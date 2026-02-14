@@ -52,3 +52,8 @@ tokio-test = "0.4"
 # aisdk = { path = "/Users/carlo/Desktop/Projects/aisdk-rs" }
 # After pushing
 aisdk = { git = "https://github.com/Blankeos/aisdk-rs", branch = "apikey-not-required" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

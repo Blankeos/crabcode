@@ -15,3 +15,8 @@ devdocs:
 
 log:
     tail -f app.log
+
+# Release: bump versions, create release commit, and create a git tag.
+# Usage: just tag [patch|minor|major]
+tag bump="":
+    sh scripts/tag_and_release.sh {{bump}}
