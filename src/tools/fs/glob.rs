@@ -15,7 +15,8 @@ impl GlobTool {
 
     fn is_in_git_metadata(path: &Path, base: &Path) -> bool {
         let rel = path.strip_prefix(base).unwrap_or(path);
-        rel.components().any(|component| component.as_os_str() == ".git")
+        rel.components()
+            .any(|component| component.as_os_str() == ".git")
     }
 }
 

@@ -31,11 +31,7 @@ impl ReadTool {
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let name = entry.file_name().to_string_lossy().to_string();
-                let with_marker = if entry
-                    .file_type()
-                    .map(|kind| kind.is_dir())
-                    .unwrap_or(false)
-                {
+                let with_marker = if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                     format!("{}/", name)
                 } else {
                     name
@@ -154,7 +150,10 @@ impl ToolHandler for ReadTool {
         }
 
         if !path.is_file() {
-            return Err(ToolError::Validation(format!("Path is not readable: {}", file_path)));
+            return Err(ToolError::Validation(format!(
+                "Path is not readable: {}",
+                file_path
+            )));
         }
 
         let metadata = std::fs::metadata(path)

@@ -187,14 +187,7 @@ impl ToolHandler for ListTool {
         let count = filtered.len();
         for (i, entry) in filtered.iter().enumerate() {
             let is_last = i == count - 1;
-            Self::list_directory(
-                &entry.path(),
-                &ignore_patterns,
-                "",
-                is_last,
-                &mut output,
-                1,
-            )?;
+            Self::list_directory(&entry.path(), &ignore_patterns, "", is_last, &mut output, 1)?;
         }
 
         let result_text = if output.len() <= 1 {
