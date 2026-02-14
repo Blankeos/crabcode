@@ -17,8 +17,66 @@ impl ReadTool {
         Self
     }
 
+    fn file_path_param(params: &Value) -> Option<String> {
+        get_string_param(params, "file_path").or_else(|| get_string_param(params, "filePath"))
+    }
+
     fn is_binary(data: &[u8]) -> bool {
         data.iter().take(BINARY_CHECK_SIZE).any(|b| *b == 0)
+    }
+
+    fn read_directory(path: &Path, offset: usize, limit: usize) -> Result<String, ToolError> {
+        let mut entries: Vec<String> = std::fs::read_dir(path)
+            .map_err(|e| ToolError::Execution(format!("Failed to read directory: {}", e)))?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let with_marker = if entry
+                    .file_type()
+                    .map(|kind| kind.is_dir())
+                    .unwrap_or(false)
+                {
+                    format!("{}/", name)
+                } else {
+                    name
+                };
+                Some(with_marker)
+            })
+            .collect();
+
+        entries.sort();
+
+        if offset >= entries.len() {
+            return Ok(format!(
+                "<path>{}</path>\n<type>directory</type>\n<entries>\n\n({} entries)\n</entries>",
+                path.display(),
+                entries.len()
+            ));
+        }
+
+        let end = (offset + limit).min(entries.len());
+        let selected = &entries[offset..end];
+        let truncated = end < entries.len();
+
+        let mut output = String::new();
+        output.push_str(&format!("<path>{}</path>\n", path.display()));
+        output.push_str("<type>directory</type>\n");
+        output.push_str("<entries>\n");
+        output.push_str(&selected.join("\n"));
+
+        if truncated {
+            output.push_str(&format!(
+                "\n\n(Showing {} of {} entries. Use offset {} to continue)\n",
+                selected.len(),
+                entries.len(),
+                end
+            ));
+        } else {
+            output.push_str(&format!("\n\n({} entries)\n", entries.len()));
+        }
+
+        output.push_str("</entries>");
+        Ok(output)
     }
 }
 
@@ -27,12 +85,19 @@ impl ToolHandler for ReadTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "read".to_string(),
-            description: "Read file contents with line numbers and pagination. Detects binary files automatically.".to_string(),
+            description: "Read file or directory contents with pagination. Detects binary files automatically."
+                .to_string(),
             parameters: vec![
                 ParameterSchema {
                     name: "file_path".to_string(),
-                    description: "Path to the file to read".to_string(),
-                    required: true,
+                    description: "Path to the file or directory to read".to_string(),
+                    required: false,
+                    param_type: ParameterType::String,
+                },
+                ParameterSchema {
+                    name: "filePath".to_string(),
+                    description: "Alias of file_path for compatibility".to_string(),
+                    required: false,
                     param_type: ParameterType::String,
                 },
                 ParameterSchema {
@@ -52,11 +117,18 @@ impl ToolHandler for ReadTool {
     }
 
     fn validate(&self, params: &Value) -> Result<(), ToolError> {
-        validate_required(params, &["file_path"])
+        let has_snake_case = get_string_param(params, "file_path").is_some();
+        let has_camel_case = get_string_param(params, "filePath").is_some();
+
+        if has_snake_case || has_camel_case {
+            Ok(())
+        } else {
+            validate_required(params, &["file_path"])
+        }
     }
 
     async fn execute(&self, params: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
-        let file_path = get_string_param(&params, "file_path")
+        let file_path = Self::file_path_param(&params)
             .ok_or_else(|| ToolError::Validation("file_path is required".to_string()))?;
 
         let offset = get_integer_param(&params, "offset")
@@ -76,11 +148,13 @@ impl ToolHandler for ReadTool {
             )));
         }
 
+        if path.is_dir() {
+            let output = Self::read_directory(path, offset, limit)?;
+            return Ok(ToolResult::new(format!("Read: {}", file_path), output));
+        }
+
         if !path.is_file() {
-            return Err(ToolError::Validation(format!(
-                "Path is not a file: {}",
-                file_path
-            )));
+            return Err(ToolError::Validation(format!("Path is not readable: {}", file_path)));
         }
 
         let metadata = std::fs::metadata(path)
@@ -142,5 +216,40 @@ impl ToolHandler for ReadTool {
         }
 
         Ok(ToolResult::new(format!("Read: {}", file_path), output))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be monotonic enough for tests")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{}_{}", prefix, nanos))
+    }
+
+    #[test]
+    fn read_directory_includes_hidden_and_directory_markers() {
+        let dir = unique_temp_dir("crabcode_read_tool_test");
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+
+        let env_path = dir.join(".env");
+        let file_path = dir.join("README.md");
+        let nested_dir = dir.join("config");
+
+        std::fs::write(&env_path, "API_KEY=test").expect(".env should be written");
+        std::fs::write(&file_path, "# test").expect("README should be written");
+        std::fs::create_dir_all(&nested_dir).expect("nested directory should be created");
+
+        let output = ReadTool::read_directory(&dir, 0, 100).expect("directory read should work");
+
+        assert!(output.contains(".env"));
+        assert!(output.contains("README.md"));
+        assert!(output.contains("config/"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

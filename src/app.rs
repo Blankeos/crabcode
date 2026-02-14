@@ -24,6 +24,10 @@ use crate::views::models_dialog::{
     handle_models_dialog_key_event, handle_models_dialog_mouse_event, init_models_dialog,
     render_models_dialog,
 };
+use crate::views::permission_dialog::{
+    handle_permission_dialog_key_event, handle_permission_dialog_mouse_event,
+    init_permission_dialog, render_permission_dialog, PermissionDialogAction,
+};
 use crate::views::session_rename_dialog::{
     handle_session_rename_dialog_key_event, init_session_rename_dialog,
     render_session_rename_dialog, RenameAction,
@@ -41,8 +45,8 @@ use crate::views::themes_dialog::{
     render_themes_dialog,
 };
 use crate::views::{
-    ChatState, ConnectDialogState, HomeState, ModelsDialogState, SessionRenameDialogState,
-    SessionsDialogState, SuggestionsPopupState, ThemesDialogState,
+    ChatState, ConnectDialogState, HomeState, ModelsDialogState, PermissionDialogState,
+    SessionRenameDialogState, SessionsDialogState, SuggestionsPopupState, ThemesDialogState,
 };
 
 use crate::{
@@ -80,6 +84,7 @@ pub enum OverlayFocus {
     SuggestionsPopup,
     SessionsDialog,
     SessionRenameDialog,
+    PermissionDialog,
     WhichKey,
 }
 
@@ -99,6 +104,7 @@ pub struct App {
     pub connect_dialog_state: ConnectDialogState,
     pub sessions_dialog_state: SessionsDialogState,
     pub session_rename_dialog_state: SessionRenameDialogState,
+    pub permission_dialog_state: PermissionDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
@@ -114,6 +120,7 @@ pub struct App {
     pub current_theme_index: usize,
     pub dark_mode: bool,
     pub sounds: crate::sound::ResolvedSoundsConfig,
+    pub tool_permissions: crate::tools::ToolPermissions,
     pub is_streaming: bool,
     chunk_sender: Option<crate::llm::ChunkSender>,
     chunk_receiver: Option<crate::llm::ChunkReceiver>,
@@ -145,13 +152,14 @@ impl App {
             .unwrap_or_else(|| "?".to_string());
 
         let home_state = init_home();
-        let agent = "Plan".to_string();
+        let mut agent = "Plan".to_string();
         let chat = Chat::new();
         let suggestions_popup_state = init_suggestions_popup(Popup::new());
         let models_dialog_state = init_models_dialog("Models", vec![]);
         let themes_dialog_state = init_themes_dialog("Themes", vec![]);
         let connect_dialog_state = init_connect_dialog();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
+        let permission_dialog_state = init_permission_dialog();
         let which_key_state = crate::views::which_key::init_which_key();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
@@ -183,6 +191,12 @@ impl App {
                 "Config: unimplemented keys present: {}",
                 loaded_config.diagnostics.unimplemented_keys.join(", ")
             );
+        }
+
+        if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
+            if !default_agent.trim().is_empty() {
+                agent = default_agent;
+            }
         }
 
         let (resolved_sounds, sound_warnings) =
@@ -245,6 +259,12 @@ impl App {
 
         let chat_state = init_chat(chat, &agent, &colors);
         let session_rename_dialog_state = init_session_rename_dialog(colors);
+        let mut agent_policies = crate::tools::AgentToolPolicies::default();
+        for (mode, tools) in &loaded_config.merged_config.agent_tool_policies {
+            agent_policies = agent_policies.with_custom_tools(mode.clone(), tools.clone());
+        }
+        let tool_permissions = crate::tools::ToolPermissions::new(cwd_path.clone())
+            .with_agent_policies(agent_policies);
 
         Ok(Self {
             running: true,
@@ -262,6 +282,7 @@ impl App {
             connect_dialog_state,
             sessions_dialog_state,
             session_rename_dialog_state,
+            permission_dialog_state,
             which_key_state,
             api_key_input,
             prefs_dao,
@@ -277,6 +298,7 @@ impl App {
             current_theme_index,
             dark_mode: true,
             sounds: resolved_sounds,
+            tool_permissions,
             is_streaming: false,
             chunk_sender: None,
             chunk_receiver: None,
@@ -678,6 +700,24 @@ impl App {
                     }
                 }
             }
+            OverlayFocus::PermissionDialog => {
+                let action =
+                    handle_permission_dialog_key_event(&mut self.permission_dialog_state, key);
+                match action {
+                    PermissionDialogAction::Respond(response) => {
+                        self.permission_dialog_state.respond_current(response);
+                        if self.permission_dialog_state.has_active() {
+                            self.overlay_focus = OverlayFocus::PermissionDialog;
+                        } else {
+                            self.chat_state.chat.resume_streaming_tps_timer();
+                            self.overlay_focus = OverlayFocus::None;
+                        }
+                        true
+                    }
+                    PermissionDialogAction::Handled => true,
+                    PermissionDialogAction::NotHandled => true,
+                }
+            }
             OverlayFocus::WhichKey => {
                 let action = self.which_key_state.handle_key_event(key);
                 match action {
@@ -864,6 +904,8 @@ impl App {
             if !self.models_dialog_state.dialog.is_visible() {
                 self.overlay_focus = OverlayFocus::None;
             }
+        } else if self.overlay_focus == OverlayFocus::PermissionDialog {
+            let _ = handle_permission_dialog_mouse_event(&mut self.permission_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::ThemesDialog {
             let before = self
                 .themes_dialog_state
@@ -1592,6 +1634,11 @@ impl App {
     }
 
     fn cleanup_streaming(&mut self) {
+        self.chat_state.chat.resume_streaming_tps_timer();
+        self.permission_dialog_state.clear_with_deny();
+        if self.overlay_focus == OverlayFocus::PermissionDialog {
+            self.overlay_focus = OverlayFocus::None;
+        }
         self.chunk_sender = None;
         self.chunk_receiver = None;
         self.streaming_cancel_token = None;
@@ -1813,6 +1860,12 @@ impl App {
                             .add_message(crate::session::types::Message::tool(content));
                     }
                 }
+                crate::llm::ChunkMessage::PermissionRequest(prompt) => {
+                    self.play_sound_event(crate::sound::SoundEvent::Permission);
+                    self.chat_state.chat.pause_streaming_tps_timer();
+                    self.permission_dialog_state.enqueue(prompt);
+                    self.overlay_focus = OverlayFocus::PermissionDialog;
+                }
             }
         }
     }
@@ -1857,6 +1910,8 @@ impl App {
 
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();
+        let agent_mode = self.agent.clone();
+        let tool_permissions = self.tool_permissions.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -1891,6 +1946,8 @@ impl App {
                     cancel_token,
                     provider_name,
                     model,
+                    agent_mode,
+                    tool_permissions,
                     messages,
                     sender_clone.clone(),
                 ),
@@ -2080,6 +2137,12 @@ impl App {
             && self.session_rename_dialog_state.is_visible()
         {
             render_session_rename_dialog(f, &mut self.session_rename_dialog_state, size, colors);
+        }
+
+        if self.overlay_focus == OverlayFocus::PermissionDialog
+            && self.permission_dialog_state.has_active()
+        {
+            render_permission_dialog(f, &mut self.permission_dialog_state, size, colors);
         }
 
         if self.overlay_focus == OverlayFocus::WhichKey {

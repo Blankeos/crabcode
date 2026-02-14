@@ -6,21 +6,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
 
-const BLOCKED_FILES: [&str; 3] = [".env", ".env.local", ".env.production"];
-
 pub struct WriteTool;
 
 impl WriteTool {
     pub fn new() -> Self {
         Self
-    }
-
-    fn is_blocked(path: &Path) -> bool {
-        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-            BLOCKED_FILES.contains(&file_name)
-        } else {
-            false
-        }
     }
 }
 
@@ -60,13 +50,7 @@ impl ToolHandler for WriteTool {
             .ok_or_else(|| ToolError::Validation("content is required".to_string()))?;
 
         let path = Path::new(&file_path);
-
-        if Self::is_blocked(path) {
-            return Err(ToolError::Permission(format!(
-                "Writing to {} is blocked for security reasons",
-                file_path
-            )));
-        }
+        let is_new = !path.exists();
 
         if let Some(parent) = path.parent() {
             if !parent.exists() {
@@ -83,8 +67,6 @@ impl ToolHandler for WriteTool {
 
         std::fs::rename(&temp_path, path)
             .map_err(|e| ToolError::Execution(format!("Failed to rename file: {}", e)))?;
-
-        let is_new = !path.exists();
 
         Ok(ToolResult::new(
             format!("Write: {}", file_path),

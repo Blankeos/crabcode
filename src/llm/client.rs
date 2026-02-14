@@ -48,7 +48,10 @@ impl LLMClient {
         let aisdk_messages = self.convert_messages(messages);
 
         let tool_registry = crate::tools::initialize_tool_registry().await;
-        let aisdk_tools = convert_to_aisdk_tools(&tool_registry, None).await;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let permissions = crate::tools::ToolPermissions::new(cwd);
+        let aisdk_tools =
+            convert_to_aisdk_tools(&tool_registry, None, "Build".to_string(), permissions).await;
 
         let provider_kind = self.provider_kind();
         let base_url = provider_kind.normalize_base_url(&self.base_url);
@@ -183,6 +186,8 @@ pub async fn stream_llm_with_cancellation(
     cancel_token: CancellationToken,
     provider_name: String,
     model: String,
+    agent_mode: String,
+    tool_permissions: crate::tools::ToolPermissions,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -220,7 +225,13 @@ pub async fn stream_llm_with_cancellation(
     let aisdk_messages = convert_messages(&messages);
 
     let tool_registry = crate::tools::initialize_tool_registry().await;
-    let aisdk_tools = convert_to_aisdk_tools(&tool_registry, Some(sender.clone())).await;
+    let aisdk_tools = convert_to_aisdk_tools(
+        &tool_registry,
+        Some(sender.clone()),
+        agent_mode,
+        tool_permissions,
+    )
+    .await;
 
     let response = match provider_kind {
         ProviderKind::OpenAICompatible => {

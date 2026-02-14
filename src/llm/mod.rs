@@ -13,6 +13,7 @@ pub enum ChunkMessage {
     Warning(String),
     ToolCalls(Vec<ToolCall>),
     ToolResult(ToolCallResult),
+    PermissionRequest(crate::tools::PermissionPrompt),
     End,
     Failed(String),
     Cancelled,

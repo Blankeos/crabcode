@@ -7,6 +7,7 @@ pub mod context;
 pub mod edit;
 pub mod fs;
 pub mod init;
+pub mod permission;
 pub mod registry;
 pub mod types;
 
@@ -14,6 +15,9 @@ pub use bash::BashTool;
 pub use context::ToolContext;
 pub use edit::EditTool;
 pub use init::initialize_tool_registry;
+pub use permission::{
+    AgentToolPolicies, PermissionAction, PermissionPrompt, PermissionResponse, ToolPermissions,
+};
 pub use registry::ToolRegistry;
 pub use types::{ParameterSchema, ParameterType, Tool, ToolError, ToolId, ToolResult};
 

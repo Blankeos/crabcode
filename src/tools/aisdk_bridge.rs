@@ -12,15 +12,23 @@ static TOOL_CALL_SEQ: AtomicUsize = AtomicUsize::new(0);
 pub async fn convert_to_aisdk_tools(
     registry: &ToolRegistry,
     sender: Option<ChunkSender>,
+    agent_mode: String,
+    permissions: crate::tools::ToolPermissions,
 ) -> Vec<Tool> {
     let mut aisdk_tools = Vec::new();
     let tools = registry.list().await;
 
     for tool_def in tools {
+        if !permissions.is_tool_allowed_for_agent(&agent_mode, &tool_def.id) {
+            continue;
+        }
+
         let tool_id = tool_def.id.clone();
         let tool_description = tool_def.description.clone();
         let registry = registry.clone();
         let sender = sender.clone();
+        let agent_mode = agent_mode.clone();
+        let permissions = permissions.clone();
 
         // Create the execute function
         let execute = ToolExecute::new(Box::new(move |input: Value| {
@@ -32,6 +40,8 @@ pub async fn convert_to_aisdk_tools(
             let tool_description_for_ui = tool_description.clone();
             let registry = registry.clone();
             let sender = sender.clone();
+            let agent_mode = agent_mode.clone();
+            let permissions = permissions.clone();
 
             let call_seq = TOOL_CALL_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
             let call_id = format!("call_{call_seq}");
@@ -73,8 +83,18 @@ pub async fn convert_to_aisdk_tools(
                         return Err(format!("Validation error: {}", e));
                     }
 
+                    permissions
+                        .preflight(
+                            &agent_mode,
+                            &tool_id_for_exec,
+                            &input,
+                            sender_for_block.as_ref(),
+                        )
+                        .await
+                        .map_err(|e| format!("{}", e))?;
+
                     let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-                    let ctx = ToolContext::new("session", "message", "aisdk", abort_rx);
+                    let ctx = ToolContext::new("session", "message", agent_mode.clone(), abort_rx);
 
                     let tool_result = handler
                         .execute(input, &ctx)

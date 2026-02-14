@@ -28,6 +28,8 @@ pub struct Chat {
     pub streaming_t1_ms: Option<u64>,
     pub streaming_tn_ms: Option<u64>,
     pub streaming_token_count: usize,
+    streaming_pause_started_at: Option<std::time::Instant>,
+    streaming_paused_duration: std::time::Duration,
     streaming_token_counter: Option<StreamingTokenCounter>,
     /// Whether to autoscroll to bottom when new content arrives
     /// Only autoscrolls if user is already near the bottom
@@ -76,6 +78,8 @@ impl Chat {
             streaming_t1_ms: None,
             streaming_tn_ms: None,
             streaming_token_count: 0,
+            streaming_pause_started_at: None,
+            streaming_paused_duration: std::time::Duration::default(),
             streaming_token_counter: None,
             autoscroll_enabled: true,
             user_scrolled_up: false,
@@ -101,6 +105,8 @@ impl Chat {
             streaming_t1_ms: None,
             streaming_tn_ms: None,
             streaming_token_count: 0,
+            streaming_pause_started_at: None,
+            streaming_paused_duration: std::time::Duration::default(),
             streaming_token_counter: None,
             autoscroll_enabled: true,
             user_scrolled_up: false,
@@ -229,6 +235,8 @@ impl Chat {
         self.streaming_t1_ms = None;
         self.streaming_tn_ms = None;
         self.streaming_token_count = 0;
+        self.streaming_pause_started_at = None;
+        self.streaming_paused_duration = std::time::Duration::default();
         self.streaming_token_counter = None;
     }
 
@@ -243,6 +251,8 @@ impl Chat {
         self.streaming_t1_ms = None;
         self.streaming_tn_ms = None;
         self.streaming_token_count = 0;
+        self.streaming_pause_started_at = None;
+        self.streaming_paused_duration = std::time::Duration::default();
         self.cached_tokens_per_sec = None;
         self.last_tps_calculated = None;
 
@@ -269,9 +279,37 @@ impl Chat {
         self.cached_tokens_per_sec
     }
 
+    pub fn pause_streaming_tps_timer(&mut self) {
+        if self.streaming_start_time.is_none() {
+            return;
+        }
+
+        if self.streaming_pause_started_at.is_none() {
+            self.streaming_pause_started_at = Some(std::time::Instant::now());
+        }
+    }
+
+    pub fn resume_streaming_tps_timer(&mut self) {
+        if let Some(started) = self.streaming_pause_started_at.take() {
+            self.streaming_paused_duration += started.elapsed();
+            self.last_tps_calculated = None;
+        }
+    }
+
+    fn total_paused_duration(&self) -> std::time::Duration {
+        let mut paused = self.streaming_paused_duration;
+        if let Some(started) = self.streaming_pause_started_at {
+            paused += started.elapsed();
+        }
+        paused
+    }
+
     pub fn get_streaming_elapsed_seconds(&self) -> Option<f64> {
-        self.streaming_start_time
-            .map(|start| start.elapsed().as_secs_f64())
+        self.streaming_start_time.map(|start| {
+            let elapsed = start.elapsed();
+            let paused = self.total_paused_duration();
+            elapsed.saturating_sub(paused).as_secs_f64()
+        })
     }
 
     pub fn is_streaming(&self) -> bool {
@@ -288,12 +326,14 @@ impl Chat {
             Some(now_epoch_ms())
         });
 
+        let paused_ms = self.total_paused_duration().as_millis();
+
         let decode_duration_ms = if let (Some(t1), Some(tn)) =
             (self.streaming_first_token_time, self.streaming_end_time)
         {
-            tn.duration_since(t1).as_millis() as u64
+            tn.duration_since(t1).as_millis().saturating_sub(paused_ms) as u64
         } else if let Some(t1) = self.streaming_first_token_time {
-            t1.elapsed().as_millis() as u64
+            t1.elapsed().as_millis().saturating_sub(paused_ms) as u64
         } else {
             0
         };
@@ -321,6 +361,8 @@ impl Chat {
         self.streaming_t1_ms = None;
         self.streaming_tn_ms = None;
         self.streaming_token_count = 0;
+        self.streaming_pause_started_at = None;
+        self.streaming_paused_duration = std::time::Duration::default();
         self.streaming_renderer = None;
         self.streaming_message_idx = None;
         self.streaming_token_counter = None;
@@ -354,7 +396,11 @@ impl Chat {
         self.last_tps_calculated = Some(now);
 
         let result = if let Some(first_token_time) = self.streaming_first_token_time {
-            let elapsed_ms = first_token_time.elapsed().as_millis();
+            let paused_ms = self.total_paused_duration().as_millis();
+            let elapsed_ms = first_token_time
+                .elapsed()
+                .as_millis()
+                .saturating_sub(paused_ms);
             if elapsed_ms >= MIN_TOKENS_PER_SECOND_ELAPSED_MS && self.streaming_token_count > 0 {
                 let tokens_per_sec =
                     (self.streaming_token_count as f64) / (elapsed_ms as f64 / 1000.0);
@@ -1133,6 +1179,76 @@ mod tests {
         chat.append_to_last_assistant(" assistant");
         assert_eq!(chat.messages.len(), 3);
         assert_eq!(chat.messages[2].content, " assistant");
+    }
+
+    #[test]
+    fn test_streaming_pause_excluded_from_decode_duration() {
+        use std::time::Duration;
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+        chat.append_to_last_assistant("hello");
+
+        std::thread::sleep(Duration::from_millis(40));
+        chat.pause_streaming_tps_timer();
+        std::thread::sleep(Duration::from_millis(320));
+        chat.resume_streaming_tps_timer();
+        std::thread::sleep(Duration::from_millis(40));
+
+        chat.mark_streaming_end();
+        chat.finalize_streaming_metrics();
+
+        let duration_ms = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .and_then(|m| m.duration_ms)
+            .unwrap_or(0);
+
+        assert!(duration_ms < 250, "duration was {}ms", duration_ms);
+    }
+
+    #[test]
+    fn test_streaming_elapsed_timer_freezes_while_paused() {
+        use std::time::Duration;
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+        chat.append_to_last_assistant("hello");
+        std::thread::sleep(Duration::from_millis(60));
+
+        let before_pause = chat.get_streaming_elapsed_seconds().unwrap_or(0.0);
+        chat.pause_streaming_tps_timer();
+        std::thread::sleep(Duration::from_millis(220));
+        let during_pause = chat.get_streaming_elapsed_seconds().unwrap_or(0.0);
+
+        assert!(
+            (during_pause - before_pause).abs() < 0.06,
+            "timer moved during pause (before={:.3}s, during={:.3}s)",
+            before_pause,
+            during_pause
+        );
+
+        chat.resume_streaming_tps_timer();
+        std::thread::sleep(Duration::from_millis(70));
+        let after_resume = chat.get_streaming_elapsed_seconds().unwrap_or(0.0);
+        assert!(
+            after_resume > during_pause + 0.03,
+            "timer did not resume (during={:.3}s, after={:.3}s)",
+            during_pause,
+            after_resume
+        );
     }
 
     #[test]

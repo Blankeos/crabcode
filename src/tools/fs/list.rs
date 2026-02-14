@@ -13,6 +13,16 @@ impl ListTool {
         Self
     }
 
+    fn should_skip_entry(name: &str, ignore_patterns: &[String]) -> bool {
+        // Keep repository internals out of default tree output while still
+        // surfacing other dotfiles (for example .env, .env.local).
+        if name == ".git" {
+            return true;
+        }
+
+        ignore_patterns.iter().any(|p| name.contains(p))
+    }
+
     fn list_directory(
         path: &Path,
         ignore_patterns: &[String],
@@ -46,7 +56,7 @@ impl ListTool {
             .into_iter()
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
-                !name.starts_with('.') && !ignore_patterns.iter().any(|p| name.contains(p))
+                !Self::should_skip_entry(&name, ignore_patterns)
             })
             .collect();
 
@@ -89,7 +99,8 @@ impl ToolHandler for ListTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "list".to_string(),
-            description: "List directory contents in a tree format. Shows files and subdirectories with visual tree connectors.".to_string(),
+            description: "List directory contents in a tree format. Includes hidden and gitignored files (except .git internals)."
+                .to_string(),
             parameters: vec![
                 ParameterSchema {
                     name: "path".to_string(),
@@ -158,7 +169,7 @@ impl ToolHandler for ListTool {
             .into_iter()
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
-                !name.starts_with('.') && !ignore_patterns.iter().any(|p| name.contains(p))
+                !Self::should_skip_entry(&name, &ignore_patterns)
             })
             .collect();
 
@@ -176,7 +187,14 @@ impl ToolHandler for ListTool {
         let count = filtered.len();
         for (i, entry) in filtered.iter().enumerate() {
             let is_last = i == count - 1;
-            Self::list_directory(&entry.path(), &ignore_patterns, "", is_last, &mut output, 1)?;
+            Self::list_directory(
+                &entry.path(),
+                &ignore_patterns,
+                "",
+                is_last,
+                &mut output,
+                1,
+            )?;
         }
 
         let result_text = if output.len() <= 1 {
@@ -186,5 +204,21 @@ impl ToolHandler for ListTool {
         };
 
         Ok(ToolResult::new(format!("List: {}", path_str), result_text))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ListTool;
+
+    #[test]
+    fn should_skip_entry_keeps_dotenv_visible() {
+        assert!(!ListTool::should_skip_entry(".env", &[]));
+        assert!(!ListTool::should_skip_entry(".env.local", &[]));
+    }
+
+    #[test]
+    fn should_skip_entry_hides_git_metadata_directory() {
+        assert!(ListTool::should_skip_entry(".git", &[]));
     }
 }

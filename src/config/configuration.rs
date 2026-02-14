@@ -164,6 +164,8 @@ impl Default for SoundsConfig {
 pub struct MergedConfig {
     pub theme: Option<String>,
     pub model: Option<String>,
+    pub default_agent: Option<String>,
+    pub agent_tool_policies: HashMap<String, Vec<String>>,
     pub sounds: SoundsConfig,
 }
 
@@ -757,7 +759,67 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
         }
     }
 
+    if let Some(Value::String(default_agent)) = obj.get("default_agent") {
+        if !default_agent.trim().is_empty() {
+            out.default_agent = Some(default_agent.trim().to_string());
+        }
+    }
+
+    out.agent_tool_policies = parse_agent_tool_policies(obj.get("agent"), diagnostics);
+
     out.sounds = parse_sounds(obj.get("sounds"), diagnostics);
+
+    out
+}
+
+fn parse_agent_tool_policies(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    let Some(Value::Object(agents)) = value else {
+        return out;
+    };
+
+    for (name, val) in agents {
+        let Some(agent_obj) = val.as_object() else {
+            continue;
+        };
+
+        let Some(tools_val) = agent_obj.get("tools") else {
+            continue;
+        };
+
+        let mut tools = Vec::new();
+        match tools_val {
+            Value::Array(arr) => {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            tools.push(trimmed.to_ascii_lowercase());
+                        }
+                    }
+                }
+            }
+            Value::String(s) => {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    tools.push(trimmed.to_ascii_lowercase());
+                }
+            }
+            _ => {
+                diagnostics.warnings.push(format!(
+                    "agent.{}.tools must be a string or array of strings",
+                    name
+                ));
+            }
+        }
+
+        if !tools.is_empty() {
+            out.insert(name.trim().to_ascii_lowercase(), tools);
+        }
+    }
 
     out
 }

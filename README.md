@@ -153,8 +153,12 @@ This project was inspired by [anomalyco/opencode](https://github.com/anomalyco/o
 - [x] The cheapest model providers (GLM, etc.)
 - [x] A ding sound, my only opencode plugin at the moment.
 - [x] No reverse-engineering oauth from big AI (Codex, Claude Code, Gemini), at least for now (Don't wanna get in trouble).
+- [ ] ChatGPT oauth (because I use it)
+- [ ] Copy chat contents, copy the chat input
+- [ ] Image inputs
 - [ ] Possibly ralphy? (very far, idk how to do that)
 - [ ] ACP w/ Zed? (very far, idk how to do that)
+- [x] No Claude Code oauth spoofing.
 - [x] No plugin ecosystem (If I think it's worth building, just make it built-in and configurable)
 - [x] No desktop app
 - [x] No web sharing thing (Might be a dealbreaker for vibecoders w/ tailscale, but I haven't reached these levels yet, when I do, I might)
