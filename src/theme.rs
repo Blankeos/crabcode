@@ -12,6 +12,7 @@ pub struct ThemeColors {
     pub interactive: ratatui::style::Color,
     pub background: ratatui::style::Color,
     pub dialog_background: ratatui::style::Color,
+    pub background_element: ratatui::style::Color,
     pub text: ratatui::style::Color,
     pub text_weak: ratatui::style::Color,
     pub text_strong: ratatui::style::Color,
@@ -23,6 +24,20 @@ pub struct ThemeColors {
     pub warning: ratatui::style::Color,
     pub error: ratatui::style::Color,
     pub info: ratatui::style::Color,
+    pub markdown_text: ratatui::style::Color,
+    pub markdown_heading: ratatui::style::Color,
+    pub markdown_link: ratatui::style::Color,
+    pub markdown_link_text: ratatui::style::Color,
+    pub markdown_code: ratatui::style::Color,
+    pub markdown_block_quote: ratatui::style::Color,
+    pub markdown_emph: ratatui::style::Color,
+    pub markdown_strong: ratatui::style::Color,
+    pub markdown_horizontal_rule: ratatui::style::Color,
+    pub markdown_list_item: ratatui::style::Color,
+    pub markdown_list_enumeration: ratatui::style::Color,
+    pub markdown_image: ratatui::style::Color,
+    pub markdown_image_text: ratatui::style::Color,
+    pub markdown_code_block: ratatui::style::Color,
 }
 
 pub fn darken_color(color: ratatui::style::Color, factor: f32) -> ratatui::style::Color {
@@ -111,6 +126,10 @@ struct DesktopThemeOverrides {
     #[serde(rename = "background-base")]
     pub background_base: String,
 
+    #[serde(rename = "background-weak")]
+    #[serde(default)]
+    pub background_weak: Option<String>,
+
     #[serde(rename = "background-stronger")]
     #[serde(default)]
     pub background_stronger: Option<String>,
@@ -142,6 +161,62 @@ struct DesktopThemeOverrides {
 
     #[serde(rename = "syntax-string")]
     pub syntax_string: String,
+
+    #[serde(rename = "markdown-text")]
+    #[serde(default)]
+    pub markdown_text: Option<String>,
+
+    #[serde(rename = "markdown-heading")]
+    #[serde(default)]
+    pub markdown_heading: Option<String>,
+
+    #[serde(rename = "markdown-link")]
+    #[serde(default)]
+    pub markdown_link: Option<String>,
+
+    #[serde(rename = "markdown-link-text")]
+    #[serde(default)]
+    pub markdown_link_text: Option<String>,
+
+    #[serde(rename = "markdown-code")]
+    #[serde(default)]
+    pub markdown_code: Option<String>,
+
+    #[serde(rename = "markdown-block-quote")]
+    #[serde(default)]
+    pub markdown_block_quote: Option<String>,
+
+    #[serde(rename = "markdown-emph")]
+    #[serde(default)]
+    pub markdown_emph: Option<String>,
+
+    #[serde(rename = "markdown-strong")]
+    #[serde(default)]
+    pub markdown_strong: Option<String>,
+
+    #[serde(rename = "markdown-horizontal-rule")]
+    #[serde(default)]
+    pub markdown_horizontal_rule: Option<String>,
+
+    #[serde(rename = "markdown-list-item")]
+    #[serde(default)]
+    pub markdown_list_item: Option<String>,
+
+    #[serde(rename = "markdown-list-enumeration")]
+    #[serde(default)]
+    pub markdown_list_enumeration: Option<String>,
+
+    #[serde(rename = "markdown-image")]
+    #[serde(default)]
+    pub markdown_image: Option<String>,
+
+    #[serde(rename = "markdown-image-text")]
+    #[serde(default)]
+    pub markdown_image_text: Option<String>,
+
+    #[serde(rename = "markdown-code-block")]
+    #[serde(default)]
+    pub markdown_code_block: Option<String>,
 }
 
 // OpenCode TUI themes ("https://opencode.ai/theme.json")
@@ -217,34 +292,111 @@ impl Theme {
                     .or(mode.overrides.background_stronger.as_deref())
                     .unwrap_or(mode.overrides.background_base.as_str());
 
+                let resolve_override = |value: Option<&str>, fallback: ratatui::style::Color| {
+                    value.map(parse_hex).unwrap_or(fallback)
+                };
+
                 let primary = parse_hex(&mode.seeds.primary);
+                let secondary = primary;
                 let interactive = parse_hex(&mode.seeds.interactive);
+                let background = parse_hex(&mode.overrides.background_base);
+                let dialog_background = parse_hex(dialog_background);
+                let background_element =
+                    resolve_override(mode.overrides.background_weak.as_deref(), dialog_background);
+                let text = parse_hex(&mode.overrides.text_base);
+                let text_weak = parse_hex(&mode.overrides.text_weak);
+                let text_strong = parse_hex(&mode.overrides.text_strong);
+                let border = parse_hex(&mode.overrides.border_base);
+                let border_weak_focus = parse_hex(&mode.overrides.border_weak_focus);
+                let border_focus = parse_hex(&mode.overrides.border_focus);
+                let border_strong_focus = parse_hex(&mode.overrides.border_strong_focus);
+                let success = parse_hex(&mode.seeds.success);
+                let warning = parse_hex(&mode.seeds.warning);
+                let error = parse_hex(&mode.seeds.error);
+                let info = parse_hex(&mode.seeds.info);
+
+                let markdown_text = resolve_override(mode.overrides.markdown_text.as_deref(), text);
+                let markdown_heading =
+                    resolve_override(mode.overrides.markdown_heading.as_deref(), primary);
+                let markdown_link = resolve_override(mode.overrides.markdown_link.as_deref(), info);
+                let markdown_link_text =
+                    resolve_override(mode.overrides.markdown_link_text.as_deref(), info);
+                let markdown_code = resolve_override(
+                    mode.overrides.markdown_code.as_deref(),
+                    parse_hex(&mode.overrides.syntax_string),
+                );
+                let markdown_block_quote =
+                    resolve_override(mode.overrides.markdown_block_quote.as_deref(), text_weak);
+                let markdown_emph =
+                    resolve_override(mode.overrides.markdown_emph.as_deref(), warning);
+                let markdown_strong =
+                    resolve_override(mode.overrides.markdown_strong.as_deref(), primary);
+                let markdown_horizontal_rule =
+                    resolve_override(mode.overrides.markdown_horizontal_rule.as_deref(), border);
+                let markdown_list_item =
+                    resolve_override(mode.overrides.markdown_list_item.as_deref(), markdown_link);
+                let markdown_list_enumeration = resolve_override(
+                    mode.overrides.markdown_list_enumeration.as_deref(),
+                    markdown_link_text,
+                );
+                let markdown_image =
+                    resolve_override(mode.overrides.markdown_image.as_deref(), markdown_link);
+                let markdown_image_text = resolve_override(
+                    mode.overrides.markdown_image_text.as_deref(),
+                    markdown_link_text,
+                );
+                let markdown_code_block =
+                    resolve_override(mode.overrides.markdown_code_block.as_deref(), markdown_text);
+
                 ThemeColors {
                     primary,
-                    secondary: primary,
+                    secondary,
                     accent: interactive,
                     interactive,
-                    background: parse_hex(&mode.overrides.background_base),
-                    dialog_background: parse_hex(dialog_background),
-                    text: parse_hex(&mode.overrides.text_base),
-                    text_weak: parse_hex(&mode.overrides.text_weak),
-                    text_strong: parse_hex(&mode.overrides.text_strong),
-                    border: parse_hex(&mode.overrides.border_base),
-                    border_weak_focus: parse_hex(&mode.overrides.border_weak_focus),
-                    border_focus: parse_hex(&mode.overrides.border_focus),
-                    border_strong_focus: parse_hex(&mode.overrides.border_strong_focus),
-                    success: parse_hex(&mode.seeds.success),
-                    warning: parse_hex(&mode.seeds.warning),
-                    error: parse_hex(&mode.seeds.error),
-                    info: parse_hex(&mode.seeds.info),
+                    background,
+                    dialog_background,
+                    background_element,
+                    text,
+                    text_weak,
+                    text_strong,
+                    border,
+                    border_weak_focus,
+                    border_focus,
+                    border_strong_focus,
+                    success,
+                    warning,
+                    error,
+                    info,
+                    markdown_text,
+                    markdown_heading,
+                    markdown_link,
+                    markdown_link_text,
+                    markdown_code,
+                    markdown_block_quote,
+                    markdown_emph,
+                    markdown_strong,
+                    markdown_horizontal_rule,
+                    markdown_list_item,
+                    markdown_list_enumeration,
+                    markdown_image,
+                    markdown_image_text,
+                    markdown_code_block,
                 }
             }
             ThemeData::Tui(theme) => {
                 let resolve = |key: &str| resolve_tui_color(theme, key, dark);
+                let resolve_or = |key: &str, fallback: ratatui::style::Color| {
+                    let v = resolve(key);
+                    if v == ratatui::style::Color::Reset {
+                        fallback
+                    } else {
+                        v
+                    }
+                };
 
                 let primary = resolve("primary");
-                let secondary = resolve("secondary");
-                let accent = resolve("accent");
+                let secondary = resolve_or("secondary", primary);
+                let accent = resolve_or("accent", secondary);
                 let interactive = {
                     // OpenCode theme.json doesn't always include an explicit interactive token.
                     // Map it to primary so we still get a theme-driven value.
@@ -264,11 +416,31 @@ impl Theme {
                         v
                     }
                 };
-                let text = resolve("text");
-                let text_weak = resolve("textMuted");
-                let border = resolve("border");
-                let border_focus = resolve("borderActive");
-                let border_weak_focus = resolve("borderSubtle");
+                let background_element = resolve_or("backgroundElement", dialog_background);
+                let text = resolve_or("text", primary);
+                let text_weak = resolve_or("textMuted", text);
+                let border = resolve_or("border", text_weak);
+                let border_focus = resolve_or("borderActive", border);
+                let border_weak_focus = resolve_or("borderSubtle", border);
+
+                let markdown_text = resolve_or("markdownText", text);
+                let markdown_heading = resolve_or("markdownHeading", primary);
+                let markdown_link =
+                    resolve_or("markdownLink", resolve_or("info", markdown_heading));
+                let markdown_link_text = resolve_or("markdownLinkText", markdown_link);
+                let markdown_code =
+                    resolve_or("markdownCode", resolve_or("success", markdown_text));
+                let markdown_block_quote = resolve_or("markdownBlockQuote", text_weak);
+                let markdown_emph =
+                    resolve_or("markdownEmph", resolve_or("warning", markdown_text));
+                let markdown_strong = resolve_or("markdownStrong", markdown_heading);
+                let markdown_horizontal_rule = resolve_or("markdownHorizontalRule", border);
+                let markdown_list_item = resolve_or("markdownListItem", markdown_link);
+                let markdown_list_enumeration =
+                    resolve_or("markdownListEnumeration", markdown_link_text);
+                let markdown_image = resolve_or("markdownImage", markdown_link);
+                let markdown_image_text = resolve_or("markdownImageText", markdown_link_text);
+                let markdown_code_block = resolve_or("markdownCodeBlock", markdown_text);
 
                 ThemeColors {
                     primary,
@@ -277,6 +449,7 @@ impl Theme {
                     interactive,
                     background,
                     dialog_background,
+                    background_element,
                     text,
                     text_weak,
                     text_strong: text,
@@ -284,10 +457,24 @@ impl Theme {
                     border_weak_focus,
                     border_focus,
                     border_strong_focus: border_focus,
-                    success: resolve("success"),
-                    warning: resolve("warning"),
-                    error: resolve("error"),
-                    info: resolve("info"),
+                    success: resolve_or("success", primary),
+                    warning: resolve_or("warning", primary),
+                    error: resolve_or("error", primary),
+                    info: resolve_or("info", primary),
+                    markdown_text,
+                    markdown_heading,
+                    markdown_link,
+                    markdown_link_text,
+                    markdown_code,
+                    markdown_block_quote,
+                    markdown_emph,
+                    markdown_strong,
+                    markdown_horizontal_rule,
+                    markdown_list_item,
+                    markdown_list_enumeration,
+                    markdown_image,
+                    markdown_image_text,
+                    markdown_code_block,
                 }
             }
         }
@@ -323,12 +510,36 @@ fn resolve_tui_color(theme: &TuiTheme, key: &str, dark: bool) -> ratatui::style:
 fn parse_hex(hex: &str) -> ratatui::style::Color {
     let hex = hex.trim_start_matches('#');
 
-    if hex.len() == 6 {
-        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-        ratatui::style::Color::Rgb(r, g, b)
-    } else {
-        ratatui::style::Color::Reset
+    match hex.len() {
+        3 => {
+            let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).unwrap_or(0);
+            let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).unwrap_or(0);
+            let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).unwrap_or(0);
+            ratatui::style::Color::Rgb(r, g, b)
+        }
+        6 | 8 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+            ratatui::style::Color::Rgb(r, g, b)
+        }
+        _ => ratatui::style::Color::Reset,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex;
+
+    #[test]
+    fn parse_hex_supports_short_rgb() {
+        let color = parse_hex("#fff");
+        assert_eq!(color, ratatui::style::Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn parse_hex_supports_rrggbbaa() {
+        let color = parse_hex("#112233ff");
+        assert_eq!(color, ratatui::style::Color::Rgb(17, 34, 51));
     }
 }

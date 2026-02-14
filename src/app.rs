@@ -382,6 +382,7 @@ impl App {
                 interactive: ratatui::style::Color::Rgb(255, 140, 0),
                 background: ratatui::style::Color::Reset,
                 dialog_background: ratatui::style::Color::Reset,
+                background_element: ratatui::style::Color::Reset,
                 text: ratatui::style::Color::Reset,
                 text_weak: ratatui::style::Color::Reset,
                 text_strong: ratatui::style::Color::Reset,
@@ -393,6 +394,20 @@ impl App {
                 warning: ratatui::style::Color::Rgb(255, 255, 0),
                 error: ratatui::style::Color::Rgb(255, 0, 0),
                 info: ratatui::style::Color::Rgb(0, 255, 255),
+                markdown_text: ratatui::style::Color::Reset,
+                markdown_heading: ratatui::style::Color::Rgb(255, 140, 0),
+                markdown_link: ratatui::style::Color::Rgb(0, 255, 255),
+                markdown_link_text: ratatui::style::Color::Rgb(0, 255, 255),
+                markdown_code: ratatui::style::Color::Rgb(0, 255, 0),
+                markdown_block_quote: ratatui::style::Color::Rgb(255, 255, 0),
+                markdown_emph: ratatui::style::Color::Rgb(255, 255, 0),
+                markdown_strong: ratatui::style::Color::Rgb(255, 140, 0),
+                markdown_horizontal_rule: ratatui::style::Color::Reset,
+                markdown_list_item: ratatui::style::Color::Rgb(255, 140, 0),
+                markdown_list_enumeration: ratatui::style::Color::Rgb(0, 255, 255),
+                markdown_image: ratatui::style::Color::Rgb(255, 140, 0),
+                markdown_image_text: ratatui::style::Color::Rgb(0, 255, 255),
+                markdown_code_block: ratatui::style::Color::Reset,
             };
         }
 

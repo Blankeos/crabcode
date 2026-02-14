@@ -724,19 +724,22 @@ impl Chat {
                 if is_streaming {
                     // Use the streaming renderer content for markdown
                     if let Some(content) = streaming_content {
-                        let markdown_lines = render_markdown(content, max_width);
+                        let markdown_lines = render_markdown(content, max_width, colors);
                         lines.extend(markdown_lines);
                     } else {
                         // Fallback to plain text if renderer not available
                         let content = message.content.clone();
                         let wrapped_lines = textwrap::wrap(&content, max_width);
                         for line in wrapped_lines {
-                            lines.push(Line::from(line.to_string()));
+                            lines.push(Line::from(Span::styled(
+                                line.to_string(),
+                                Style::default().fg(colors.markdown_text),
+                            )));
                         }
                     }
                 } else {
                     // For complete messages, use tui-markdown directly
-                    let markdown_lines = render_markdown(&message.content, max_width);
+                    let markdown_lines = render_markdown(&message.content, max_width, colors);
                     lines.extend(markdown_lines);
                 }
 

@@ -89,6 +89,7 @@ impl Default for SessionRenameDialogState {
             interactive: Color::Rgb(255, 140, 0),
             background: Color::Reset,
             dialog_background: Color::Reset,
+            background_element: Color::Reset,
             text: Color::Reset,
             text_weak: Color::Reset,
             text_strong: Color::Reset,
@@ -100,6 +101,20 @@ impl Default for SessionRenameDialogState {
             warning: Color::Rgb(255, 255, 0),
             error: Color::Rgb(255, 0, 0),
             info: Color::Rgb(0, 255, 255),
+            markdown_text: Color::Reset,
+            markdown_heading: Color::Rgb(255, 140, 0),
+            markdown_link: Color::Rgb(0, 255, 255),
+            markdown_link_text: Color::Rgb(0, 255, 255),
+            markdown_code: Color::Rgb(0, 255, 0),
+            markdown_block_quote: Color::Rgb(255, 255, 0),
+            markdown_emph: Color::Rgb(255, 255, 0),
+            markdown_strong: Color::Rgb(255, 140, 0),
+            markdown_horizontal_rule: Color::Reset,
+            markdown_list_item: Color::Rgb(255, 140, 0),
+            markdown_list_enumeration: Color::Rgb(0, 255, 255),
+            markdown_image: Color::Rgb(255, 140, 0),
+            markdown_image_text: Color::Rgb(0, 255, 255),
+            markdown_code_block: Color::Reset,
         })
     }
 }
