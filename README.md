@@ -31,10 +31,11 @@ A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interac
 
 ## Quick Start
 
-Install via cargo:
-
 ```bash
-cargo install crabcode
+cargo install crabcode # via cargo
+npm install -g crabcode # via npm
+bun install -g crabcode # via bun
+# Brew, coming sooon
 ```
 
 ## Quick Start
