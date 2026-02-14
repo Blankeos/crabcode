@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 const MAX_VISIBLE_ITEMS: usize = 8;
+const ITEM_HORIZONTAL_PADDING: usize = 1;
 
 pub enum PopupAction {
     Handled,
@@ -100,6 +101,7 @@ impl Popup {
         }
 
         let popup_width = area.width;
+        let item_width = popup_width.saturating_sub(2) as usize;
         let popup_height = (self.suggestions.len() as u16).min(MAX_VISIBLE_ITEMS as u16) + 2;
 
         let popup_area = Rect {
@@ -138,28 +140,37 @@ impl Popup {
                     .add_modifier(Modifier::BOLD);
                 let desc_style = Style::default().fg(desc_fg).bg(bg_style);
                 let padding_style = Style::default().bg(bg_style);
+                let left_padding = " ".repeat(ITEM_HORIZONTAL_PADDING);
+                let right_padding = " ".repeat(ITEM_HORIZONTAL_PADDING);
 
                 let line = if !suggestion.description.is_empty() {
                     let mid_padding = " ".repeat(max_name_len + 3 - suggestion.name.len());
                     let content_len = suggestion.name.len()
                         + suggestion.description.len()
                         + mid_padding.len()
-                        + 2;
-                    let end_padding =
-                        " ".repeat(popup_width.saturating_sub(content_len as u16).max(0) as usize);
+                        + 1
+                        + ITEM_HORIZONTAL_PADDING
+                        + ITEM_HORIZONTAL_PADDING;
+                    let end_padding = " ".repeat(item_width.saturating_sub(content_len));
                     Line::from(vec![
+                        Span::styled(left_padding, padding_style),
                         Span::styled(format!("/{}", suggestion.name), name_style),
                         Span::styled(mid_padding, padding_style),
                         Span::styled(suggestion.description.clone(), desc_style),
                         Span::styled(end_padding, padding_style),
+                        Span::styled(right_padding, padding_style),
                     ])
                 } else {
-                    let content_len = suggestion.name.len() + 1;
-                    let end_padding =
-                        " ".repeat(popup_width.saturating_sub(content_len as u16).max(0) as usize);
+                    let content_len = suggestion.name.len()
+                        + 1
+                        + ITEM_HORIZONTAL_PADDING
+                        + ITEM_HORIZONTAL_PADDING;
+                    let end_padding = " ".repeat(item_width.saturating_sub(content_len));
                     Line::from(vec![
+                        Span::styled(left_padding, padding_style),
                         Span::styled(format!("/{}", suggestion.name), name_style),
                         Span::styled(end_padding, padding_style),
+                        Span::styled(right_padding, padding_style),
                     ])
                 };
                 ListItem::new(line)
