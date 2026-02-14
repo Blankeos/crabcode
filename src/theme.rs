@@ -54,11 +54,11 @@ pub fn contrast_text(background: ratatui::style::Color) -> ratatui::style::Color
 
 pub fn agent_color(agent: &str, colors: &ThemeColors) -> ratatui::style::Color {
     match agent {
-        // OpenCode tokens:
-        // - Plan: info (icon-agent-plan-base)
-        // - Build: interactive (icon-agent-build-base)
-        "Plan" => colors.info,
-        "Build" => colors.interactive,
+        // Match OpenCode primary agent colors:
+        // - Build: secondary
+        // - Plan: accent
+        "Build" => colors.secondary,
+        "Plan" => colors.accent,
         _ => colors.primary,
     }
 }
