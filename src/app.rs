@@ -1215,9 +1215,7 @@ impl App {
                                         provider_id: item.provider_id.clone(),
                                     })
                                     .collect();
-                            self.sessions_dialog_state = init_sessions_dialog(title, dialog_items);
-                            self.sessions_dialog_state.dialog.show();
-                            self.overlay_focus = OverlayFocus::SessionsDialog;
+                            self.show_sessions_dialog(title, dialog_items);
                         } else {
                             let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
                                 items
@@ -1328,9 +1326,7 @@ impl App {
                             provider_id: item.provider_id.clone(),
                         })
                         .collect();
-                    self.sessions_dialog_state = init_sessions_dialog(title, dialog_items);
-                    self.sessions_dialog_state.dialog.show();
-                    self.overlay_focus = OverlayFocus::SessionsDialog;
+                    self.show_sessions_dialog(title, dialog_items);
                 } else {
                     let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
                         .into_iter()
@@ -1588,6 +1584,25 @@ impl App {
         self.models_dialog_state.refresh_items(items);
     }
 
+    fn show_sessions_dialog(
+        &mut self,
+        title: impl Into<String>,
+        items: Vec<crate::ui::components::dialog::DialogItem>,
+    ) {
+        self.sessions_dialog_state = init_sessions_dialog(title, items);
+
+        let current_session_id = self.session_manager.get_current_session_id().cloned();
+        if let Some(session_id) = current_session_id {
+            let _ = self
+                .sessions_dialog_state
+                .dialog
+                .select_item_by_key(&session_id, "");
+        }
+
+        self.sessions_dialog_state.dialog.show();
+        self.overlay_focus = OverlayFocus::SessionsDialog;
+    }
+
     fn show_themes_dialog(&mut self) {
         use crate::ui::components::dialog::DialogItem;
 
@@ -1618,16 +1633,16 @@ impl App {
 
         items.sort_by(|a, b| a.id.cmp(&b.id));
 
-        let mut selected_index = 0usize;
-        if let Some(ref id) = current_id {
-            if let Some((idx, _)) = items.iter().enumerate().find(|(_, it)| &it.id == id) {
-                selected_index = idx;
-            }
+        self.themes_dialog_state = init_themes_dialog("Themes", items);
+
+        if let Some(theme_id) = current_id.as_deref() {
+            let _ = self
+                .themes_dialog_state
+                .dialog
+                .select_item_by_key(theme_id, "");
         }
 
-        self.themes_dialog_state = init_themes_dialog("Themes", items);
         self.themes_dialog_state.dialog.show();
-        self.themes_dialog_state.dialog.selected_index = selected_index;
         self.themes_dialog_original_theme_index = self.current_theme_index;
         self.themes_dialog_committed = false;
         self.overlay_focus = OverlayFocus::ThemesDialog;
