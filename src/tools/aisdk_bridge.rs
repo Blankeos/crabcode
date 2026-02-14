@@ -9,16 +9,19 @@ use crate::llm::ChunkSender;
 static TOOL_CALL_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// Convert our ToolRegistry to AISDK Tools
-pub async fn convert_to_aisdk_tools(registry: &ToolRegistry, sender: Option<ChunkSender>) -> Vec<Tool> {
+pub async fn convert_to_aisdk_tools(
+    registry: &ToolRegistry,
+    sender: Option<ChunkSender>,
+) -> Vec<Tool> {
     let mut aisdk_tools = Vec::new();
     let tools = registry.list().await;
-    
+
     for tool_def in tools {
         let tool_id = tool_def.id.clone();
         let tool_description = tool_def.description.clone();
         let registry = registry.clone();
         let sender = sender.clone();
-        
+
         // Create the execute function
         let execute = ToolExecute::new(Box::new(move |input: Value| {
             let tool_id = tool_id.clone();
@@ -36,14 +39,16 @@ pub async fn convert_to_aisdk_tools(registry: &ToolRegistry, sender: Option<Chun
             if let Some(ref sender) = sender {
                 // Surface tool call start to the UI
                 let args = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
-                let _ = sender.send(crate::llm::ChunkMessage::ToolCalls(vec![crate::llm::ToolCall {
-                    id: call_id.clone(),
-                    call_type: "function".to_string(),
-                    function: crate::llm::FunctionCall {
-                        name: tool_id.clone(),
-                        arguments: args,
+                let _ = sender.send(crate::llm::ChunkMessage::ToolCalls(vec![
+                    crate::llm::ToolCall {
+                        id: call_id.clone(),
+                        call_type: "function".to_string(),
+                        function: crate::llm::FunctionCall {
+                            name: tool_id.clone(),
+                            arguments: args,
+                        },
                     },
-                }]));
+                ]));
             }
 
             let sender_for_block = sender.clone();
@@ -56,8 +61,7 @@ pub async fn convert_to_aisdk_tools(registry: &ToolRegistry, sender: Option<Chun
                 tokio::runtime::Handle::current().block_on(async move {
                     let _ = crate::logging::log(&format!(
                         "[AISDK_TOOL] call {} args={} ",
-                        tool_id_for_exec,
-                        input
+                        tool_id_for_exec, input
                     ));
 
                     let handler = registry
@@ -142,11 +146,11 @@ pub async fn convert_to_aisdk_tools(registry: &ToolRegistry, sender: Option<Chun
 
             result
         }));
-        
+
         // Build the tool schema from parameters
         let mut properties = serde_json::Map::new();
         let mut required = Vec::new();
-        
+
         for param in &tool_def.parameters {
             let schema = param_to_json_schema(&param.param_type);
             properties.insert(param.name.clone(), schema);
@@ -154,7 +158,7 @@ pub async fn convert_to_aisdk_tools(registry: &ToolRegistry, sender: Option<Chun
                 required.push(param.name.clone());
             }
         }
-        
+
         let input_schema_json = serde_json::json!({
             "type": "object",
             "properties": properties,
@@ -171,29 +175,30 @@ pub async fn convert_to_aisdk_tools(registry: &ToolRegistry, sender: Option<Chun
                 Schema::from(true)
             }
         };
-        
+
         let aisdk_tool = match Tool::builder()
             .name(&tool_def.id)
             .description(&tool_def.description)
             .input_schema(schema)
             .execute(execute)
-            .build() {
+            .build()
+        {
             Ok(t) => t,
             Err(e) => {
                 let _ = crate::logging::log(&format!("Error building tool {}: {}", tool_def.id, e));
                 continue;
             }
         };
-        
+
         aisdk_tools.push(aisdk_tool);
     }
-    
+
     aisdk_tools
 }
 
 fn param_to_json_schema(param_type: &crate::tools::ParameterType) -> serde_json::Value {
     use crate::tools::ParameterType;
-    
+
     match param_type {
         ParameterType::String => serde_json::json!({"type": "string"}),
         ParameterType::Integer => serde_json::json!({"type": "integer"}),

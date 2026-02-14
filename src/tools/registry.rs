@@ -29,10 +29,7 @@ impl ToolRegistry {
 
     pub async fn list(&self) -> Vec<Tool> {
         let tools = self.tools.read().await;
-        tools
-            .values()
-            .map(|t| t.definition())
-            .collect()
+        tools.values().map(|t| t.definition()).collect()
     }
 
     pub async fn list_schemas(&self) -> Vec<serde_json::Value> {

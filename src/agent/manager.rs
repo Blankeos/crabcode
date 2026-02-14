@@ -21,9 +21,20 @@ pub struct AgentManager {
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    ToolCallStarted { tool_id: String, call_id: String },
-    ToolCallCompleted { tool_id: String, call_id: String, result: ToolResult },
-    ToolCallFailed { tool_id: String, call_id: String, error: String },
+    ToolCallStarted {
+        tool_id: String,
+        call_id: String,
+    },
+    ToolCallCompleted {
+        tool_id: String,
+        call_id: String,
+        result: ToolResult,
+    },
+    ToolCallFailed {
+        tool_id: String,
+        call_id: String,
+        error: String,
+    },
     Message(String),
 }
 
@@ -35,13 +46,10 @@ impl AgentManager {
         platform: impl Into<String>,
     ) -> anyhow::Result<Self> {
         let tool_registry = initialize_tool_registry().await;
-        
-        let composer = SystemPromptComposer::new(
-            model_id,
-            working_directory,
-            is_git_repo,
-            platform,
-        ).with_tool_registry(tool_registry.clone());
+
+        let composer =
+            SystemPromptComposer::new(model_id, working_directory, is_git_repo, platform)
+                .with_tool_registry(tool_registry.clone());
 
         let system_prompt = composer.compose().await;
 
@@ -93,8 +101,7 @@ impl AgentManager {
         tool.execute(params, &ctx).await
     }
 
-    pub fn create_system_message(&self,
-    ) -> Message {
+    pub fn create_system_message(&self) -> Message {
         Message::system(self.agent.system_prompt.clone())
     }
 
@@ -113,7 +120,8 @@ impl AgentManager {
             });
 
             match self
-                .execute_tool(&call.tool_id,
+                .execute_tool(
+                    &call.tool_id,
                     call.params.clone(),
                     call.call_id.clone(),
                     abort_rx.clone(),
@@ -178,12 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_manager_creation() {
-        let manager = AgentManager::new(
-            "gpt-4",
-            "/tmp",
-            false,
-            "darwin",
-        ).await;
+        let manager = AgentManager::new("gpt-4", "/tmp", false, "darwin").await;
 
         assert!(manager.is_ok());
     }

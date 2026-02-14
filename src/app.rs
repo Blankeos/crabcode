@@ -23,10 +23,6 @@ use crate::views::models_dialog::{
     handle_models_dialog_key_event, handle_models_dialog_mouse_event, init_models_dialog,
     render_models_dialog,
 };
-use crate::views::themes_dialog::{
-    handle_themes_dialog_key_event, handle_themes_dialog_mouse_event, init_themes_dialog,
-    render_themes_dialog,
-};
 use crate::views::session_rename_dialog::{
     handle_session_rename_dialog_key_event, init_session_rename_dialog,
     render_session_rename_dialog, RenameAction,
@@ -38,6 +34,10 @@ use crate::views::sessions_dialog::{
 use crate::views::suggestions_popup::{
     clear_suggestions, get_selected_suggestion, handle_suggestions_popup_key_event,
     init_suggestions_popup, is_suggestions_visible, render_suggestions_popup, set_suggestions,
+};
+use crate::views::themes_dialog::{
+    handle_themes_dialog_key_event, handle_themes_dialog_mouse_event, init_themes_dialog,
+    render_themes_dialog,
 };
 use crate::views::{
     ChatState, ConnectDialogState, HomeState, ModelsDialogState, SessionRenameDialogState,
@@ -199,7 +199,10 @@ impl App {
         };
 
         if active_model_info.is_none() {
-            if let (Some(ref dao), Some(model_str)) = (prefs_dao.as_ref(), loaded_config.merged_config.model.clone()) {
+            if let (Some(ref dao), Some(model_str)) = (
+                prefs_dao.as_ref(),
+                loaded_config.merged_config.model.clone(),
+            ) {
                 let (provider_id, model_id) = parse_model_ref(&model_str);
                 let _ = dao.set_active_model(provider_id, model_id);
             }
@@ -211,14 +214,15 @@ impl App {
             None
         };
 
-        let (active_model, active_provider_name) = if let Some((provider_id, model_id)) = active_model_info {
-            (model_id.clone(), provider_id.clone())
-        } else if let Some(model_str) = loaded_config.merged_config.model.clone() {
-            let (provider_id, model_id) = parse_model_ref(&model_str);
-            (model_id, provider_id)
-        } else {
-            ("big-pickle".to_string(), "opencode".to_string())
-        };
+        let (active_model, active_provider_name) =
+            if let Some((provider_id, model_id)) = active_model_info {
+                (model_id.clone(), provider_id.clone())
+            } else if let Some(model_str) = loaded_config.merged_config.model.clone() {
+                let (provider_id, model_id) = parse_model_ref(&model_str);
+                (model_id, provider_id)
+            } else {
+                ("big-pickle".to_string(), "opencode".to_string())
+            };
 
         let (themes, current_theme_index) = crate::config::discover_themes(
             &loaded_config.xdg_config_home,
@@ -232,8 +236,9 @@ impl App {
             .or_else(|| themes.first())
             .cloned()
             .unwrap_or_else(|| {
-                theme::Theme::load_from_file("src/theme.json")
-                    .unwrap_or_else(|_| theme::Theme::load_from_file("src/generated_themes/ayu.json").unwrap())
+                theme::Theme::load_from_file("src/theme.json").unwrap_or_else(|_| {
+                    theme::Theme::load_from_file("src/generated_themes/ayu.json").unwrap()
+                })
             });
         let colors = theme_for_colors.get_colors(true);
 
@@ -286,9 +291,55 @@ impl App {
     }
 
     fn play_sound_event(&self, event: crate::sound::SoundEvent) {
+        self.play_sound_event_with_notification_detail(event, None);
+    }
+
+    fn play_sound_event_with_notification_detail(
+        &self,
+        event: crate::sound::SoundEvent,
+        detail: Option<&str>,
+    ) {
         if let Some(path) = self.sounds.path_for_event(event) {
             crate::sound::play_file(path);
         }
+
+        if self.sounds.notify_for_event(event) {
+            crate::notify::notify_event(event, detail);
+        }
+    }
+
+    fn completion_notification_stats(&self) -> Option<String> {
+        let message = self.chat_state.chat.messages.iter().rev().find(|msg| {
+            msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
+        })?;
+
+        if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
+            let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
+            let total_ms = tn.saturating_sub(t0);
+            let decode_ms = tn.saturating_sub(t1);
+
+            let total_sec = total_ms as f64 / 1000.0;
+            let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
+                (output_tokens as f64) / (decode_ms as f64 / 1000.0)
+            } else {
+                0.0
+            };
+
+            return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
+        }
+
+        if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
+            let duration_sec = duration_ms as f64 / 1000.0;
+            let tokens_per_sec = if duration_ms > 0 {
+                (token_count as f64) / (duration_ms as f64 / 1000.0)
+            } else {
+                0.0
+            };
+
+            return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
+        }
+
+        None
     }
 
     fn get_random_placeholder() -> String {
@@ -395,9 +446,7 @@ impl App {
                 }
             }
             OverlayFocus::ModelsDialog => {
-                if key.code == KeyCode::Char('a')
-                    && key.modifiers == event::KeyModifiers::CONTROL
-                {
+                if key.code == KeyCode::Char('a') && key.modifiers == event::KeyModifiers::CONTROL {
                     self.models_dialog_state.dialog.hide();
                     if let crate::command::parser::InputType::Command(parsed) =
                         crate::command::parser::parse_input("/connect")
@@ -467,20 +516,25 @@ impl App {
                 true
             }
             OverlayFocus::ThemesDialog => {
-                let action =
-                    handle_themes_dialog_key_event(&mut self.themes_dialog_state, key);
+                let action = handle_themes_dialog_key_event(&mut self.themes_dialog_state, key);
 
                 match action {
                     crate::views::themes_dialog::ThemesDialogAction::PreviewTheme { theme_id } => {
-                        if let Some((idx, _)) =
-                            self.themes.iter().enumerate().find(|(_, t)| t.id == theme_id)
+                        if let Some((idx, _)) = self
+                            .themes
+                            .iter()
+                            .enumerate()
+                            .find(|(_, t)| t.id == theme_id)
                         {
                             self.current_theme_index = idx;
                         }
                     }
                     crate::views::themes_dialog::ThemesDialogAction::SelectTheme { theme_id } => {
-                        if let Some((idx, theme)) =
-                            self.themes.iter().enumerate().find(|(_, t)| t.id == theme_id)
+                        if let Some((idx, theme)) = self
+                            .themes
+                            .iter()
+                            .enumerate()
+                            .find(|(_, t)| t.id == theme_id)
                         {
                             self.current_theme_index = idx;
                             self.themes_dialog_committed = true;
@@ -819,8 +873,11 @@ impl App {
 
             if before != after {
                 if let Some(theme_id) = after {
-                    if let Some((idx, _)) =
-                        self.themes.iter().enumerate().find(|(_, t)| t.id == theme_id)
+                    if let Some((idx, _)) = self
+                        .themes
+                        .iter()
+                        .enumerate()
+                        .find(|(_, t)| t.id == theme_id)
                     {
                         self.current_theme_index = idx;
                     }
@@ -936,8 +993,11 @@ impl App {
                     .get_selected()
                     .map(|it| it.id.clone())
                 {
-                    if let Some((idx, _)) =
-                        self.themes.iter().enumerate().find(|(_, t)| t.id == theme_id)
+                    if let Some((idx, _)) = self
+                        .themes
+                        .iter()
+                        .enumerate()
+                        .find(|(_, t)| t.id == theme_id)
                     {
                         self.current_theme_index = idx;
                     }
@@ -1162,17 +1222,18 @@ impl App {
                     self.quit();
                 }
             }
-                    crate::command::registry::CommandResult::Error(msg) => {
-                        self.play_sound_event(crate::sound::SoundEvent::Error);
-                        if msg.starts_with("Unknown command:") {
-                            push_toast(ratatui_toolkit::Toast::new(
-                                msg,
-                                ratatui_toolkit::ToastLevel::Error,
+            crate::command::registry::CommandResult::Error(msg) => {
+                self.play_sound_event(crate::sound::SoundEvent::Error);
+                if msg.starts_with("Unknown command:") {
+                    push_toast(ratatui_toolkit::Toast::new(
+                        msg,
+                        ratatui_toolkit::ToastLevel::Error,
                         Some(std::time::Duration::from_secs(3)),
                     ));
                 } else {
                     let error_msg = format!("Error: {}", msg);
-                    let error_message = crate::session::types::Message::assistant(error_msg.clone());
+                    let error_message =
+                        crate::session::types::Message::assistant(error_msg.clone());
                     let _ = self
                         .session_manager
                         .add_message_to_current_session(&error_message);
@@ -1592,7 +1653,11 @@ impl App {
                     self.streaming_provider = None;
                     self.cleanup_streaming();
 
-                    self.play_sound_event(crate::sound::SoundEvent::Complete);
+                    let completion_stats = self.completion_notification_stats();
+                    self.play_sound_event_with_notification_detail(
+                        crate::sound::SoundEvent::Complete,
+                        completion_stats.as_deref(),
+                    );
                 }
                 crate::llm::ChunkMessage::Failed(error) => {
                     self.is_streaming = false;
@@ -1647,8 +1712,10 @@ impl App {
                     }
 
                     for call in tool_calls {
-                        let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
-                            .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()));
+                        let args_value: serde_json::Value =
+                            serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| {
+                                serde_json::Value::String(call.function.arguments.clone())
+                            });
 
                         let content = serde_json::json!({
                             "id": call.id,
@@ -1668,7 +1735,11 @@ impl App {
                     }
                 }
                 crate::llm::ChunkMessage::ToolResult(result) => {
-                    if let Some(idx) = self.tool_call_message_indices.get(&result.tool_call_id).copied() {
+                    if let Some(idx) = self
+                        .tool_call_message_indices
+                        .get(&result.tool_call_id)
+                        .copied()
+                    {
                         if let Some(msg) = self.chat_state.chat.messages.get_mut(idx) {
                             let mut v: serde_json::Value = serde_json::from_str(&msg.content)
                                 .unwrap_or_else(|_| serde_json::json!({}));
@@ -1676,13 +1747,15 @@ impl App {
                             v["name"] = serde_json::Value::String(result.name.clone());
 
                             // Merge structured payloads from the AISDK bridge if present.
-                            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&result.content) {
+                            if let Ok(payload) =
+                                serde_json::from_str::<serde_json::Value>(&result.content)
+                            {
                                 if payload.is_object() {
                                     if v.get("status").is_none() {
-                                        v["status"] = payload
-                                            .get("status")
-                                            .cloned()
-                                            .unwrap_or_else(|| serde_json::Value::String("ok".to_string()));
+                                        v["status"] =
+                                            payload.get("status").cloned().unwrap_or_else(|| {
+                                                serde_json::Value::String("ok".to_string())
+                                            });
                                     } else {
                                         v["status"] = payload
                                             .get("status")
@@ -1703,7 +1776,8 @@ impl App {
                                     }
                                 } else {
                                     v["status"] = serde_json::Value::String("ok".to_string());
-                                    v["output_preview"] = serde_json::Value::String(result.content.clone());
+                                    v["output_preview"] =
+                                        serde_json::Value::String(result.content.clone());
                                 }
                             } else {
                                 let status = if result.content.trim_start().starts_with("Error:") {
@@ -1712,7 +1786,8 @@ impl App {
                                     "ok"
                                 };
                                 v["status"] = serde_json::Value::String(status.to_string());
-                                v["output_preview"] = serde_json::Value::String(result.content.clone());
+                                v["output_preview"] =
+                                    serde_json::Value::String(result.content.clone());
                             }
 
                             msg.content = v.to_string();
@@ -1776,15 +1851,15 @@ impl App {
         let model = self.model.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
-        
+
         // Build messages with system prompt
         let mut messages = self.chat_state.chat.messages.clone();
-        
+
         // Check if we already have a system message
-        let has_system = messages.iter().any(|m| {
-            m.role == crate::session::types::MessageRole::System
-        });
-        
+        let has_system = messages
+            .iter()
+            .any(|m| m.role == crate::session::types::MessageRole::System);
+
         if !has_system {
             // Create system prompt with tools
             let composer = crate::prompt::SystemPromptComposer::new(
@@ -1793,11 +1868,9 @@ impl App {
                 is_git_repo,
                 std::env::consts::OS,
             );
-            
+
             let system_prompt = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    composer.compose().await
-                })
+                tokio::runtime::Handle::current().block_on(async { composer.compose().await })
             });
             let system_msg = crate::session::types::Message::system(system_prompt);
             messages.insert(0, system_msg);

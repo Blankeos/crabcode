@@ -16,6 +16,10 @@ pub struct ResolvedSoundsConfig {
     pub complete: Option<PathBuf>,
     pub permission: Option<PathBuf>,
     pub question: Option<PathBuf>,
+    pub error_notify: bool,
+    pub complete_notify: bool,
+    pub permission_notify: bool,
+    pub question_notify: bool,
 }
 
 impl ResolvedSoundsConfig {
@@ -25,6 +29,15 @@ impl ResolvedSoundsConfig {
             SoundEvent::Complete => self.complete.as_deref(),
             SoundEvent::Permission => self.permission.as_deref(),
             SoundEvent::Question => self.question.as_deref(),
+        }
+    }
+
+    pub fn notify_for_event(&self, event: SoundEvent) -> bool {
+        match event {
+            SoundEvent::Error => self.error_notify,
+            SoundEvent::Complete => self.complete_notify,
+            SoundEvent::Permission => self.permission_notify,
+            SoundEvent::Question => self.question_notify,
         }
     }
 }
@@ -79,7 +92,23 @@ pub fn resolve_effective_sounds(
             &mut built_in_cache,
             &mut warnings,
         ),
+        error_notify: config.error.notify,
+        complete_notify: config.complete.notify,
+        permission_notify: config.permission.notify,
+        question_notify: config.question.notify,
     };
+
+    if (resolved.error_notify
+        || resolved.complete_notify
+        || resolved.permission_notify
+        || resolved.question_notify)
+        && !crate::notify::is_supported()
+    {
+        warnings.push(
+            "Desktop notifications are enabled for sounds, but no supported notification backend is available on this OS"
+                .to_string(),
+        );
+    }
 
     (resolved, warnings)
 }

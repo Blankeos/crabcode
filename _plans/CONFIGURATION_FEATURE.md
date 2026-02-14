@@ -1,6 +1,6 @@
 # Configuration Feature Plan
 
-Goal: Add a layered configuration system for Crabcode that is (1) compatible with OpenCode configs, (2) supports both global + per-project config, and (3) can be extended incrementally. For the first implementation pass, only `theme`, `sounds`, and `model` are functional; other supported keys are parsed/merged but treated as unimplemented.
+Goal: Add a layered configuration system for Crabcode that is (1) compatible with OpenCode configs, (2) supports both global + per-project config, and (3) can be extended incrementally. For the first implementation pass, only `theme`, `sounds`, and `model` are functional. `sounds.<event>.notify` extends `sounds` with native desktop notifications (default off per event); other supported keys are parsed/merged but treated as unimplemented.
 
 ## Non-Goals (Initial Scope)
 
@@ -173,6 +173,7 @@ We should still allow these keys to exist (no parse error); we just exclude them
 Crabcode config supports everything in the compatibility set above, plus:
 
 - `sounds` (Crabcode-only)
+- `sounds.<event>.notify` (Crabcode-only desktop notifications, default off per event)
 - `theme` (Crabcode controls the theme selection, but the theme system is compatible with OpenCode)
 
 If these appear in OpenCode config files, they are ignored.
@@ -193,19 +194,43 @@ Minimal schema we actively apply in the first iteration:
 
   // Crabcode-only (All are optional to use, but these are the defaults)
   "sounds": {
-    "error": { "file": "/absolute/path.wav", "enabled": false },
-    "complete": { "file": "/absolute/path.wav", "enabled": true },
-    "permission": { "file": "/absolute/path.wav", "enabled": false },
-    "question": { "file": "/absolute/path.wav", "enabled": false },
+    "error": { "file": "/absolute/path.wav", "enabled": false, "notify": false },
+    "complete": { "file": "/absolute/path.wav", "enabled": true, "notify": true },
+    "permission": { "file": "/absolute/path.wav", "enabled": false, "notify": false },
+    "question": { "file": "/absolute/path.wav", "enabled": false, "notify": false },
   },
 }
 ```
 
 Sounds requirements:
 
+- Sound event keys (`error`, `complete`, `permission`, `question`) should accept either:
+  - Object form: `{ "enabled": bool, "file": "/absolute/path.wav" }`
+  - Boolean shorthand: `true`/`false` (e.g. `"complete": true`)
 - `file` must be an absolute path (no `~`, no relative). If invalid, record a warning and treat sound as disabled.
 - `enabled` default behavior:
   - If not specified: default to `false` except `complete` default to `true` (per requirement).
+- `notify` is an optional boolean under each event object with default `false`.
+
+### Desktop Notification Delivery (`sounds.<event>.notify`)
+
+When `sounds.<event>.notify` is `true`, Crabcode should emit a native desktop notification for that event.
+
+Cross-platform backend plan:
+
+- macOS: use Notification Center via `osascript` (`display notification ...`).
+- Linux: use `notify-send` (libnotify); if unavailable, log a warning and continue.
+- Windows: use a PowerShell/WinRT toast invocation; if unavailable, log a warning and continue.
+
+Behavioral rules:
+
+- Fire exactly once per completed assistant response (not per chunk).
+- Notification delivery must be best-effort and non-blocking (spawn background process/task).
+- For completion notifications, include concise runtime stats when available (for example `1.0s | 30t/s`).
+- `sounds.<event>.enabled` and `sounds.<event>.notify` are independent toggles:
+  - `complete: { enabled: false, notify: true }` => silent audio + desktop notification.
+  - `complete: { enabled: true, notify: false }` => sound only.
+- If notification permission is denied by the OS, do not fail app startup or streaming.
 
 ## .opencode Directory Structure Compatibility
 
@@ -276,6 +301,7 @@ Proposed diagnostic design:
   - Parse errors per file (non-fatal; skip file).
   - `{file:...}` read failures.
   - Invalid `sounds.*.file` (non-absolute).
+  - Notification backend unavailable when any `sounds.<event>.notify=true` (e.g., missing `notify-send`).
   - Unknown keys (only if they look like they were intended, optional).
 
 - Collect “unimplemented keys” present in the merged config:
@@ -293,6 +319,8 @@ Current state observations:
 - `src/config.rs` currently manages `api_keys.json` and is not a general config loader.
 - Theme is currently loaded from `src/theme.json` with a fallback to `src/themes/ayu.json` (`src/app.rs`).
 - Model selection is persisted in SQLite (`src/persistence/prefs.rs`) and in message history; config should only set the default.
+- `src/sound.rs` already contains event-based sound resolution and OS-specific command dispatch (good pattern to mirror for desktop notifications).
+- `src/app.rs` already emits `SoundEvent::Complete` at streaming end (and `SoundEvent::Error` on failures); these are integration points for `sounds.<event>.notify`.
 
 Planned integration:
 
@@ -301,6 +329,7 @@ Planned integration:
   - `MergedConfig` (typed subset we act upon: theme/model/sounds)
   - `RawMergedValue` (full merged JSON value, for future keys)
   - `Diagnostics` (warnings + unimplemented)
+- Add a desktop notification module (e.g. `src/notify.rs`) with OS-specific backends and a no-op fallback.
 
 ## Phase 1 Implementation Checklist
 
@@ -318,6 +347,9 @@ Phase 1 should implement behavior for `theme`, `sounds`, `model` only.
   - Do not overwrite persisted “active model” selection.
 - Apply `sounds`:
   - Introduce an audio playback layer and trigger events from existing UI flows.
+  - Add per-event `notify` parsing (`sounds.<event>.notify`, default `false`) and boolean shorthand support for sound event toggles.
+  - Add native desktop notifications for completion events on macOS/Linux/Windows.
+  - Keep notification dispatch best-effort/non-blocking with warning diagnostics on backend failures.
   - If we can’t add playback immediately, still wire config parsing + diagnostics so the shape is stable.
 
 ## Phase 2+ (Future)

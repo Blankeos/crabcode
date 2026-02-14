@@ -1,6 +1,6 @@
 use crate::tools::{
-    get_bool_param, get_string_param, validate_required, Tool, ToolContext, ToolError,
-    ToolHandler, ToolResult, ParameterSchema, ParameterType,
+    get_bool_param, get_string_param, validate_required, ParameterSchema, ParameterType, Tool,
+    ToolContext, ToolError, ToolHandler, ToolResult,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -42,7 +42,7 @@ impl EditTool {
                 if i + old_lines.len() <= lines.len() {
                     let candidate: String = lines[i..i + old_lines.len()].join("\n");
                     let similarity = Self::levenshtein_similarity(&candidate, old_string);
-                    
+
                     if similarity >= SIMILARITY_THRESHOLD {
                         let start = lines[..i].join("\n").len();
                         let start = if i > 0 { start + 1 } else { start };
@@ -110,11 +110,17 @@ impl ToolHandler for EditTool {
         let path = Path::new(&file_path);
 
         if !path.exists() {
-            return Err(ToolError::NotFound(format!("File not found: {}", file_path)));
+            return Err(ToolError::NotFound(format!(
+                "File not found: {}",
+                file_path
+            )));
         }
 
         if !path.is_file() {
-            return Err(ToolError::Validation(format!("Path is not a file: {}", file_path)));
+            return Err(ToolError::Validation(format!(
+                "Path is not a file: {}",
+                file_path
+            )));
         }
 
         let content = std::fs::read_to_string(path)
@@ -136,13 +142,14 @@ impl ToolHandler for EditTool {
 
             return Ok(ToolResult::new(
                 format!("Edit: {}", file_path),
-                format!("Replaced {} occurrence(s)", count)
+                format!("Replaced {} occurrence(s)", count),
             ));
         }
 
         match Self::find_best_match(&content, &old_string) {
             Some((start, end)) => {
-                let mut new_content = String::with_capacity(content.len() - (end - start) + new_string.len());
+                let mut new_content =
+                    String::with_capacity(content.len() - (end - start) + new_string.len());
                 new_content.push_str(&content[..start]);
                 new_content.push_str(&new_string);
                 new_content.push_str(&content[end..]);
@@ -154,7 +161,7 @@ impl ToolHandler for EditTool {
 
                 Ok(ToolResult::new(
                     format!("Edit: {}", file_path),
-                    format!("Replaced at line {}", line_num)
+                    format!("Replaced at line {}", line_num),
                 ))
             }
             None => Err(ToolError::NotFound(format!(

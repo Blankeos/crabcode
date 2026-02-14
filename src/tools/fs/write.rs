@@ -1,6 +1,6 @@
 use crate::tools::{
-    get_string_param, validate_required, Tool, ToolContext, ToolError, ToolHandler, ToolResult,
-    ParameterSchema, ParameterType,
+    get_string_param, validate_required, ParameterSchema, ParameterType, Tool, ToolContext,
+    ToolError, ToolHandler, ToolResult,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -29,7 +29,8 @@ impl ToolHandler for WriteTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "write".to_string(),
-            description: "Create or overwrite a file. Creates parent directories if needed.".to_string(),
+            description: "Create or overwrite a file. Creates parent directories if needed."
+                .to_string(),
             parameters: vec![
                 ParameterSchema {
                     name: "file_path".to_string(),
@@ -69,13 +70,14 @@ impl ToolHandler for WriteTool {
 
         if let Some(parent) = path.parent() {
             if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| ToolError::Execution(format!("Failed to create directories: {}", e)))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    ToolError::Execution(format!("Failed to create directories: {}", e))
+                })?;
             }
         }
 
         let temp_path = path.with_extension("tmp");
-        
+
         std::fs::write(&temp_path, content)
             .map_err(|e| ToolError::Execution(format!("Failed to write temp file: {}", e)))?;
 
@@ -83,14 +85,20 @@ impl ToolHandler for WriteTool {
             .map_err(|e| ToolError::Execution(format!("Failed to rename file: {}", e)))?;
 
         let is_new = !path.exists();
-        
+
         Ok(ToolResult::new(
             format!("Write: {}", file_path),
             if is_new {
-                format!("Created file with {} bytes", std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
+                format!(
+                    "Created file with {} bytes",
+                    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+                )
             } else {
-                format!("Updated file with {} bytes", std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
-            }
+                format!(
+                    "Updated file with {} bytes",
+                    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+                )
+            },
         ))
     }
 }

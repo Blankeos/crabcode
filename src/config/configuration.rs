@@ -122,6 +122,7 @@ pub struct ConfigInventory {
 pub struct SoundEffectConfig {
     pub file: Option<PathBuf>,
     pub enabled: bool,
+    pub notify: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -138,18 +139,22 @@ impl Default for SoundsConfig {
             error: SoundEffectConfig {
                 file: None,
                 enabled: true,
+                notify: false,
             },
             complete: SoundEffectConfig {
                 file: None,
                 enabled: true,
+                notify: false,
             },
             permission: SoundEffectConfig {
                 file: None,
                 enabled: false,
+                notify: false,
             },
             question: SoundEffectConfig {
                 file: None,
                 enabled: false,
+                notify: false,
             },
         }
     }
@@ -763,6 +768,13 @@ fn parse_sounds(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> S
         return sounds;
     };
 
+    if map.contains_key("notify") {
+        diagnostics.warnings.push(
+            "sounds.notify is no longer supported; use sounds.<event>.notify (for example sounds.complete.notify)"
+                .to_string(),
+        );
+    }
+
     apply_sound_event(
         &mut sounds.error,
         map.get("error"),
@@ -797,12 +809,25 @@ fn apply_sound_event(
     key: &str,
     diagnostics: &mut ConfigDiagnostics,
 ) {
-    let Some(Value::Object(map)) = value else {
+    let Some(value) = value else {
+        return;
+    };
+
+    if let Value::Bool(enabled) = value {
+        target.enabled = *enabled;
+        return;
+    }
+
+    let Value::Object(map) = value else {
         return;
     };
 
     if let Some(Value::Bool(enabled)) = map.get("enabled") {
         target.enabled = *enabled;
+    }
+
+    if let Some(Value::Bool(notify)) = map.get("notify") {
+        target.notify = *notify;
     }
 
     if let Some(Value::String(file)) = map.get("file") {

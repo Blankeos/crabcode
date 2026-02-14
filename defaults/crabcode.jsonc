@@ -1,6 +1,6 @@
 {
   // Optional: enables editor completion/validation.
-  "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/schema/crabcode.schema.json",
+  "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json",
 
   // Theme ID (not a path). Crabcode resolves theme IDs from built-ins and theme folders.
   // Example built-ins live under `src/generated_themes/*.json`.
@@ -11,6 +11,7 @@
 
   // Sounds are optional.
   // - `enabled` toggles each event.
+  // - `notify` toggles desktop notifications per event.
   // - `file` must be an absolute path (no `~`, no relative).
   // - If `enabled` is true and `file` is omitted:
   //   - `complete` and `error` use bundled defaults
@@ -18,20 +19,24 @@
   "sounds": {
     "error": {
       "enabled": true,
+      "notify": false,
       // Optional override:
       // "file": "/absolute/path/to/error.mp3"
     },
     "complete": {
       "enabled": true,
+      "notify": false,
       // Optional override:
       // "file": "/absolute/path/to/complete.mp3"
     },
     "permission": {
       "enabled": false,
+      "notify": false,
       // "file": "/absolute/path/to/permission.wav"
     },
     "question": {
       "enabled": false,
+      "notify": false,
       // "file": "/absolute/path/to/question.wav"
     }
   },

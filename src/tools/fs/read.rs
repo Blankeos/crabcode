@@ -1,6 +1,6 @@
 use crate::tools::{
-    get_integer_param, get_string_param, validate_required, Tool, ToolContext, ToolError,
-    ToolHandler, ToolResult, ParameterSchema, ParameterType,
+    get_integer_param, get_string_param, validate_required, ParameterSchema, ParameterType, Tool,
+    ToolContext, ToolError, ToolHandler, ToolResult,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -70,11 +70,17 @@ impl ToolHandler for ReadTool {
         let path = Path::new(&file_path);
 
         if !path.exists() {
-            return Err(ToolError::NotFound(format!("File not found: {}", file_path)));
+            return Err(ToolError::NotFound(format!(
+                "File not found: {}",
+                file_path
+            )));
         }
 
         if !path.is_file() {
-            return Err(ToolError::Validation(format!("Path is not a file: {}", file_path)));
+            return Err(ToolError::Validation(format!(
+                "Path is not a file: {}",
+                file_path
+            )));
         }
 
         let metadata = std::fs::metadata(path)
@@ -96,7 +102,7 @@ impl ToolHandler for ReadTool {
         if Self::is_binary(&content) {
             return Ok(ToolResult::new(
                 format!("Read: {}", file_path),
-                "[Binary file - contents not displayed]".to_string()
+                "[Binary file - contents not displayed]".to_string(),
             ));
         }
 
@@ -107,7 +113,10 @@ impl ToolHandler for ReadTool {
         if offset >= total_lines {
             return Ok(ToolResult::new(
                 format!("Read: {}", file_path),
-                format!("[File has {} lines, offset {} is beyond end]", total_lines, offset)
+                format!(
+                    "[File has {} lines, offset {} is beyond end]",
+                    total_lines, offset
+                ),
             ));
         }
 
@@ -123,13 +132,15 @@ impl ToolHandler for ReadTool {
         let mut output = numbered_lines.join("\n");
 
         if end < total_lines {
-            output.push_str(&format!("\n\n... {} more lines (showing {}-{} of {})", 
-                total_lines - end, offset + 1, end, total_lines));
+            output.push_str(&format!(
+                "\n\n... {} more lines (showing {}-{} of {})",
+                total_lines - end,
+                offset + 1,
+                end,
+                total_lines
+            ));
         }
 
-        Ok(ToolResult::new(
-            format!("Read: {}", file_path),
-            output
-        ))
+        Ok(ToolResult::new(format!("Read: {}", file_path), output))
     }
 }

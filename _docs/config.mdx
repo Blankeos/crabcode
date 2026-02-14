@@ -72,6 +72,11 @@ Audio feedback for events (terminal-only, so crabcode-only):
 }
 ```
 
+Each sound event key (`complete`, `error`, `permission`, `question`) accepts either:
+
+- object form: `{ "enabled": true, "notify": false, "file": "/absolute/path.wav" }`
+- boolean shorthand: `true`/`false` (equivalent to toggling `enabled`)
+
 **Custom sounds:** Provide an absolute path to a sound file:
 
 ```jsonc
@@ -86,6 +91,27 @@ Audio feedback for events (terminal-only, so crabcode-only):
 ```
 
 If `file` is omitted, `complete` and `error` use bundled defaults. `permission` and `question` stay silent by default.
+
+### `sounds.<event>.notify`
+
+Trigger native desktop notifications per sound event.
+
+Default: `false` for each event.
+
+For completion notifications, crabcode includes runtime stats when available (for example `1.0s | 30t/s`).
+
+```jsonc
+{
+  "sounds": {
+    "complete": { "enabled": true, "notify": true },
+    "error": { "enabled": true, "notify": true }
+  }
+}
+```
+
+`sounds.notify` (top-level) is no longer supported.
+
+On macOS, crabcode uses `osascript` (Notification Center).
 
 ---
 
@@ -133,6 +159,6 @@ crabcode supports OpenCode's placeholder syntax:
 
 ```jsonc
 {
-  "$schema": "https://opencode.ai/config.json"
+  "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json"
 }
 ```

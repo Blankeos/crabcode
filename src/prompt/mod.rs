@@ -14,7 +14,7 @@ pub enum ProviderType {
 impl ProviderType {
     pub fn from_model_id(model_id: &str) -> Self {
         let lower = model_id.to_lowercase();
-        
+
         if lower.contains("gpt-5") {
             ProviderType::Codex
         } else if lower.contains("gpt-") || lower.contains("o1") || lower.contains("o3") {
@@ -58,14 +58,13 @@ impl SystemPromptComposer {
         self
     }
 
-    pub async fn compose(&self,
-    ) -> String {
+    pub async fn compose(&self) -> String {
         let mut parts = Vec::new();
 
         parts.push(self.get_header());
         parts.push(self.get_core_prompt());
         parts.push(self.get_environment_context());
-        
+
         if let Some(ref registry) = self.tool_registry {
             parts.push(self.get_tools_context(registry).await);
         }
@@ -225,7 +224,7 @@ Your output will be displayed on a command line interface. Your responses should
     fn get_environment_context(&self) -> String {
         let git_status = if self.is_git_repo { "yes" } else { "no" };
         let date = chrono::Local::now().format("%a %b %d %Y").to_string();
-        
+
         format!(
             r#"<env>
   Working directory: {}
@@ -237,17 +236,15 @@ Your output will be displayed on a command line interface. Your responses should
         )
     }
 
-    async fn get_tools_context(&self,
-        registry: &ToolRegistry,
-    ) -> String {
+    async fn get_tools_context(&self, registry: &ToolRegistry) -> String {
         let schemas = registry.list_schemas().await;
-        
+
         if schemas.is_empty() {
             return String::new();
         }
 
-        let tools_json = serde_json::to_string_pretty(&schemas)
-            .unwrap_or_else(|_| "[]".to_string());
+        let tools_json =
+            serde_json::to_string_pretty(&schemas).unwrap_or_else(|_| "[]".to_string());
 
         format!(
             r#"You have access to the following tools (JSON schema):
@@ -276,8 +273,17 @@ mod tests {
     fn test_provider_type_detection() {
         assert_eq!(ProviderType::from_model_id("gpt-4"), ProviderType::OpenAI);
         assert_eq!(ProviderType::from_model_id("gpt-5"), ProviderType::Codex);
-        assert_eq!(ProviderType::from_model_id("claude-3"), ProviderType::Anthropic);
-        assert_eq!(ProviderType::from_model_id("gemini-pro"), ProviderType::Gemini);
-        assert_eq!(ProviderType::from_model_id("unknown"), ProviderType::Generic);
+        assert_eq!(
+            ProviderType::from_model_id("claude-3"),
+            ProviderType::Anthropic
+        );
+        assert_eq!(
+            ProviderType::from_model_id("gemini-pro"),
+            ProviderType::Gemini
+        );
+        assert_eq!(
+            ProviderType::from_model_id("unknown"),
+            ProviderType::Generic
+        );
     }
 }

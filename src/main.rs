@@ -8,6 +8,7 @@ mod config;
 mod llm;
 mod logging;
 mod model;
+mod notify;
 mod persistence;
 mod prompt;
 mod session;

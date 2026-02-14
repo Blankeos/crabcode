@@ -89,79 +89,80 @@ pub fn handle_connect<'a>(
             Err(e) => return CommandResult::Error(format!("Failed to load auth config: {}", e)),
         };
 
-            let connected_providers = match auth_dao.load() {
-                Ok(providers) => providers,
-                Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
-            };
+        let connected_providers = match auth_dao.load() {
+            Ok(providers) => providers,
+            Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
+        };
 
-            fn fallback_providers() -> std::collections::HashMap<String, crate::model::discovery::Provider> {
-                use crate::model::discovery::Provider;
-                use std::collections::HashMap;
+        fn fallback_providers(
+        ) -> std::collections::HashMap<String, crate::model::discovery::Provider> {
+            use crate::model::discovery::Provider;
+            use std::collections::HashMap;
 
-                let mut out: HashMap<String, Provider> = HashMap::new();
-                for (id, name) in [
-                    ("opencode", "OpenCode"),
-                    ("anthropic", "Anthropic"),
-                    ("openai", "OpenAI"),
-                    ("google", "Google"),
-                ] {
-                    out.insert(
-                        id.to_string(),
-                        Provider {
-                            id: id.to_string(),
-                            name: name.to_string(),
-                            api: String::new(),
-                            doc: String::new(),
-                            env: Vec::new(),
-                            npm: String::new(),
-                            models: HashMap::new(),
-                        },
-                    );
-                }
-                out
+            let mut out: HashMap<String, Provider> = HashMap::new();
+            for (id, name) in [
+                ("opencode", "OpenCode"),
+                ("anthropic", "Anthropic"),
+                ("openai", "OpenAI"),
+                ("google", "Google"),
+            ] {
+                out.insert(
+                    id.to_string(),
+                    Provider {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        api: String::new(),
+                        doc: String::new(),
+                        env: Vec::new(),
+                        npm: String::new(),
+                        models: HashMap::new(),
+                    },
+                );
             }
+            out
+        }
 
-            let providers_map = match crate::model::discovery::Discovery::new() {
-                Ok(discovery) => match discovery.fetch_providers().await {
-                    Ok(p) => p,
-                    Err(_) => fallback_providers(),
-                },
+        let providers_map = match crate::model::discovery::Discovery::new() {
+            Ok(discovery) => match discovery.fetch_providers().await {
+                Ok(p) => p,
                 Err(_) => fallback_providers(),
-            };
+            },
+            Err(_) => fallback_providers(),
+        };
 
-            const POPULAR_PROVIDERS: &[&str] = &[
-                "opencode",
-                "anthropic",
-                "openai",
-                "google",
-                "zai-coding-plan",
-            ];
+        const POPULAR_PROVIDERS: &[&str] = &[
+            "opencode",
+            "anthropic",
+            "openai",
+            "google",
+            "zai-coding-plan",
+        ];
 
-            let mut items: Vec<crate::command::registry::DialogItem> = providers_map
-                .into_iter()
-                .map(|(id, provider)| {
-                    let group = if POPULAR_PROVIDERS.contains(&id.as_str()) {
-                        "Popular"
+        let mut items: Vec<crate::command::registry::DialogItem> = providers_map
+            .into_iter()
+            .map(|(id, provider)| {
+                let group = if POPULAR_PROVIDERS.contains(&id.as_str()) {
+                    "Popular"
+                } else {
+                    "Other"
+                };
+                let is_connected = connected_providers.contains_key(&id);
+                crate::command::registry::DialogItem {
+                    id: id.clone(),
+                    name: provider.name.clone(),
+                    group: group.to_string(),
+                    description: id.clone(),
+                    tip: if is_connected {
+                        Some("🟢 Connected".to_string())
                     } else {
-                        "Other"
-                    };
-                    let is_connected = connected_providers.contains_key(&id);
-                    crate::command::registry::DialogItem {
-                        id: id.clone(),
-                        name: provider.name.clone(),
-                        group: group.to_string(),
-                        description: id.clone(),
-                        tip: if is_connected {
-                            Some("🟢 Connected".to_string())
-                        } else {
-                            None
-                        },
-                        provider_id: id.clone(),
-                    }
-                })
-                .collect();
+                        None
+                    },
+                    provider_id: id.clone(),
+                }
+            })
+            .collect();
 
-            items.sort_by(|a, b| a.name.cmp(&b.name));
+        items.sort_by(|a, b| a.name.cmp(&b.name));
 
         CommandResult::ShowDialog {
             title: "Connect a provider".to_string(),

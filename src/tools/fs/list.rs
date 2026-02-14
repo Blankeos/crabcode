@@ -1,6 +1,6 @@
 use crate::tools::{
-    get_string_param, validate_required, Tool, ToolContext, ToolError, ToolHandler, ToolResult,
-    ParameterSchema, ParameterType,
+    get_string_param, validate_required, ParameterSchema, ParameterType, Tool, ToolContext,
+    ToolError, ToolHandler, ToolResult,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -22,13 +22,13 @@ impl ListTool {
         depth: usize,
     ) -> Result<(), ToolError> {
         const MAX_DEPTH: usize = 10;
-        
+
         if depth > MAX_DEPTH {
             return Ok(());
         }
 
         let connector = if is_last { "└── " } else { "├── " };
-        
+
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             output.push(format!("{}{}{}", prefix, connector, name));
         }
@@ -53,7 +53,7 @@ impl ListTool {
         filtered.sort_by(|a, b| {
             let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
             let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            
+
             match (a_is_dir, b_is_dir) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
@@ -126,17 +126,23 @@ impl ToolHandler for ListTool {
             .unwrap_or_default();
 
         let path = Path::new(&path_str);
-        
+
         if !path.exists() {
-            return Err(ToolError::NotFound(format!("Directory not found: {}", path_str)));
+            return Err(ToolError::NotFound(format!(
+                "Directory not found: {}",
+                path_str
+            )));
         }
 
         if !path.is_dir() {
-            return Err(ToolError::Validation(format!("Path is not a directory: {}", path_str)));
+            return Err(ToolError::Validation(format!(
+                "Path is not a directory: {}",
+                path_str
+            )));
         }
 
         let mut output = Vec::new();
-        
+
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             output.push(name.to_string());
         } else {
@@ -159,7 +165,7 @@ impl ToolHandler for ListTool {
         filtered.sort_by(|a, b| {
             let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
             let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            
+
             match (a_is_dir, b_is_dir) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
@@ -170,14 +176,7 @@ impl ToolHandler for ListTool {
         let count = filtered.len();
         for (i, entry) in filtered.iter().enumerate() {
             let is_last = i == count - 1;
-            Self::list_directory(
-                &entry.path(),
-                &ignore_patterns,
-                "",
-                is_last,
-                &mut output,
-                1,
-            )?;
+            Self::list_directory(&entry.path(), &ignore_patterns, "", is_last, &mut output, 1)?;
         }
 
         let result_text = if output.len() <= 1 {
@@ -186,9 +185,6 @@ impl ToolHandler for ListTool {
             output.join("\n")
         };
 
-        Ok(ToolResult::new(
-            format!("List: {}", path_str),
-            result_text
-        ))
+        Ok(ToolResult::new(format!("List: {}", path_str), result_text))
     }
 }
