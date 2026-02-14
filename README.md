@@ -12,7 +12,7 @@ A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interac
 >
 > ~ Carlo (Author)
 
-![screenshot](_docs/screenshot.png)
+![Crabcode banner](_docs/crabcode_banner.jpg)
 
 ## Features
 
