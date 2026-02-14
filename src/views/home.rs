@@ -100,7 +100,7 @@ pub fn render_home(
         Span::styled("tab", Style::default().fg(colors.info)),
         Span::raw(" agents  "),
         Span::styled("ctrl+cc", Style::default().fg(colors.info)),
-        Span::raw(" quit"),
+        Span::raw(" quit "),
     ];
     let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
     f.render_widget(help, home_chunks[2]);

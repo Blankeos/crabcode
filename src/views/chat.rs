@@ -100,7 +100,7 @@ pub fn render_chat(
         Span::styled("tab", Style::default().fg(colors.info)),
         Span::raw(" agents  "),
         Span::styled("ctrl+cc", Style::default().fg(colors.info)),
-        Span::raw(" quit"),
+        Span::raw(" quit "),
     ];
     let help_line = Line::from(help_text);
     let help_width = help_line.width() as u16;

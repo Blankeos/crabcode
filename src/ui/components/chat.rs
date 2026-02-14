@@ -581,11 +581,11 @@ impl Chat {
         // Update streaming renderer before calculating heights
         self.update_streaming_renderer();
 
-        // Calculate content area (leave space for scrollbar)
+        // Calculate content area (leave space for scrollbar + right padding)
         let content_area = Rect {
             x: area.x,
             y: area.y,
-            width: area.width.saturating_sub(1),
+            width: area.width.saturating_sub(2),
             height: area.height,
         };
 
