@@ -8,6 +8,7 @@ use crate::llm::client::stream_llm_with_cancellation;
 use crate::session::manager::SessionManager;
 
 use crate::push_toast;
+use crate::toast::{self, Toast, ToastLevel};
 use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
@@ -45,7 +46,7 @@ use crate::views::{
 };
 
 use crate::{
-    get_toast_manager, render_toasts,
+    get_toast_manager,
     theme::{self, Theme},
 };
 
@@ -478,9 +479,9 @@ impl App {
                             }
                         }
 
-                        push_toast(ratatui_toolkit::Toast::new(
+                        push_toast(Toast::new(
                             format!("Switched to: {}", model_id_clone),
-                            ratatui_toolkit::ToastLevel::Info,
+                            ToastLevel::Info,
                             None,
                         ));
                     }
@@ -495,13 +496,13 @@ impl App {
                             false
                         };
 
-                        push_toast(ratatui_toolkit::Toast::new(
+                        push_toast(Toast::new(
                             if is_favorite {
                                 "Added to favorites"
                             } else {
                                 "Removed from favorites"
                             },
-                            ratatui_toolkit::ToastLevel::Info,
+                            ToastLevel::Info,
                             None,
                         ));
 
@@ -538,9 +539,9 @@ impl App {
                         {
                             self.current_theme_index = idx;
                             self.themes_dialog_committed = true;
-                            push_toast(ratatui_toolkit::Toast::new(
+                            push_toast(Toast::new(
                                 format!("Theme: {}", theme.id),
-                                ratatui_toolkit::ToastLevel::Info,
+                                ToastLevel::Info,
                                 None,
                             ));
                         }
@@ -944,12 +945,12 @@ impl App {
         const MAX_PASTE_SIZE: usize = 20 * 1024 * 1024;
 
         if text.len() > MAX_PASTE_SIZE {
-            push_toast(ratatui_toolkit::Toast::new(
+            push_toast(Toast::new(
                 format!(
                     "Paste content too large ({}MB). Maximum is 20MB.",
                     text.len() / 1024 / 1024
                 ),
-                ratatui_toolkit::ToastLevel::Warning,
+                ToastLevel::Warning,
                 None,
             ));
             return;
@@ -1107,9 +1108,9 @@ impl App {
                     crate::command::registry::CommandResult::Error(msg) => {
                         self.play_sound_event(crate::sound::SoundEvent::Error);
                         if msg.starts_with("Unknown command:") {
-                            push_toast(ratatui_toolkit::Toast::new(
+                            push_toast(Toast::new(
                                 msg,
-                                ratatui_toolkit::ToastLevel::Error,
+                                ToastLevel::Error,
                                 Some(std::time::Duration::from_secs(3)),
                             ));
                         } else {
@@ -1225,9 +1226,9 @@ impl App {
             crate::command::registry::CommandResult::Error(msg) => {
                 self.play_sound_event(crate::sound::SoundEvent::Error);
                 if msg.starts_with("Unknown command:") {
-                    push_toast(ratatui_toolkit::Toast::new(
+                    push_toast(Toast::new(
                         msg,
-                        ratatui_toolkit::ToastLevel::Error,
+                        ToastLevel::Error,
                         Some(std::time::Duration::from_secs(3)),
                     ));
                 } else {
@@ -1617,11 +1618,7 @@ impl App {
                         .append_reasoning_to_last_assistant(&reasoning);
                 }
                 crate::llm::ChunkMessage::Warning(msg) => {
-                    push_toast(ratatui_toolkit::Toast::new(
-                        msg,
-                        ratatui_toolkit::ToastLevel::Warning,
-                        None,
-                    ));
+                    push_toast(Toast::new(msg, ToastLevel::Warning, None));
                 }
                 crate::llm::ChunkMessage::End => {
                     // Capture end timestamp for TTFT/TPS/latency calculations.
@@ -1664,9 +1661,9 @@ impl App {
                     self.chat_state.chat.mark_streaming_end();
                     self.chat_state.chat.finalize_streaming_metrics();
                     self.play_sound_event(crate::sound::SoundEvent::Error);
-                    push_toast(ratatui_toolkit::Toast::new(
+                    push_toast(Toast::new(
                         format!("LLM error: {}", error),
-                        ratatui_toolkit::ToastLevel::Error,
+                        ToastLevel::Error,
                         None,
                     ));
                     self.chat_state
@@ -1679,11 +1676,7 @@ impl App {
                     self.is_streaming = false;
                     self.chat_state.chat.mark_streaming_end();
                     self.chat_state.chat.finalize_streaming_metrics();
-                    push_toast(ratatui_toolkit::Toast::new(
-                        "Streaming cancelled",
-                        ratatui_toolkit::ToastLevel::Info,
-                        None,
-                    ));
+                    push_toast(Toast::new("Streaming cancelled", ToastLevel::Info, None));
                     self.chat_state
                         .chat
                         .messages
@@ -1920,9 +1913,9 @@ impl App {
             self.base_focus = BaseFocus::Chat;
 
             if let Err(e) = self.start_llm_streaming(&msg) {
-                push_toast(ratatui_toolkit::Toast::new(
+                push_toast(Toast::new(
                     format!("LLM error: {}", e),
-                    ratatui_toolkit::ToastLevel::Error,
+                    ToastLevel::Error,
                     None,
                 ));
             }
@@ -1939,9 +1932,9 @@ impl App {
                 .add_user_message_with_agent_mode(&msg, self.agent.clone());
 
             if let Err(e) = self.start_llm_streaming(&msg) {
-                push_toast(ratatui_toolkit::Toast::new(
+                push_toast(Toast::new(
                     format!("LLM error: {}", e),
-                    ratatui_toolkit::ToastLevel::Error,
+                    ToastLevel::Error,
                     None,
                 ));
             }
@@ -2078,7 +2071,7 @@ impl App {
             crate::views::which_key::render_which_key(f, &self.which_key_state, &colors);
         }
 
-        render_toasts(f, &get_toast_manager().lock().unwrap());
+        toast::render_toasts(f, &get_toast_manager().lock().unwrap(), &colors);
     }
 }
 

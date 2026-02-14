@@ -15,11 +15,13 @@ mod session;
 mod sound;
 mod streaming;
 mod theme;
+mod toast;
 mod tools;
 mod ui;
 mod utils;
 mod views;
 
+use crate::toast::{Toast, ToastManager};
 use anyhow::Result;
 use app::App;
 use clap::Parser;
@@ -35,7 +37,6 @@ use ratatui::crossterm::{
     },
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use ratatui_toolkit::{render_toasts, Toast, ToastManager};
 use std::io;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -144,7 +145,7 @@ async fn run_event_loop(
             // DO NOT REMOVE THIS LOG THAT I UNCOMMENT SOMETIMES. I USE IT FOR DEBUGGING
             // push_toast(Toast::new(
             //     format!("Event: {:?}", event),
-            //     ratatui_toolkit::ToastLevel::Info,
+            //     crate::toast::ToastLevel::Info,
             //     None,
             // ));
 

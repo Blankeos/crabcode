@@ -2,6 +2,7 @@ use crate::command::parser::ParsedCommand;
 use crate::command::registry::{Command, CommandResult, Registry};
 use crate::push_toast;
 use crate::session::manager::SessionManager;
+use crate::toast::{Toast, ToastLevel};
 use chrono::{DateTime, Local, Utc};
 use std::pin::Pin;
 
@@ -437,9 +438,9 @@ pub fn handle_refreshmodels<'a>(
         let discovery = match crate::model::discovery::Discovery::new() {
             Ok(d) => d,
             Err(e) => {
-                push_toast(ratatui_toolkit::Toast::new(
+                push_toast(Toast::new(
                     format!("Failed to initialize model discovery: {}", e),
-                    ratatui_toolkit::ToastLevel::Error,
+                    ToastLevel::Error,
                     Some(std::time::Duration::from_secs(3)),
                 ));
                 return CommandResult::Success(String::new());
@@ -449,9 +450,9 @@ pub fn handle_refreshmodels<'a>(
         let providers = match discovery.refresh_cache().await {
             Ok(p) => p,
             Err(e) => {
-                push_toast(ratatui_toolkit::Toast::new(
+                push_toast(Toast::new(
                     format!("Failed to refresh models cache: {}", e),
-                    ratatui_toolkit::ToastLevel::Error,
+                    ToastLevel::Error,
                     Some(std::time::Duration::from_secs(3)),
                 ));
                 return CommandResult::Success(String::new());
@@ -461,12 +462,12 @@ pub fn handle_refreshmodels<'a>(
         let provider_count = providers.len();
         let model_count: usize = providers.values().map(|p| p.models.len()).sum();
 
-        push_toast(ratatui_toolkit::Toast::new(
+        push_toast(Toast::new(
             format!(
                 "Models cache refreshed: {} providers, {} models",
                 provider_count, model_count
             ),
-            ratatui_toolkit::ToastLevel::Info,
+            ToastLevel::Info,
             Some(std::time::Duration::from_secs(3)),
         ));
 
