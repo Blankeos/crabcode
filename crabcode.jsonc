@@ -1,7 +1,7 @@
 {
   "$schema": "crabcode.schema.json",
   // Crabcode theme id (see src/generated_themes/carbonfox.json)
-  "theme": "vercel",
+  // "theme": "vercel",
   "sounds": {
     "complete": {
       "enabled": true,
