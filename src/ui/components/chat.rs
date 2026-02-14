@@ -720,11 +720,8 @@ impl Chat {
                 // Wrap content to fit within max_width - padding
                 let wrapped_lines = textwrap::wrap(&content, max_width.saturating_sub(4));
 
-                for (i, line) in wrapped_lines.iter().enumerate() {
-                    let is_first = i == 0;
-                    let _is_last = i == wrapped_lines.len() - 1;
-
-                    let left_border = if is_first { "▌ " } else { "│ " };
+                for line in wrapped_lines.iter() {
+                    let left_border = "▌ ";
 
                     let right_padding = " ".repeat(max_width.saturating_sub(line.len() + 3));
 
