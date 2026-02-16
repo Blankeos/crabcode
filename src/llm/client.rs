@@ -6,6 +6,7 @@ use aisdk::{
     providers::{Anthropic, OpenAI, OpenAICompatible},
 };
 use futures::StreamExt;
+use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
 use crate::logging::log;
@@ -195,14 +196,11 @@ pub async fn stream_llm_with_cancellation(
     use std::time::Instant;
 
     let auth_dao = crate::persistence::AuthDAO::new()?;
-
-    let api_key = auth_dao.get_api_key(&provider_name)?;
-    if api_key.is_none() {
-        let _ = sender.send(crate::llm::ChunkMessage::Warning(format!(
-            "No API key configured for '{}'. Trying anyway.",
-            provider_name
-        )));
-    }
+    let auth_config = auth_dao.get_provider(&provider_name)?;
+    let mut api_key = auth_config.as_ref().and_then(|config| match config {
+        crate::persistence::AuthConfig::Api { key } => Some(key.clone()),
+        crate::persistence::AuthConfig::OAuth { access, .. } => Some(access.clone()),
+    });
 
     let discovery = crate::model::discovery::Discovery::new()?;
 
@@ -214,11 +212,107 @@ pub async fn stream_llm_with_cancellation(
 
     let npm_package = &provider.npm;
     let provider_kind = ProviderKind::from_provider(&provider_name, npm_package);
-    let base_url = provider_kind.normalize_base_url(&provider.api);
+    let mut base_url = provider_kind.normalize_base_url(&provider.api);
+    let mut effective_model = model.clone();
+    let mut openai_response_path: Option<String> = None;
+    let mut openai_additional_headers: HashMap<String, String> = HashMap::new();
+    let mut openai_force_store_false = false;
+    let mut openai_default_instructions: Option<String> = None;
+    let mut openai_disallow_system_messages = false;
+    let mut openai_force_tool_strict_false = false;
+
+    if provider_kind == ProviderKind::OpenAI && provider_name == "openai" {
+        if let Some(crate::persistence::AuthConfig::OAuth {
+            refresh,
+            access,
+            expires,
+            account_id,
+            enterprise_url,
+        }) = auth_config.clone()
+        {
+            let mut oauth_refresh = refresh;
+            let mut oauth_access = access;
+            let mut oauth_expires = expires;
+            let mut oauth_account_id = account_id;
+            let mut oauth_enterprise_url = enterprise_url;
+
+            if oauth_expires <= crate::auth::openai_oauth::now_unix_ms() + 60_000 {
+                match crate::auth::openai_oauth::refresh_access_token(&oauth_refresh).await {
+                    Ok(refreshed) => {
+                        oauth_refresh = refreshed.refresh;
+                        oauth_access = refreshed.access;
+                        oauth_expires = refreshed.expires;
+                        if refreshed.account_id.is_some() {
+                            oauth_account_id = refreshed.account_id;
+                        }
+                        if refreshed.enterprise_url.is_some() {
+                            oauth_enterprise_url = refreshed.enterprise_url;
+                        }
+
+                        let _ = auth_dao.set_provider(
+                            provider_name.clone(),
+                            crate::persistence::AuthConfig::OAuth {
+                                refresh: oauth_refresh.clone(),
+                                access: oauth_access.clone(),
+                                expires: oauth_expires,
+                                account_id: oauth_account_id.clone(),
+                                enterprise_url: oauth_enterprise_url.clone(),
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        let _ = sender.send(crate::llm::ChunkMessage::Warning(format!(
+                            "Failed to refresh OpenAI OAuth token: {}",
+                            err
+                        )));
+                    }
+                }
+            }
+
+            api_key = Some(oauth_access.clone());
+            base_url = "https://chatgpt.com".to_string();
+            openai_response_path = Some("/backend-api/codex/responses".to_string());
+            openai_force_store_false = true;
+            openai_default_instructions = Some(
+                "You are Codex, a coding assistant focused on high-quality code changes."
+                    .to_string(),
+            );
+            openai_disallow_system_messages = true;
+            openai_force_tool_strict_false = true;
+
+            openai_additional_headers.insert("originator".to_string(), "crabcode".to_string());
+            openai_additional_headers.insert(
+                "User-Agent".to_string(),
+                crate::auth::openai_oauth::build_user_agent(),
+            );
+
+            if let Some(account_id) = oauth_account_id {
+                openai_additional_headers.insert("ChatGPT-Account-Id".to_string(), account_id);
+            }
+
+            let _ = log("Configured OpenAI OAuth Codex transport");
+
+            if !is_openai_oauth_model_allowed(&effective_model) {
+                let fallback_model = "gpt-5.3-codex".to_string();
+                let _ = sender.send(crate::llm::ChunkMessage::Warning(format!(
+                    "Model '{}' is not supported for OpenAI OAuth. Falling back to '{}'.",
+                    effective_model, fallback_model
+                )));
+                effective_model = fallback_model;
+            }
+        }
+    }
+
+    if api_key.is_none() {
+        let _ = sender.send(crate::llm::ChunkMessage::Warning(format!(
+            "No API key configured for '{}'. Trying anyway.",
+            provider_name
+        )));
+    }
 
     let _ = log(&format!(
-        "Provider: {}, NPM: {}, Base URL: {}",
-        provider_name, npm_package, base_url
+        "Provider: {}, NPM: {}, Base URL: {}, Model: {}",
+        provider_name, npm_package, base_url, effective_model
     ));
 
     // Determine which provider to use based on npm package
@@ -237,7 +331,7 @@ pub async fn stream_llm_with_cancellation(
         ProviderKind::OpenAICompatible => {
             let mut provider_builder = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
                 .base_url(&base_url)
-                .model_name(&model)
+                .model_name(&effective_model)
                 .provider_name(&provider.name);
 
             if let Some(key) = api_key.as_deref() {
@@ -262,7 +356,7 @@ pub async fn stream_llm_with_cancellation(
         ProviderKind::Anthropic => {
             let mut provider_builder = Anthropic::<aisdk::core::DynamicModel>::builder()
                 .base_url(&base_url)
-                .model_name(&model)
+                .model_name(&effective_model)
                 .provider_name(&provider.name);
 
             if let Some(key) = api_key.as_deref() {
@@ -287,11 +381,36 @@ pub async fn stream_llm_with_cancellation(
         ProviderKind::OpenAI => {
             let mut provider_builder = OpenAI::<aisdk::core::DynamicModel>::builder()
                 .base_url(&base_url)
-                .model_name(&model)
+                .model_name(&effective_model)
                 .provider_name(&provider.name);
 
             if let Some(key) = api_key.as_deref() {
                 provider_builder = provider_builder.api_key(key);
+            }
+
+            if let Some(response_path) = &openai_response_path {
+                provider_builder = provider_builder.response_path(response_path);
+            }
+
+            if openai_force_store_false {
+                provider_builder = provider_builder.force_store_false(true);
+            }
+
+            if let Some(instructions) = &openai_default_instructions {
+                provider_builder = provider_builder.default_instructions(instructions.clone());
+            }
+
+            if openai_disallow_system_messages {
+                provider_builder = provider_builder.disallow_system_messages(true);
+            }
+
+            if openai_force_tool_strict_false {
+                provider_builder = provider_builder.force_tool_strict_false(true);
+            }
+
+            if !openai_additional_headers.is_empty() {
+                provider_builder =
+                    provider_builder.additional_headers(openai_additional_headers.clone());
             }
 
             let provider_config = provider_builder
@@ -384,7 +503,20 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
     aisdk_messages
 }
 
-#[derive(Clone, Copy, Debug)]
+fn is_openai_oauth_model_allowed(model: &str) -> bool {
+    matches!(
+        model,
+        "gpt-5.1-codex-max"
+            | "gpt-5.1-codex-mini"
+            | "gpt-5.2"
+            | "gpt-5.2-codex"
+            | "gpt-5.3-codex"
+            | "gpt-5.1-codex"
+            | "codex-mini-latest"
+    ) || model.contains("codex")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProviderKind {
     OpenAI,
     OpenAICompatible,
@@ -408,6 +540,13 @@ impl ProviderKind {
     fn normalize_base_url(self, base_url: &str) -> String {
         match self {
             ProviderKind::Anthropic => normalize_anthropic_base_url(base_url),
+            ProviderKind::OpenAI => {
+                if base_url.trim().is_empty() {
+                    "https://api.openai.com".to_string()
+                } else {
+                    base_url.to_string()
+                }
+            }
             _ => base_url.to_string(),
         }
     }

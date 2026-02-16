@@ -24,6 +24,10 @@ use crate::views::models_dialog::{
     handle_models_dialog_key_event, handle_models_dialog_mouse_event, init_models_dialog,
     render_models_dialog,
 };
+use crate::views::openai_oauth_flow::{
+    handle_openai_oauth_flow_key_event, handle_openai_oauth_flow_mouse_event,
+    init_openai_oauth_flow, render_openai_oauth_flow, OpenAIOAuthFlowAction,
+};
 use crate::views::permission_dialog::{
     handle_permission_dialog_key_event, handle_permission_dialog_mouse_event,
     init_permission_dialog, render_permission_dialog, PermissionDialogAction,
@@ -45,8 +49,9 @@ use crate::views::themes_dialog::{
     render_themes_dialog,
 };
 use crate::views::{
-    ChatState, ConnectDialogState, HomeState, ModelsDialogState, PermissionDialogState,
-    SessionRenameDialogState, SessionsDialogState, SuggestionsPopupState, ThemesDialogState,
+    ChatState, ConnectDialogState, HomeState, ModelsDialogState, OpenAIOAuthFlowState,
+    PermissionDialogState, SessionRenameDialogState, SessionsDialogState, SuggestionsPopupState,
+    ThemesDialogState,
 };
 
 use crate::{
@@ -80,12 +85,26 @@ pub enum OverlayFocus {
     ModelsDialog,
     ThemesDialog,
     ConnectDialog,
+    OpenAIOAuthFlow,
     ApiKeyInput,
     SuggestionsPopup,
     SessionsDialog,
     SessionRenameDialog,
     PermissionDialog,
     WhichKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectDialogMode {
+    ProviderSelection,
+    OpenAIMethodSelection,
+}
+
+#[derive(Debug)]
+enum OpenAIOAuthTaskMessage {
+    HeadlessCode { code: String, url: String },
+    Success(crate::auth::OAuthCredentials),
+    Failed(String),
 }
 
 pub struct App {
@@ -102,11 +121,15 @@ pub struct App {
     themes_dialog_original_theme_index: usize,
     themes_dialog_committed: bool,
     pub connect_dialog_state: ConnectDialogState,
+    connect_dialog_mode: ConnectDialogMode,
+    openai_oauth_flow_state: OpenAIOAuthFlowState,
     pub sessions_dialog_state: SessionsDialogState,
     pub session_rename_dialog_state: SessionRenameDialogState,
     pub permission_dialog_state: PermissionDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
+    openai_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<OpenAIOAuthTaskMessage>>,
+    openai_oauth_in_progress: bool,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
     pub model: String,
@@ -158,6 +181,7 @@ impl App {
         let models_dialog_state = init_models_dialog("Models", vec![]);
         let themes_dialog_state = init_themes_dialog("Themes", vec![]);
         let connect_dialog_state = init_connect_dialog();
+        let openai_oauth_flow_state = init_openai_oauth_flow();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
         let permission_dialog_state = init_permission_dialog();
         let which_key_state = crate::views::which_key::init_which_key();
@@ -280,11 +304,15 @@ impl App {
             themes_dialog_original_theme_index: 0,
             themes_dialog_committed: false,
             connect_dialog_state,
+            connect_dialog_mode: ConnectDialogMode::ProviderSelection,
+            openai_oauth_flow_state,
             sessions_dialog_state,
             session_rename_dialog_state,
             permission_dialog_state,
             which_key_state,
             api_key_input,
+            openai_oauth_receiver: None,
+            openai_oauth_in_progress: false,
             prefs_dao,
             agent,
             model: active_model,
@@ -595,6 +623,11 @@ impl App {
                 true
             }
             OverlayFocus::ConnectDialog => {
+                if key.code == KeyCode::Char('d') && key.modifiers == event::KeyModifiers::CONTROL {
+                    self.disconnect_selected_provider();
+                    return;
+                }
+
                 if handle_connect_dialog_key_event(&mut self.connect_dialog_state, key) {
                     return;
                 }
@@ -602,13 +635,40 @@ impl App {
                     if let Some(selected_item) =
                         get_pending_selection(&mut self.connect_dialog_state)
                     {
-                        self.api_key_input.show(&selected_item.id);
-                        self.overlay_focus = OverlayFocus::ApiKeyInput;
+                        self.handle_connect_dialog_selection(selected_item);
                         return;
                     }
+                    self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
                     self.overlay_focus = OverlayFocus::None;
                 }
                 false
+            }
+            OverlayFocus::OpenAIOAuthFlow => {
+                let action =
+                    handle_openai_oauth_flow_key_event(&mut self.openai_oauth_flow_state, key);
+                match action {
+                    OpenAIOAuthFlowAction::Handled => true,
+                    OpenAIOAuthFlowAction::NotHandled => false,
+                    OpenAIOAuthFlowAction::Close => {
+                        self.overlay_focus = OverlayFocus::None;
+                        true
+                    }
+                    OpenAIOAuthFlowAction::CopyLink(url) => {
+                        match crate::utils::clipboard::copy_text(&url) {
+                            Ok(_) => push_toast(Toast::new(
+                                "Copied OpenAI login link",
+                                ToastLevel::Info,
+                                None,
+                            )),
+                            Err(err) => push_toast(Toast::new(
+                                format!("Failed to copy link: {}", err),
+                                ToastLevel::Error,
+                                None,
+                            )),
+                        }
+                        true
+                    }
+                }
             }
             OverlayFocus::ApiKeyInput => {
                 let action = self.api_key_input.handle_key_event(key);
@@ -623,6 +683,7 @@ impl App {
                                 crate::persistence::AuthConfig::Api { key: api_key },
                             );
                             self.connect_dialog_state = init_connect_dialog();
+                            self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
                         }
                         self.overlay_focus = OverlayFocus::None;
                         true
@@ -945,11 +1006,34 @@ impl App {
             handle_connect_dialog_mouse_event(&mut self.connect_dialog_state, mouse);
             if !self.connect_dialog_state.dialog.is_visible() {
                 if let Some(selected_item) = get_pending_selection(&mut self.connect_dialog_state) {
-                    self.api_key_input.show(&selected_item.id);
-                    self.overlay_focus = OverlayFocus::ApiKeyInput;
+                    self.handle_connect_dialog_selection(selected_item);
                     return;
                 }
+                self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
                 self.overlay_focus = OverlayFocus::None;
+            }
+        } else if self.overlay_focus == OverlayFocus::OpenAIOAuthFlow {
+            let action =
+                handle_openai_oauth_flow_mouse_event(&mut self.openai_oauth_flow_state, mouse);
+            match action {
+                OpenAIOAuthFlowAction::Handled | OpenAIOAuthFlowAction::NotHandled => {}
+                OpenAIOAuthFlowAction::Close => {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                OpenAIOAuthFlowAction::CopyLink(url) => {
+                    match crate::utils::clipboard::copy_text(&url) {
+                        Ok(_) => push_toast(Toast::new(
+                            "Copied OpenAI login link",
+                            ToastLevel::Info,
+                            None,
+                        )),
+                        Err(err) => push_toast(Toast::new(
+                            format!("Failed to copy link: {}", err),
+                            ToastLevel::Error,
+                            None,
+                        )),
+                    }
+                }
             }
         } else if self.overlay_focus == OverlayFocus::SessionsDialog {
             handle_sessions_dialog_mouse_event(&mut self.sessions_dialog_state, mouse);
@@ -1194,12 +1278,9 @@ impl App {
                                         provider_id: item.provider_id.clone(),
                                     })
                                     .collect();
-                            self.connect_dialog_state = crate::views::ConnectDialogState::new(
-                                crate::ui::components::dialog::Dialog::with_items(
-                                    title,
-                                    dialog_items,
-                                ),
-                            );
+                            self.connect_dialog_state =
+                                crate::views::ConnectDialogState::with_items(title, dialog_items);
+                            self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
                             self.connect_dialog_state.dialog.show();
                             self.overlay_focus = OverlayFocus::ConnectDialog;
                         } else if title == "Sessions" {
@@ -1309,9 +1390,9 @@ impl App {
                             provider_id: item.provider_id.clone(),
                         })
                         .collect();
-                    self.connect_dialog_state = crate::views::ConnectDialogState::new(
-                        crate::ui::components::dialog::Dialog::with_items(title, dialog_items),
-                    );
+                    self.connect_dialog_state =
+                        crate::views::ConnectDialogState::with_items(title, dialog_items);
+                    self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
                     self.connect_dialog_state.dialog.show();
                     self.overlay_focus = OverlayFocus::ConnectDialog;
                 } else if title == "Sessions" {
@@ -1648,6 +1729,298 @@ impl App {
         self.overlay_focus = OverlayFocus::ThemesDialog;
     }
 
+    fn show_openai_connect_methods(&mut self) {
+        use crate::ui::components::dialog::DialogItem;
+
+        let items = vec![
+            DialogItem {
+                id: "openai-oauth-browser".to_string(),
+                name: "ChatGPT Plus/Pro (browser)".to_string(),
+                group: "OpenAI".to_string(),
+                description: "OAuth via browser callback".to_string(),
+                tip: None,
+                provider_id: "openai".to_string(),
+            },
+            DialogItem {
+                id: "openai-oauth-headless".to_string(),
+                name: "ChatGPT Plus/Pro (headless)".to_string(),
+                group: "OpenAI".to_string(),
+                description: "Device code login flow".to_string(),
+                tip: None,
+                provider_id: "openai".to_string(),
+            },
+            DialogItem {
+                id: "openai-api-key".to_string(),
+                name: "Manually enter API key".to_string(),
+                group: "OpenAI".to_string(),
+                description: "Use OpenAI API key".to_string(),
+                tip: None,
+                provider_id: "openai".to_string(),
+            },
+        ];
+
+        self.connect_dialog_state = crate::views::ConnectDialogState::new(
+            crate::ui::components::dialog::Dialog::with_items("Connect OpenAI", items),
+        );
+        self.connect_dialog_state.dialog.show();
+        self.connect_dialog_mode = ConnectDialogMode::OpenAIMethodSelection;
+        self.overlay_focus = OverlayFocus::ConnectDialog;
+    }
+
+    fn reopen_connect_dialog(&mut self, select_provider_id: Option<&str>) {
+        if let crate::command::parser::InputType::Command(parsed) =
+            crate::command::parser::parse_input("/connect")
+        {
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(self.process_command_input(parsed));
+            });
+        }
+
+        if let Some(provider_id) = select_provider_id {
+            let _ = self
+                .connect_dialog_state
+                .dialog
+                .select_item_by_key(provider_id, "");
+        }
+    }
+
+    fn disconnect_selected_provider(&mut self) {
+        if self.connect_dialog_mode != ConnectDialogMode::ProviderSelection {
+            push_toast(Toast::new(
+                "Disconnect is available in provider list",
+                ToastLevel::Info,
+                None,
+            ));
+            return;
+        }
+
+        let selected_item = match self.connect_dialog_state.dialog.get_selected() {
+            Some(item) => item.clone(),
+            None => {
+                push_toast(Toast::new("No provider selected", ToastLevel::Info, None));
+                return;
+            }
+        };
+
+        let provider_id = selected_item.id;
+        let provider_name = selected_item.name;
+
+        let auth_dao = match crate::persistence::AuthDAO::new() {
+            Ok(dao) => dao,
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Failed to open auth store: {}", err),
+                    ToastLevel::Error,
+                    None,
+                ));
+                return;
+            }
+        };
+
+        match auth_dao.get_provider(&provider_id) {
+            Ok(Some(_)) => {
+                if let Err(err) = auth_dao.remove_provider(&provider_id) {
+                    push_toast(Toast::new(
+                        format!("Failed to disconnect {}: {}", provider_name, err),
+                        ToastLevel::Error,
+                        None,
+                    ));
+                    return;
+                }
+
+                push_toast(Toast::new(
+                    format!("Disconnected {}", provider_name),
+                    ToastLevel::Info,
+                    None,
+                ));
+
+                self.reopen_connect_dialog(Some(&provider_id));
+            }
+            Ok(None) => {
+                push_toast(Toast::new(
+                    format!("{} is not connected", provider_name),
+                    ToastLevel::Info,
+                    None,
+                ));
+            }
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Failed to inspect provider auth: {}", err),
+                    ToastLevel::Error,
+                    None,
+                ));
+            }
+        }
+    }
+
+    fn handle_connect_dialog_selection(
+        &mut self,
+        selected_item: crate::ui::components::dialog::DialogItem,
+    ) {
+        match self.connect_dialog_mode {
+            ConnectDialogMode::ProviderSelection => {
+                if selected_item.id == "openai" {
+                    self.show_openai_connect_methods();
+                    return;
+                }
+
+                self.api_key_input.show(&selected_item.id);
+                self.overlay_focus = OverlayFocus::ApiKeyInput;
+            }
+            ConnectDialogMode::OpenAIMethodSelection => match selected_item.id.as_str() {
+                "openai-oauth-browser" => {
+                    self.begin_openai_oauth_browser();
+                }
+                "openai-oauth-headless" => {
+                    self.begin_openai_oauth_headless();
+                }
+                "openai-api-key" => {
+                    self.api_key_input.show("openai");
+                    self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+                    self.overlay_focus = OverlayFocus::ApiKeyInput;
+                }
+                _ => {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+            },
+        }
+    }
+
+    fn begin_openai_oauth_browser(&mut self) {
+        if self.openai_oauth_in_progress {
+            push_toast(Toast::new(
+                "OpenAI OAuth is already in progress",
+                ToastLevel::Info,
+                None,
+            ));
+            self.overlay_focus = OverlayFocus::None;
+            return;
+        }
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<OpenAIOAuthTaskMessage>();
+        self.openai_oauth_receiver = Some(receiver);
+        self.openai_oauth_in_progress = true;
+        self.openai_oauth_flow_state.show_browser_waiting();
+        self.overlay_focus = OverlayFocus::OpenAIOAuthFlow;
+        self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+        self.connect_dialog_state = init_connect_dialog();
+
+        tokio::spawn(async move {
+            match crate::auth::openai_oauth::authorize_browser().await {
+                Ok(credentials) => {
+                    let _ = sender.send(OpenAIOAuthTaskMessage::Success(credentials));
+                }
+                Err(err) => {
+                    let _ = sender.send(OpenAIOAuthTaskMessage::Failed(err.to_string()));
+                }
+            }
+        });
+    }
+
+    fn begin_openai_oauth_headless(&mut self) {
+        if self.openai_oauth_in_progress {
+            push_toast(Toast::new(
+                "OpenAI OAuth is already in progress",
+                ToastLevel::Info,
+                None,
+            ));
+            self.overlay_focus = OverlayFocus::None;
+            return;
+        }
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<OpenAIOAuthTaskMessage>();
+        self.openai_oauth_receiver = Some(receiver);
+        self.openai_oauth_in_progress = true;
+        self.openai_oauth_flow_state.show_headless_preparing();
+        self.overlay_focus = OverlayFocus::OpenAIOAuthFlow;
+        self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+        self.connect_dialog_state = init_connect_dialog();
+
+        tokio::spawn(async move {
+            let code_sender = sender.clone();
+            let result = crate::auth::openai_oauth::authorize_headless(move |code, url| {
+                let _ = code_sender.send(OpenAIOAuthTaskMessage::HeadlessCode { code, url });
+            })
+            .await;
+
+            match result {
+                Ok(credentials) => {
+                    let _ = sender.send(OpenAIOAuthTaskMessage::Success(credentials));
+                }
+                Err(err) => {
+                    let _ = sender.send(OpenAIOAuthTaskMessage::Failed(err.to_string()));
+                }
+            }
+        });
+    }
+
+    fn process_openai_oauth_events(&mut self) {
+        let mut events = Vec::new();
+
+        if let Some(receiver) = &mut self.openai_oauth_receiver {
+            while let Ok(event) = receiver.try_recv() {
+                events.push(event);
+            }
+        }
+
+        for event in events {
+            match event {
+                OpenAIOAuthTaskMessage::HeadlessCode { code, url } => {
+                    self.openai_oauth_flow_state.set_headless_code(code, url);
+                    self.overlay_focus = OverlayFocus::OpenAIOAuthFlow;
+                }
+                OpenAIOAuthTaskMessage::Success(credentials) => {
+                    if let Ok(auth_dao) = crate::persistence::AuthDAO::new() {
+                        let _ = auth_dao.set_provider(
+                            "openai".to_string(),
+                            crate::persistence::AuthConfig::OAuth {
+                                refresh: credentials.refresh,
+                                access: credentials.access,
+                                expires: credentials.expires,
+                                account_id: credentials.account_id,
+                                enterprise_url: credentials.enterprise_url,
+                            },
+                        );
+                    }
+
+                    if let Some(prefs_dao) = self.prefs_dao.as_ref() {
+                        let _ = prefs_dao
+                            .set_active_model("openai".to_string(), "gpt-5.3-codex".to_string());
+                    }
+
+                    self.provider_name = "openai".to_string();
+                    self.model = "gpt-5.3-codex".to_string();
+                    self.openai_oauth_in_progress = false;
+                    self.openai_oauth_receiver = None;
+                    self.openai_oauth_flow_state.hide();
+                    if self.overlay_focus == OverlayFocus::OpenAIOAuthFlow {
+                        self.overlay_focus = OverlayFocus::None;
+                    }
+
+                    push_toast(Toast::new(
+                        "Connected OpenAI via ChatGPT Plus/Pro OAuth",
+                        ToastLevel::Info,
+                        None,
+                    ));
+                }
+                OpenAIOAuthTaskMessage::Failed(error) => {
+                    self.openai_oauth_in_progress = false;
+                    self.openai_oauth_receiver = None;
+                    self.openai_oauth_flow_state.hide();
+                    if self.overlay_focus == OverlayFocus::OpenAIOAuthFlow {
+                        self.overlay_focus = OverlayFocus::None;
+                    }
+                    push_toast(Toast::new(
+                        format!("OpenAI OAuth failed: {}", error),
+                        ToastLevel::Error,
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+
     fn cleanup_streaming(&mut self) {
         self.chat_state.chat.resume_streaming_tps_timer();
         self.permission_dialog_state.clear_with_deny();
@@ -1676,6 +2049,8 @@ impl App {
     }
 
     pub fn process_streaming_chunks(&mut self) {
+        self.process_openai_oauth_events();
+
         let mut chunks = Vec::new();
 
         if let Some(receiver) = &mut self.chunk_receiver {
@@ -2136,6 +2511,12 @@ impl App {
             && self.connect_dialog_state.dialog.is_visible()
         {
             render_connect_dialog(f, &mut self.connect_dialog_state, size, colors);
+        }
+
+        if self.overlay_focus == OverlayFocus::OpenAIOAuthFlow
+            && self.openai_oauth_flow_state.is_visible()
+        {
+            render_openai_oauth_flow(f, &mut self.openai_oauth_flow_state, size, colors);
         }
 
         if self.overlay_focus == OverlayFocus::ApiKeyInput && self.api_key_input.is_visible() {

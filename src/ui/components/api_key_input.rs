@@ -136,31 +136,50 @@ impl ApiKeyInput {
             ])
             .split(content_area);
 
-        let title_line = Line::from(vec![
+        let esc_text = "esc";
+        let esc_area_width = (esc_text.len() as u16).saturating_add(1);
+        let header_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(esc_area_width),
+            ])
+            .split(chunks[0]);
+
+        let title_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            "API key",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(ratatui::layout::Alignment::Left);
+        frame.render_widget(title_paragraph, header_chunks[0]);
+
+        let esc_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            esc_text,
+            Style::default()
+                .fg(colors.primary)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(ratatui::layout::Alignment::Right);
+        frame.render_widget(esc_paragraph, header_chunks[1]);
+
+        frame.render_widget(&self.text_area, chunks[1]);
+
+        let footer_line = Line::from(vec![
             Span::styled(
-                "API key",
-                Style::default()
-                    .fg(colors.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" ".repeat(40)),
-            Span::styled(
-                "esc",
+                "enter",
                 Style::default()
                     .fg(colors.primary)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(
+                " submit",
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            ),
         ]);
-
-        frame.render_widget(Paragraph::new(title_line), chunks[0]);
-        frame.render_widget(&self.text_area, chunks[1]);
-
-        let footer_line = Line::from(vec![Span::styled(
-            "enter submit",
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
-        )]);
 
         frame.render_widget(Paragraph::new(footer_line), chunks[2]);
     }

@@ -152,8 +152,8 @@ This project was inspired by [anomalyco/opencode](https://github.com/anomalyco/o
 - [x] Minimal configurations (I want it to just feel at least like vanilla opencode)
 - [x] The cheapest model providers (GLM, etc.)
 - [x] A ding sound, my only opencode plugin at the moment.
-- [x] No reverse-engineering oauth from big AI (Codex, Claude Code, Gemini), at least for now (Don't wanna get in trouble).
-- [ ] ChatGPT oauth (because I use it)
+- [x] No reverse-engineering oauth from big AI (Claude Code, Gemini), at least for now (Don't wanna get in trouble).
+- [x] Exception: ChatGPT oauth (because I use it)
 - [ ] Copy chat contents, copy the chat input
 - [ ] Image inputs
 - [ ] Possibly ralphy? (very far, idk how to do that)

@@ -16,6 +16,14 @@ pub enum AuthConfig {
         refresh: String,
         access: String,
         expires: i64,
+        #[serde(rename = "accountId", default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+        #[serde(
+            rename = "enterpriseUrl",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        enterprise_url: Option<String>,
     },
 }
 
@@ -122,6 +130,11 @@ impl AuthDAO {
             AuthConfig::Api { key } => Some(key.clone()),
             AuthConfig::OAuth { access, .. } => Some(access.clone()),
         }))
+    }
+
+    pub fn get_provider(&self, name: &str) -> Result<Option<AuthConfig>> {
+        let providers = self.load()?;
+        Ok(providers.get(name).cloned())
     }
 }
 

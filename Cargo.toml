@@ -42,15 +42,18 @@ unicode-width = "0.1"
 tui-markdown = "0.3"
 ratatui-core = "0.1"
 tiktoken-rs = "0.9.1"
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
 
 [dev-dependencies]
 tokio-test = "0.4"
 
 [patch.crates-io]
-# Local
-# aisdk = { path = "/Users/carlo/Desktop/Projects/aisdk-rs" }
+# For local fork development
+aisdk = { path = "/Users/carlo/Desktop/Projects/aisdk-rs" }
 # After pushing
-aisdk = { git = "https://github.com/Blankeos/aisdk-rs", branch = "crabcode" }
+# aisdk = { git = "https://github.com/Blankeos/aisdk-rs", branch = "crabcode" }
 
 # The profile that 'dist' will build with
 [profile.dist]
