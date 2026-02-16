@@ -2,7 +2,6 @@ pub mod client;
 pub mod provider;
 pub mod tool_calls;
 
-pub use client::LLMClient;
 pub use tool_calls::{FunctionCall, ToolCall, ToolCallResult};
 
 use tokio::sync::mpsc;

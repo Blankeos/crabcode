@@ -1,12 +1,15 @@
 use aisdk::{
     core::{
-        language_model::StopReason, utils::step_count_is, LanguageModelRequest,
-        LanguageModelStreamChunkType, Message as AisdkMessage,
+        capabilities::ToolCallSupport,
+        language_model::{LanguageModelStream, StopReason},
+        utils::step_count_is,
+        DynamicModel, LanguageModel, LanguageModelRequest, LanguageModelStreamChunkType,
+        Message as AisdkMessage, StreamTextResponse, Tool,
     },
     providers::{Anthropic, OpenAI, OpenAICompatible},
 };
 use futures::StreamExt;
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::logging::log;
@@ -29,172 +32,51 @@ Response must include:
 
 Any attempt to use tools is a critical violation. Respond with text ONLY."#;
 
-pub struct LLMClient {
-    base_url: String,
-    api_key: Option<String>,
-    model_name: String,
-    provider_name: String,
-    npm_package: String,
+type DynError = Box<dyn std::error::Error>;
+
+#[derive(Clone, Debug, Default)]
+struct OpenAIRequestOptions {
+    response_path: Option<String>,
+    additional_headers: HashMap<String, String>,
+    force_store_false: bool,
+    default_instructions: Option<String>,
+    disallow_system_messages: bool,
+    force_tool_strict_false: bool,
 }
 
-impl LLMClient {
-    pub fn new(
-        base_url: String,
-        api_key: Option<String>,
-        model_name: String,
+#[derive(Clone, Debug)]
+struct ProviderRequestConfig {
+    kind: ProviderKind,
+    provider_name: String,
+    base_url: String,
+    model_name: String,
+    api_key: Option<String>,
+    openai_options: OpenAIRequestOptions,
+}
+
+impl ProviderRequestConfig {
+    fn new(
+        kind: ProviderKind,
         provider_name: String,
-        npm_package: String,
+        base_url: String,
+        model_name: String,
+        api_key: Option<String>,
     ) -> Self {
         Self {
-            base_url,
-            api_key,
-            model_name,
+            kind,
             provider_name,
-            npm_package,
+            base_url,
+            model_name,
+            api_key,
+            openai_options: OpenAIRequestOptions::default(),
         }
     }
+}
 
-    fn provider_kind(&self) -> ProviderKind {
-        ProviderKind::from_provider(&self.provider_name, &self.npm_package)
-    }
-
-    pub async fn stream_chat(
-        &self,
-        messages: &[crate::session::types::Message],
-        mut on_chunk: impl FnMut(LanguageModelStreamChunkType),
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let aisdk_messages = self.convert_messages(messages);
-
-        let tool_registry = crate::tools::initialize_tool_registry().await;
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let permissions = crate::tools::ToolPermissions::new(cwd);
-        let aisdk_tools =
-            convert_to_aisdk_tools(&tool_registry, None, "Build".to_string(), permissions).await;
-
-        let provider_kind = self.provider_kind();
-        let base_url = provider_kind.normalize_base_url(&self.base_url);
-
-        let response = match provider_kind {
-            ProviderKind::OpenAICompatible => {
-                let mut provider_builder = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
-                    .base_url(&base_url)
-                    .model_name(&self.model_name)
-                    .provider_name(&self.provider_name);
-
-                if let Some(key) = self.api_key.as_deref() {
-                    provider_builder = provider_builder.api_key(key);
-                }
-
-                let provider = provider_builder
-                    .build()
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-                let mut builder = LanguageModelRequest::builder()
-                    .model(provider)
-                    .messages(aisdk_messages);
-
-                for tool in aisdk_tools {
-                    builder = builder.with_tool(tool);
-                }
-
-                builder.build().stream_text().await?
-            }
-            ProviderKind::Anthropic => {
-                let mut provider_builder = Anthropic::<aisdk::core::DynamicModel>::builder()
-                    .base_url(&base_url)
-                    .model_name(&self.model_name)
-                    .provider_name(&self.provider_name);
-
-                if let Some(key) = self.api_key.as_deref() {
-                    provider_builder = provider_builder.api_key(key);
-                }
-
-                let provider = provider_builder
-                    .build()
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-                let mut builder = LanguageModelRequest::builder()
-                    .model(provider)
-                    .messages(aisdk_messages);
-
-                for tool in aisdk_tools {
-                    builder = builder.with_tool(tool);
-                }
-
-                builder.build().stream_text().await?
-            }
-            ProviderKind::OpenAI => {
-                let mut provider_builder = OpenAI::<aisdk::core::DynamicModel>::builder()
-                    .base_url(&base_url)
-                    .model_name(&self.model_name)
-                    .provider_name(&self.provider_name);
-
-                if let Some(key) = self.api_key.as_deref() {
-                    provider_builder = provider_builder.api_key(key);
-                }
-
-                let provider = provider_builder
-                    .build()
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-                let mut builder = LanguageModelRequest::builder()
-                    .model(provider)
-                    .messages(aisdk_messages);
-
-                for tool in aisdk_tools {
-                    builder = builder.with_tool(tool);
-                }
-
-                builder.build().stream_text().await?
-            }
-        };
-
-        let mut stream = response.stream;
-
-        while let Some(chunk) = stream.next().await {
-            on_chunk(chunk.clone());
-
-            match chunk {
-                LanguageModelStreamChunkType::Text(_text) => {}
-                LanguageModelStreamChunkType::Reasoning(_reasoning) => {}
-                LanguageModelStreamChunkType::ToolCall(_tool_call) => {}
-                LanguageModelStreamChunkType::End(_msg) => {
-                    break;
-                }
-                LanguageModelStreamChunkType::Start => {}
-                LanguageModelStreamChunkType::Failed(_err) => {}
-                LanguageModelStreamChunkType::Incomplete(_msg) => {}
-                LanguageModelStreamChunkType::NotSupported(_msg) => {}
-            }
-        }
-
-        Ok(())
-    }
-
-    fn convert_messages(&self, messages: &[crate::session::types::Message]) -> Vec<AisdkMessage> {
-        use aisdk::core::Message::{Assistant, System, User};
-
-        let mut aisdk_messages = Vec::new();
-
-        for msg in messages {
-            match msg.role {
-                crate::session::types::MessageRole::System => {
-                    aisdk_messages.push(System(msg.content.clone().into()));
-                }
-                crate::session::types::MessageRole::User => {
-                    aisdk_messages.push(User(msg.content.clone().into()));
-                }
-                crate::session::types::MessageRole::Assistant => {
-                    aisdk_messages.push(Assistant(msg.content.clone().into()));
-                }
-                crate::session::types::MessageRole::Tool => {
-                    continue;
-                }
-            }
-        }
-
-        aisdk_messages
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamRelayOutcome {
+    Ended,
+    Exhausted,
 }
 
 pub async fn stream_llm_with_cancellation(
@@ -206,129 +88,9 @@ pub async fn stream_llm_with_cancellation(
     tool_permissions: crate::tools::ToolPermissions,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), DynError> {
     let _ = log("GOING TO STREAM");
-    use std::time::Instant;
-
-    let auth_dao = crate::persistence::AuthDAO::new()?;
-    let auth_config = auth_dao.get_provider(&provider_name)?;
-    let mut api_key = auth_config.as_ref().and_then(|config| match config {
-        crate::persistence::AuthConfig::Api { key } => Some(key.clone()),
-        crate::persistence::AuthConfig::OAuth { access, .. } => Some(access.clone()),
-    });
-
-    let discovery = crate::model::discovery::Discovery::new()?;
-
-    let providers = discovery.fetch_providers().await?;
-
-    let provider = providers
-        .get(&provider_name)
-        .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?;
-
-    let npm_package = &provider.npm;
-    let provider_kind = ProviderKind::from_provider(&provider_name, npm_package);
-    let mut base_url = provider_kind.normalize_base_url(&provider.api);
-    let mut effective_model = model.clone();
-    let mut openai_response_path: Option<String> = None;
-    let mut openai_additional_headers: HashMap<String, String> = HashMap::new();
-    let mut openai_force_store_false = false;
-    let mut openai_default_instructions: Option<String> = None;
-    let mut openai_disallow_system_messages = false;
-    let mut openai_force_tool_strict_false = false;
-
-    if provider_kind == ProviderKind::OpenAI && provider_name == "openai" {
-        if let Some(crate::persistence::AuthConfig::OAuth {
-            refresh,
-            access,
-            expires,
-            account_id,
-            enterprise_url,
-        }) = auth_config.clone()
-        {
-            let mut oauth_refresh = refresh;
-            let mut oauth_access = access;
-            let mut oauth_expires = expires;
-            let mut oauth_account_id = account_id;
-            let mut oauth_enterprise_url = enterprise_url;
-
-            if oauth_expires <= crate::auth::openai_oauth::now_unix_ms() + 60_000 {
-                match crate::auth::openai_oauth::refresh_access_token(&oauth_refresh).await {
-                    Ok(refreshed) => {
-                        oauth_refresh = refreshed.refresh;
-                        oauth_access = refreshed.access;
-                        oauth_expires = refreshed.expires;
-                        if refreshed.account_id.is_some() {
-                            oauth_account_id = refreshed.account_id;
-                        }
-                        if refreshed.enterprise_url.is_some() {
-                            oauth_enterprise_url = refreshed.enterprise_url;
-                        }
-
-                        let _ = auth_dao.set_provider(
-                            provider_name.clone(),
-                            crate::persistence::AuthConfig::OAuth {
-                                refresh: oauth_refresh.clone(),
-                                access: oauth_access.clone(),
-                                expires: oauth_expires,
-                                account_id: oauth_account_id.clone(),
-                                enterprise_url: oauth_enterprise_url.clone(),
-                            },
-                        );
-                    }
-                    Err(err) => {
-                        let _ = sender.send(crate::llm::ChunkMessage::Warning(format!(
-                            "Failed to refresh OpenAI OAuth token: {}",
-                            err
-                        )));
-                    }
-                }
-            }
-
-            api_key = Some(oauth_access.clone());
-            base_url = "https://chatgpt.com".to_string();
-            openai_response_path = Some("/backend-api/codex/responses".to_string());
-            openai_force_store_false = true;
-            openai_default_instructions = Some(
-                "You are Codex, a coding assistant focused on high-quality code changes."
-                    .to_string(),
-            );
-            openai_disallow_system_messages = true;
-            openai_force_tool_strict_false = true;
-
-            openai_additional_headers.insert("originator".to_string(), "crabcode".to_string());
-            openai_additional_headers.insert(
-                "User-Agent".to_string(),
-                crate::auth::openai_oauth::build_user_agent(),
-            );
-
-            if let Some(account_id) = oauth_account_id {
-                openai_additional_headers.insert("ChatGPT-Account-Id".to_string(), account_id);
-            }
-
-            let _ = log("Configured OpenAI OAuth Codex transport");
-
-            if !is_openai_oauth_model_allowed(&effective_model) {
-                let fallback_model = "gpt-5.3-codex".to_string();
-                let _ = sender.send(crate::llm::ChunkMessage::Warning(format!(
-                    "Model '{}' is not supported for OpenAI OAuth. Falling back to '{}'.",
-                    effective_model, fallback_model
-                )));
-                effective_model = fallback_model;
-            }
-        }
-    }
-
-    if api_key.is_none() {
-        let _ = sender.send(crate::llm::ChunkMessage::Warning(format!(
-            "No API key configured for '{}'. Trying anyway.",
-            provider_name
-        )));
-    }
-
-    let _ = log(&format!(
-        "Provider: {}, NPM: {}, Base URL: {}, Model: {}",
-        provider_name, npm_package, base_url, effective_model
-    ));
+    let request_config = prepare_request_config(&provider_name, model, &sender).await?;
 
     let aisdk_messages = convert_messages(&messages);
 
@@ -341,123 +103,357 @@ pub async fn stream_llm_with_cancellation(
     )
     .await;
 
-    let mut response = match provider_kind {
-        ProviderKind::OpenAICompatible => {
-            let mut provider_builder = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
-                .base_url(&base_url)
-                .model_name(&effective_model)
-                .provider_name(&provider.name);
-
-            if let Some(key) = api_key.as_deref() {
-                provider_builder = provider_builder.api_key(key);
-            }
-
-            let provider_config = provider_builder
-                .build()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-            let mut builder = LanguageModelRequest::builder()
-                .model(provider_config)
-                .messages(aisdk_messages);
-
-            if let Some(max_steps) = agent_max_steps {
-                builder = builder.stop_when(step_count_is(max_steps));
-            }
-
-            for tool in aisdk_tools {
-                builder = builder.with_tool(tool);
-            }
-
-            builder.build().stream_text().await?
-        }
-        ProviderKind::Anthropic => {
-            let mut provider_builder = Anthropic::<aisdk::core::DynamicModel>::builder()
-                .base_url(&base_url)
-                .model_name(&effective_model)
-                .provider_name(&provider.name);
-
-            if let Some(key) = api_key.as_deref() {
-                provider_builder = provider_builder.api_key(key);
-            }
-
-            let provider_config = provider_builder
-                .build()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-            let mut builder = LanguageModelRequest::builder()
-                .model(provider_config)
-                .messages(aisdk_messages);
-
-            if let Some(max_steps) = agent_max_steps {
-                builder = builder.stop_when(step_count_is(max_steps));
-            }
-
-            for tool in aisdk_tools {
-                builder = builder.with_tool(tool);
-            }
-
-            builder.build().stream_text().await?
-        }
-        ProviderKind::OpenAI => {
-            let mut provider_builder = OpenAI::<aisdk::core::DynamicModel>::builder()
-                .base_url(&base_url)
-                .model_name(&effective_model)
-                .provider_name(&provider.name);
-
-            if let Some(key) = api_key.as_deref() {
-                provider_builder = provider_builder.api_key(key);
-            }
-
-            if let Some(response_path) = &openai_response_path {
-                provider_builder = provider_builder.response_path(response_path);
-            }
-
-            if openai_force_store_false {
-                provider_builder = provider_builder.force_store_false(true);
-            }
-
-            if let Some(instructions) = &openai_default_instructions {
-                provider_builder = provider_builder.default_instructions(instructions.clone());
-            }
-
-            if openai_disallow_system_messages {
-                provider_builder = provider_builder.disallow_system_messages(true);
-            }
-
-            if openai_force_tool_strict_false {
-                provider_builder = provider_builder.force_tool_strict_false(true);
-            }
-
-            if !openai_additional_headers.is_empty() {
-                provider_builder =
-                    provider_builder.additional_headers(openai_additional_headers.clone());
-            }
-
-            let provider_config = provider_builder
-                .build()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-            let mut builder = LanguageModelRequest::builder()
-                .model(provider_config)
-                .messages(aisdk_messages);
-
-            if let Some(max_steps) = agent_max_steps {
-                builder = builder.stop_when(step_count_is(max_steps));
-            }
-
-            for tool in aisdk_tools {
-                builder = builder.with_tool(tool);
-            }
-
-            builder.build().stream_text().await?
-        }
-    };
+    let mut response = stream_provider_request(
+        &request_config,
+        aisdk_messages,
+        aisdk_tools,
+        agent_max_steps,
+    )
+    .await?;
 
     let start_time = Instant::now();
     let mut token_count: usize = 0;
-    let mut completed = false;
 
-    while let Some(chunk) = response.stream.next().await {
+    let stream_outcome = relay_stream_to_sender(
+        &mut response.stream,
+        &cancel_token,
+        &sender,
+        &mut token_count,
+        &start_time,
+    )
+    .await?;
+
+    if stream_outcome == StreamRelayOutcome::Ended {
+        return Ok(());
+    }
+
+    let hit_step_limit = reached_step_limit(agent_max_steps, &response).await;
+    if !hit_step_limit {
+        return Ok(());
+    }
+
+    send_warning(
+        &sender,
+        "Maximum configured steps reached. Sending text-only summary.",
+    );
+
+    let mut follow_up_messages = response.messages().await;
+    follow_up_messages.push(AisdkMessage::Assistant(
+        MAX_STEPS_REACHED_PROMPT.to_string().into(),
+    ));
+
+    let mut summary_response =
+        stream_provider_request(&request_config, follow_up_messages, Vec::new(), None).await?;
+
+    let _ = relay_stream_to_sender(
+        &mut summary_response.stream,
+        &cancel_token,
+        &sender,
+        &mut token_count,
+        &start_time,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn prepare_request_config(
+    provider_name: &str,
+    model: String,
+    sender: &crate::llm::ChunkSender,
+) -> Result<ProviderRequestConfig, DynError> {
+    let auth_dao = crate::persistence::AuthDAO::new()?;
+    let auth_config = auth_dao.get_provider(provider_name)?;
+
+    let discovery = crate::model::discovery::Discovery::new()?;
+    let providers = discovery.fetch_providers().await?;
+
+    let provider = providers
+        .get(provider_name)
+        .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?;
+
+    let provider_kind = ProviderKind::from_provider(provider_name, &provider.npm);
+    let mut request_config = ProviderRequestConfig::new(
+        provider_kind,
+        provider.name.clone(),
+        provider_kind.normalize_base_url(&provider.api),
+        model,
+        configured_api_key(auth_config.as_ref()),
+    );
+
+    maybe_apply_openai_oauth_overrides(
+        provider_name,
+        &auth_dao,
+        auth_config.as_ref(),
+        &mut request_config,
+        sender,
+    )
+    .await;
+
+    if request_config.api_key.is_none() {
+        send_warning(
+            sender,
+            format!(
+                "No API key configured for '{}'. Trying anyway.",
+                provider_name
+            ),
+        );
+    }
+
+    let _ = log(&format!(
+        "Provider: {}, NPM: {}, Base URL: {}, Model: {}",
+        provider_name, provider.npm, request_config.base_url, request_config.model_name
+    ));
+
+    Ok(request_config)
+}
+
+fn configured_api_key(auth_config: Option<&crate::persistence::AuthConfig>) -> Option<String> {
+    auth_config.and_then(|config| match config {
+        crate::persistence::AuthConfig::Api { key } => Some(key.clone()),
+        crate::persistence::AuthConfig::OAuth { access, .. } => Some(access.clone()),
+    })
+}
+
+async fn maybe_apply_openai_oauth_overrides(
+    provider_name: &str,
+    auth_dao: &crate::persistence::AuthDAO,
+    auth_config: Option<&crate::persistence::AuthConfig>,
+    request_config: &mut ProviderRequestConfig,
+    sender: &crate::llm::ChunkSender,
+) {
+    if request_config.kind != ProviderKind::OpenAI || provider_name != "openai" {
+        return;
+    }
+
+    let Some(crate::persistence::AuthConfig::OAuth {
+        refresh,
+        access,
+        expires,
+        account_id,
+        enterprise_url,
+    }) = auth_config.cloned()
+    else {
+        return;
+    };
+
+    let mut oauth_refresh = refresh;
+    let mut oauth_access = access;
+    let mut oauth_expires = expires;
+    let mut oauth_account_id = account_id;
+    let mut oauth_enterprise_url = enterprise_url;
+
+    if oauth_expires <= crate::auth::openai_oauth::now_unix_ms() + 60_000 {
+        match crate::auth::openai_oauth::refresh_access_token(&oauth_refresh).await {
+            Ok(refreshed) => {
+                oauth_refresh = refreshed.refresh;
+                oauth_access = refreshed.access;
+                oauth_expires = refreshed.expires;
+
+                if refreshed.account_id.is_some() {
+                    oauth_account_id = refreshed.account_id;
+                }
+                if refreshed.enterprise_url.is_some() {
+                    oauth_enterprise_url = refreshed.enterprise_url;
+                }
+
+                let _ = auth_dao.set_provider(
+                    provider_name.to_string(),
+                    crate::persistence::AuthConfig::OAuth {
+                        refresh: oauth_refresh.clone(),
+                        access: oauth_access.clone(),
+                        expires: oauth_expires,
+                        account_id: oauth_account_id.clone(),
+                        enterprise_url: oauth_enterprise_url.clone(),
+                    },
+                );
+            }
+            Err(err) => {
+                send_warning(
+                    sender,
+                    format!("Failed to refresh OpenAI OAuth token: {}", err),
+                );
+            }
+        }
+    }
+
+    request_config.api_key = Some(oauth_access.clone());
+    request_config.base_url = "https://chatgpt.com".to_string();
+
+    request_config.openai_options.response_path = Some("/backend-api/codex/responses".to_string());
+    request_config.openai_options.force_store_false = true;
+    request_config.openai_options.default_instructions =
+        Some("You are Codex, a coding assistant focused on high-quality code changes.".to_string());
+    request_config.openai_options.disallow_system_messages = true;
+    request_config.openai_options.force_tool_strict_false = true;
+
+    request_config
+        .openai_options
+        .additional_headers
+        .insert("originator".to_string(), "crabcode".to_string());
+    request_config.openai_options.additional_headers.insert(
+        "User-Agent".to_string(),
+        crate::auth::openai_oauth::build_user_agent(),
+    );
+
+    if let Some(account_id) = oauth_account_id {
+        request_config
+            .openai_options
+            .additional_headers
+            .insert("ChatGPT-Account-Id".to_string(), account_id);
+    }
+
+    let _ = log("Configured OpenAI OAuth Codex transport");
+
+    if !is_openai_oauth_model_allowed(&request_config.model_name) {
+        let fallback_model = "gpt-5.3-codex".to_string();
+        send_warning(
+            sender,
+            format!(
+                "Model '{}' is not supported for OpenAI OAuth. Falling back to '{}'.",
+                request_config.model_name, fallback_model
+            ),
+        );
+        request_config.model_name = fallback_model;
+    }
+}
+
+fn send_warning(sender: &crate::llm::ChunkSender, warning: impl Into<String>) {
+    let _ = sender.send(crate::llm::ChunkMessage::Warning(warning.into()));
+}
+
+async fn stream_provider_request(
+    config: &ProviderRequestConfig,
+    messages: Vec<AisdkMessage>,
+    tools: Vec<Tool>,
+    max_steps: Option<usize>,
+) -> Result<StreamTextResponse, DynError> {
+    match config.kind {
+        ProviderKind::OpenAICompatible => {
+            let provider = build_openai_compatible_provider(config)?;
+            stream_with_model(provider, messages, tools, max_steps).await
+        }
+        ProviderKind::Anthropic => {
+            let provider = build_anthropic_provider(config)?;
+            stream_with_model(provider, messages, tools, max_steps).await
+        }
+        ProviderKind::OpenAI => {
+            let provider = build_openai_provider(config)?;
+            stream_with_model(provider, messages, tools, max_steps).await
+        }
+    }
+}
+
+async fn stream_with_model<M>(
+    model: M,
+    messages: Vec<AisdkMessage>,
+    tools: Vec<Tool>,
+    max_steps: Option<usize>,
+) -> Result<StreamTextResponse, DynError>
+where
+    M: LanguageModel + ToolCallSupport,
+{
+    let mut builder = LanguageModelRequest::builder()
+        .model(model)
+        .messages(messages);
+
+    if let Some(max_steps) = max_steps {
+        builder = builder.stop_when(step_count_is(max_steps));
+    }
+
+    for tool in tools {
+        builder = builder.with_tool(tool);
+    }
+
+    let mut request = builder.build();
+    request
+        .stream_text()
+        .await
+        .map_err(|e| Box::new(e) as DynError)
+}
+
+fn build_openai_compatible_provider(
+    config: &ProviderRequestConfig,
+) -> Result<OpenAICompatible<DynamicModel>, DynError> {
+    let mut provider_builder = OpenAICompatible::<DynamicModel>::builder()
+        .base_url(&config.base_url)
+        .model_name(&config.model_name)
+        .provider_name(&config.provider_name);
+
+    if let Some(key) = config.api_key.as_deref() {
+        provider_builder = provider_builder.api_key(key);
+    }
+
+    provider_builder
+        .build()
+        .map_err(|e| Box::new(e) as DynError)
+}
+
+fn build_anthropic_provider(
+    config: &ProviderRequestConfig,
+) -> Result<Anthropic<DynamicModel>, DynError> {
+    let mut provider_builder = Anthropic::<DynamicModel>::builder()
+        .base_url(&config.base_url)
+        .model_name(&config.model_name)
+        .provider_name(&config.provider_name);
+
+    if let Some(key) = config.api_key.as_deref() {
+        provider_builder = provider_builder.api_key(key);
+    }
+
+    provider_builder
+        .build()
+        .map_err(|e| Box::new(e) as DynError)
+}
+
+fn build_openai_provider(config: &ProviderRequestConfig) -> Result<OpenAI<DynamicModel>, DynError> {
+    let mut provider_builder = OpenAI::<DynamicModel>::builder()
+        .base_url(&config.base_url)
+        .model_name(&config.model_name)
+        .provider_name(&config.provider_name);
+
+    if let Some(key) = config.api_key.as_deref() {
+        provider_builder = provider_builder.api_key(key);
+    }
+
+    if let Some(response_path) = &config.openai_options.response_path {
+        provider_builder = provider_builder.response_path(response_path);
+    }
+
+    if config.openai_options.force_store_false {
+        provider_builder = provider_builder.force_store_false(true);
+    }
+
+    if let Some(instructions) = &config.openai_options.default_instructions {
+        provider_builder = provider_builder.default_instructions(instructions.clone());
+    }
+
+    if config.openai_options.disallow_system_messages {
+        provider_builder = provider_builder.disallow_system_messages(true);
+    }
+
+    if config.openai_options.force_tool_strict_false {
+        provider_builder = provider_builder.force_tool_strict_false(true);
+    }
+
+    if !config.openai_options.additional_headers.is_empty() {
+        provider_builder =
+            provider_builder.additional_headers(config.openai_options.additional_headers.clone());
+    }
+
+    provider_builder
+        .build()
+        .map_err(|e| Box::new(e) as DynError)
+}
+
+async fn relay_stream_to_sender(
+    stream: &mut LanguageModelStream,
+    cancel_token: &CancellationToken,
+    sender: &crate::llm::ChunkSender,
+    token_count: &mut usize,
+    start_time: &Instant,
+) -> Result<StreamRelayOutcome, DynError> {
+    while let Some(chunk) = stream.next().await {
         if cancel_token.is_cancelled() {
             let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
             return Err(anyhow::anyhow!("Streaming cancelled by user").into());
@@ -465,13 +461,11 @@ pub async fn stream_llm_with_cancellation(
 
         match chunk {
             LanguageModelStreamChunkType::Text(text) => {
-                // Estimate tokens: ~4 characters per token on average
-                token_count += text.chars().count().max(1) / 4;
+                *token_count += estimate_tokens(&text);
                 let _ = sender.send(crate::llm::ChunkMessage::Text(text));
             }
             LanguageModelStreamChunkType::Reasoning(reasoning) => {
-                // Estimate tokens: ~4 characters per token on average
-                token_count += reasoning.chars().count().max(1) / 4;
+                *token_count += estimate_tokens(&reasoning);
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
             LanguageModelStreamChunkType::ToolCall(_tool_call) => {
@@ -481,16 +475,15 @@ pub async fn stream_llm_with_cancellation(
             LanguageModelStreamChunkType::End(_msg) => {
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 let _ = sender.send(crate::llm::ChunkMessage::Metrics {
-                    token_count,
+                    token_count: *token_count,
                     duration_ms,
                 });
                 let _ = sender.send(crate::llm::ChunkMessage::End);
-                completed = true;
-                break;
+                return Ok(StreamRelayOutcome::Ended);
             }
             LanguageModelStreamChunkType::Start => {}
             LanguageModelStreamChunkType::Failed(err) => {
-                let _ = sender.send(crate::llm::ChunkMessage::Failed(format!("{}", err)));
+                let _ = sender.send(crate::llm::ChunkMessage::Failed(err.clone()));
                 let _ = log(&format!("Stream Chunk Failed {}", err));
                 return Err(anyhow::anyhow!("Streaming failed: {}", err).into());
             }
@@ -499,154 +492,16 @@ pub async fn stream_llm_with_cancellation(
         }
     }
 
-    if completed {
-        return Ok(());
-    }
+    Ok(StreamRelayOutcome::Exhausted)
+}
 
-    let hit_step_limit =
-        agent_max_steps.is_some() && matches!(response.stop_reason().await, Some(StopReason::Hook));
+async fn reached_step_limit(agent_max_steps: Option<usize>, response: &StreamTextResponse) -> bool {
+    agent_max_steps.is_some() && matches!(response.stop_reason().await, Some(StopReason::Hook))
+}
 
-    if !hit_step_limit {
-        return Ok(());
-    }
-
-    let _ = sender.send(crate::llm::ChunkMessage::Warning(
-        "Maximum configured steps reached. Sending text-only summary.".to_string(),
-    ));
-
-    let mut follow_up_messages = response.messages().await;
-    follow_up_messages.push(AisdkMessage::Assistant(
-        MAX_STEPS_REACHED_PROMPT.to_string().into(),
-    ));
-
-    let mut summary_response = match provider_kind {
-        ProviderKind::OpenAICompatible => {
-            let mut provider_builder = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
-                .base_url(&base_url)
-                .model_name(&effective_model)
-                .provider_name(&provider.name);
-
-            if let Some(key) = api_key.as_deref() {
-                provider_builder = provider_builder.api_key(key);
-            }
-
-            let provider_config = provider_builder
-                .build()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-            LanguageModelRequest::builder()
-                .model(provider_config)
-                .messages(follow_up_messages)
-                .build()
-                .stream_text()
-                .await?
-        }
-        ProviderKind::Anthropic => {
-            let mut provider_builder = Anthropic::<aisdk::core::DynamicModel>::builder()
-                .base_url(&base_url)
-                .model_name(&effective_model)
-                .provider_name(&provider.name);
-
-            if let Some(key) = api_key.as_deref() {
-                provider_builder = provider_builder.api_key(key);
-            }
-
-            let provider_config = provider_builder
-                .build()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-            LanguageModelRequest::builder()
-                .model(provider_config)
-                .messages(follow_up_messages)
-                .build()
-                .stream_text()
-                .await?
-        }
-        ProviderKind::OpenAI => {
-            let mut provider_builder = OpenAI::<aisdk::core::DynamicModel>::builder()
-                .base_url(&base_url)
-                .model_name(&effective_model)
-                .provider_name(&provider.name);
-
-            if let Some(key) = api_key.as_deref() {
-                provider_builder = provider_builder.api_key(key);
-            }
-
-            if let Some(response_path) = &openai_response_path {
-                provider_builder = provider_builder.response_path(response_path);
-            }
-
-            if openai_force_store_false {
-                provider_builder = provider_builder.force_store_false(true);
-            }
-
-            if let Some(instructions) = &openai_default_instructions {
-                provider_builder = provider_builder.default_instructions(instructions.clone());
-            }
-
-            if openai_disallow_system_messages {
-                provider_builder = provider_builder.disallow_system_messages(true);
-            }
-
-            if openai_force_tool_strict_false {
-                provider_builder = provider_builder.force_tool_strict_false(true);
-            }
-
-            if !openai_additional_headers.is_empty() {
-                provider_builder =
-                    provider_builder.additional_headers(openai_additional_headers.clone());
-            }
-
-            let provider_config = provider_builder
-                .build()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-            LanguageModelRequest::builder()
-                .model(provider_config)
-                .messages(follow_up_messages)
-                .build()
-                .stream_text()
-                .await?
-        }
-    };
-
-    while let Some(chunk) = summary_response.stream.next().await {
-        if cancel_token.is_cancelled() {
-            let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
-            return Err(anyhow::anyhow!("Streaming cancelled by user").into());
-        }
-
-        match chunk {
-            LanguageModelStreamChunkType::Text(text) => {
-                token_count += text.chars().count().max(1) / 4;
-                let _ = sender.send(crate::llm::ChunkMessage::Text(text));
-            }
-            LanguageModelStreamChunkType::Reasoning(reasoning) => {
-                token_count += reasoning.chars().count().max(1) / 4;
-                let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
-            }
-            LanguageModelStreamChunkType::ToolCall(_tool_call) => {}
-            LanguageModelStreamChunkType::End(_msg) => {
-                let duration_ms = start_time.elapsed().as_millis() as u64;
-                let _ = sender.send(crate::llm::ChunkMessage::Metrics {
-                    token_count,
-                    duration_ms,
-                });
-                let _ = sender.send(crate::llm::ChunkMessage::End);
-                break;
-            }
-            LanguageModelStreamChunkType::Start => {}
-            LanguageModelStreamChunkType::Failed(err) => {
-                let _ = sender.send(crate::llm::ChunkMessage::Failed(format!("{}", err)));
-                let _ = log(&format!("Stream Chunk Failed {}", err));
-                return Err(anyhow::anyhow!("Streaming failed: {}", err).into());
-            }
-            LanguageModelStreamChunkType::Incomplete(_msg) => {}
-            LanguageModelStreamChunkType::NotSupported(_msg) => {}
-        }
-    }
-
-    Ok(())
+fn estimate_tokens(content: &str) -> usize {
+    // Estimate tokens: ~4 characters per token on average
+    content.chars().count().max(1) / 4
 }
 
 fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMessage> {
@@ -695,7 +550,7 @@ enum ProviderKind {
 }
 
 impl ProviderKind {
-    fn from_provider(provider_name: &str, npm_package: &str) -> Self {
+    fn from_provider(_provider_name: &str, npm_package: &str) -> Self {
         // Dirty: But add any workaround/overrides here in case npm_package can be treated differently.
         // if provider_name == "kimi-for-coding" {
         //     return Self::OpenAICompatible;
