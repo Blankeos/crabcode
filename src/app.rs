@@ -132,6 +132,8 @@ pub struct App {
     openai_oauth_in_progress: bool,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
+    pub agent_steps: std::collections::HashMap<String, usize>,
+    pub provider_timeouts: std::collections::HashMap<String, crate::config::ProviderTimeout>,
     pub model: String,
     pub provider_name: String,
     pub cwd: String,
@@ -269,6 +271,8 @@ impl App {
             &loaded_config.cwd,
             loaded_config.merged_config.theme.as_deref(),
         );
+        let agent_steps = loaded_config.merged_config.agent_steps.clone();
+        let provider_timeouts = loaded_config.merged_config.provider_timeouts.clone();
 
         let theme_for_colors = themes
             .get(current_theme_index)
@@ -315,6 +319,8 @@ impl App {
             openai_oauth_in_progress: false,
             prefs_dao,
             agent,
+            agent_steps,
+            provider_timeouts,
             model: active_model,
             provider_name: active_provider_name,
             cwd,
@@ -2301,6 +2307,14 @@ impl App {
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();
         let agent_mode = self.agent.clone();
+        let provider_timeout = self
+            .provider_timeouts
+            .get(&self.provider_name.to_ascii_lowercase())
+            .copied();
+        let agent_max_steps = self
+            .agent_steps
+            .get(&self.agent.to_ascii_lowercase())
+            .copied();
         let tool_permissions = self.tool_permissions.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
@@ -2330,26 +2344,35 @@ impl App {
         }
 
         tokio::spawn(async move {
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                stream_llm_with_cancellation(
-                    cancel_token,
-                    provider_name,
-                    model,
-                    agent_mode,
-                    tool_permissions,
-                    messages,
-                    sender_clone.clone(),
-                ),
-            )
-            .await;
+            let stream = stream_llm_with_cancellation(
+                cancel_token,
+                provider_name,
+                model,
+                agent_mode,
+                agent_max_steps,
+                tool_permissions,
+                messages,
+                sender_clone.clone(),
+            );
+
+            let result: Result<Result<(), Box<dyn std::error::Error>>, u64> = match provider_timeout
+            {
+                Some(crate::config::ProviderTimeout::Millis(ms)) => {
+                    match tokio::time::timeout(std::time::Duration::from_millis(ms), stream).await {
+                        Ok(inner) => Ok(inner),
+                        Err(_) => Err(ms),
+                    }
+                }
+                Some(crate::config::ProviderTimeout::Disabled) | None => Ok(stream.await),
+            };
 
             let _ = match result {
                 Ok(Ok(())) => sender_clone.send(crate::llm::ChunkMessage::End),
                 Ok(Err(e)) => sender_clone.send(crate::llm::ChunkMessage::Failed(e.to_string())),
-                Err(_) => sender_clone.send(crate::llm::ChunkMessage::Failed(
-                    "Timeout: No response within 5 minutes".to_string(),
-                )),
+                Err(ms) => sender_clone.send(crate::llm::ChunkMessage::Failed(format!(
+                    "Timeout: No response within {} ms",
+                    ms
+                ))),
             };
         });
 

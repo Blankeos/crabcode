@@ -160,12 +160,20 @@ impl Default for SoundsConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderTimeout {
+    Millis(u64),
+    Disabled,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MergedConfig {
     pub theme: Option<String>,
     pub model: Option<String>,
     pub default_agent: Option<String>,
     pub agent_tool_policies: HashMap<String, Vec<String>>,
+    pub agent_steps: HashMap<String, usize>,
+    pub provider_timeouts: HashMap<String, ProviderTimeout>,
     pub sounds: SoundsConfig,
 }
 
@@ -766,6 +774,8 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     }
 
     out.agent_tool_policies = parse_agent_tool_policies(obj.get("agent"), diagnostics);
+    out.agent_steps = parse_agent_steps(obj.get("agent"), diagnostics);
+    out.provider_timeouts = parse_provider_timeouts(obj.get("provider"), diagnostics);
 
     out.sounds = parse_sounds(obj.get("sounds"), diagnostics);
 
@@ -819,6 +829,125 @@ fn parse_agent_tool_policies(
         if !tools.is_empty() {
             out.insert(name.trim().to_ascii_lowercase(), tools);
         }
+    }
+
+    out
+}
+
+fn parse_agent_steps(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+) -> HashMap<String, usize> {
+    let mut out = HashMap::new();
+    let Some(Value::Object(agents)) = value else {
+        return out;
+    };
+
+    for (name, val) in agents {
+        let Some(agent_obj) = val.as_object() else {
+            continue;
+        };
+
+        if agent_obj.contains_key("maxSteps") {
+            diagnostics.warnings.push(format!(
+                "agent.{}.maxSteps is not supported by crabcode; use agent.{}.steps instead",
+                name, name
+            ));
+        }
+
+        let Some(raw) = agent_obj.get("steps") else {
+            continue;
+        };
+
+        let Some(num) = raw.as_u64() else {
+            diagnostics
+                .warnings
+                .push(format!("agent.{}.steps must be a positive integer", name));
+            continue;
+        };
+
+        if num == 0 {
+            diagnostics
+                .warnings
+                .push(format!("agent.{}.steps must be greater than 0", name));
+            continue;
+        }
+
+        if num > usize::MAX as u64 {
+            diagnostics.warnings.push(format!(
+                "agent.{}.steps is too large for this platform; ignoring value {}",
+                name, num
+            ));
+            continue;
+        }
+
+        out.insert(name.trim().to_ascii_lowercase(), num as usize);
+    }
+
+    out
+}
+
+fn parse_provider_timeouts(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+) -> HashMap<String, ProviderTimeout> {
+    let mut out = HashMap::new();
+    let Some(Value::Object(providers)) = value else {
+        return out;
+    };
+
+    for (provider_id, provider_val) in providers {
+        let Some(provider_obj) = provider_val.as_object() else {
+            continue;
+        };
+
+        let Some(options_val) = provider_obj.get("options") else {
+            continue;
+        };
+
+        let Some(options_obj) = options_val.as_object() else {
+            diagnostics.warnings.push(format!(
+                "provider.{}.options must be an object",
+                provider_id
+            ));
+            continue;
+        };
+
+        let Some(timeout_val) = options_obj.get("timeout") else {
+            continue;
+        };
+
+        let timeout = match timeout_val {
+            Value::Bool(false) => ProviderTimeout::Disabled,
+            Value::Number(n) => {
+                let Some(ms) = n.as_u64() else {
+                    diagnostics.warnings.push(format!(
+                        "provider.{}.options.timeout must be a positive integer in milliseconds or false",
+                        provider_id
+                    ));
+                    continue;
+                };
+
+                if ms == 0 {
+                    diagnostics.warnings.push(format!(
+                        "provider.{}.options.timeout must be greater than 0 when set",
+                        provider_id
+                    ));
+                    continue;
+                }
+
+                ProviderTimeout::Millis(ms)
+            }
+            _ => {
+                diagnostics.warnings.push(format!(
+                    "provider.{}.options.timeout must be a positive integer in milliseconds or false",
+                    provider_id
+                ));
+                continue;
+            }
+        };
+
+        out.insert(provider_id.trim().to_ascii_lowercase(), timeout);
     }
 
     out
@@ -913,7 +1042,16 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
     };
 
     let supported: BTreeSet<&'static str> = crabcode_allowed_keys();
-    let implemented: BTreeSet<&'static str> = ["theme", "model", "sounds"].into_iter().collect();
+    let implemented: BTreeSet<&'static str> = [
+        "theme",
+        "model",
+        "sounds",
+        "default_agent",
+        "agent",
+        "provider",
+    ]
+    .into_iter()
+    .collect();
 
     let mut keys = Vec::new();
     for k in obj.keys() {

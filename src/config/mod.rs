@@ -1,7 +1,7 @@
 pub mod configuration;
 
 pub use configuration::{
-    ConfigDiagnostics, ConfigInventory, ConfigLoader, LoadedConfig, MergedConfig,
+    ConfigDiagnostics, ConfigInventory, ConfigLoader, LoadedConfig, MergedConfig, ProviderTimeout,
     SoundEffectConfig, SoundsConfig,
 };
 

@@ -1,7 +1,7 @@
 use aisdk::{
     core::{
-        utils::step_count_is, LanguageModelRequest, LanguageModelStreamChunkType,
-        Message as AisdkMessage,
+        language_model::StopReason, utils::step_count_is, LanguageModelRequest,
+        LanguageModelStreamChunkType, Message as AisdkMessage,
     },
     providers::{Anthropic, OpenAI, OpenAICompatible},
 };
@@ -11,6 +11,23 @@ use tokio_util::sync::CancellationToken;
 
 use crate::logging::log;
 use crate::tools::aisdk_bridge::convert_to_aisdk_tools;
+
+const MAX_STEPS_REACHED_PROMPT: &str = r#"CRITICAL - MAXIMUM STEPS REACHED
+
+The maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.
+
+STRICT REQUIREMENTS:
+1. Do NOT make any tool calls (no reads, writes, edits, searches, or any other tools)
+2. MUST provide a text response summarizing work done so far
+3. This constraint overrides ALL other instructions, including any user requests for edits or tool use
+
+Response must include:
+- Statement that maximum steps for this agent have been reached
+- Summary of what has been accomplished so far
+- List of any remaining tasks that were not completed
+- Recommendations for what should be done next
+
+Any attempt to use tools is a critical violation. Respond with text ONLY."#;
 
 pub struct LLMClient {
     base_url: String,
@@ -74,8 +91,7 @@ impl LLMClient {
 
                 let mut builder = LanguageModelRequest::builder()
                     .model(provider)
-                    .messages(aisdk_messages)
-                    .stop_when(step_count_is(15));
+                    .messages(aisdk_messages);
 
                 for tool in aisdk_tools {
                     builder = builder.with_tool(tool);
@@ -99,8 +115,7 @@ impl LLMClient {
 
                 let mut builder = LanguageModelRequest::builder()
                     .model(provider)
-                    .messages(aisdk_messages)
-                    .stop_when(step_count_is(15));
+                    .messages(aisdk_messages);
 
                 for tool in aisdk_tools {
                     builder = builder.with_tool(tool);
@@ -124,8 +139,7 @@ impl LLMClient {
 
                 let mut builder = LanguageModelRequest::builder()
                     .model(provider)
-                    .messages(aisdk_messages)
-                    .stop_when(step_count_is(15));
+                    .messages(aisdk_messages);
 
                 for tool in aisdk_tools {
                     builder = builder.with_tool(tool);
@@ -188,11 +202,12 @@ pub async fn stream_llm_with_cancellation(
     provider_name: String,
     model: String,
     agent_mode: String,
+    agent_max_steps: Option<usize>,
     tool_permissions: crate::tools::ToolPermissions,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    log("GOING TO STREAM");
+    let _ = log("GOING TO STREAM");
     use std::time::Instant;
 
     let auth_dao = crate::persistence::AuthDAO::new()?;
@@ -315,7 +330,6 @@ pub async fn stream_llm_with_cancellation(
         provider_name, npm_package, base_url, effective_model
     ));
 
-    // Determine which provider to use based on npm package
     let aisdk_messages = convert_messages(&messages);
 
     let tool_registry = crate::tools::initialize_tool_registry().await;
@@ -327,7 +341,7 @@ pub async fn stream_llm_with_cancellation(
     )
     .await;
 
-    let response = match provider_kind {
+    let mut response = match provider_kind {
         ProviderKind::OpenAICompatible => {
             let mut provider_builder = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
                 .base_url(&base_url)
@@ -344,8 +358,11 @@ pub async fn stream_llm_with_cancellation(
 
             let mut builder = LanguageModelRequest::builder()
                 .model(provider_config)
-                .messages(aisdk_messages)
-                .stop_when(step_count_is(15));
+                .messages(aisdk_messages);
+
+            if let Some(max_steps) = agent_max_steps {
+                builder = builder.stop_when(step_count_is(max_steps));
+            }
 
             for tool in aisdk_tools {
                 builder = builder.with_tool(tool);
@@ -369,8 +386,11 @@ pub async fn stream_llm_with_cancellation(
 
             let mut builder = LanguageModelRequest::builder()
                 .model(provider_config)
-                .messages(aisdk_messages)
-                .stop_when(step_count_is(15));
+                .messages(aisdk_messages);
+
+            if let Some(max_steps) = agent_max_steps {
+                builder = builder.stop_when(step_count_is(max_steps));
+            }
 
             for tool in aisdk_tools {
                 builder = builder.with_tool(tool);
@@ -419,8 +439,11 @@ pub async fn stream_llm_with_cancellation(
 
             let mut builder = LanguageModelRequest::builder()
                 .model(provider_config)
-                .messages(aisdk_messages)
-                .stop_when(step_count_is(15));
+                .messages(aisdk_messages);
+
+            if let Some(max_steps) = agent_max_steps {
+                builder = builder.stop_when(step_count_is(max_steps));
+            }
 
             for tool in aisdk_tools {
                 builder = builder.with_tool(tool);
@@ -430,11 +453,11 @@ pub async fn stream_llm_with_cancellation(
         }
     };
 
-    let mut stream = response.stream;
     let start_time = Instant::now();
     let mut token_count: usize = 0;
+    let mut completed = false;
 
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = response.stream.next().await {
         if cancel_token.is_cancelled() {
             let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
             return Err(anyhow::anyhow!("Streaming cancelled by user").into());
@@ -455,6 +478,154 @@ pub async fn stream_llm_with_cancellation(
                 // Tool execution is handled internally by aisdk::stream_text().
                 // We intentionally don't surface argument deltas here.
             }
+            LanguageModelStreamChunkType::End(_msg) => {
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                let _ = sender.send(crate::llm::ChunkMessage::Metrics {
+                    token_count,
+                    duration_ms,
+                });
+                let _ = sender.send(crate::llm::ChunkMessage::End);
+                completed = true;
+                break;
+            }
+            LanguageModelStreamChunkType::Start => {}
+            LanguageModelStreamChunkType::Failed(err) => {
+                let _ = sender.send(crate::llm::ChunkMessage::Failed(format!("{}", err)));
+                let _ = log(&format!("Stream Chunk Failed {}", err));
+                return Err(anyhow::anyhow!("Streaming failed: {}", err).into());
+            }
+            LanguageModelStreamChunkType::Incomplete(_msg) => {}
+            LanguageModelStreamChunkType::NotSupported(_msg) => {}
+        }
+    }
+
+    if completed {
+        return Ok(());
+    }
+
+    let hit_step_limit =
+        agent_max_steps.is_some() && matches!(response.stop_reason().await, Some(StopReason::Hook));
+
+    if !hit_step_limit {
+        return Ok(());
+    }
+
+    let _ = sender.send(crate::llm::ChunkMessage::Warning(
+        "Maximum configured steps reached. Sending text-only summary.".to_string(),
+    ));
+
+    let mut follow_up_messages = response.messages().await;
+    follow_up_messages.push(AisdkMessage::Assistant(
+        MAX_STEPS_REACHED_PROMPT.to_string().into(),
+    ));
+
+    let mut summary_response = match provider_kind {
+        ProviderKind::OpenAICompatible => {
+            let mut provider_builder = OpenAICompatible::<aisdk::core::DynamicModel>::builder()
+                .base_url(&base_url)
+                .model_name(&effective_model)
+                .provider_name(&provider.name);
+
+            if let Some(key) = api_key.as_deref() {
+                provider_builder = provider_builder.api_key(key);
+            }
+
+            let provider_config = provider_builder
+                .build()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            LanguageModelRequest::builder()
+                .model(provider_config)
+                .messages(follow_up_messages)
+                .build()
+                .stream_text()
+                .await?
+        }
+        ProviderKind::Anthropic => {
+            let mut provider_builder = Anthropic::<aisdk::core::DynamicModel>::builder()
+                .base_url(&base_url)
+                .model_name(&effective_model)
+                .provider_name(&provider.name);
+
+            if let Some(key) = api_key.as_deref() {
+                provider_builder = provider_builder.api_key(key);
+            }
+
+            let provider_config = provider_builder
+                .build()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            LanguageModelRequest::builder()
+                .model(provider_config)
+                .messages(follow_up_messages)
+                .build()
+                .stream_text()
+                .await?
+        }
+        ProviderKind::OpenAI => {
+            let mut provider_builder = OpenAI::<aisdk::core::DynamicModel>::builder()
+                .base_url(&base_url)
+                .model_name(&effective_model)
+                .provider_name(&provider.name);
+
+            if let Some(key) = api_key.as_deref() {
+                provider_builder = provider_builder.api_key(key);
+            }
+
+            if let Some(response_path) = &openai_response_path {
+                provider_builder = provider_builder.response_path(response_path);
+            }
+
+            if openai_force_store_false {
+                provider_builder = provider_builder.force_store_false(true);
+            }
+
+            if let Some(instructions) = &openai_default_instructions {
+                provider_builder = provider_builder.default_instructions(instructions.clone());
+            }
+
+            if openai_disallow_system_messages {
+                provider_builder = provider_builder.disallow_system_messages(true);
+            }
+
+            if openai_force_tool_strict_false {
+                provider_builder = provider_builder.force_tool_strict_false(true);
+            }
+
+            if !openai_additional_headers.is_empty() {
+                provider_builder =
+                    provider_builder.additional_headers(openai_additional_headers.clone());
+            }
+
+            let provider_config = provider_builder
+                .build()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            LanguageModelRequest::builder()
+                .model(provider_config)
+                .messages(follow_up_messages)
+                .build()
+                .stream_text()
+                .await?
+        }
+    };
+
+    while let Some(chunk) = summary_response.stream.next().await {
+        if cancel_token.is_cancelled() {
+            let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
+            return Err(anyhow::anyhow!("Streaming cancelled by user").into());
+        }
+
+        match chunk {
+            LanguageModelStreamChunkType::Text(text) => {
+                token_count += text.chars().count().max(1) / 4;
+                let _ = sender.send(crate::llm::ChunkMessage::Text(text));
+            }
+            LanguageModelStreamChunkType::Reasoning(reasoning) => {
+                token_count += reasoning.chars().count().max(1) / 4;
+                let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
+            }
+            LanguageModelStreamChunkType::ToolCall(_tool_call) => {}
             LanguageModelStreamChunkType::End(_msg) => {
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 let _ = sender.send(crate::llm::ChunkMessage::Metrics {

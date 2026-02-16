@@ -124,7 +124,10 @@ crabcode parses and merges these OpenCode settings (some are functional now, oth
 | `model` | ✅ Works |
 | `theme` | ✅ Works (crabcode config only) |
 | `sounds` | ✅ Works (crabcode-only) |
-| `agent`, `instructions`, `tools`, `mcp`, `provider`, `command`, `permission`, `compaction`, `watcher`, `default_agent`, `formatter`, `disabled_providers`, `enabled_providers` | ⏳ Merged but not yet implemented |
+| `default_agent` | ✅ Works |
+| `agent` | ⚠️ Partial (`agent.<name>.tools`, `agent.<name>.steps`) |
+| `provider` | ⚠️ Partial (`provider.<name>.options.timeout` as milliseconds, or `false` to disable) |
+| `instructions`, `tools`, `mcp`, `command`, `permission`, `compaction`, `watcher`, `formatter`, `disabled_providers`, `enabled_providers` | ⏳ Merged but not yet implemented |
 
 These OpenCode settings are intentionally ignored (they don't apply to a terminal UI):
 
