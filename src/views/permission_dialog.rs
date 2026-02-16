@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
     Frame,
 };
 use std::collections::VecDeque;
@@ -123,9 +123,9 @@ pub fn handle_permission_dialog_key_event(
             state.next_action();
             PermissionDialogAction::Handled
         }
-        KeyCode::Char('1') => PermissionDialogAction::Respond(PermissionResponse::Deny),
-        KeyCode::Char('2') => PermissionDialogAction::Respond(PermissionResponse::AllowOnce),
-        KeyCode::Char('3') => PermissionDialogAction::Respond(PermissionResponse::AllowAlways),
+        KeyCode::Char('1') => PermissionDialogAction::Respond(PermissionResponse::AllowOnce),
+        KeyCode::Char('2') => PermissionDialogAction::Respond(PermissionResponse::AllowAlways),
+        KeyCode::Char('3') => PermissionDialogAction::Respond(PermissionResponse::Deny),
         KeyCode::Enter => PermissionDialogAction::Respond(state.selected_response()),
         _ => PermissionDialogAction::NotHandled,
     }
@@ -148,13 +148,14 @@ pub fn render_permission_dialog(
         return;
     };
 
-    let width = area.width.min(78).max(54).min(area.width);
-    let height = area.height.min(17).max(12).min(area.height);
+    let min_height = area.height.min(6);
+    let desired_height = area.height.min(8);
+    let panel_height = desired_height.max(min_height);
     let dialog_area = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
+        x: area.x,
+        y: area.y + area.height.saturating_sub(panel_height),
+        width: area.width,
+        height: panel_height,
     };
 
     f.render_widget(Clear, dialog_area);
@@ -163,40 +164,47 @@ pub fn render_permission_dialog(
         dialog_area,
     );
 
-    const PADDING: u16 = 3;
-    let content_area = Rect {
-        x: dialog_area.x + PADDING,
-        y: dialog_area.y + PADDING,
-        width: dialog_area.width.saturating_sub(PADDING * 2),
-        height: dialog_area.height.saturating_sub(PADDING * 2),
-    };
+    let border = Block::default()
+        .style(Style::default().bg(colors.dialog_background))
+        .borders(Borders::LEFT)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(colors.warning))
+        .padding(Padding::new(1, 1, 1, 1));
+    let content_area = border.inner(dialog_area);
+    f.render_widget(border, dialog_area);
+
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(2),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Min(1),
             Constraint::Length(1),
         ])
         .split(content_area);
 
-    let esc_text = "esc";
-    let esc_area_width = (esc_text.len() as u16).saturating_add(1);
+    let esc_text = "esc reject";
+    let esc_area_width = (esc_text.len() as u16).min(chunks[0].width);
     let header_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(esc_area_width)])
         .split(chunks[0]);
 
+    let title = if state.queue.is_empty() {
+        "Permission required".to_string()
+    } else {
+        format!("Permission required (+{} queued)", state.queue.len())
+    };
+
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "Permission required",
+            title,
             Style::default()
-                .fg(colors.text)
+                .fg(colors.warning)
                 .add_modifier(Modifier::BOLD),
         )])),
         header_chunks[0],
@@ -206,8 +214,8 @@ pub fn render_permission_dialog(
         Paragraph::new(Line::from(vec![Span::styled(
             esc_text,
             Style::default()
-                .fg(colors.primary)
-                .add_modifier(Modifier::BOLD),
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
         )]))
         .alignment(Alignment::Right),
         header_chunks[1],
@@ -220,12 +228,11 @@ pub fn render_permission_dialog(
         .unwrap_or_else(|| "(none)".to_string());
     let summary = Line::from(vec![
         Span::styled(
-            "Tool",
+            "Tool ",
             Style::default()
                 .fg(colors.text_weak)
                 .add_modifier(Modifier::DIM),
         ),
-        Span::raw(" "),
         Span::styled(
             prompt.tool_id.clone(),
             Style::default()
@@ -233,100 +240,92 @@ pub fn render_permission_dialog(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  •  ",
+            " • ",
             Style::default()
                 .fg(colors.text_weak)
                 .add_modifier(Modifier::DIM),
         ),
         Span::styled(
-            "Target",
+            "Target ",
             Style::default()
                 .fg(colors.text_weak)
                 .add_modifier(Modifier::DIM),
         ),
-        Span::raw(" "),
         Span::styled(target, Style::default().fg(colors.text)),
     ]);
-    f.render_widget(Paragraph::new(summary), chunks[2]);
+    f.render_widget(Paragraph::new(summary), chunks[1]);
 
     let reason = Paragraph::new(prompt.reason.clone())
-        .style(Style::default().fg(colors.text))
+        .style(
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        )
         .wrap(Wrap { trim: true });
-    f.render_widget(reason, chunks[3]);
+    f.render_widget(reason, chunks[2]);
 
-    let actions = [("Deny", "1"), ("Allow Once", "2"), ("Allow Always", "3")];
+    let actions = [
+        (1usize, "Allow once", "1"),
+        (2usize, "Allow always", "2"),
+        (0usize, "Reject", "3"),
+    ];
     let mut action_spans = Vec::new();
-    for (idx, (label, key)) in actions.iter().enumerate() {
+    for (idx, (action_index, label, key)) in actions.iter().enumerate() {
         if idx > 0 {
-            action_spans.push(Span::raw("   "));
+            action_spans.push(Span::raw("  "));
         }
 
-        let is_selected = idx == state.selected_action;
+        let option_text = format!(" {} ({}) ", label, key);
+        let is_selected = *action_index == state.selected_action;
         if is_selected {
             let selected = Style::default()
-                .bg(colors.primary)
-                .fg(contrast_text(colors.primary))
+                .bg(colors.warning)
+                .fg(contrast_text(colors.warning))
                 .add_modifier(Modifier::BOLD);
-            action_spans.push(Span::styled(format!(" {} ({}) ", label, key), selected));
+            action_spans.push(Span::styled(option_text, selected));
         } else {
+            action_spans.push(Span::raw(" "));
             action_spans.push(Span::styled(
-                format!("{} ", label),
+                *label,
                 Style::default()
                     .fg(colors.primary)
                     .add_modifier(Modifier::BOLD),
             ));
+            action_spans.push(Span::raw(" "));
             action_spans.push(Span::styled(
                 format!("({})", key),
                 Style::default()
                     .fg(colors.text_weak)
                     .add_modifier(Modifier::DIM),
             ));
+            action_spans.push(Span::raw(" "));
         }
     }
 
-    let actions_line = Paragraph::new(Line::from(action_spans)).alignment(Alignment::Left);
-    f.render_widget(actions_line, chunks[5]);
-
     let help = Line::from(vec![
-        Span::styled(
-            "Confirm",
-            Style::default()
-                .fg(colors.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "  enter",
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::raw("   "),
-        Span::styled(
-            "Switch",
-            Style::default()
-                .fg(colors.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "  ⇄",
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::raw("   "),
-        Span::styled(
-            "Deny",
-            Style::default()
-                .fg(colors.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "  esc",
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
-        ),
+        Span::styled("⇆", Style::default().fg(colors.info)),
+        Span::raw(" select  "),
+        Span::styled("enter", Style::default().fg(colors.info)),
+        Span::raw(" confirm"),
     ]);
-    let help = Paragraph::new(help).alignment(Alignment::Left);
-    f.render_widget(help, chunks[7]);
+
+    let actions_line = Paragraph::new(Line::from(action_spans)).alignment(Alignment::Left);
+    let help_width = help.width() as u16;
+    let can_render_help = chunks[3].width > 42;
+    if can_render_help {
+        let footer_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(help_width.min(chunks[3].width.saturating_sub(20))),
+            ])
+            .split(chunks[3]);
+        f.render_widget(actions_line, footer_chunks[0]);
+        f.render_widget(
+            Paragraph::new(help).alignment(Alignment::Right),
+            footer_chunks[1],
+        );
+    } else {
+        f.render_widget(actions_line, chunks[3]);
+    }
 }
