@@ -1,72 +1,86 @@
+
 #!/usr/bin/env bash
 
-# This script bumps crate/npm versions, commits the release and creates a git tag.
-# - Keep the tree clean before running.
-# - Optionally pass patch|minor|major as first arg or answer the prompt.
+# THIS SCRIPT IS CUSTOM - inspired from changesets.
+# The difference is, there is no workflow. So everything runs from your computer.
+# Which also means, no collaboration kind of, not everyone can release.
 
 set -euo pipefail
 
 if [ -n "$(git status --porcelain)" ]; then
-  echo "Please commit all changes before running a release bump." >&2
-  exit 1
+    echo "❗ Please commit all changes before bumping the version."
+    exit 1
 fi
 
+# Written by AI :)
 NAME=$(sed -n 's/^name *= *"\([^"]*\)".*/\1/p' Cargo.toml)
 CURRENT=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+echo "🦋 What kind of change is this for $NAME? (current version is $CURRENT) [patch, minor, major] >"
 
-if [ $# -gt 1 ]; then
-  echo "Usage: ./scripts/tag_and_release.sh [patch|minor|major]" >&2
-  exit 1
-fi
-
-BUMP="${1-}"
-
-if [ -z "$BUMP" ]; then
-  echo "What kind of release bump for $NAME? (current version: $CURRENT) [patch, minor, major]"
-  read -r BUMP
-fi
-
-IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-
-if [ -z "$MAJOR" ] || [ -z "$MINOR" ] || [ -z "$PATCH" ]; then
-  echo "Failed to parse current version: $CURRENT" >&2
-  exit 1
-fi
+read -r BUMP
 
 case "$BUMP" in
-  patch) NEW="$MAJOR.$MINOR.$((PATCH + 1))" ;;
-  minor) NEW="$MAJOR.$((MINOR + 1)).0" ;;
-  major) NEW="$((MAJOR + 1)).0.0" ;;
-  *) echo "Please specify patch, minor, or major" >&2; exit 1 ;;
+    patch) NEW=$(echo "$CURRENT" | awk -F. '{$NF+=1; OFS="."; print $1,$2,$3}') ;;
+    minor) NEW=$(echo "$CURRENT" | awk -F. '{$(NF-1)+=1; $NF=0; OFS="."; print $1,$2,$3}') ;;
+    major) NEW=$(echo "$CURRENT" | awk -F. '{$1+=1; $2=0; $3=0; OFS="."; print $1,$2,$3}') ;;
+    *) echo "Please specify patch, minor, or major"; exit 1 ;;
 esac
 
-echo "Will bump ${CURRENT} -> ${NEW} and create git tag v${NEW}"
+echo "🦋 Would tag and push $NAME $CURRENT -> $NEW"
+
 read -p "Proceed? [Y/n] " -r CONFIRM
-CONFIRM=${CONFIRM:-Y}
+CONFIRM=${CONFIRM:-y}
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-  echo "Aborted."
-  exit 0
+    echo "Aborted."
+    exit 0
 fi
 
-echo "Updating Cargo.toml version to ${NEW}"
+# ============================================
+# Update & Commit - Release manifests
+# ============================================
+
+# Update the Cargo.toml
+echo "🦋 Updating Cargo.toml to version ${NEW}"
 sed -i.bak "s/^version *= *\"[^\"]*\"/version = \"${NEW}\"/" Cargo.toml
-rm -f Cargo.toml.bak
+rm Cargo.toml.bak
 
+# Update npm/package.json if it exists
 if [ -f "npm/package.json" ]; then
-  echo "Updating npm/package.json version to ${NEW}"
-  sed -i.bak "s/\"version\":[[:space:]]*\"[^\"]*\"/\"version\": \"${NEW}\"/" npm/package.json
-  rm -f npm/package.json.bak
-  git add npm/package.json
+    echo "🦋 Updating npm/package.json to version ${NEW}"
+    sed -i.bak "s/\"version\":[[:space:]]*\"[^\"]*\"/\"version\": \"${NEW}\"/" npm/package.json
+    rm npm/package.json.bak
+    git add npm/package.json
 fi
 
-git add Cargo.toml
+# Update Cargo.lock to reflect the new version
+echo "🦋 Updating Cargo.lock..."
+cargo generate-lockfile
+
+# Commit
+echo "🦋 Committing version bump ${NEW}..."
+git add .
 git commit -m "release: ${NAME} v${NEW}"
 
-echo "Creating git tag v${NEW}"
+# ============================================
+# cargo-dist Publish GitHub Releases via actions
+# ============================================
+
+# Create the git tag.
+echo "🦋 Creating git tag v${NEW}"
 git tag "v${NEW}"
 
-echo "Pushing commit and tag"
-git push
+# Create release binaries (with cargo-dist)
+echo "🦋 Pushing..."
 git push --tags
+git push
 
-echo "Done: ${NAME} v${NEW}"
+# ============================================
+# PUBLISHING: I put it here as documentation, but this is manual for now!
+# ============================================
+
+# crates.io
+# cargo publish
+
+# npm
+# cd npm
+# npm publish
