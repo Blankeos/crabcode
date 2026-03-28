@@ -29,13 +29,14 @@ A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interac
   - **Session Management** - Create and manage multiple chat sessions
   - **Streaming Responses** - Real-time streaming of AI responses (w/ [aisdk.rs](https://aisdk.rs))
 
-## Quick Start
+## Installation
 
-```bash
-cargo install crabcode # via cargo
-npm install -g crabcode # via npm
-bun install -g crabcode # via bun
-# Brew, coming sooon
+```sh
+npm install -g crabcode  # npm
+bun install -g crabcode  # or bun
+cargo binstall crabcode  # or cargo-binstall (prebuilt binary, faster)
+cargo install crabcode   # or cargo (build from source)
+curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | sh # or linux/macos (via curl)
 ```
 
 ## Quick Start
@@ -119,14 +120,6 @@ I tried crabcode specifically for these providers:
 - Claude Code Subscription - Known to explicitly not like harnesses. So never will, sorry.
 
 ## Development
-
-### Build from source
-
-```bash
-git clone https://github.com/blankeos/crabcode.git
-cd crabcode
-cargo build --release
-```
 
 ### Run tests
 
