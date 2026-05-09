@@ -14,6 +14,7 @@ pub struct Command {
     pub name: String,
     pub description: String,
     pub handler: CommandHandler,
+    pub hidden_tokens: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,7 +53,16 @@ impl Registry {
     }
 
     pub fn get(&self, name: &str) -> Option<&Command> {
-        self.commands.get(name)
+        if let Some(cmd) = self.commands.get(name) {
+            return Some(cmd);
+        }
+        // Check hidden_tokens
+        for cmd in self.commands.values() {
+            if cmd.hidden_tokens.iter().any(|t| t == name) {
+                return Some(cmd);
+            }
+        }
+        None
     }
 
     pub async fn execute<'a>(
@@ -132,6 +142,7 @@ mod tests {
             name: "test".to_string(),
             description: "Test command".to_string(),
             handler: dummy_handler,
+            hidden_tokens: vec![],
         };
         registry.register(command);
         assert_eq!(registry.commands.len(), 1);
@@ -144,6 +155,7 @@ mod tests {
             name: "test".to_string(),
             description: "Test command".to_string(),
             handler: dummy_handler,
+            hidden_tokens: vec![],
         };
         registry.register(command.clone());
 
@@ -159,6 +171,20 @@ mod tests {
         assert!(retrieved.is_none());
     }
 
+    #[test]
+    fn test_get_by_hidden_token() {
+        let mut registry = Registry::new();
+        let command = Command {
+            name: "test".to_string(),
+            description: "Test command".to_string(),
+            handler: dummy_handler,
+            hidden_tokens: vec!["alias".to_string()],
+        };
+        registry.register(command);
+        assert!(registry.get("alias").is_some());
+        assert_eq!(registry.get("alias").unwrap().name, "test");
+    }
+
     #[tokio::test]
     async fn test_execute_command() {
         let mut registry = Registry::new();
@@ -166,9 +192,9 @@ mod tests {
             name: "test".to_string(),
             description: "Test command".to_string(),
             handler: dummy_handler,
+            hidden_tokens: vec![],
         };
         registry.register(command);
-
         let parsed = ParsedCommand {
             name: "test".to_string(),
             args: vec![],
@@ -208,11 +234,13 @@ mod tests {
             name: "test1".to_string(),
             description: "Test command 1".to_string(),
             handler: dummy_handler,
+            hidden_tokens: vec![],
         };
         let command2 = Command {
             name: "test2".to_string(),
             description: "Test command 2".to_string(),
             handler: dummy_handler,
+            hidden_tokens: vec![],
         };
 
         registry.register(command1);
@@ -230,11 +258,13 @@ mod tests {
             name: "zebra".to_string(),
             description: "Test command 1".to_string(),
             handler: dummy_handler,
+            hidden_tokens: vec![],
         };
         let command2 = Command {
             name: "apple".to_string(),
             description: "Test command 2".to_string(),
             handler: dummy_handler,
+            hidden_tokens: vec![],
         };
 
         registry.register(command1);
@@ -266,6 +296,7 @@ mod tests {
             name: "test".to_string(),
             description: "Test command".to_string(),
             handler: handler_with_args,
+            hidden_tokens: vec![],
         };
         registry.register(command);
 

@@ -472,6 +472,7 @@ pub fn register_skill_commands(registry: &mut Registry) {
                 name: skill.name.clone(),
                 description: skill.description.clone().unwrap_or_default(),
                 handler: handle_skill_command,
+                hidden_tokens: vec![],
             });
         }
     }
@@ -527,54 +528,63 @@ pub fn register_all_commands(registry: &mut Registry) {
         name: "exit".to_string(),
         description: "Quit crabcode".to_string(),
         handler: handle_exit,
+        hidden_tokens: vec![],
     });
 
     registry.register(Command {
         name: "sessions".to_string(),
         description: "List all sessions".to_string(),
         handler: handle_sessions,
+        hidden_tokens: vec!["resume".to_string()],
     });
 
     registry.register(Command {
         name: "new".to_string(),
         description: "Switch to home screen".to_string(),
         handler: handle_new,
+        hidden_tokens: vec![],
     });
 
     registry.register(Command {
         name: "home".to_string(),
         description: "Switch to home screen".to_string(),
         handler: handle_new,
+        hidden_tokens: vec![],
     });
 
     registry.register(Command {
         name: "connect".to_string(),
         description: "Connect to a model provider".to_string(),
         handler: handle_connect,
+        hidden_tokens: vec![],
     });
 
     registry.register(Command {
         name: "models".to_string(),
         description: "List available models".to_string(),
         handler: handle_models,
+        hidden_tokens: vec![],
     });
 
     registry.register(Command {
         name: "themes".to_string(),
         description: "Choose a theme".to_string(),
         handler: handle_themes,
+        hidden_tokens: vec![],
     });
 
     registry.register(Command {
         name: "refreshmodels".to_string(),
         description: "Refresh the models.dev cache".to_string(),
         handler: handle_refreshmodels,
+        hidden_tokens: vec![],
     });
 
     registry.register(Command {
         name: "skills".to_string(),
         description: "List available skills".to_string(),
         handler: handle_skills,
+        hidden_tokens: vec![],
     });
 }
 

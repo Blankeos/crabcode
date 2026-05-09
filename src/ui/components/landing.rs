@@ -19,9 +19,15 @@ fn darken_color(color: Color, factor: f32) -> Color {
 }
 
 pub const LOGO: &str = r#"
-🦀▄▄▄▄ ▄▄▄▄   ▄▄▄  ▄▄▄▄   ▄▄▄▄  ▄▄▄  ▄▄▄▄  ▄▄▄▄▄
+ ▄▄▄▄ ▄▄▄▄   ▄▄▄  ▄▄▄▄   ▄▄▄▄  ▄▄▄  ▄▄▄▄  ▄▄▄▄▄
 ██▀▀▀ ██▄█▄ ██▀██ ██▄██ ██▀▀▀ ██▀██ ██▀██ ██▄▄
 ▀████ ██ ██ ██▀██ ██▄█▀ ▀████ ▀███▀ ████▀ ██▄▄▄
+"#;
+
+pub const MASCO: &str = r#"
+    ▃▃▛████▜▃▃
+ █▟▟▜████████▛▙▙█
+    ▞ ▘    ▝ ▚
 "#;
 
 pub struct Landing;
@@ -41,7 +47,7 @@ impl Landing {
 
         let top_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Length(2)].as_ref())
+            .constraints([Constraint::Length(4), Constraint::Length(3)].as_ref())
             .split(chunks[0]);
 
         let logo_lines: Vec<Line> = LOGO
@@ -63,6 +69,26 @@ impl Landing {
 
         let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
 
+        let welcome_row = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(25), Constraint::Min(1)].as_ref())
+            .split(top_chunks[1]);
+
+        let mascot_lines: Vec<Line> = MASCO
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                Line::styled(
+                    line,
+                    Style::default()
+                        .fg(Color::Rgb(255, 140, 0))
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect();
+
+        let mascot = Paragraph::new(Text::from(mascot_lines));
+
         let welcome_text = Text::from(vec![Line::from(vec![
             Span::styled(
                 "Crabcode",
@@ -77,12 +103,25 @@ impl Landing {
             ),
         ])]);
 
+        let welcome_text_col = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(
+                [
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ]
+                .as_ref(),
+            )
+            .split(welcome_row[1]);
+
         let welcome = Paragraph::new(welcome_text)
-            .alignment(Alignment::Center)
+            .alignment(Alignment::Left)
             .wrap(Wrap { trim: true });
 
         f.render_widget(logo, top_chunks[0]);
-        f.render_widget(welcome, top_chunks[1]);
+        f.render_widget(mascot, welcome_row[0]);
+        f.render_widget(welcome, welcome_text_col[1]);
     }
 }
 

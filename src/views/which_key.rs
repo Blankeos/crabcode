@@ -184,13 +184,9 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
     // Scale like the Dialog component (which is 70×25) — broad enough to visually
     // anchor the popup and cover behind-the-modal content (logo, scrollbar artefacts).
     const POPUP_WIDTH: u16 = 58;
-    const MIN_POPUP_HEIGHT: u16 = 16;
 
     let popup_width = area.width.min(POPUP_WIDTH);
-    let popup_height = area
-        .height
-        .min((bindings_count + 10) as u16)
-        .max(MIN_POPUP_HEIGHT.min(area.height));
+    let popup_height = area.height.min((bindings_count + 10) as u16);
 
     let popup_area = Rect {
         x: area.x + (area.width.saturating_sub(popup_width)) / 2,
@@ -218,7 +214,7 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),                         // absorb extra space at top
+            Constraint::Length(1),                      // top margin
             Constraint::Length(1),                      // title
             Constraint::Length(bindings_count as u16),  // bindings
             Constraint::Length(1),                      // spacer
