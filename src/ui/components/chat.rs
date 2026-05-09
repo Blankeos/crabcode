@@ -1,5 +1,5 @@
 use crate::session::types::{Message, MessageRole};
-use crate::theme::ThemeColors;
+use crate::theme::{contrast_text, ThemeColors};
 use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
 use crate::ui::selection::Selection;
 use crate::utils::token_counter::StreamingTokenCounter;
@@ -12,6 +12,8 @@ use ratatui::{
     Frame,
 };
 use serde_json::Value as JsonValue;
+use unicode_width::UnicodeWidthStr;
+
 
 #[derive(Debug, Clone, Default)]
 pub struct Chat {
@@ -798,11 +800,10 @@ impl Chat {
             self.cached_fingerprint = fingerprint;
         }
 
-        let content_height = all_lines.len();
+        let mut content_height = all_lines.len();
 
-        // Apply highlight
+        // Apply timeline highlight
         let hl_idx = self.highlighted_message_index;
-        let hl_bg = colors.interactive;
         if let Some(hl) = hl_idx {
             if hl < positions.len() {
                 let start = positions[hl];
@@ -811,13 +812,40 @@ impl Chat {
                 } else {
                     all_lines.len()
                 };
-                for line in all_lines
-                    .iter_mut()
-                    .skip(start)
-                    .take(end.saturating_sub(start))
-                {
-                    for span in line.spans.iter_mut() {
-                        span.style = span.style.bg(hl_bg);
+
+                if end > start {
+                    let hl_bg = colors.interactive;
+                    let hl_fg = contrast_text(hl_bg);
+                    let mut removed = 0usize;
+
+                    for i in (start..end).rev() {
+                        let line = &mut all_lines[i];
+                        let current_width: usize = line
+                            .spans
+                            .iter()
+                            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                            .sum();
+                        if current_width == 0 {
+                            all_lines.remove(i);
+                            removed += 1;
+                        } else {
+                            for span in line.spans.iter_mut() {
+                                span.style = span.style.bg(hl_bg).fg(hl_fg);
+                            }
+                            if current_width < max_width {
+                                let padding = " ".repeat(max_width - current_width);
+                                line.spans.push(
+                                    Span::styled(padding, Style::default().bg(hl_bg)),
+                                );
+                            }
+                        }
+                    }
+
+                    if removed > 0 {
+                        for p in positions.iter_mut().skip(hl + 1) {
+                            *p = p.saturating_sub(removed);
+                        }
+                        content_height = all_lines.len();
                     }
                 }
             }
@@ -850,8 +878,10 @@ impl Chat {
 
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some("│"))
-                .thumb_symbol("█"),
+                .track_symbol(Some(" "))
+                .thumb_symbol("█")
+                .begin_symbol(Some(" "))
+                .end_symbol(Some(" ")),
             scrollbar_area,
             &mut self.scrollbar_state,
         );

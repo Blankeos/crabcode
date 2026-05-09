@@ -14,7 +14,7 @@ impl TimelineDialogState {
         let mut dialog = Dialog::new("Timeline").with_position(DialogPosition::Right);
         dialog = dialog.with_actions(vec![
             FooterAction {
-                label: "Jump".to_string(),
+                label: "Jump actions".to_string(),
                 key: "enter".to_string(),
             },
         ]);
@@ -96,7 +96,7 @@ impl TimelineDialogState {
         dialog.adjust_scroll();
         dialog = dialog.with_actions(vec![
             FooterAction {
-                label: "Jump".to_string(),
+                label: "Jump actions".to_string(),
                 key: "enter".to_string(),
             },
         ]);

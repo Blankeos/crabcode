@@ -934,7 +934,9 @@ impl Dialog {
         let scrollbar_area = chunks[3];
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some(" ")),
+                .track_symbol(Some(" "))
+                .begin_symbol(Some(" "))
+                .end_symbol(Some(" ")),
             scrollbar_area,
             &mut self.scrollbar_state,
         );

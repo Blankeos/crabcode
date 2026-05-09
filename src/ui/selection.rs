@@ -1,3 +1,4 @@
+use crate::theme::contrast_text;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::Span,
@@ -273,12 +274,11 @@ pub fn extract_selected_text(
 /// Apply a selection highlight style to a span.
 /// Uses the accent color as background with inverted text for visibility.
 fn selection_span_style<'a>(span: &Span<'a>, accent: Color) -> Span<'a> {
-    let current_fg = span.style.fg.unwrap_or(Color::Reset);
     Span::styled(
         span.content.clone(),
         Style::default()
             .bg(accent)
-            .fg(current_fg)
+            .fg(contrast_text(accent))
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -353,7 +353,7 @@ fn split_and_style_span<'a>(
         selected,
         Style::default()
             .bg(accent)
-            .fg(span.style.fg.unwrap_or(Color::Reset))
+            .fg(contrast_text(accent))
             .add_modifier(Modifier::BOLD),
     ));
 
