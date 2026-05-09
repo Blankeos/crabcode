@@ -76,6 +76,30 @@ pub fn render_sessions_dialog(
     area: Rect,
     colors: ThemeColors,
 ) {
+    dialog_state.dialog.pending_delete_id = dialog_state.pending_delete.clone();
+    if dialog_state.pending_delete.is_some() {
+        let existing_actions = dialog_state.dialog.actions.clone();
+        let has_confirm = existing_actions.iter().any(|a| a.label == "confirm");
+        if !has_confirm {
+            dialog_state.dialog.actions = vec![
+                crate::ui::components::dialog::DialogAction {
+                    label: "confirm".to_string(),
+                    key: "ctrl+d".to_string(),
+                },
+            ];
+        }
+    } else {
+        dialog_state.dialog.actions = vec![
+            crate::ui::components::dialog::DialogAction {
+                label: "Delete".to_string(),
+                key: "ctrl+d".to_string(),
+            },
+            crate::ui::components::dialog::DialogAction {
+                label: "Rename".to_string(),
+                key: "ctrl+r".to_string(),
+            },
+        ];
+    }
     dialog_state.dialog.render(f, area, colors);
 }
 
@@ -87,8 +111,12 @@ pub fn handle_sessions_dialog_key_event(
 
     if event.code == KeyCode::Char('d') && event.modifiers == KeyModifiers::CONTROL {
         if let Some(selected) = dialog_state.dialog.get_selected() {
+            if dialog_state.pending_delete.as_ref() == Some(&selected.id) {
+                dialog_state.pending_delete = None;
+                return SessionsDialogAction::Delete(selected.id.clone());
+            }
             dialog_state.pending_delete = Some(selected.id.clone());
-            return SessionsDialogAction::Delete(selected.id.clone());
+            return SessionsDialogAction::PendingDelete(selected.id.clone());
         }
     }
 
@@ -99,6 +127,11 @@ pub fn handle_sessions_dialog_key_event(
     }
 
     let handled = dialog_state.dialog.handle_key_event(event);
+
+    // Clear pending delete when user navigates away
+    if matches!(event.code, KeyCode::Up | KeyCode::Down | KeyCode::Esc) {
+        dialog_state.pending_delete = None;
+    }
 
     if was_visible && !dialog_state.dialog.is_visible() {
         return SessionsDialogAction::Close;
@@ -135,5 +168,6 @@ pub enum SessionsDialogAction {
     Close,
     Select(String),
     Delete(String),
+    PendingDelete(String),
     Rename(String, String),
 }

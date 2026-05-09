@@ -764,9 +764,7 @@ impl Chat {
 
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some(" "))
-                .begin_symbol(Some(" "))
-                .end_symbol(Some(" "))
+                .track_symbol(Some("│"))
                 .thumb_symbol("█"),
             scrollbar_area,
             &mut self.scrollbar_state,

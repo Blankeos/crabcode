@@ -488,6 +488,13 @@ pub fn register_skill_commands(registry: &mut Registry) {
     }
 }
 
+pub fn handle_copy<'a>(
+    _parsed: &'a ParsedCommand<'a>,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    Box::pin(async move { CommandResult::Success("copy".to_string()) })
+}
+
 pub fn handle_refreshmodels<'a>(
     _parsed: &'a ParsedCommand<'a>,
     _sm: &'a mut SessionManager,
@@ -588,6 +595,14 @@ pub fn register_all_commands(registry: &mut Registry) {
         handler: handle_themes,
         hidden_tokens: vec![],
         chat_only: false,
+    });
+
+    registry.register(Command {
+        name: "copy".to_string(),
+        description: "Copy session transcript to clipboard".to_string(),
+        handler: handle_copy,
+        hidden_tokens: vec![],
+        chat_only: true,
     });
 
     registry.register(Command {
@@ -890,7 +905,7 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 11);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));

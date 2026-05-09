@@ -89,6 +89,119 @@ fn format_post_close_message(info: Option<&PostCloseInfo>) -> String {
     msg
 }
 
+async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()> {
+    use crate::llm::client::stream_llm_with_cancellation;
+    use crate::session::types::Message;
+    use tokio::sync::mpsc;
+
+    // Load config and model preferences
+    let loaded_config = crate::config::ConfigLoader::load()?;
+    let prefs_dao = crate::persistence::PrefsDAO::new().ok();
+
+    let (provider_name, model_id) = {
+        let active = prefs_dao.as_ref().and_then(|d| d.get_active_model().ok().flatten());
+        if let Some((pid, mid)) = active {
+            (pid, mid)
+        } else if let Some(m) = loaded_config.merged_config.model.clone() {
+            let (pid, mid) = crate::app::parse_model_ref(&m);
+            (pid, mid)
+        } else {
+            ("opencode".to_string(), "big-pickle".to_string())
+        }
+    };
+
+    let agent_mode = loaded_config
+        .merged_config
+        .default_agent
+        .clone()
+        .unwrap_or_else(|| "Build".to_string());
+
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .to_string_lossy()
+        .to_string();
+
+    let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
+
+    // Build messages with system prompt
+    let composer = crate::prompt::SystemPromptComposer::new(
+        &model_id,
+        &cwd,
+        is_git_repo,
+        std::env::consts::OS,
+    );
+    let system_prompt = composer.compose().await;
+    let messages = vec![
+        Message::system(system_prompt),
+        Message::user(prompt),
+    ];
+
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+
+    let tool_permissions = crate::tools::ToolPermissions::new(
+        std::path::PathBuf::from(&cwd),
+    );
+
+    let agent_max_steps = loaded_config
+        .merged_config
+        .agent_steps
+        .get(&agent_mode.to_ascii_lowercase())
+        .copied();
+
+    let provider_name_clone = provider_name.clone();
+    let model_clone = model_id.clone();
+
+    tokio::spawn(async move {
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let _ = stream_llm_with_cancellation(
+            cancel_token,
+            provider_name_clone,
+            model_clone,
+            agent_mode.clone(),
+            agent_max_steps,
+            tool_permissions,
+            messages,
+            sender,
+        )
+        .await;
+    });
+
+    while let Some(chunk) = receiver.recv().await {
+        match chunk {
+            crate::llm::ChunkMessage::Text(text) => {
+                print!("{}", text);
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            crate::llm::ChunkMessage::ToolCalls(calls) => {
+                println!();
+                for call in &calls {
+                    println!("  🔧 {}", call.function.name);
+                }
+            }
+            crate::llm::ChunkMessage::ToolResult(result) => {
+                println!("  ✓ {}", result.name);
+            }
+            crate::llm::ChunkMessage::End => {
+                println!();
+                break;
+            }
+            crate::llm::ChunkMessage::Failed(error) => {
+                eprintln!("\nError: {}", error);
+                break;
+            }
+            crate::llm::ChunkMessage::Warning(warning) => {
+                eprintln!("Warning: {}", warning);
+            }
+            _ => {}
+        }
+    }
+
+    flush_startup_diagnostics();
+    let _ = no_session_persistence;
+    Ok(())
+}
+
 lazy_static::lazy_static! {
     static ref TOAST_MANAGER: Mutex<ToastManager> = Mutex::new(ToastManager::new());
 }
@@ -111,11 +224,34 @@ struct Args {
     /// Resume a session by ID
     #[arg(short = 's', long = "session")]
     session: Option<String>,
+
+    /// Run in print mode (non-interactive, streams output to stdout)
+    #[arg(short = 'p', long = "print")]
+    print_mode: bool,
+
+    /// Do not persist session data to disk
+    #[arg(long = "no-session-persistence")]
+    no_session_persistence: bool,
+
+    /// The prompt to run (positional, used in print mode)
+    prompt: Vec<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.print_mode {
+        let prompt = args.prompt.join(" ");
+        if prompt.trim().is_empty() {
+            flush_startup_diagnostics();
+            eprintln!("Error: No prompt provided for print mode.");
+            eprintln!("Usage: crabcode -p \"<PROMPT>\"");
+            std::process::exit(1);
+        }
+        return run_print_mode(&prompt, args.no_session_persistence).await;
+    }
+
     let mut app = App::new()?;
 
     if let Some(ref session_id) = args.session {

@@ -61,7 +61,7 @@ use crate::{
 
 use anyhow::Result;
 
-fn parse_model_ref(model: &str) -> (String, String) {
+pub fn parse_model_ref(model: &str) -> (String, String) {
     let model = model.trim();
     if let Some((provider_id, model_id)) = model.split_once('/') {
         let provider_id = provider_id.trim();
@@ -165,6 +165,7 @@ pub struct App {
     streaming_chat_len_before_assistant: usize,
     tool_call_message_indices: std::collections::HashMap<String, usize>,
     tool_call_order: Vec<String>,
+    discovery: Option<crate::model::discovery::Discovery>,
 }
 
 impl App {
@@ -307,6 +308,8 @@ impl App {
         let tool_permissions = crate::tools::ToolPermissions::new(cwd_path.clone())
             .with_agent_policies(agent_policies);
 
+        let discovery = crate::model::discovery::Discovery::new().ok();
+
         Ok(Self {
             running: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -363,6 +366,7 @@ impl App {
             streaming_chat_len_before_assistant: 0,
             tool_call_message_indices: std::collections::HashMap::new(),
             tool_call_order: Vec::new(),
+            discovery,
         })
     }
 
@@ -444,8 +448,42 @@ impl App {
         format!("Ask anything... \"{}\"", suggestions[index])
     }
 
-    pub fn quit(&mut self) {
-        self.running = false;
+    fn session_usage_text(&self) -> String {
+        let total_tokens: usize = self
+            .chat_state
+            .chat
+            .messages
+            .iter()
+            .filter_map(|m| m.token_count)
+            .sum();
+
+        if total_tokens == 0 {
+            return String::new();
+        }
+
+        let token_text = format_token_count(total_tokens);
+
+        if let Some(ref discovery) = self.discovery {
+            if let Some(cost) = discovery.get_model_pricing(
+                &self.provider_name.to_lowercase(),
+                &self.model,
+            ) {
+                let output_tokens: usize = self
+                    .chat_state
+                    .chat
+                    .messages
+                    .iter()
+                    .filter_map(|m| m.output_tokens)
+                    .sum();
+                let total = (output_tokens.max(total_tokens)) as f64;
+                let price = total / 1_000_000.0 * cost.output;
+                if price > 0.001 {
+                    return format!("{} \u{00b7} ${:.2}", token_text, price);
+                }
+            }
+        }
+
+        token_text
     }
 
     pub fn get_current_theme_colors(&self) -> theme::ThemeColors {
@@ -802,6 +840,11 @@ impl App {
                         }
                         false
                     }
+                    SessionsDialogAction::PendingDelete(_id) => {
+                        self.sessions_dialog_state.dialog.pending_delete_id =
+                            Some(_id.clone());
+                        true
+                    }
                     SessionsDialogAction::Select(id) => {
                         self.session_manager.switch_session(&id);
                         if let Some(session) = self.session_manager.get_session(&id) {
@@ -816,13 +859,28 @@ impl App {
                         true
                     }
                     SessionsDialogAction::Delete(id) => {
+                        let was_current = self
+                            .session_manager
+                            .get_current_session_id()
+                            .map_or(false, |current| *current == id);
                         self.session_manager.delete_session(&id);
                         if let Some(pending) = crate::views::sessions_dialog::get_pending_delete(
                             &mut self.sessions_dialog_state,
                         ) {
                             self.session_manager.delete_session(&pending);
                         }
+                        let remaining = self.session_manager.list_sessions();
+                        if remaining.is_empty() {
+                            self.sessions_dialog_state.dialog.hide();
+                            self.overlay_focus = OverlayFocus::None;
+                        }
                         self.refresh_sessions_dialog();
+                        if was_current {
+                            self.chat_state.chat.clear();
+                            self.base_focus = BaseFocus::Home;
+                            self.sessions_dialog_state.dialog.hide();
+                            self.overlay_focus = OverlayFocus::None;
+                        }
                         true
                     }
                     SessionsDialogAction::Rename(id, title) => {
@@ -1518,7 +1576,69 @@ impl App {
 
         match parse_input(input) {
             InputType::Command(mut parsed) => {
-                if parsed.name == "themes" {
+        if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
+            let messages = &self.chat_state.chat.messages;
+            let session_title = self
+                .session_manager
+                .get_current_session()
+                .map(|s| s.title.clone())
+                .unwrap_or_else(|| "Untitled".to_string());
+            let mut transcript = format!("# {}\n\n", session_title);
+            for msg in messages {
+                match msg.role {
+                    crate::session::types::MessageRole::User => {
+                        transcript.push_str("## User\n\n");
+                        transcript.push_str(&msg.content);
+                        transcript.push_str("\n\n---\n\n");
+                    }
+                    crate::session::types::MessageRole::Assistant => {
+                        let agent = msg.agent_mode.as_ref().map_or("Build", |a| a.as_str());
+                        let model = msg.model.as_deref().unwrap_or("unknown");
+                        let duration = msg
+                            .duration_ms
+                            .map(|ms| format!(" · {:.1}s", ms as f64 / 1000.0))
+                            .unwrap_or_default();
+                        transcript.push_str(&format!(
+                            "## Assistant ({agent} · {model}{duration})\n\n"
+                        ));
+                        transcript.push_str(&msg.content);
+                        transcript.push_str("\n\n---\n\n");
+                    }
+                    crate::session::types::MessageRole::Tool => {
+                        transcript.push_str("**Tool Result**\n\n");
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                            if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                                transcript.push_str(&format!("**Tool:** {}\n", name));
+                            }
+                            if let Some(preview) = v.get("output_preview").and_then(|p| p.as_str())
+                            {
+                                transcript.push_str(&format!("```\n{}\n```\n", preview));
+                            }
+                        }
+                        transcript.push_str("\n---\n\n");
+                    }
+                    _ => {}
+                }
+            }
+            match crate::utils::clipboard::copy_text(&transcript) {
+                Ok(_) => {
+                    push_toast(Toast::new(
+                        "Session transcript copied to clipboard!",
+                        ToastLevel::Info,
+                        None,
+                    ));
+                }
+                Err(e) => {
+                    push_toast(Toast::new(
+                        format!("Failed to copy: {}", e),
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                }
+            }
+            return;
+        }
+        if parsed.name == "themes" {
                     self.show_themes_dialog();
                     return;
                 }
@@ -1947,6 +2067,10 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn quit(&mut self) {
+        self.running = false;
     }
 
     fn close_message_actions(&mut self) {
@@ -2549,6 +2673,7 @@ impl App {
 
         if self.last_animation_update.elapsed() >= ANIMATION_INTERVAL {
             self.chat_state.wave_spinner.update();
+            self.home_state.tick();
             self.last_animation_update = std::time::Instant::now();
         }
     }
@@ -2930,11 +3055,14 @@ impl App {
         self.last_frame_size = size;
         let colors = self.get_current_theme_colors();
 
+        let usage_text = self.session_usage_text();
+
         match self.base_focus {
             BaseFocus::Home => {
                 render_home(
                     f,
                     &mut self.input,
+                    &self.home_state,
                     self.version.clone(),
                     self.cwd.clone(),
                     git::get_current_branch(),
@@ -2942,6 +3070,7 @@ impl App {
                     self.model.clone(),
                     self.provider_name.clone(),
                     &colors,
+                    &usage_text,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -2985,6 +3114,7 @@ impl App {
                     self.provider_name.clone(),
                     &colors,
                     self.is_streaming,
+                    &usage_text,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -3097,6 +3227,18 @@ impl App {
 
         toast::render_toasts(f, &get_toast_manager().lock().unwrap(), &colors);
     }
+}
+
+fn format_token_count(count: usize) -> String {
+    if count < 1000 {
+        return count.to_string();
+    }
+    if count < 1_000_000 {
+        let k = count as f64 / 1000.0;
+        return format!("{:.1}k", k);
+    }
+    let m = count as f64 / 1_000_000.0;
+    format!("{:.1}M", m)
 }
 
 impl Default for App {

@@ -72,6 +72,7 @@ pub struct Dialog {
     pub visible_row_count: usize,
     pub actions: Vec<DialogAction>,
     pub position: DialogPosition,
+    pub pending_delete_id: Option<String>,
     matcher: Matcher,
 }
 
@@ -102,6 +103,7 @@ impl Dialog {
             visible_row_count: 0,
             actions: Vec::new(),
             position: DialogPosition::Center,
+            pending_delete_id: None,
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -825,6 +827,7 @@ impl Dialog {
 
                 for item in items {
                     let is_selected = item_index == self.selected_index;
+                    let is_pending_delete = self.pending_delete_id.as_ref() == Some(&item.id);
                     let has_description = !item.description.is_empty();
 
                     let mut spans: Vec<Span> = if let Some(tip) = &item.tip {
@@ -899,6 +902,13 @@ impl Dialog {
                             style = style.fg(fg).bg(colors.primary);
                             span.style = style;
                         }
+                    } else if is_pending_delete {
+                        let fg = contrast_text(colors.error);
+                        for span in &mut spans {
+                            let mut style = span.style.clone();
+                            style = style.fg(fg).bg(colors.error);
+                            span.style = style;
+                        }
                     }
 
                     content_lines.push(Line::from(spans));
@@ -924,8 +934,6 @@ impl Dialog {
         let scrollbar_area = chunks[3];
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"))
                 .track_symbol(Some(" ")),
             scrollbar_area,
             &mut self.scrollbar_state,
@@ -989,6 +997,7 @@ impl Clone for Dialog {
             visible_row_count: self.visible_row_count,
             actions: self.actions.clone(),
             position: self.position,
+            pending_delete_id: self.pending_delete_id.clone(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }

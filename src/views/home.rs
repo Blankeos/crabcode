@@ -16,18 +16,46 @@ const LOGO: &str = r#"
 ▀████ ██ ██ ██▀██ ██▄█▀ ▀████ ▀███▀ ████▀ ██▄▄▄
 "#;
 
-const MASCO: &str = r#"
+const MASCO: [&str; 2] = [
+    r#"
     ▃▃▛████▜▃▃
  █▟▟▜████████▛▙▙█
     ▞ ▘    ▝ ▚
-"#;
+"#,
+    r#"
+    ▃▃▛████▜▃▃
+ █▙▟▜████████▛▙▟█
+    ▞ ▘    ▝ ▚
+"#,
+];
 
 #[derive(Debug, Clone)]
-pub struct HomeState;
+pub struct HomeState {
+    phase: u8,
+    tick_count: u32,
+}
+
+const PHASE_DURATIONS: [u32; 5] = [20, 10, 10, 10, 20];
+const PHASE_FRAMES: [usize; 5] = [0, 1, 0, 1, 0];
 
 impl HomeState {
     pub fn new() -> Self {
-        Self
+        Self {
+            phase: 0,
+            tick_count: 0,
+        }
+    }
+
+    pub fn tick(&mut self) {
+        self.tick_count += 1;
+        if self.tick_count >= PHASE_DURATIONS[self.phase as usize] {
+            self.tick_count = 0;
+            self.phase = (self.phase + 1) % PHASE_DURATIONS.len() as u8;
+        }
+    }
+
+    pub fn frame(&self) -> usize {
+        PHASE_FRAMES[self.phase as usize]
     }
 }
 
@@ -38,6 +66,7 @@ pub fn init_home() -> HomeState {
 pub fn render_home(
     f: &mut Frame,
     input: &mut Input,
+    home_state: &HomeState,
     version: String,
     cwd: String,
     branch: Option<String>,
@@ -45,6 +74,7 @@ pub fn render_home(
     model: String,
     provider_name: String,
     colors: &ThemeColors,
+    usage_text: &str,
 ) {
     let size = f.area();
 
@@ -86,7 +116,7 @@ pub fn render_home(
         ])
         .split(logo_chunks[1]);
 
-    let mascot_lines: Vec<Line> = MASCO
+    let mascot_lines: Vec<Line> = MASCO[home_state.frame()]
         .lines()
         .filter(|l| !l.is_empty())
         .map(|line| {
@@ -134,8 +164,38 @@ pub fn render_home(
         Span::styled("ctrl+cc", Style::default().fg(colors.info)),
         Span::raw(" quit "),
     ];
-    let help = Paragraph::new(Line::from(help_text)).alignment(Alignment::Right);
-    f.render_widget(help, home_chunks[2]);
+    let help_line = Line::from(help_text);
+    let help_width = help_line.width() as u16;
+    let available_width = home_chunks[2].width;
+    let help_width = help_width.min(available_width);
+
+    let usage_width = if !usage_text.is_empty() {
+        (usage_text.len() as u16 + 2).min(available_width.saturating_sub(help_width))
+    } else {
+        0
+    };
+
+    let status_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(usage_width),
+            Constraint::Min(0),
+            Constraint::Length(help_width),
+        ])
+        .split(home_chunks[2]);
+
+    if !usage_text.is_empty() {
+        let usage = Paragraph::new(Line::from(vec![Span::styled(
+            usage_text,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        )]));
+        f.render_widget(usage, status_chunks[0]);
+    }
+
+    let help = Paragraph::new(help_line).alignment(Alignment::Right);
+    f.render_widget(help, status_chunks[2]);
 
     let blank = Block::default();
     f.render_widget(blank, home_chunks[3]);

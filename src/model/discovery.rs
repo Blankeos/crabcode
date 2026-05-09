@@ -292,6 +292,30 @@ impl Discovery {
         Ok(models)
     }
 
+    pub fn get_model_pricing(&self, provider_id: &str, model_id: &str) -> Option<Cost> {
+        let cache_path = self.get_cache_path();
+        if !cache_path.exists() {
+            return None;
+        }
+        let cached_json = std::fs::read_to_string(cache_path).ok()?;
+        let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
+        let provider = entry.data.get(provider_id)?;
+        let model = provider.models.get(model_id)?;
+        model.cost.clone()
+    }
+
+    pub fn get_model_limit(&self, provider_id: &str, model_id: &str) -> Option<u32> {
+        let cache_path = self.get_cache_path();
+        if !cache_path.exists() {
+            return None;
+        }
+        let cached_json = std::fs::read_to_string(cache_path).ok()?;
+        let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
+        let provider = entry.data.get(provider_id)?;
+        let model = provider.models.get(model_id)?;
+        model.limit.as_ref().map(|l| l.context)
+    }
+
     pub async fn list_models(&self, provider_filter: Option<&str>) -> Result<String> {
         let models = self.fetch_models().await?;
 

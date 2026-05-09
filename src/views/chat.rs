@@ -56,6 +56,7 @@ pub fn render_chat(
     provider_name: String,
     colors: &ThemeColors,
     is_streaming: bool,
+    usage_text: &str,
 ) {
     let size = f.area();
 
@@ -107,23 +108,34 @@ pub fn render_chat(
     let available_width = above_status_chunks[4].width;
     let help_width = help_width.min(available_width);
 
+    let usage_width = if !usage_text.is_empty() {
+        (usage_text.len() as u16 + 2).min(available_width.saturating_sub(help_width))
+    } else {
+        0
+    };
+    let middle_width = if usage_width > 0 {
+        available_width.saturating_sub(help_width + usage_width)
+    } else {
+        available_width.saturating_sub(help_width)
+    };
+
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(help_width)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(usage_width),
+            Constraint::Length(help_width),
+        ])
         .split(above_status_chunks[4]);
 
     if is_streaming {
-        // Update spinner color based on current agent (only if changed)
         let agent_color = crate::theme::agent_color(&agent, colors);
         chat_state.wave_spinner.set_color(agent_color);
 
-        // Animation update is now handled in the main event loop at a fixed rate
-        // to prevent speed issues when mouse movement causes frequent redraws
         let mut streaming_text = chat_state.wave_spinner.spans();
 
         let tps = chat_state.chat.get_streaming_tokens_per_sec();
 
-        // Add tokens/second if available
         if let Some(tps) = tps {
             streaming_text.push(Span::raw(" "));
             streaming_text.push(Span::styled(
@@ -133,7 +145,7 @@ pub fn render_chat(
         }
 
         if let Some(elapsed) = chat_state.chat.get_streaming_elapsed_seconds() {
-            streaming_text.push(Span::raw(if tps.is_some() { " • " } else { " " }));
+            streaming_text.push(Span::raw(if tps.is_some() { " · " } else { " " }));
             streaming_text.push(Span::styled(
                 format!("{:.1}s", elapsed),
                 Style::default().fg(colors.info),
@@ -152,8 +164,18 @@ pub fn render_chat(
         f.render_widget(streaming_paragraph, status_chunks[0]);
     }
 
+    if !usage_text.is_empty() {
+        let usage = Paragraph::new(Line::from(vec![Span::styled(
+            usage_text,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        )]));
+        f.render_widget(usage, status_chunks[1]);
+    }
+
     let help = Paragraph::new(help_line).alignment(Alignment::Right);
-    f.render_widget(help, status_chunks[1]);
+    f.render_widget(help, status_chunks[2]);
 
     let blank = Block::default();
     f.render_widget(blank, above_status_chunks[5]);
