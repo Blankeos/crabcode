@@ -102,8 +102,8 @@ pub fn render_home(
     let mascot = Paragraph::new(Text::from(mascot_lines));
 
     let logo_lines: Vec<Line> = LOGO
-        .trim()
         .lines()
+        .filter(|l| !l.is_empty())
         .enumerate()
         .map(|(i, line)| {
             let color = if i == 2 {

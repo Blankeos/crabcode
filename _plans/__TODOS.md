@@ -1,0 +1,1 @@
+- [ ] Rearchitect - multi-workspace, just like codex. Since it's a terminal, special case is it runs even when closed. Doing /sessions can switch between running sessions. Show a loading (use claude code loading animation), for loading sessions. Group by folders, not by Today, etc. Move the /sessions dialog to the "left". Run as a process?

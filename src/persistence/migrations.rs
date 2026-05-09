@@ -28,6 +28,7 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_identifier TEXT NOT NULL,
             name TEXT NOT NULL,
             created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
@@ -36,6 +37,8 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
             total_time_sec REAL NOT NULL DEFAULT 0,
             avg_tokens_per_sec REAL NOT NULL DEFAULT 0
         );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_identifier ON sessions(session_identifier);
 
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,

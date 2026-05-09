@@ -7,6 +7,7 @@ use super::{ensure_data_dir, get_data_dir, migrations::run_migrations};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: i64,
+    pub session_identifier: String,
     pub name: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -55,31 +56,40 @@ impl HistoryDAO {
         let mut conn = Connection::open(&db_path)?;
         run_migrations(&mut conn)?;
 
+        // Ensure session_identifier column exists on pre-existing databases
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN session_identifier TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+
         Ok(Self { conn })
     }
 
-    pub fn create_session(&self, name: String) -> Result<i64> {
-        self.conn
-            .execute("INSERT INTO sessions (name) VALUES (?1)", params![name])?;
+    pub fn create_session(&self, identifier: &str, name: String) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO sessions (session_identifier, name) VALUES (?1, ?2)",
+            params![identifier, name],
+        )?;
         Ok(self.conn.last_insert_rowid())
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at, total_tokens, total_cost, total_time_sec, avg_tokens_per_sec
+            "SELECT id, session_identifier, name, created_at, updated_at, total_tokens, total_cost, total_time_sec, avg_tokens_per_sec
              FROM sessions ORDER BY updated_at DESC"
         )?;
 
         let session_iter = stmt.query_map([], |row| {
             Ok(Session {
                 id: row.get(0)?,
-                name: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-                total_tokens: row.get(4)?,
-                total_cost: row.get(5)?,
-                total_time_sec: row.get(6)?,
-                avg_tokens_per_sec: row.get(7)?,
+                session_identifier: row.get(1)?,
+                name: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                total_tokens: row.get(5)?,
+                total_cost: row.get(6)?,
+                total_time_sec: row.get(7)?,
+                avg_tokens_per_sec: row.get(8)?,
             })
         })?;
 
@@ -89,7 +99,7 @@ impl HistoryDAO {
 
     pub fn get_session(&self, id: i64) -> Result<Option<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at, total_tokens, total_cost, total_time_sec, avg_tokens_per_sec
+            "SELECT id, session_identifier, name, created_at, updated_at, total_tokens, total_cost, total_time_sec, avg_tokens_per_sec
              FROM sessions WHERE id = ?1"
         )?;
 
@@ -97,13 +107,14 @@ impl HistoryDAO {
         if let Some(row) = rows.next()? {
             Ok(Some(Session {
                 id: row.get(0)?,
-                name: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-                total_tokens: row.get(4)?,
-                total_cost: row.get(5)?,
-                total_time_sec: row.get(6)?,
-                avg_tokens_per_sec: row.get(7)?,
+                session_identifier: row.get(1)?,
+                name: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                total_tokens: row.get(5)?,
+                total_cost: row.get(6)?,
+                total_time_sec: row.get(7)?,
+                avg_tokens_per_sec: row.get(8)?,
             }))
         } else {
             Ok(None)

@@ -70,7 +70,7 @@ impl SessionManager {
                     .map_err(|e| SessionError::PersistenceError(e.to_string()))?
             };
 
-            session.id = cuid2::create_id();
+            session.id = db_session.session_identifier.clone();
             session.title = db_session.name;
             session.created_at = std::time::UNIX_EPOCH
                 + std::time::Duration::from_secs(db_session.created_at as u64);
@@ -94,11 +94,7 @@ impl SessionManager {
             .clone()
             .unwrap_or_else(|| format!("session-{}", self.session_counter));
 
-        let session_id = if let Some(ref session_name) = name {
-            session_name.clone()
-        } else {
-            format!("session-{}", self.session_counter)
-        };
+        let session_id = cuid2::create_id();
 
         let mut session = Session::with_title(title.clone());
         session.id = session_id.clone();
@@ -108,7 +104,7 @@ impl SessionManager {
 
         if let Some(ref dao) = self.history_dao {
             let db_id = dao
-                .create_session(title.clone())
+                .create_session(&session_id, title.clone())
                 .unwrap_or_else(|_| self.session_counter as i64);
             self.id_mapping.insert(session_id.clone(), db_id);
             self.db_id_to_id.insert(db_id, session_id.clone());
@@ -239,7 +235,7 @@ mod tests {
     fn test_create_session_default_name() {
         let mut manager = SessionManager::new();
         let id = manager.create_session(None);
-        assert_eq!(id, "session-1");
+        assert!(!id.is_empty());
         assert!(manager.sessions.contains_key(&id));
         assert_eq!(manager.current_session_id, Some(id));
     }
@@ -248,9 +244,11 @@ mod tests {
     fn test_create_session_custom_name() {
         let mut manager = SessionManager::new();
         let id = manager.create_session(Some("my-session".to_string()));
-        assert_eq!(id, "my-session");
+        assert!(!id.is_empty());
         assert!(manager.sessions.contains_key(&id));
-        assert_eq!(manager.current_session_id, Some(id));
+        assert_eq!(manager.current_session_id, Some(id.clone()));
+        let session = manager.get_session(&id).unwrap();
+        assert_eq!(session.title, "my-session");
     }
 
     #[test]
@@ -260,9 +258,9 @@ mod tests {
         let id2 = manager.create_session(None);
         let id3 = manager.create_session(None);
 
-        assert_eq!(id1, "session-1");
-        assert_eq!(id2, "session-2");
-        assert_eq!(id3, "session-3");
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
         assert_eq!(manager.sessions.len(), 3);
     }
 
@@ -299,22 +297,22 @@ mod tests {
     #[test]
     fn test_get_session() {
         let mut manager = SessionManager::new();
-        manager.create_session(Some("test".to_string()));
-        assert!(manager.get_session("test").is_some());
+        let id = manager.create_session(Some("test".to_string()));
+        assert!(manager.get_session(&id).is_some());
         assert!(manager.get_session("nonexistent").is_none());
     }
 
     #[test]
     fn test_switch_session() {
         let mut manager = SessionManager::new();
-        manager.create_session(Some("session-1".to_string()));
-        manager.create_session(Some("session-2".to_string()));
+        let id1 = manager.create_session(Some("session-1".to_string()));
+        let id2 = manager.create_session(Some("session-2".to_string()));
 
-        assert!(manager.switch_session("session-1"));
-        assert_eq!(manager.current_session_id, Some("session-1".to_string()));
+        assert!(manager.switch_session(&id1));
+        assert_eq!(manager.current_session_id, Some(id1.clone()));
 
-        assert!(manager.switch_session("session-2"));
-        assert_eq!(manager.current_session_id, Some("session-2".to_string()));
+        assert!(manager.switch_session(&id2));
+        assert_eq!(manager.current_session_id, Some(id2.clone()));
 
         assert!(!manager.switch_session("nonexistent"));
     }
@@ -322,22 +320,22 @@ mod tests {
     #[test]
     fn test_delete_session() {
         let mut manager = SessionManager::new();
-        manager.create_session(Some("session-1".to_string()));
-        manager.create_session(Some("session-2".to_string()));
+        let id1 = manager.create_session(Some("session-1".to_string()));
+        let id2 = manager.create_session(Some("session-2".to_string()));
 
-        assert!(manager.delete_session("session-1"));
-        assert!(!manager.sessions.contains_key("session-1"));
-        assert!(manager.sessions.contains_key("session-2"));
+        assert!(manager.delete_session(&id1));
+        assert!(!manager.sessions.contains_key(&id1));
+        assert!(manager.sessions.contains_key(&id2));
     }
 
     #[test]
     fn test_delete_current_session() {
         let mut manager = SessionManager::new();
-        manager.create_session(Some("session-1".to_string()));
-        manager.create_session(Some("session-2".to_string()));
+        let id1 = manager.create_session(Some("session-1".to_string()));
+        let _id2 = manager.create_session(Some("session-2".to_string()));
 
-        manager.switch_session("session-1");
-        assert!(manager.delete_session("session-1"));
+        manager.switch_session(&id1);
+        assert!(manager.delete_session(&id1));
         assert!(manager.current_session_id.is_none());
     }
 }
