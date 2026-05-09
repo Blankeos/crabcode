@@ -223,6 +223,12 @@ impl App {
             );
         }
 
+        crate::skill::init_skill_store(
+            &loaded_config.xdg_config_home,
+            &loaded_config.project_root,
+        );
+        crate::command::handlers::register_skill_commands(&mut registry);
+
         if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
             if !default_agent.trim().is_empty() {
                 agent = default_agent;
@@ -339,6 +345,7 @@ impl App {
             sounds: resolved_sounds,
             tool_permissions,
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
+            // Note: skills_dirs is legacy; skill loading is now handled by src/skill/mod.rs
             is_streaming: false,
             chunk_sender: None,
             chunk_receiver: None,
@@ -1793,20 +1800,18 @@ impl App {
 
         let mut items: Vec<DialogItem> = Vec::new();
 
-        for skill_dir in &self.skills_dirs {
-            if let Some(dir_name) = skill_dir.file_name().and_then(|n| n.to_str()) {
-                let description = if skill_dir.join("SKILL.md").exists() {
-                    "Available".to_string()
-                } else {
-                    "No SKILL.md".to_string()
-                };
-
+        if let Some(store) = crate::skill::get_skill_store() {
+            for skill in store.all() {
                 items.push(DialogItem {
-                    id: dir_name.to_string(),
-                    name: dir_name.to_string(),
+                    id: skill.name.clone(),
+                    name: skill.name.clone(),
                     group: "Skills".to_string(),
-                    description,
-                    tip: None,
+                    description: skill.description.clone().unwrap_or_default(),
+                    tip: if skill.description.is_some() {
+                        None
+                    } else {
+                        Some("No description".to_string())
+                    },
                     provider_id: String::new(),
                 });
             }

@@ -1,6 +1,6 @@
 use crate::tools::{
     fs::{GlobTool, GrepTool, ListTool, ReadTool, WriteTool},
-    BashTool, EditTool, ToolRegistry,
+    BashTool, EditTool, SkillTool, ToolRegistry,
 };
 use std::sync::Arc;
 
@@ -14,6 +14,7 @@ pub async fn initialize_tool_registry() -> ToolRegistry {
     registry.register(Arc::new(WriteTool::new())).await;
     registry.register(Arc::new(BashTool::new())).await;
     registry.register(Arc::new(EditTool::new())).await;
+    registry.register(Arc::new(SkillTool::new())).await;
 
     registry
 }

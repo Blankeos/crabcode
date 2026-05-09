@@ -301,7 +301,9 @@ fn discover_opencode_inventory(
     diagnostics: &mut ConfigDiagnostics,
 ) {
     let global_opencode = xdg_config_home.join("opencode");
+    let global_crabcode = xdg_config_home.join("crabcode");
     let local_opencode = project_root.join(".opencode");
+    let local_crabcode = project_root.join(".crabcode");
 
     let mut agents = Vec::new();
     agents.extend(list_md_files(&global_opencode.join("agents")));
@@ -322,8 +324,12 @@ fn discover_opencode_inventory(
     for dir in [
         global_opencode.join("skills"),
         global_opencode.join("skill"),
+        global_crabcode.join("skills"),
+        global_crabcode.join("skill"),
         local_opencode.join("skills"),
         local_opencode.join("skill"),
+        local_crabcode.join("skills"),
+        local_crabcode.join("skill"),
     ] {
         if dir.is_dir() {
             skills_dirs.push(dir);

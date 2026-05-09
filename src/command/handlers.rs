@@ -448,6 +448,35 @@ pub fn handle_skills<'a>(
     })
 }
 
+pub fn handle_skill_command<'a>(
+    parsed: &'a ParsedCommand<'a>,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let skill_name = parsed.name.clone();
+
+    Box::pin(async move {
+        if let Some(store) = crate::skill::get_skill_store() {
+            if let Some(skill) = store.get(&skill_name) {
+                return CommandResult::Success(skill.content.clone());
+            }
+        }
+
+        CommandResult::Error(format!("Unknown command: {}", skill_name))
+    })
+}
+
+pub fn register_skill_commands(registry: &mut Registry) {
+    if let Some(store) = crate::skill::get_skill_store() {
+        for skill in store.all() {
+            registry.register(Command {
+                name: skill.name.clone(),
+                description: skill.description.clone().unwrap_or_default(),
+                handler: handle_skill_command,
+            });
+        }
+    }
+}
+
 pub fn handle_refreshmodels<'a>(
     _parsed: &'a ParsedCommand<'a>,
     _sm: &'a mut SessionManager,

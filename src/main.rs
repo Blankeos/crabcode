@@ -13,6 +13,7 @@ mod notify;
 mod persistence;
 mod prompt;
 mod session;
+mod skill;
 mod sound;
 mod streaming;
 mod theme;

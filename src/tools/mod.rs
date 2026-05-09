@@ -9,6 +9,7 @@ pub mod fs;
 pub mod init;
 pub mod permission;
 pub mod registry;
+pub mod skill;
 pub mod types;
 
 pub use bash::BashTool;
@@ -19,6 +20,7 @@ pub use permission::{
     AgentToolPolicies, PermissionAction, PermissionPrompt, PermissionResponse, ToolPermissions,
 };
 pub use registry::ToolRegistry;
+pub use skill::SkillTool;
 pub use types::{ParameterSchema, ParameterType, Tool, ToolError, ToolId, ToolResult};
 
 #[async_trait]

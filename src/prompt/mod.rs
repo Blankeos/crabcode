@@ -261,7 +261,40 @@ Tool use:
     }
 
     async fn get_custom_instructions(&self) -> String {
-        rules::get_custom_instructions(&self.working_directory).await
+        let mut instructions = rules::get_custom_instructions(&self.working_directory).await;
+
+        // Add available skills listing
+        if let Some(store) = crate::skill::get_skill_store() {
+            let skills = store.all();
+            if !skills.is_empty() {
+                let skills_xml = skills
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>file://{}</location>\n  </skill>",
+                            s.name,
+                            s.description.as_deref().unwrap_or(""),
+                            s.location.display()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let skills_block = format!(
+                    "\n\nSkills provide specialized instructions and workflows for specific tasks.\n\
+                     Use the skill tool to load a skill when a task matches its description.\n\
+                     <available_skills>\n{}\n</available_skills>",
+                    skills_xml
+                );
+
+                if !instructions.is_empty() {
+                    instructions.push_str("\n\n");
+                }
+                instructions.push_str(&skills_block);
+            }
+        }
+
+        instructions
     }
 }
 

@@ -754,8 +754,7 @@ impl Dialog {
 
                 for item in items {
                     let is_selected = item_index == self.selected_index;
-                    let is_special_group = group == "Favorite" || group == "Recent";
-                    let has_description = is_special_group && !item.description.is_empty();
+                    let has_description = !item.description.is_empty();
 
                     let mut spans: Vec<Span> = if let Some(tip) = &item.tip {
                         let base_len = if has_description {
