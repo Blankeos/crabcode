@@ -111,7 +111,8 @@ pub async fn convert_to_aisdk_tools(
                         let preview_limit: usize = 4000;
                         let mut preview = tool_result.output.clone();
                         if preview.len() > preview_limit {
-                            preview.truncate(preview_limit);
+                            let boundary = preview.floor_char_boundary(preview_limit);
+                            preview.truncate(boundary);
                             preview.push_str("... (truncated)");
                         }
 

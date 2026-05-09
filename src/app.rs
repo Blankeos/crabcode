@@ -466,8 +466,18 @@ impl App {
         }
 
         let token_text = format_token_count(total_tokens);
+        let mut text = token_text;
 
         if let Some(ref discovery) = self.discovery {
+            if let Some(limit) =
+                discovery.get_model_limit(&self.provider_name.to_lowercase(), &self.model)
+            {
+                if limit > 0 {
+                    let pct = ((total_tokens as f64 / limit as f64) * 100.0).round() as u32;
+                    text = format!("{} ({}%)", text, pct);
+                }
+            }
+
             if let Some(cost) = discovery.get_model_pricing(
                 &self.provider_name.to_lowercase(),
                 &self.model,
@@ -482,12 +492,12 @@ impl App {
                 let total = (output_tokens.max(total_tokens)) as f64;
                 let price = total / 1_000_000.0 * cost.output;
                 if price > 0.001 {
-                    return format!("{} \u{00b7} ${:.2}", token_text, price);
+                    return format!("{} \u{00b7} ${:.2}", text, price);
                 }
             }
         }
 
-        token_text
+        text
     }
 
     pub fn get_current_theme_colors(&self) -> theme::ThemeColors {
@@ -3280,7 +3290,7 @@ fn format_token_count(count: usize) -> String {
     }
     if count < 1_000_000 {
         let k = count as f64 / 1000.0;
-        return format!("{:.1}k", k);
+        return format!("{:.1}K", k);
     }
     let m = count as f64 / 1_000_000.0;
     format!("{:.1}M", m)

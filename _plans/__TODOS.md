@@ -37,3 +37,5 @@
 - [x] Feature: Rename command `/rename` - parity with opencode.
 
 - [ ] Bug: theme is not persisted? Or is it by config? Just make theme be based on state now, no more config for it.
+
+- [ ] Bug: skill loading on conflict. i.e. duplicate frontend-design skill. Warning: duplicate skill name 'frontend-design' (existing: /Users/carlo/.claude/skills/frontend-design/SKILL.md, duplicate: /Users/carlo/.config/opencode/skill/frontend-design/SKILL.md)
