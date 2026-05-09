@@ -416,12 +416,12 @@ fn build_openai_provider(config: &ProviderRequestConfig) -> Result<OpenAI<Dynami
         provider_builder = provider_builder.api_key(key);
     }
 
-    if let Some(response_path) = &config.openai_options.response_path {
-        provider_builder = provider_builder.response_path(response_path);
+    if let Some(responses_path) = &config.openai_options.response_path {
+        provider_builder = provider_builder.responses_path(responses_path);
     }
 
     if config.openai_options.force_store_false {
-        provider_builder = provider_builder.force_store_false(true);
+        provider_builder = provider_builder.store_override(false);
     }
 
     if let Some(instructions) = &config.openai_options.default_instructions {
@@ -429,16 +429,16 @@ fn build_openai_provider(config: &ProviderRequestConfig) -> Result<OpenAI<Dynami
     }
 
     if config.openai_options.disallow_system_messages {
-        provider_builder = provider_builder.disallow_system_messages(true);
+        provider_builder = provider_builder.strip_system_and_developer_messages(true);
     }
 
     if config.openai_options.force_tool_strict_false {
-        provider_builder = provider_builder.force_tool_strict_false(true);
+        provider_builder = provider_builder.tool_strict_override(false);
     }
 
     if !config.openai_options.additional_headers.is_empty() {
         provider_builder =
-            provider_builder.additional_headers(config.openai_options.additional_headers.clone());
+            provider_builder.headers(config.openai_options.additional_headers.clone());
     }
 
     provider_builder

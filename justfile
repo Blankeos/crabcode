@@ -7,6 +7,9 @@ dev:
 preview:
     ./target/release/crabcode
 
+dpreview:
+    ./target/debug/crabcode
+
 gen-themes:
     bun run scripts/gen-themes.ts
 
@@ -17,6 +20,7 @@ log:
     tail -f app.log
 
 # Release: bump versions, create release commit, and create a git tag.
+
 # Usage: just tag [patch|minor|major]
 tag bump="":
-    sh scripts/tag_and_release.sh {{bump}}
+    sh scripts/tag_and_release.sh {{ bump }}

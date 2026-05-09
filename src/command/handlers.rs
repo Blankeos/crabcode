@@ -430,6 +430,24 @@ pub fn handle_themes<'a>(
     })
 }
 
+pub fn handle_skills<'a>(
+    parsed: &'a ParsedCommand<'a>,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error(
+                "This command only opens the skills dialog. Usage: /skills".to_string(),
+            );
+        }
+
+        // The app intercepts /skills to show the dialog.
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_refreshmodels<'a>(
     _parsed: &'a ParsedCommand<'a>,
     _sm: &'a mut SessionManager,
@@ -522,6 +540,12 @@ pub fn register_all_commands(registry: &mut Registry) {
         name: "refreshmodels".to_string(),
         description: "Refresh the models.dev cache".to_string(),
         handler: handle_refreshmodels,
+    });
+
+    registry.register(Command {
+        name: "skills".to_string(),
+        description: "List available skills".to_string(),
+        handler: handle_skills,
     });
 }
 
@@ -800,7 +824,7 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 9);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
@@ -809,6 +833,7 @@ mod tests {
         assert!(names.contains(&"themes".to_string()));
         assert!(names.contains(&"home".to_string()));
         assert!(names.contains(&"refreshmodels".to_string()));
+        assert!(names.contains(&"skills".to_string()));
     }
 
     #[tokio::test]

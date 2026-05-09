@@ -91,6 +91,7 @@ pub enum OverlayFocus {
     SessionsDialog,
     SessionRenameDialog,
     PermissionDialog,
+    SkillsDialog,
     WhichKey,
 }
 
@@ -126,6 +127,7 @@ pub struct App {
     pub sessions_dialog_state: SessionsDialogState,
     pub session_rename_dialog_state: SessionRenameDialogState,
     pub permission_dialog_state: PermissionDialogState,
+    pub skills_dialog_state: crate::views::SkillsDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     openai_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<OpenAIOAuthTaskMessage>>,
@@ -146,6 +148,7 @@ pub struct App {
     pub dark_mode: bool,
     pub sounds: crate::sound::ResolvedSoundsConfig,
     pub tool_permissions: crate::tools::ToolPermissions,
+    pub skills_dirs: Vec<std::path::PathBuf>,
     pub is_streaming: bool,
     chunk_sender: Option<crate::llm::ChunkSender>,
     chunk_receiver: Option<crate::llm::ChunkReceiver>,
@@ -186,6 +189,7 @@ impl App {
         let openai_oauth_flow_state = init_openai_oauth_flow();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
         let permission_dialog_state = init_permission_dialog();
+        let skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
         let which_key_state = crate::views::which_key::init_which_key();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
@@ -313,6 +317,7 @@ impl App {
             sessions_dialog_state,
             session_rename_dialog_state,
             permission_dialog_state,
+            skills_dialog_state,
             which_key_state,
             api_key_input,
             openai_oauth_receiver: None,
@@ -333,6 +338,7 @@ impl App {
             dark_mode: true,
             sounds: resolved_sounds,
             tool_permissions,
+            skills_dirs: loaded_config.inventory.opencode_skills_dirs,
             is_streaming: false,
             chunk_sender: None,
             chunk_receiver: None,
@@ -785,6 +791,27 @@ impl App {
                     PermissionDialogAction::NotHandled => true,
                 }
             }
+            OverlayFocus::SkillsDialog => {
+                let action =
+                    crate::views::skills_dialog::handle_skills_dialog_key_event(
+                        &mut self.skills_dialog_state,
+                        key,
+                    );
+                match action {
+                    crate::views::skills_dialog::SkillsDialogAction::SelectSkill { skill_id: _ } => {
+                        if !self.skills_dialog_state.dialog.is_visible() {
+                            self.overlay_focus = OverlayFocus::None;
+                        }
+                        true
+                    }
+                    crate::views::skills_dialog::SkillsDialogAction::None => {
+                        if !self.skills_dialog_state.dialog.is_visible() {
+                            self.overlay_focus = OverlayFocus::None;
+                        }
+                        false
+                    }
+                }
+            }
             OverlayFocus::WhichKey => {
                 let action = self.which_key_state.handle_key_event(key);
                 match action {
@@ -1046,6 +1073,14 @@ impl App {
             if !self.sessions_dialog_state.dialog.is_visible() {
                 self.overlay_focus = OverlayFocus::None;
             }
+        } else if self.overlay_focus == OverlayFocus::SkillsDialog {
+            crate::views::skills_dialog::handle_skills_dialog_mouse_event(
+                &mut self.skills_dialog_state,
+                mouse,
+            );
+            if !self.skills_dialog_state.dialog.is_visible() {
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::None {
             // Handle mouse events for chat scrolling when in chat mode
             if self.base_focus == BaseFocus::Chat {
@@ -1179,6 +1214,20 @@ impl App {
                 );
                 self.sessions_dialog_state.dialog.selected_index = 0;
             }
+            (_, OverlayFocus::SkillsDialog) => {
+                self.skills_dialog_state
+                    .dialog
+                    .search_textarea
+                    .insert_str(&text);
+                self.skills_dialog_state.dialog.set_search_query(
+                    self.skills_dialog_state
+                        .dialog
+                        .search_textarea
+                        .lines()
+                        .join(""),
+                );
+                self.skills_dialog_state.dialog.selected_index = 0;
+            }
             (_, OverlayFocus::SessionRenameDialog) => {
                 self.session_rename_dialog_state
                     .input_textarea
@@ -1219,6 +1268,10 @@ impl App {
             InputType::Command(mut parsed) => {
                 if parsed.name == "themes" {
                     self.show_themes_dialog();
+                    return;
+                }
+                if parsed.name == "skills" {
+                    self.show_skills_dialog();
                     return;
                 }
                 parsed.prefs_dao = self.prefs_dao.as_ref();
@@ -1733,6 +1786,38 @@ impl App {
         self.themes_dialog_original_theme_index = self.current_theme_index;
         self.themes_dialog_committed = false;
         self.overlay_focus = OverlayFocus::ThemesDialog;
+    }
+
+    fn show_skills_dialog(&mut self) {
+        use crate::ui::components::dialog::DialogItem;
+
+        let mut items: Vec<DialogItem> = Vec::new();
+
+        for skill_dir in &self.skills_dirs {
+            if let Some(dir_name) = skill_dir.file_name().and_then(|n| n.to_str()) {
+                let description = if skill_dir.join("SKILL.md").exists() {
+                    "Available".to_string()
+                } else {
+                    "No SKILL.md".to_string()
+                };
+
+                items.push(DialogItem {
+                    id: dir_name.to_string(),
+                    name: dir_name.to_string(),
+                    group: "Skills".to_string(),
+                    description,
+                    tip: None,
+                    provider_id: String::new(),
+                });
+            }
+        }
+
+        items.sort_by(|a, b| a.id.cmp(&b.id));
+
+        self.skills_dialog_state =
+            crate::views::skills_dialog::init_skills_dialog("Skills", items);
+        self.skills_dialog_state.dialog.show();
+        self.overlay_focus = OverlayFocus::SkillsDialog;
     }
 
     fn show_openai_connect_methods(&mut self) {
@@ -2550,6 +2635,17 @@ impl App {
             && self.sessions_dialog_state.dialog.is_visible()
         {
             render_sessions_dialog(f, &mut self.sessions_dialog_state, size, colors);
+        }
+
+        if self.overlay_focus == OverlayFocus::SkillsDialog
+            && self.skills_dialog_state.dialog.is_visible()
+        {
+            crate::views::skills_dialog::render_skills_dialog(
+                f,
+                &mut self.skills_dialog_state,
+                size,
+                colors,
+            );
         }
 
         if self.overlay_focus == OverlayFocus::SessionRenameDialog
