@@ -323,6 +323,10 @@ impl Input {
                 }
                 true
             }
+            MouseEventKind::Up(MouseButton::Left) => {
+                // Selection finalized (cursor was moved during drag)
+                true
+            }
             MouseEventKind::Up(MouseButton::Right) => {
                 // Right-click clears selection
                 self.textarea.cancel_selection();

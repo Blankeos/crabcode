@@ -21,16 +21,13 @@ impl TimelineDialogState {
         Self { dialog }
     }
 
-    pub fn build_from_messages(
-        messages: &[Message],
-        model: &str,
-    ) -> Self {
+    pub fn build_from_messages(messages: &[Message]) -> Self {
         let mut state = Self::new();
-        state.refresh_messages(messages, model);
+        state.refresh_messages(messages);
         state
     }
 
-    pub fn refresh_messages(&mut self, messages: &[Message], model: &str) {
+    pub fn refresh_messages(&mut self, messages: &[Message]) {
         let mut items: Vec<DialogItem> = Vec::new();
 
         for (idx, message) in messages.iter().enumerate() {
@@ -51,8 +48,8 @@ impl TimelineDialogState {
                 .find(|line| !line.trim().is_empty())
                 .map(|line| {
                     let trimmed = line.trim();
-                    if trimmed.len() > 60 {
-                        format!("{}…", &trimmed[..60])
+                    if trimmed.len() > 20 {
+                        format!("{}...", &trimmed[..20])
                     } else {
                         trimmed.to_string()
                     }
@@ -60,23 +57,7 @@ impl TimelineDialogState {
                 .unwrap_or_else(|| "(empty)".to_string());
 
             let name = format!("{}: {}", role_label, preview);
-
-            let description = match message.role {
-                MessageRole::Assistant => {
-                    let m = message.model.as_deref().unwrap_or(model);
-                    if message.is_complete {
-                        format!("{}", m)
-                    } else {
-                        format!("{} · streaming", m)
-                    }
-                }
-                MessageRole::User => message
-                    .agent_mode
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_string(),
-                _ => String::new(),
-            };
+            let description = String::new();
 
             let tip = {
                 let duration = message
@@ -111,6 +92,7 @@ impl TimelineDialogState {
         let mut dialog = Dialog::with_items("Timeline", items)
             .with_position(DialogPosition::Right);
         dialog.selected_index = last_index;
+        dialog.adjust_scroll();
         dialog = dialog.with_actions(vec![
             FooterAction {
                 label: "Jump".to_string(),

@@ -45,11 +45,6 @@ impl WhichKeyState {
     pub fn new() -> Self {
         let bindings = vec![
             KeyBinding {
-                key: "g".to_string(),
-                description: "Open Messages Timeline dialog".to_string(),
-                action: WhichKeyAction::ShowTimeline,
-            },
-            KeyBinding {
                 key: "m".to_string(),
                 description: "Open Models dialog".to_string(),
                 action: WhichKeyAction::ShowModels,
@@ -77,6 +72,11 @@ impl WhichKeyState {
         ];
 
         let chat_bindings = vec![
+            KeyBinding {
+                key: "g".to_string(),
+                description: "Open Messages Timeline dialog".to_string(),
+                action: WhichKeyAction::ShowTimeline,
+            },
             KeyBinding {
                 key: "k".to_string(),
                 description: "Scroll up".to_string(),
@@ -127,7 +127,7 @@ impl WhichKeyState {
         self.update_last_key_time();
 
         match event.code {
-            KeyCode::Char('g') | KeyCode::Char('G') => {
+            KeyCode::Char('g') | KeyCode::Char('G') if self.is_chat_active => {
                 self.hide();
                 WhichKeyAction::ShowTimeline
             }

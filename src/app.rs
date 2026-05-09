@@ -1302,7 +1302,6 @@ impl App {
             }
 
             // Handle mouse events for the main input when no overlay is focused
-            let was_input_selecting = self.input.has_selection();
             if self.input.handle_mouse_event(mouse) {
                 // Auto-copy input selection on mouse up (after drag select)
                 if matches!(
@@ -1310,9 +1309,7 @@ impl App {
                     ratatui::crossterm::event::MouseEventKind::Up(
                         ratatui::crossterm::event::MouseButton::Left
                     )
-                ) && !was_input_selecting
-                    && self.input.has_selection()
-                {
+                ) {
                     let text = self.input.get_selected_text();
                     if !text.is_empty() {
                         let _ = crate::utils::clipboard::copy_text(&text);
@@ -1749,9 +1746,8 @@ impl App {
             None => return,
         };
 
-        let model = self.model.clone();
         self.timeline_dialog_state
-            .refresh_messages(&messages, &model);
+            .refresh_messages(&messages);
         self.timeline_dialog_state.show();
         self.overlay_focus = OverlayFocus::TimelineDialog;
     }

@@ -423,7 +423,7 @@ impl Dialog {
         line_index
     }
 
-    fn adjust_scroll(&mut self) {
+    pub fn adjust_scroll(&mut self) {
         let visible_rows = self.get_visible_row_count().max(1);
         let selected_line = self.get_line_index_of_item(self.selected_index);
 
