@@ -2077,9 +2077,21 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
             }
             "undo" => {
+                let undone_content: Option<String> = {
+                    if let Some(session) = self.session_manager.get_current_session() {
+                        let content = session
+                            .messages
+                            .get(idx)
+                            .map(|m| m.content.clone());
+                        session.messages.truncate(idx);
+                        content
+                    } else {
+                        return;
+                    }
+                };
+
                 let remaining: Vec<crate::session::types::Message> = {
                     if let Some(session) = self.session_manager.get_current_session() {
-                        session.messages.truncate(idx);
                         session.messages.clone()
                     } else {
                         return;
@@ -2092,6 +2104,10 @@ impl App {
                 }
                 self.chat_state.chat.scroll_offset = usize::MAX;
                 self.chat_state.chat.clear_highlighted_message();
+
+                if let Some(content) = undone_content {
+                    self.input.set_text(&content);
+                }
 
                 push_toast(Toast::new(
                     format!("Removed {} message(s)", idx),

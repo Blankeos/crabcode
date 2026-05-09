@@ -97,24 +97,17 @@ pub fn render_home(
         )
         .split(main_chunks[0]);
 
+    let is_wide = size.width >= 80;
+    let logo_area_height = if is_wide { 5 } else { 7 };
+
     let logo_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(5),
+            Constraint::Length(logo_area_height),
             Constraint::Min(0),
         ])
         .split(home_chunks[0]);
-
-    let logo_row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Fill(1),
-            Constraint::Length(25),
-            Constraint::Min(52),
-            Constraint::Fill(1),
-        ])
-        .split(logo_chunks[1]);
 
     let mascot_lines: Vec<Line> = MASCO[home_state.frame()]
         .lines()
@@ -128,8 +121,6 @@ pub fn render_home(
             )
         })
         .collect();
-
-    let mascot = Paragraph::new(Text::from(mascot_lines));
 
     let logo_lines: Vec<Line> = LOGO
         .lines()
@@ -148,10 +139,38 @@ pub fn render_home(
         })
         .collect();
 
-    let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
+    if is_wide {
+        let logo_row = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Fill(1),
+                Constraint::Length(22),
+                Constraint::Min(55),
+                Constraint::Fill(1),
+            ])
+            .split(logo_chunks[1]);
 
-    f.render_widget(mascot, logo_row[1]);
-    f.render_widget(logo, logo_row[2]);
+        let mascot = Paragraph::new(Text::from(mascot_lines));
+        let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
+
+        f.render_widget(mascot, logo_row[1]);
+        f.render_widget(logo, logo_row[2]);
+    } else {
+        let stack = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(3),
+            ])
+            .split(logo_chunks[1]);
+
+        let mascot = Paragraph::new(Text::from(mascot_lines)).alignment(Alignment::Center);
+        let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
+
+        f.render_widget(mascot, stack[0]);
+        f.render_widget(logo, stack[2]);
+    }
     input.render(f, home_chunks[1], &agent, &model, &provider_name, colors);
 
     let help_text = vec![
