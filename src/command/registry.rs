@@ -15,6 +15,7 @@ pub struct Command {
     pub description: String,
     pub handler: CommandHandler,
     pub hidden_tokens: Vec<String>,
+    pub chat_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +144,7 @@ mod tests {
             description: "Test command".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec![],
+            chat_only: false,
         };
         registry.register(command);
         assert_eq!(registry.commands.len(), 1);
@@ -156,6 +158,7 @@ mod tests {
             description: "Test command".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec![],
+            chat_only: false,
         };
         registry.register(command.clone());
 
@@ -179,6 +182,7 @@ mod tests {
             description: "Test command".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec!["alias".to_string()],
+            chat_only: false,
         };
         registry.register(command);
         assert!(registry.get("alias").is_some());
@@ -193,6 +197,7 @@ mod tests {
             description: "Test command".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec![],
+            chat_only: false,
         };
         registry.register(command);
         let parsed = ParsedCommand {
@@ -235,12 +240,14 @@ mod tests {
             description: "Test command 1".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec![],
+            chat_only: false,
         };
         let command2 = Command {
             name: "test2".to_string(),
             description: "Test command 2".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec![],
+            chat_only: false,
         };
 
         registry.register(command1);
@@ -259,12 +266,14 @@ mod tests {
             description: "Test command 1".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec![],
+            chat_only: false,
         };
         let command2 = Command {
             name: "apple".to_string(),
             description: "Test command 2".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec![],
+            chat_only: false,
         };
 
         registry.register(command1);
@@ -297,6 +306,7 @@ mod tests {
             description: "Test command".to_string(),
             handler: handler_with_args,
             hidden_tokens: vec![],
+            chat_only: false,
         };
         registry.register(command);
 

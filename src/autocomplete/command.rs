@@ -1,4 +1,5 @@
 use crate::command::registry::Registry;
+use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct Suggestion {
@@ -10,6 +11,7 @@ pub struct Suggestion {
 pub struct CommandAuto {
     commands: Vec<Suggestion>,
     hidden_token_map: Vec<(String, String)>,
+    chat_only_commands: HashSet<String>,
 }
 
 impl CommandAuto {
@@ -34,18 +36,29 @@ impl CommandAuto {
             })
             .collect();
 
+        let chat_only_commands: HashSet<String> = registry
+            .list_commands()
+            .iter()
+            .filter(|cmd| cmd.chat_only)
+            .map(|cmd| cmd.name.clone())
+            .collect();
+
         Self {
             commands,
             hidden_token_map,
+            chat_only_commands,
         }
     }
 
-    pub fn get_suggestions(&self, input: &str) -> Vec<Suggestion> {
+    pub fn get_suggestions(&self, input: &str, is_chat: bool) -> Vec<Suggestion> {
         let input_lower = input.to_lowercase();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut results: Vec<Suggestion> = Vec::new();
 
         for cmd in &self.commands {
+            if !is_chat && self.chat_only_commands.contains(&cmd.name) {
+                continue;
+            }
             if cmd.name.to_lowercase().starts_with(&input_lower) {
                 if seen.insert(cmd.name.clone()) {
                     results.push(cmd.clone());
@@ -54,6 +67,9 @@ impl CommandAuto {
         }
 
         for (token, command_name) in &self.hidden_token_map {
+            if !is_chat && self.chat_only_commands.contains(command_name) {
+                continue;
+            }
             if token.to_lowercase().starts_with(&input_lower) {
                 if seen.insert(command_name.clone()) {
                     if let Some(cmd) = self.commands.iter().find(|c| c.name == *command_name) {
@@ -88,18 +104,21 @@ mod tests {
             description: "Show help".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec![],
+            chat_only: false,
         });
         registry.register(Command {
             name: "sessions".to_string(),
             description: "Manage sessions".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec!["resume".to_string()],
+            chat_only: false,
         });
         registry.register(Command {
             name: "exit".to_string(),
             description: "Exit the app".to_string(),
             handler: dummy_handler,
             hidden_tokens: vec![],
+            chat_only: false,
         });
         registry
     }
@@ -121,7 +140,7 @@ mod tests {
     fn test_get_suggestions_empty() {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);
-        let suggestions = auto.get_suggestions("");
+        let suggestions = auto.get_suggestions("", true);
         assert_eq!(suggestions.len(), 3);
     }
 
@@ -129,7 +148,7 @@ mod tests {
     fn test_get_suggestions_partial() {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);
-        let suggestions = auto.get_suggestions("s");
+        let suggestions = auto.get_suggestions("s", true);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].name, "sessions");
     }
@@ -138,7 +157,7 @@ mod tests {
     fn test_get_suggestions_exact() {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);
-        let suggestions = auto.get_suggestions("help");
+        let suggestions = auto.get_suggestions("help", true);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].name, "help");
     }
@@ -147,7 +166,7 @@ mod tests {
     fn test_get_suggestions_hidden_token() {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);
-        let suggestions = auto.get_suggestions("res");
+        let suggestions = auto.get_suggestions("res", true);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].name, "sessions");
     }
@@ -156,7 +175,7 @@ mod tests {
     fn test_get_suggestions_no_match() {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);
-        let suggestions = auto.get_suggestions("xyz");
+        let suggestions = auto.get_suggestions("xyz", true);
         assert!(suggestions.is_empty());
     }
 
@@ -164,7 +183,7 @@ mod tests {
     fn test_get_suggestions_case_insensitive() {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);
-        let suggestions = auto.get_suggestions("HELP");
+        let suggestions = auto.get_suggestions("HELP", true);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].name, "help");
     }

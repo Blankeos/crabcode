@@ -25,7 +25,7 @@ pub struct SessionInfo {
 }
 
 pub struct SessionManager {
-    sessions: HashMap<String, Session>,
+    pub sessions: HashMap<String, Session>,
     current_session_id: Option<String>,
     session_counter: usize,
     history_dao: Option<HistoryDAO>,
@@ -163,6 +163,12 @@ impl SessionManager {
         &mut self,
         message: &crate::session::types::Message,
     ) -> Result<(), SessionError> {
+        if let Some(session_id) = &self.current_session_id.clone() {
+            if let Some(session) = self.sessions.get_mut(session_id) {
+                session.add_message(message.clone());
+            }
+        }
+
         if let (Some(session_id), Some(ref dao)) = (&self.current_session_id, &self.history_dao) {
             if let Some(db_id) = self.id_mapping.get(session_id) {
                 let mut db_message: crate::persistence::Message = message.clone().into();

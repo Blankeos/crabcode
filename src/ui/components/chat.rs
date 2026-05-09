@@ -49,6 +49,8 @@ pub struct Chat {
     pub message_line_positions: Vec<usize>,
     /// Text selection state for copy-on-select
     pub selection: Selection,
+    /// Index of the message highlighted by timeline navigation (None = no highlight)
+    pub highlighted_message_index: Option<usize>,
 }
 
 // Minimum elapsed time before showing tokens/s (250ms)
@@ -94,6 +96,7 @@ impl Chat {
             streaming_message_idx: None,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
+            highlighted_message_index: None,
         }
     }
 
@@ -123,6 +126,7 @@ impl Chat {
             streaming_message_idx: None,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
+            highlighted_message_index: None,
         }
     }
 
@@ -537,6 +541,14 @@ impl Chat {
         self.update_scrollbar();
     }
 
+    pub fn set_highlighted_message(&mut self, idx: Option<usize>) {
+        self.highlighted_message_index = idx;
+    }
+
+    pub fn clear_highlighted_message(&mut self) {
+        self.highlighted_message_index = None;
+    }
+
     fn update_scrollbar(&mut self) {
         let max_offset = self.content_height.saturating_sub(self.viewport_height);
         let content_length = max_offset.saturating_add(1).max(1);
@@ -802,7 +814,26 @@ impl Chat {
         model: &'a str,
         colors: &'a ThemeColors,
     ) -> Vec<Line<'a>> {
-        let lines = self.build_all_lines(max_width, model, colors);
+        let mut lines = self.build_all_lines(max_width, model, colors);
+
+        if let Some(hl_idx) = self.highlighted_message_index {
+            if hl_idx < self.message_line_positions.len() {
+                let start_line = self.message_line_positions[hl_idx];
+                let end_line = if hl_idx + 1 < self.message_line_positions.len() {
+                    self.message_line_positions[hl_idx + 1]
+                } else {
+                    lines.len()
+                };
+
+                let hl_bg = colors.interactive;
+                for line in lines.iter_mut().skip(start_line).take(end_line.saturating_sub(start_line)) {
+                    for span in line.spans.iter_mut() {
+                        span.style = span.style.bg(hl_bg);
+                    }
+                }
+            }
+        }
+
         crate::ui::selection::apply_selection_to_lines(lines, &self.selection, colors.accent)
     }
 

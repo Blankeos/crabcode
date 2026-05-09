@@ -24,9 +24,9 @@ impl AutoComplete {
         }
     }
 
-    pub fn get_suggestions(&self, input: &str) -> Vec<Suggestion> {
+    pub fn get_suggestions(&self, input: &str, is_chat: bool) -> Vec<Suggestion> {
         match &self.mode {
-            AutoCompleteMode::Command => self.command_auto.get_suggestions(input),
+            AutoCompleteMode::Command => self.command_auto.get_suggestions(input, is_chat),
             AutoCompleteMode::File => self
                 .file_auto
                 .get_suggestions(input)

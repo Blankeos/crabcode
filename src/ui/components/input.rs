@@ -7,6 +7,47 @@ use ratatui::crossterm::event::{
 use ratatui::prelude::{Rect, Style};
 use ratatui::widgets::{Block, Paragraph};
 use tui_textarea::{CursorMove, Input as TuiInput, TextArea};
+use unicode_width::UnicodeWidthChar;
+
+/// Convert a display-column position to a byte offset within a string.
+/// Handles multi-byte and wide characters (emoji, CJK, etc.)
+fn display_col_to_byte_offset(line: &str, display_col: usize) -> usize {
+    let mut current_display = 0;
+
+    for (byte_idx, c) in line.char_indices() {
+        let char_width = UnicodeWidthChar::width(c).unwrap_or(1);
+        if display_col < current_display + char_width {
+            return byte_idx;
+        }
+        current_display += char_width;
+    }
+
+    line.len()
+}
+
+/// Clamp a byte offset to the nearest valid UTF-8 character boundary in `s`.
+fn char_boundary_before(s: &str, byte_idx: usize) -> usize {
+    let idx = byte_idx.min(s.len());
+    if s.is_char_boundary(idx) {
+        idx
+    } else {
+        (0..idx)
+            .rev()
+            .find(|&i| s.is_char_boundary(i))
+            .unwrap_or(0)
+    }
+}
+
+/// Word category for word-delete logic (matching tui-textarea's CharKind).
+fn char_kind(c: char) -> u8 {
+    if c.is_whitespace() {
+        0 // Space
+    } else if c.is_ascii_punctuation() {
+        1 // Punct
+    } else {
+        2 // Other (includes emoji, letters, etc.)
+    }
+}
 
 pub struct Input {
     textarea: TextArea<'static>,
@@ -214,8 +255,10 @@ impl Input {
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
             KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
                 let (cursor_row, cursor_col) = self.textarea.cursor();
-                if let Some(lines) = self.textarea.lines().get(cursor_row) {
-                    let before_cursor = &lines[..cursor_col.min(lines.len())];
+                if let Some(line) = self.textarea.lines().get(cursor_row) {
+                    // Clamp to valid char boundary to avoid panics on multi-byte emoji
+                    let safe_col = char_boundary_before(line, cursor_col);
+                    let before_cursor = &line[..safe_col];
                     for _ in 0..before_cursor.chars().count() {
                         self.textarea.delete_char();
                     }
@@ -224,6 +267,12 @@ impl Input {
             }
             KeyCode::Tab => false,
             KeyCode::Esc => false,
+            KeyCode::Backspace if event.modifiers.contains(KeyModifiers::ALT) => {
+                // Handle Alt+Backspace (word-delete) ourselves to avoid
+                // tui-textarea's buggy word boundary with multi-byte emoji
+                self.delete_word_backward();
+                true
+            }
             _ => {
                 self.textarea.input(input);
                 true
@@ -291,7 +340,7 @@ impl Input {
 
                 if target_row < lines.len() {
                     let line = &lines[target_row];
-                    let target_col = (relative_x as usize).min(line.len());
+                    let target_col = display_col_to_byte_offset(line, relative_x as usize);
                     // Position cursor and start selection for potential drag
                     self.textarea
                         .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
@@ -315,7 +364,7 @@ impl Input {
 
                 if target_row < lines.len() {
                     let line = &lines[target_row];
-                    let target_col = (relative_x as usize).min(line.len());
+                    let target_col = display_col_to_byte_offset(line, relative_x as usize);
                     // Since start_selection() was called and is_selecting() is true,
                     // move_cursor extends the selection
                     self.textarea
@@ -353,20 +402,79 @@ impl Input {
             if i < start_row || i > end_row {
                 continue;
             }
-            let start = if i == start_row { start_col } else { 0 };
-            let end = if i == end_row { end_col } else { line.len() };
+            let start = if i == start_row { start_col.min(line.len()) } else { 0 };
+            let end = if i == end_row { end_col.min(line.len()) } else { line.len() };
 
-            let line_str: String = line.chars().skip(start).take(end.saturating_sub(start)).collect();
+            if start >= end {
+                continue;
+            }
+            // Byte-based slicing (safe: start/end are guaranteed char boundaries)
             if !result.is_empty() {
                 result.push('\n');
             }
-            result.push_str(&line_str);
+            result.push_str(&line[start..end]);
         }
         result
     }
 
     pub fn clear_selection(&mut self) {
         self.textarea.cancel_selection();
+    }
+
+    /// Delete the word before the cursor. Handles multi-byte emoji correctly
+    /// (works around a tui-textarea bug in find_word_start_backward).
+    fn delete_word_backward(&mut self) {
+        let (row, cursor_col) = self.textarea.cursor();
+        let lines = self.textarea.lines();
+        let line = match lines.get(row) {
+            Some(l) => l,
+            None => return,
+        };
+
+        // Find the word start by walking chars backwards from the cursor
+        let safe_col = char_boundary_before(line, cursor_col);
+        if safe_col == 0 {
+            // At start of line: join with previous line if possible
+            if row > 0 {
+                self.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
+                self.textarea.delete_char(); // deletes newline, joining lines
+            }
+            return;
+        }
+
+        // Walk backwards from the cursor to find the word boundary
+        let prefix = &line[..safe_col];
+        let chars_rev: Vec<(usize, char)> = prefix.char_indices().rev().collect();
+
+        if chars_rev.is_empty() {
+            return;
+        }
+
+        // Determine the category of the character just before the cursor
+        let (_, first_char) = chars_rev[0];
+        let first_kind = char_kind(first_char);
+
+        // Scan backward to find where the word starts
+        let mut word_start = safe_col;
+        for (byte_idx, c) in chars_rev.iter().skip(1) {
+            let kind = char_kind(*c);
+            if kind != first_kind {
+                // Boundary found at the byte after this character
+                word_start = byte_idx + c.len_utf8();
+                break;
+            }
+            word_start = *byte_idx;
+        }
+
+        // Delete from word_start to safe_col
+        if word_start < safe_col {
+            let char_count = line[word_start..safe_col].chars().count();
+            self.textarea
+                .move_cursor(CursorMove::Jump(row as u16, safe_col as u16));
+            for _ in 0..char_count {
+                self.textarea.delete_char();
+            }
+        }
     }
 
     pub fn should_show_suggestions(&self) -> bool {
@@ -379,8 +487,8 @@ impl Input {
         text.trim_end() == "/"
     }
 
-    pub fn complete_selection(&mut self) {
-        if let Some(selected) = self.get_autocomplete_selection() {
+    pub fn complete_selection(&mut self, is_chat: bool) {
+        if let Some(selected) = self.get_autocomplete_selection(is_chat) {
             let current_text = self.get_text();
             let start_index = current_text.rfind('/').map_or(0, |i| i + 1);
 
@@ -394,14 +502,14 @@ impl Input {
         }
     }
 
-    pub fn get_autocomplete_selection(&self) -> Option<String> {
+    pub fn get_autocomplete_selection(&self, is_chat: bool) -> Option<String> {
         if let Some(autocomplete) = &self.autocomplete {
             let text = self.get_text();
             let suggestions = if text.starts_with('/') {
                 let filter = text.trim_start_matches('/');
-                autocomplete.get_suggestions(filter)
+                autocomplete.get_suggestions(filter, is_chat)
             } else {
-                autocomplete.get_suggestions(&text)
+                autocomplete.get_suggestions(&text, is_chat)
             };
             if !suggestions.is_empty() {
                 return Some(suggestions[0].name.clone());
@@ -470,14 +578,14 @@ impl Input {
         self.textarea.insert_str(text);
     }
 
-    pub fn get_autocomplete_suggestions(&self) -> Vec<Suggestion> {
+    pub fn get_autocomplete_suggestions(&self, is_chat: bool) -> Vec<Suggestion> {
         if let Some(autocomplete) = &self.autocomplete {
             let text = self.get_text();
             if text.starts_with('/') {
                 let filter = text.trim_start_matches('/');
-                return autocomplete.get_suggestions(filter);
+                return autocomplete.get_suggestions(filter, is_chat);
             } else {
-                return autocomplete.get_suggestions(&text);
+                return autocomplete.get_suggestions(&text, is_chat);
             }
         }
         Vec::new()

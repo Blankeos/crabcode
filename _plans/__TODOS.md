@@ -1,4 +1,4 @@
-- [ ] Rearchitect - multi-workspace, just like the codex desktop app.
+- [ ] VERY VERY far future. Rearchitect - multi-workspace, just like the codex desktop app.
   - Since it's a terminal, we have a special case to make it run even when closed, or when there are multiple instances of the program running. They have the same sort of "streaming" state. I will elaborate.
   - Mutli-workspace feature is essentially having multiple "chat sessions" running. Currently.. Every run of `crabcode` is its own isolated session.
   - We want to change that by making `crabcode` a multi-workspace agentic TUI by default, just like the codex desktop app, superconductor, etc. But simpler because the idea is literally just like a chat app on the web. Wherein, I want to be able to check the "sessions" in the sidebar, create new chats in the same tab (in this case a tab is a run of `crabcode`).
@@ -6,6 +6,7 @@
   - Because we can create multiple sessions, we can swap between them because each chat session will now be isolated with their own state. No worktrees for now because that's complicated.
   - Since they each have their own state, that means the streaming will have their own states and when I do `/sessions` I can clearly see what's currently streaming and already done. We want to indicate "streaming" with the same icon claude uses (I had a very nice working example here /Users/carlo/Desktop/Projects/lazygitrs
     )
+  - Because we want this isolated state. Make sure that in the UI, I can switch session focus just easily and it won't affect the rendering. Each session I go to stream seamlessly. I can show you my existing architecture for this for webapps, it's very seamless. (INSERT REFERENCE HERE)
   - Also the idea is, we can run create multiple "sessions" in the same run of `crabcode`. And we can even open multiple `crabcode` runs in the terminal, and it'll still have the same states for "streaming" when I check the other sessions with `/session`.
   - /sessions can switch between running sessions. Show a loading (use claude code loading animation), for loading sessions. Group by folders, not by Today, etc. Move the /sessions dialog to the "left". Run as a process? Allow for interruption as well. Maybe via a `/` command or a `ctrl-x` shortcut.
 
@@ -18,3 +19,13 @@
   - Also add Call it `opencode -p`. It's gonna be exactly the same as `opencode run`.
   - Add `--no-session-persistence` flag, exactly like Claude Code.
   - Other than that, very similar to the original implementation.
+
+- [ ] Add a `/copy` command. See opencode reference for "Copy session transcript" for a similar implementation.
+
+- [ ] Minor, When I 'delete' and I delete the current, go to `home` page.
+
+- [x] Minor, after forking. please scroll the conversation all the way down.
+
+- [x] Weird bug: I fork any "agent" message. Anything that has an emoji. I get: 'panicked at src/app.rs:1892:54: byte index 40 is not a char boundary; it is inside '😄' (bytes 37..41) of `Thanks! I'm glad you think I'm cool. 😄'
+
+- [ ] Minor, `chat_only` flag is codesmell... We better come up with strings for deciding "Only show this slash command in this context", just like how we do with 'Shortcuts' (in case shortcuts follow this codesmell as well, come up with a better approach)

@@ -93,6 +93,7 @@ pub enum OverlayFocus {
     PermissionDialog,
     SkillsDialog,
     TimelineDialog,
+    MessageActions,
     WhichKey,
 }
 
@@ -131,6 +132,8 @@ pub struct App {
     pub skills_dialog_state: crate::views::SkillsDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
+    pub message_actions_index: Option<usize>,
+    pub message_actions_dialog: Option<crate::ui::components::dialog::Dialog>,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     openai_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<OpenAIOAuthTaskMessage>>,
     openai_oauth_in_progress: bool,
@@ -226,10 +229,7 @@ impl App {
             );
         }
 
-        crate::skill::init_skill_store(
-            &loaded_config.xdg_config_home,
-            &loaded_config.project_root,
-        );
+        crate::skill::init_skill_store(&loaded_config.xdg_config_home, &loaded_config.project_root);
         crate::command::handlers::register_skill_commands(&mut registry);
 
         if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
@@ -329,6 +329,8 @@ impl App {
             skills_dialog_state,
             which_key_state,
             timeline_dialog_state,
+            message_actions_index: None,
+            message_actions_dialog: None,
             api_key_input,
             openai_oauth_receiver: None,
             openai_oauth_in_progress: false,
@@ -505,7 +507,11 @@ impl App {
             let model = self.model.clone();
             // Use a default max_width for text extraction
             let max_width = 80;
-            if let Some(text) = self.chat_state.chat.get_selected_text(max_width, &model, &colors) {
+            if let Some(text) = self
+                .chat_state
+                .chat
+                .get_selected_text(max_width, &model, &colors)
+            {
                 let _ = crate::utils::clipboard::copy_text(&text);
                 push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
             }
@@ -549,11 +555,11 @@ impl App {
         let colors = self.get_current_theme_colors();
         let model = self.model.clone();
         let max_width = self.last_frame_size.width.saturating_sub(4) as usize;
-        if let Some(text) = self.chat_state.chat.get_selected_text(
-            max_width.max(40),
-            &model,
-            &colors,
-        ) {
+        if let Some(text) =
+            self.chat_state
+                .chat
+                .get_selected_text(max_width.max(40), &model, &colors)
+        {
             if !text.trim().is_empty() {
                 let _ = crate::utils::clipboard::copy_text(&text);
                 push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
@@ -870,13 +876,14 @@ impl App {
                 }
             }
             OverlayFocus::SkillsDialog => {
-                let action =
-                    crate::views::skills_dialog::handle_skills_dialog_key_event(
-                        &mut self.skills_dialog_state,
-                        key,
-                    );
+                let action = crate::views::skills_dialog::handle_skills_dialog_key_event(
+                    &mut self.skills_dialog_state,
+                    key,
+                );
                 match action {
-                    crate::views::skills_dialog::SkillsDialogAction::SelectSkill { skill_id: _ } => {
+                    crate::views::skills_dialog::SkillsDialogAction::SelectSkill {
+                        skill_id: _,
+                    } => {
                         if !self.skills_dialog_state.dialog.is_visible() {
                             self.overlay_focus = OverlayFocus::None;
                         }
@@ -897,20 +904,43 @@ impl App {
                 );
                 match action {
                     crate::views::timeline_dialog::TimelineDialogAction::Close => {
+                        self.chat_state.chat.clear_highlighted_message();
                         self.overlay_focus = OverlayFocus::None;
                         true
                     }
                     crate::views::timeline_dialog::TimelineDialogAction::Select(idx) => {
                         self.chat_state.chat.scroll_to_message_index(idx);
-                        self.overlay_focus = OverlayFocus::None;
+                        self.chat_state.chat.set_highlighted_message(Some(idx));
+                        self.show_message_actions(idx);
                         true
                     }
                     crate::views::timeline_dialog::TimelineDialogAction::Navigate(idx) => {
                         self.chat_state.chat.scroll_to_message_index(idx);
+                        self.chat_state.chat.set_highlighted_message(Some(idx));
                         true
                     }
                     crate::views::timeline_dialog::TimelineDialogAction::Handled => true,
                     crate::views::timeline_dialog::TimelineDialogAction::NotHandled => false,
+                }
+            }
+            OverlayFocus::MessageActions => {
+                if let Some(ref mut dialog) = self.message_actions_dialog {
+                    if key.code == KeyCode::Esc {
+                        self.close_message_actions();
+                        true
+                    } else if key.code == KeyCode::Enter {
+                        if let Some(selected) = dialog.get_selected() {
+                            let action_clone = selected.provider_id.clone();
+                            self.execute_message_action(&action_clone);
+                            true
+                        } else {
+                            dialog.handle_key_event(key)
+                        }
+                    } else {
+                        dialog.handle_key_event(key)
+                    }
+                } else {
+                    false
                 }
             }
             OverlayFocus::WhichKey => {
@@ -1091,7 +1121,7 @@ impl App {
 
     fn update_suggestions(&mut self) {
         if self.input.should_show_suggestions() {
-            let suggestions = self.input.get_autocomplete_suggestions();
+            let suggestions = self.input.get_autocomplete_suggestions(self.base_focus == BaseFocus::Chat);
             if !suggestions.is_empty() {
                 set_suggestions(&mut self.suggestions_popup_state, suggestions);
                 self.overlay_focus = OverlayFocus::SuggestionsPopup;
@@ -1213,9 +1243,33 @@ impl App {
                 mouse,
             ) {
                 self.chat_state.chat.scroll_to_message_index(idx);
+                self.chat_state.chat.set_highlighted_message(Some(idx));
             }
             if !self.timeline_dialog_state.dialog.is_visible() {
+                self.chat_state.chat.clear_highlighted_message();
                 self.overlay_focus = OverlayFocus::None;
+            }
+        } else if self.overlay_focus == OverlayFocus::MessageActions {
+            let maybe_action = if let Some(ref mut dialog) = self.message_actions_dialog {
+                let handled = dialog.handle_mouse_event(mouse);
+                if handled {
+                    dialog.get_selected().map(|s| s.provider_id.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(action) = maybe_action {
+                self.execute_message_action(&action);
+            }
+            if self
+                .message_actions_dialog
+                .as_ref()
+                .map(|d| !d.is_visible())
+                .unwrap_or(false)
+            {
+                self.close_message_actions();
             }
         } else if self.overlay_focus == OverlayFocus::None {
             // If chat has a selection and user clicks outside chat area, clear it
@@ -1236,12 +1290,12 @@ impl App {
                     .direction(ratatui::layout::Direction::Vertical)
                     .constraints(
                         [
-                            ratatui::layout::Constraint::Length(1),  // Top padding
-                            ratatui::layout::Constraint::Min(0),     // Chat content
-                            ratatui::layout::Constraint::Length(1),  // Bottom padding
+                            ratatui::layout::Constraint::Length(1), // Top padding
+                            ratatui::layout::Constraint::Min(0),    // Chat content
+                            ratatui::layout::Constraint::Length(1), // Bottom padding
                             ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(1),  // Help bar
-                            ratatui::layout::Constraint::Length(1),  // Blank
+                            ratatui::layout::Constraint::Length(1), // Help bar
+                            ratatui::layout::Constraint::Length(1), // Blank
                         ]
                         .as_ref(),
                     )
@@ -1274,12 +1328,12 @@ impl App {
                     .direction(ratatui::layout::Direction::Vertical)
                     .constraints(
                         [
-                            ratatui::layout::Constraint::Length(1),  // Top padding
-                            ratatui::layout::Constraint::Min(0),     // Chat content
-                            ratatui::layout::Constraint::Length(1),  // Bottom padding
+                            ratatui::layout::Constraint::Length(1), // Top padding
+                            ratatui::layout::Constraint::Min(0),    // Chat content
+                            ratatui::layout::Constraint::Length(1), // Bottom padding
                             ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(1),  // Help bar
-                            ratatui::layout::Constraint::Length(1),  // Blank
+                            ratatui::layout::Constraint::Length(1), // Help bar
+                            ratatui::layout::Constraint::Length(1), // Blank
                         ]
                         .as_ref(),
                     )
@@ -1313,11 +1367,7 @@ impl App {
                     let text = self.input.get_selected_text();
                     if !text.is_empty() {
                         let _ = crate::utils::clipboard::copy_text(&text);
-                        push_toast(Toast::new(
-                            "Copied to clipboard",
-                            ToastLevel::Info,
-                            None,
-                        ));
+                        push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
                     }
                 }
                 self.update_suggestions();
@@ -1476,6 +1526,10 @@ impl App {
                     self.show_skills_dialog();
                     return;
                 }
+                if parsed.name == "timeline" && self.base_focus == BaseFocus::Chat {
+                    self.open_timeline_dialog();
+                    return;
+                }
                 parsed.prefs_dao = self.prefs_dao.as_ref();
                 parsed.active_model_id = Some(self.model.clone());
 
@@ -1590,6 +1644,10 @@ impl App {
     ) {
         if parsed.name == "themes" {
             self.show_themes_dialog();
+            return;
+        }
+        if parsed.name == "timeline" && self.base_focus == BaseFocus::Chat {
+            self.open_timeline_dialog();
             return;
         }
         parsed.prefs_dao = self.prefs_dao.as_ref();
@@ -1741,14 +1799,159 @@ impl App {
     }
 
     fn open_timeline_dialog(&mut self) {
-        let messages: Vec<crate::session::types::Message> = match self.session_manager.get_current_session() {
-            Some(s) => s.messages.clone(),
+        let messages: Vec<crate::session::types::Message> =
+            match self.session_manager.get_current_session() {
+                Some(s) => s.messages.clone(),
+                None => return,
+            };
+
+        self.timeline_dialog_state.refresh_messages(&messages);
+        self.timeline_dialog_state.show();
+        self.overlay_focus = OverlayFocus::TimelineDialog;
+
+        if let Some(selected) = self.timeline_dialog_state.dialog.get_selected() {
+            if let Ok(idx) = selected.id.parse::<usize>() {
+                self.chat_state.chat.scroll_to_message_index(idx);
+                self.chat_state.chat.set_highlighted_message(Some(idx));
+            }
+        }
+    }
+
+    fn show_message_actions(&mut self, idx: usize) {
+        use crate::ui::components::dialog::{Dialog, DialogItem};
+
+        self.message_actions_index = Some(idx);
+
+        let items = vec![
+            DialogItem {
+                id: "copy".to_string(),
+                name: "Copy".to_string(),
+                group: String::new(),
+                description: "Copy message to clipboard".to_string(),
+                tip: None,
+                provider_id: "copy".to_string(),
+            },
+            DialogItem {
+                id: "fork".to_string(),
+                name: "Fork at this point".to_string(),
+                group: String::new(),
+                description: "Create new session (Will include this message)".to_string(),
+                tip: None,
+                provider_id: "fork".to_string(),
+            },
+            DialogItem {
+                id: "undo".to_string(),
+                name: "Undo".to_string(),
+                group: String::new(),
+                description: "Remove messages from here onward".to_string(),
+                tip: None,
+                provider_id: "undo".to_string(),
+            },
+        ];
+
+        let mut dialog = Dialog::with_items("Message Actions", items);
+        dialog.show();
+        self.message_actions_dialog = Some(dialog);
+        self.overlay_focus = OverlayFocus::MessageActions;
+    }
+
+    fn execute_message_action(&mut self, action: &str) {
+        let idx = match self.message_actions_index {
+            Some(i) => i,
             None => return,
         };
 
-        self.timeline_dialog_state
-            .refresh_messages(&messages);
-        self.timeline_dialog_state.show();
+        match action {
+            "copy" => {
+                if let Some(session) = self.session_manager.get_current_session() {
+                    if let Some(msg) = session.messages.get(idx) {
+                        let _ = crate::utils::clipboard::copy_text(&msg.content);
+                        push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
+                    }
+                }
+                self.close_message_actions();
+            }
+            "fork" => {
+                let messages_to_fork: Vec<crate::session::types::Message> = {
+                    if let Some(session) = self.session_manager.get_current_session() {
+                        session.messages.iter().take(idx + 1).cloned().collect()
+                    } else {
+                        return;
+                    }
+                };
+
+                let fork_title = messages_to_fork
+                    .last()
+                    .map(|msg| {
+                        let preview = msg
+                            .content
+                            .lines()
+                            .find(|line| !line.trim().is_empty())
+                            .unwrap_or("fork");
+                        let truncated: String = preview.chars().take(40).collect();
+                        if truncated.len() < preview.len() {
+                            format!("{}...", truncated)
+                        } else {
+                            truncated
+                        }
+                    })
+                    .unwrap_or_default();
+
+                let _ = self.session_manager.create_session(Some(fork_title));
+                for msg in &messages_to_fork {
+                    let _ = self.session_manager.add_message_to_current_session(msg);
+                }
+
+                self.chat_state.chat.clear();
+                self.chat_state.chat.messages = messages_to_fork;
+                self.chat_state.chat.scroll_offset = usize::MAX;
+                self.chat_state.chat.clear_highlighted_message();
+                self.base_focus = BaseFocus::Chat;
+
+                push_toast(Toast::new(
+                    format!("Forked session from message {}", idx + 1),
+                    ToastLevel::Info,
+                    None,
+                ));
+
+                self.close_message_actions();
+                self.timeline_dialog_state.hide();
+                self.overlay_focus = OverlayFocus::None;
+            }
+            "undo" => {
+                let remaining: Vec<crate::session::types::Message> = {
+                    if let Some(session) = self.session_manager.get_current_session() {
+                        session.messages.truncate(idx);
+                        session.messages.clone()
+                    } else {
+                        return;
+                    }
+                };
+
+                self.chat_state.chat.clear();
+                for msg in &remaining {
+                    self.chat_state.chat.add_message(msg.clone());
+                }
+                self.chat_state.chat.scroll_offset = usize::MAX;
+                self.chat_state.chat.clear_highlighted_message();
+
+                push_toast(Toast::new(
+                    format!("Removed {} message(s)", idx),
+                    ToastLevel::Info,
+                    None,
+                ));
+
+                self.close_message_actions();
+                self.timeline_dialog_state.hide();
+                self.overlay_focus = OverlayFocus::None;
+            }
+            _ => {}
+        }
+    }
+
+    fn close_message_actions(&mut self) {
+        self.message_actions_index = None;
+        self.message_actions_dialog = None;
         self.overlay_focus = OverlayFocus::TimelineDialog;
     }
 
@@ -2026,8 +2229,7 @@ impl App {
 
         items.sort_by(|a, b| a.id.cmp(&b.id));
 
-        self.skills_dialog_state =
-            crate::views::skills_dialog::init_skills_dialog("Skills", items);
+        self.skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", items);
         self.skills_dialog_state.dialog.show();
         self.overlay_focus = OverlayFocus::SkillsDialog;
     }
@@ -2869,6 +3071,12 @@ impl App {
                 size,
                 colors,
             );
+        }
+
+        if self.overlay_focus == OverlayFocus::MessageActions {
+            if let Some(ref mut dialog) = self.message_actions_dialog {
+                dialog.render(f, size, colors);
+            }
         }
 
         if self.overlay_focus == OverlayFocus::SessionRenameDialog

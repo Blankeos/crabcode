@@ -48,10 +48,11 @@ impl TimelineDialogState {
                 .find(|line| !line.trim().is_empty())
                 .map(|line| {
                     let trimmed = line.trim();
-                    if trimmed.len() > 20 {
-                        format!("{}...", &trimmed[..20])
+                    let truncated: String = trimmed.chars().take(20).collect();
+                    if truncated.len() < trimmed.len() {
+                        format!("{}...", truncated)
                     } else {
-                        trimmed.to_string()
+                        truncated
                     }
                 })
                 .unwrap_or_else(|| "(empty)".to_string());

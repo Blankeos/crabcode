@@ -422,6 +422,23 @@ pub fn handle_themes<'a>(
     })
 }
 
+pub fn handle_timeline<'a>(
+    parsed: &'a ParsedCommand<'a>,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error(
+                "Usage: /timeline".to_string(),
+            );
+        }
+
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_skills<'a>(
     parsed: &'a ParsedCommand<'a>,
     _sm: &'a mut SessionManager,
@@ -465,6 +482,7 @@ pub fn register_skill_commands(registry: &mut Registry) {
                 description: skill.description.clone().unwrap_or_default(),
                 handler: handle_skill_command,
                 hidden_tokens: vec![],
+                chat_only: false,
             });
         }
     }
@@ -521,6 +539,7 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "Quit crabcode".to_string(),
         handler: handle_exit,
         hidden_tokens: vec![],
+        chat_only: false,
     });
 
     registry.register(Command {
@@ -528,6 +547,7 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "List all sessions".to_string(),
         handler: handle_sessions,
         hidden_tokens: vec!["resume".to_string()],
+        chat_only: false,
     });
 
     registry.register(Command {
@@ -535,6 +555,7 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "Switch to home screen".to_string(),
         handler: handle_new,
         hidden_tokens: vec![],
+        chat_only: false,
     });
 
     registry.register(Command {
@@ -542,6 +563,7 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "Switch to home screen".to_string(),
         handler: handle_new,
         hidden_tokens: vec![],
+        chat_only: false,
     });
 
     registry.register(Command {
@@ -549,6 +571,7 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "Connect to a model provider".to_string(),
         handler: handle_connect,
         hidden_tokens: vec![],
+        chat_only: false,
     });
 
     registry.register(Command {
@@ -556,6 +579,7 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "List available models".to_string(),
         handler: handle_models,
         hidden_tokens: vec![],
+        chat_only: false,
     });
 
     registry.register(Command {
@@ -563,6 +587,7 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "Choose a theme".to_string(),
         handler: handle_themes,
         hidden_tokens: vec![],
+        chat_only: false,
     });
 
     registry.register(Command {
@@ -570,6 +595,15 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "Refresh the models.dev cache".to_string(),
         handler: handle_refreshmodels,
         hidden_tokens: vec![],
+        chat_only: false,
+    });
+
+    registry.register(Command {
+        name: "timeline".to_string(),
+        description: "Open the message timeline dialog".to_string(),
+        handler: handle_timeline,
+        hidden_tokens: vec![],
+        chat_only: true,
     });
 
     registry.register(Command {
@@ -577,6 +611,7 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "List available skills".to_string(),
         handler: handle_skills,
         hidden_tokens: vec![],
+        chat_only: false,
     });
 }
 
@@ -855,7 +890,7 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 10);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
@@ -864,6 +899,7 @@ mod tests {
         assert!(names.contains(&"themes".to_string()));
         assert!(names.contains(&"home".to_string()));
         assert!(names.contains(&"refreshmodels".to_string()));
+        assert!(names.contains(&"timeline".to_string()));
         assert!(names.contains(&"skills".to_string()));
     }
 
