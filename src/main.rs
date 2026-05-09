@@ -43,6 +43,30 @@ use std::io;
 use std::sync::Mutex;
 use std::time::Duration;
 
+const POST_CLOSE_LOGO: &str = include_str!("../crabcode-logo.txt");
+
+struct PostCloseInfo {
+    session_id: String,
+    session_title: String,
+}
+
+fn format_post_close_message(info: Option<&PostCloseInfo>) -> String {
+    let mut msg = String::new();
+
+    for line in POST_CLOSE_LOGO.lines() {
+        msg.push_str(line);
+        msg.push('\n');
+    }
+
+    if let Some(info) = info {
+        msg.push('\n');
+        msg.push_str(&format!("  {:<10}{}\n", "Session", info.session_title));
+        msg.push_str(&format!("  {:<10}crabcode -s {}\n", "Continue", info.session_id));
+    }
+
+    msg
+}
+
 lazy_static::lazy_static! {
     static ref TOAST_MANAGER: Mutex<ToastManager> = Mutex::new(ToastManager::new());
 }
@@ -61,12 +85,28 @@ pub fn get_toast_manager() -> &'static Mutex<ToastManager> {
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {}
+struct Args {
+    /// Resume a session by ID
+    #[arg(short = 's', long = "session")]
+    session: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _args = Args::parse();
+    let args = Args::parse();
     let mut app = App::new()?;
+
+    if let Some(ref session_id) = args.session {
+        app.session_manager.switch_session(session_id);
+        if let Some(session) = app.session_manager.get_session(session_id) {
+            app.chat_state.chat.clear();
+            let messages = session.messages.clone();
+            for message in messages {
+                app.chat_state.chat.add_message(message);
+            }
+        }
+        app.base_focus = app::BaseFocus::Chat;
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -93,6 +133,21 @@ async fn main() -> Result<()> {
 
     let result = run_event_loop(&mut terminal, &mut app).await;
 
+    let close_info = {
+        let session_id = app.session_manager.get_current_session_id().cloned();
+        let session_title = app
+            .session_manager
+            .get_current_session()
+            .map(|s| s.title.clone());
+        match (session_id, session_title) {
+            (Some(session_id), Some(session_title)) => Some(PostCloseInfo {
+                session_id,
+                session_title,
+            }),
+            _ => None,
+        }
+    };
+
     disable_raw_mode()?;
     if supports_keyboard_enhancement().unwrap_or(false) {
         execute!(
@@ -111,6 +166,8 @@ async fn main() -> Result<()> {
         )?;
     }
     terminal.show_cursor()?;
+
+    print!("{}", format_post_close_message(close_info.as_ref()));
 
     result
 }

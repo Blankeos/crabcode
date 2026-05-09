@@ -267,12 +267,7 @@ impl Discovery {
                 if model.attachment {
                     capabilities.push("attachment".to_string());
                 }
-                if model.reasoning {
-                    capabilities.push("reasoning".to_string());
-                }
-                if model.tool_call {
-                    capabilities.push("tool_call".to_string());
-                }
+
                 if model.structured_output {
                     capabilities.push("structured_output".to_string());
                 }
