@@ -1646,6 +1646,18 @@ impl App {
                     self.show_skills_dialog();
                     return;
                 }
+                if parsed.name == "rename" && parsed.args.is_empty() && self.base_focus == BaseFocus::Chat {
+                    if let Some(session) = self.session_manager.get_current_session() {
+                        let id = session.id.clone();
+                        let title = session.title.clone();
+                        drop(session);
+                        self.session_rename_dialog_state
+                            .set_colors(self.get_current_theme_colors());
+                        self.session_rename_dialog_state.show(id, title);
+                        self.overlay_focus = OverlayFocus::SessionRenameDialog;
+                    }
+                    return;
+                }
                 if parsed.name == "timeline" && self.base_focus == BaseFocus::Chat {
                     self.open_timeline_dialog();
                     return;
@@ -1764,6 +1776,18 @@ impl App {
     ) {
         if parsed.name == "themes" {
             self.show_themes_dialog();
+            return;
+        }
+        if parsed.name == "rename" && parsed.args.is_empty() && self.base_focus == BaseFocus::Chat {
+            if let Some(session) = self.session_manager.get_current_session() {
+                let id = session.id.clone();
+                let title = session.title.clone();
+                drop(session);
+                self.session_rename_dialog_state
+                    .set_colors(self.get_current_theme_colors());
+                self.session_rename_dialog_state.show(id, title);
+                self.overlay_focus = OverlayFocus::SessionRenameDialog;
+            }
             return;
         }
         if parsed.name == "timeline" && self.base_focus == BaseFocus::Chat {

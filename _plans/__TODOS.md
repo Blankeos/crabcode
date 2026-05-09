@@ -10,22 +10,30 @@
   - Also the idea is, we can run create multiple "sessions" in the same run of `crabcode`. And we can even open multiple `crabcode` runs in the terminal, and it'll still have the same states for "streaming" when I check the other sessions with `/session`.
   - /sessions can switch between running sessions. Show a loading (use claude code loading animation), for loading sessions. Group by folders, not by Today, etc. Move the /sessions dialog to the "left". Run as a process? Allow for interruption as well. Maybe via a `/` command or a `ctrl-x` shortcut.
 
-- [ ] Just like opencode. I want to see the `94.4.k (9%) ∙ $0.39` detail just next to the helpful tips under the input box. Use the same data sources.
+- [x] Just like opencode. I want to see the `94.4.k (9%) ∙ $0.39` detail just next to the helpful tips under the input box. Use the same data sources.
 
-- [ ] Scrollbar, make it like opencode. As thin as opencode. That's the only change I want really.
+- [x] Scrollbar, make it like opencode. As thin as opencode. That's the only change I want really.
 
-- [ ] Add print-mode just like `opencode run "<PROMPT>"`. See the reference. But two things I want to deviate from the original implementation:
+- [x] Add print-mode just like `opencode run "<PROMPT>"`. See the reference. But two things I want to deviate from the original implementation:
   - The preamble, just print whatever is printed, that's IT!
   - Also add Call it `opencode -p`. It's gonna be exactly the same as `opencode run`.
   - Add `--no-session-persistence` flag, exactly like Claude Code.
   - Other than that, very similar to the original implementation.
 
-- [ ] Add a `/copy` command. See opencode reference for "Copy session transcript" for a similar implementation.
+- [x] Add a `/copy` command. See opencode reference for "Copy session transcript" for a similar implementation.
 
-- [ ] Minor, When I 'delete' and I delete the current, go to `home` page.
+- [x] Minor, When I 'delete' and I delete the current, go to `home` page.
 
 - [x] Minor, after forking. please scroll the conversation all the way down.
 
 - [x] Weird bug: I fork any "agent" message. Anything that has an emoji. I get: 'panicked at src/app.rs:1892:54: byte index 40 is not a char boundary; it is inside '😄' (bytes 37..41) of `Thanks! I'm glad you think I'm cool. 😄'
 
 - [ ] Minor, `chat_only` flag is codesmell... We better come up with strings for deciding "Only show this slash command in this context", just like how we do with 'Shortcuts' (in case shortcuts follow this codesmell as well, come up with a better approach)
+
+- [ ] Chore: Create a /checkparity-opencode (the most important thing is only the agent-loop, nothing else. We do differ a bit in terms of UX anyway, but the agent-loop, tool calling, etc has to be very very close so that the performance is mostly the same) and /checkparity-codex (au) command
+
+- [ ] Feature: Subagents just like opencode.
+
+- [x] Feature: Rename command `/rename` - parity with opencode.
+
+- [ ] Bug: theme is not persisted? Or is it by config? Just make theme be based on state now, no more config for it.

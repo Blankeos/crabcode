@@ -488,6 +488,28 @@ pub fn register_skill_commands(registry: &mut Registry) {
     }
 }
 
+pub fn handle_rename<'a>(
+    parsed: &'a ParsedCommand<'a>,
+    sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let session_id = sm.get_current_session_id().cloned();
+    let new_title = if parsed.args.is_empty() {
+        None
+    } else {
+        Some(parsed.args.join(" "))
+    };
+
+    Box::pin(async move {
+        let (Some(sid), Some(title)) = (session_id, new_title) else {
+            return CommandResult::Error("Usage: /rename <new title>".to_string());
+        };
+        match sm.rename_session(&sid, title) {
+            Ok(_) => CommandResult::Success(String::new()),
+            Err(e) => CommandResult::Error(format!("Failed to rename: {:?}", e)),
+        }
+    })
+}
+
 pub fn handle_copy<'a>(
     _parsed: &'a ParsedCommand<'a>,
     _sm: &'a mut SessionManager,
@@ -595,6 +617,14 @@ pub fn register_all_commands(registry: &mut Registry) {
         handler: handle_themes,
         hidden_tokens: vec![],
         chat_only: false,
+    });
+
+    registry.register(Command {
+        name: "rename".to_string(),
+        description: "Rename the current session".to_string(),
+        handler: handle_rename,
+        hidden_tokens: vec![],
+        chat_only: true,
     });
 
     registry.register(Command {
