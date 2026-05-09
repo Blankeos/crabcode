@@ -215,7 +215,13 @@ impl Dialog {
 
                 let combined_strings: Vec<String> = items
                     .iter()
-                    .map(|item| format!("{} {}", group, item.name))
+                    .map(|item| {
+                        let base = format!("{} {}", group, item.name);
+                        match &item.tip {
+                            Some(tip) => format!("{} {}", base, tip),
+                            None => base,
+                        }
+                    })
                     .collect();
 
                 let matched: Vec<(&str, u32)> = pattern.match_list(
@@ -229,7 +235,14 @@ impl Dialog {
                         .filter_map(|(combined_str, score)| {
                             items
                                 .iter()
-                                .find(|item| format!("{} {}", group, item.name) == *combined_str)
+                                .find(|item| {
+                                    let base = format!("{} {}", group, item.name);
+                                    let s = match &item.tip {
+                                        Some(tip) => format!("{} {}", base, tip),
+                                        None => base,
+                                    };
+                                    s == *combined_str
+                                })
                                 .map(|item| (item.clone(), score))
                         })
                         .collect();

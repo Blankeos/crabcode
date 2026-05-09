@@ -184,7 +184,7 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
     // Scale like the Dialog component (which is 70×25) — broad enough to visually
     // anchor the popup and cover behind-the-modal content (logo, scrollbar artefacts).
     const POPUP_WIDTH: u16 = 58;
-    const MIN_POPUP_HEIGHT: u16 = 22;
+    const MIN_POPUP_HEIGHT: u16 = 16;
 
     let popup_width = area.width.min(POPUP_WIDTH);
     let popup_height = area

@@ -9,7 +9,7 @@ use ratatui::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tui_textarea::{Input as TuiInput, TextArea};
+use tui_textarea::{CursorMove, Input as TuiInput, TextArea};
 
 #[derive(Debug)]
 pub struct SessionRenameDialogState {
@@ -52,6 +52,7 @@ impl SessionRenameDialogState {
         self.input_textarea.set_placeholder_text("Session title");
         self.input_textarea
             .set_cursor_line_style(Style::default().fg(self.colors.primary));
+        self.input_textarea.move_cursor(CursorMove::End);
         self.visible = true;
         self.is_input_focused.store(true, Ordering::SeqCst);
     }
