@@ -336,24 +336,32 @@ async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
-    // Use a shorter poll duration for smoother animations (16ms = ~60fps max)
-    const POLL_DURATION: Duration = Duration::from_millis(16);
+    // Adaptive poll duration: fast when animations run (home page / streaming),
+    // slow otherwise to avoid wasting CPU on unnecessary re-renders.
+    const FAST_POLL: Duration = Duration::from_millis(16);  // ~60fps for animations
+    const SLOW_POLL: Duration = Duration::from_millis(250); // ~4fps idle
 
     while app.running {
         let loop_start = std::time::Instant::now();
+
+        let animation_needed = app.is_animation_running();
 
         app.process_streaming_chunks();
         app.update_animations();
         remove_expired_toasts();
         terminal.draw(|f| app.render(f))?;
 
+        let poll_duration = if animation_needed {
+            FAST_POLL
+        } else {
+            SLOW_POLL
+        };
+
         // Calculate how long the loop iteration took
         let elapsed = loop_start.elapsed();
 
-        // Poll for events, but with a dynamic timeout to maintain consistent frame timing
-        // If we spent less than POLL_DURATION processing, wait for the remainder
-        let poll_timeout = if elapsed < POLL_DURATION {
-            POLL_DURATION - elapsed
+        let poll_timeout = if elapsed < poll_duration {
+            poll_duration - elapsed
         } else {
             Duration::from_millis(0)
         };

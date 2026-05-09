@@ -51,6 +51,10 @@ pub struct Chat {
     pub selection: Selection,
     /// Index of the message highlighted by timeline navigation (None = no highlight)
     pub highlighted_message_index: Option<usize>,
+    /// Render cache — fingerprints content to skip expensive re-formatting
+    cached_lines: Vec<Line<'static>>,
+    cached_positions: Vec<usize>,
+    cached_fingerprint: u64,
 }
 
 // Minimum elapsed time before showing tokens/s (250ms)
@@ -97,6 +101,9 @@ impl Chat {
             message_line_positions: Vec::new(),
             selection: Selection::new(),
             highlighted_message_index: None,
+            cached_lines: Vec::new(),
+            cached_positions: Vec::new(),
+            cached_fingerprint: 0,
         }
     }
 
@@ -127,11 +134,15 @@ impl Chat {
             message_line_positions: Vec::new(),
             selection: Selection::new(),
             highlighted_message_index: None,
+            cached_lines: Vec::new(),
+            cached_positions: Vec::new(),
+            cached_fingerprint: 0,
         }
     }
 
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message);
+        self.invalidate_cache();
         if self.should_autoscroll() {
             // Reset scroll to show new content at bottom
             // Content height will be recalculated on next render
@@ -252,6 +263,23 @@ impl Chat {
         self.streaming_paused_duration = std::time::Duration::default();
         self.streaming_token_counter = None;
         self.selection.clear();
+        self.cached_lines.clear();
+        self.cached_fingerprint = 0;
+    }
+
+    fn invalidate_cache(&mut self) {
+        self.cached_fingerprint = 0;
+    }
+
+    fn compute_fingerprint(&self, max_width: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.messages.len().hash(&mut h);
+        for msg in &self.messages {
+            msg.content.len().hash(&mut h);
+        }
+        max_width.hash(&mut h);
+        h.finish()
     }
 
     pub fn begin_streaming_turn(&mut self) {
@@ -719,10 +747,8 @@ impl Chat {
     ) {
         self.viewport_height = area.height as usize;
 
-        // Update streaming renderer before calculating heights
         self.update_streaming_renderer();
 
-        // Calculate content area (leave space for scrollbar + right padding)
         let content_area = Rect {
             x: area.x,
             y: area.y,
@@ -730,31 +756,91 @@ impl Chat {
             height: area.height,
         };
 
-        // Calculate total content height first
-        let total_height =
-            self.calculate_content_height(content_area.width as usize, model, colors);
-        self.content_height = total_height;
+        let max_width = content_area.width as usize;
 
-        // Clamp scroll offset
-        let max_offset = self.content_height.saturating_sub(self.viewport_height);
-        self.scroll_offset = self.scroll_offset.min(max_offset);
-        self.update_scrollbar();
+        let fingerprint = self.compute_fingerprint(max_width);
+        let cache_valid = !self.cached_lines.is_empty() && fingerprint == self.cached_fingerprint;
 
-        // Now render the visible content
+        let mut positions: Vec<usize>;
+        let mut all_lines: Vec<Line<'static>>;
+
+        if cache_valid {
+            positions = self.cached_positions.clone();
+            all_lines = self.cached_lines.clone();
+        } else {
+            let message_count = self.messages.len();
+            let streaming_idx = self.streaming_assistant_idx();
+            let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
+
+            positions = Vec::with_capacity(message_count);
+            all_lines = Vec::new();
+
+            for (idx, message) in self.messages.iter().enumerate() {
+                positions.push(all_lines.len());
+                let attached =
+                    idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
+                let message_lines = self.format_message(
+                    message,
+                    max_width,
+                    idx,
+                    message_count,
+                    streaming_content,
+                    streaming_idx,
+                    model,
+                    colors,
+                    attached,
+                );
+                all_lines.extend(message_lines.into_iter().map(line_to_static));
+            }
+
+            self.cached_lines = all_lines.clone();
+            self.cached_positions = positions.clone();
+            self.cached_fingerprint = fingerprint;
+        }
+
+        let content_height = all_lines.len();
+
+        // Apply highlight
+        let hl_idx = self.highlighted_message_index;
+        let hl_bg = colors.interactive;
+        if let Some(hl) = hl_idx {
+            if hl < positions.len() {
+                let start = positions[hl];
+                let end = if hl + 1 < positions.len() {
+                    positions[hl + 1]
+                } else {
+                    all_lines.len()
+                };
+                for line in all_lines
+                    .iter_mut()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                {
+                    for span in line.spans.iter_mut() {
+                        span.style = span.style.bg(hl_bg);
+                    }
+                }
+            }
+        }
+
         let content_lines =
-            self.render_visible_messages(content_area.width as usize, model, colors);
+            crate::ui::selection::apply_selection_to_lines(all_lines, &self.selection, colors.accent);
 
-        // Store scroll_offset before creating paragraph
-        let scroll_offset = self.scroll_offset;
+        let viewport = self.viewport_height;
+        let max_offset = content_height.saturating_sub(viewport);
+        let clamped_scroll = self.scroll_offset.min(max_offset);
 
-        // Render content
         let paragraph = Paragraph::new(Text::from(content_lines))
             .wrap(Wrap { trim: false })
-            .scroll((scroll_offset as u16, 0));
+            .scroll((clamped_scroll as u16, 0));
 
         f.render_widget(paragraph, content_area);
 
-        // Render scrollbar
+        self.content_height = content_height;
+        self.message_line_positions = positions;
+        self.scroll_offset = clamped_scroll;
+        self.update_scrollbar();
+
         let scrollbar_area = Rect {
             x: area.x + area.width.saturating_sub(1),
             y: area.y,
@@ -769,70 +855,6 @@ impl Chat {
             scrollbar_area,
             &mut self.scrollbar_state,
         );
-    }
-
-    fn calculate_content_height(
-        &mut self,
-        max_width: usize,
-        model: &str,
-        colors: &ThemeColors,
-    ) -> usize {
-        let mut total_height = 0;
-        let message_count = self.messages.len();
-        let streaming_idx = self.streaming_assistant_idx();
-        let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
-
-        self.message_line_positions.clear();
-        self.message_line_positions.reserve(message_count);
-
-        for (idx, message) in self.messages.iter().enumerate() {
-            self.message_line_positions.push(total_height);
-            let attached_to_assistant =
-                idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
-            let message_lines = self.format_message(
-                message,
-                max_width,
-                idx,
-                message_count,
-                streaming_content,
-                streaming_idx,
-                model,
-                colors,
-                attached_to_assistant,
-            );
-            total_height += message_lines.len();
-        }
-
-        total_height
-    }
-
-    fn render_visible_messages<'a>(
-        &'a self,
-        max_width: usize,
-        model: &'a str,
-        colors: &'a ThemeColors,
-    ) -> Vec<Line<'a>> {
-        let mut lines = self.build_all_lines(max_width, model, colors);
-
-        if let Some(hl_idx) = self.highlighted_message_index {
-            if hl_idx < self.message_line_positions.len() {
-                let start_line = self.message_line_positions[hl_idx];
-                let end_line = if hl_idx + 1 < self.message_line_positions.len() {
-                    self.message_line_positions[hl_idx + 1]
-                } else {
-                    lines.len()
-                };
-
-                let hl_bg = colors.interactive;
-                for line in lines.iter_mut().skip(start_line).take(end_line.saturating_sub(start_line)) {
-                    for span in line.spans.iter_mut() {
-                        span.style = span.style.bg(hl_bg);
-                    }
-                }
-            }
-        }
-
-        crate::ui::selection::apply_selection_to_lines(lines, &self.selection, colors.accent)
     }
 
     fn build_all_lines<'a>(
@@ -1274,6 +1296,17 @@ impl Chat {
         }
         // Default to Plan if no preceding user message with agent_mode found
         "Plan".to_string()
+    }
+}
+
+fn line_to_static(line: Line<'_>) -> Line<'static> {
+    Line {
+        spans: line.spans.into_iter().map(|span| Span {
+            content: std::borrow::Cow::Owned(span.content.into_owned()),
+            style: span.style,
+        }).collect(),
+        style: Style::default(),
+        alignment: line.alignment,
     }
 }
 

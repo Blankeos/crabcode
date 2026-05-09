@@ -165,8 +165,11 @@ pub fn apply_selection_to_lines<'a>(
             if line_idx < s_line || line_idx > e_line {
                 return line;
             }
-            let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let line_width = unicode_width::UnicodeWidthStr::width(line_text.as_str());
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
             let sel_range = selection.selection_range_in_line(line_idx, line_width);
 
             // If entire line is selected, just style all spans

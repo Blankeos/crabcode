@@ -166,6 +166,8 @@ pub struct App {
     tool_call_message_indices: std::collections::HashMap<String, usize>,
     tool_call_order: Vec<String>,
     discovery: Option<crate::model::discovery::Discovery>,
+    cached_usage_text: String,
+    cached_usage_check: (usize, usize),
 }
 
 impl App {
@@ -367,6 +369,8 @@ impl App {
             tool_call_message_indices: std::collections::HashMap::new(),
             tool_call_order: Vec::new(),
             discovery,
+            cached_usage_text: String::new(),
+            cached_usage_check: (0, 0),
         })
     }
 
@@ -2702,6 +2706,10 @@ impl App {
         }
     }
 
+    pub fn is_animation_running(&self) -> bool {
+        self.base_focus == BaseFocus::Home || self.is_streaming
+    }
+
     pub fn process_streaming_chunks(&mut self) {
         self.process_openai_oauth_events();
 
@@ -3079,7 +3087,20 @@ impl App {
         self.last_frame_size = size;
         let colors = self.get_current_theme_colors();
 
-        let usage_text = self.session_usage_text();
+        let fingerprint: (usize, usize) = (
+            self.chat_state.chat.messages.len(),
+            self.chat_state
+                .chat
+                .messages
+                .iter()
+                .filter_map(|m| m.token_count)
+                .sum(),
+        );
+        if self.cached_usage_check != fingerprint {
+            self.cached_usage_check = fingerprint;
+            self.cached_usage_text = self.session_usage_text();
+        }
+        let usage_text = &self.cached_usage_text;
 
         match self.base_focus {
             BaseFocus::Home => {
