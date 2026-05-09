@@ -21,6 +21,12 @@ impl Input {
     pub fn new() -> Self {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
+        // Default selection style (will be updated per-theme in render)
+        textarea.set_selection_style(
+            Style::default()
+                .bg(ratatui::style::Color::Rgb(255, 140, 0))
+                .fg(ratatui::style::Color::Reset),
+        );
         let prompt_history = PromptHistoryCache::new().ok();
         Self {
             textarea,
@@ -71,6 +77,13 @@ impl Input {
 
         // Store the textarea area for mouse event handling
         self.textarea_area = Some(chunks[1]);
+
+        // Configure selection style to match theme
+        self.textarea.set_selection_style(
+            ratatui::style::Style::default()
+                .bg(colors.accent)
+                .fg(colors.text),
+        );
 
         // Ensure viewport_top stays within valid bounds
         let line_count = self.textarea.lines().len();
@@ -242,15 +255,10 @@ impl Input {
                 let line_count = self.textarea.lines().len();
                 let visible_lines = textarea_area.height as usize;
 
-                // Only scroll if content exceeds viewport
                 if line_count > visible_lines {
-                    // Calculate max valid viewport top position
                     let max_viewport_top = line_count.saturating_sub(visible_lines);
-
-                    // Only scroll down if we haven't reached the bottom yet
                     if self.viewport_top < max_viewport_top {
                         self.viewport_top += 1;
-                        // Move cursor to keep it visible in the viewport
                         let target_row = self.viewport_top + visible_lines - 1;
                         let (_, cursor_col) = self.textarea.cursor();
                         self.textarea
@@ -263,12 +271,9 @@ impl Input {
                 let line_count = self.textarea.lines().len();
                 let visible_lines = textarea_area.height as usize;
 
-                // Only scroll if content exceeds viewport
                 if line_count > visible_lines {
-                    // Only scroll up if we're not at the top already
                     if self.viewport_top > 0 {
                         self.viewport_top -= 1;
-                        // Move cursor to keep it visible in the viewport
                         let target_row = self.viewport_top;
                         let (_, cursor_col) = self.textarea.cursor();
                         self.textarea
@@ -278,32 +283,86 @@ impl Input {
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                // Calculate cursor position from mouse coordinates
                 let relative_x = mouse_x.saturating_sub(textarea_area.x);
                 let relative_y = mouse_y.saturating_sub(textarea_area.y);
 
-                // Get the lines to calculate proper column position
                 let lines = self.textarea.lines();
-                // Account for viewport offset when calculating target row
                 let target_row = self.viewport_top + relative_y as usize;
 
                 if target_row < lines.len() {
                     let line = &lines[target_row];
-                    // Clamp column to line length
                     let target_col = (relative_x as usize).min(line.len());
+                    // Position cursor and start selection for potential drag
                     self.textarea
                         .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
+                    self.textarea.start_selection();
                 } else {
-                    // Clicked beyond the last line, move to end of last line
                     let last_row = lines.len().saturating_sub(1);
                     let last_col = lines[last_row].len();
                     self.textarea
                         .move_cursor(CursorMove::Jump(last_row as u16, last_col as u16));
+                    self.textarea.start_selection();
                 }
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                // Extend the ongoing selection
+                let relative_x = mouse_x.saturating_sub(textarea_area.x);
+                let relative_y = mouse_y.saturating_sub(textarea_area.y);
+
+                let lines = self.textarea.lines();
+                let target_row = self.viewport_top + relative_y as usize;
+
+                if target_row < lines.len() {
+                    let line = &lines[target_row];
+                    let target_col = (relative_x as usize).min(line.len());
+                    // Since start_selection() was called and is_selecting() is true,
+                    // move_cursor extends the selection
+                    self.textarea
+                        .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Right) => {
+                // Right-click clears selection
+                self.textarea.cancel_selection();
                 true
             }
             _ => false,
         }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.textarea.is_selecting()
+    }
+
+    pub fn get_selected_text(&self) -> String {
+        let range = match self.textarea.selection_range() {
+            Some(r) => r,
+            None => return String::new(),
+        };
+        let ((start_row, start_col), (end_row, end_col)) = range;
+        let lines = self.textarea.lines();
+
+        let mut result = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            if i < start_row || i > end_row {
+                continue;
+            }
+            let start = if i == start_row { start_col } else { 0 };
+            let end = if i == end_row { end_col } else { line.len() };
+
+            let line_str: String = line.chars().skip(start).take(end.saturating_sub(start)).collect();
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&line_str);
+        }
+        result
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.textarea.cancel_selection();
     }
 
     pub fn should_show_suggestions(&self) -> bool {
@@ -358,6 +417,11 @@ impl Input {
     pub fn clear(&mut self) {
         self.textarea = TextArea::default();
         self.textarea.set_cursor_line_style(Style::default());
+        self.textarea.set_selection_style(
+            Style::default()
+                .bg(ratatui::style::Color::Rgb(255, 140, 0))
+                .fg(ratatui::style::Color::Reset),
+        );
         self.viewport_top = 0;
         self.draft_text = None;
         if let Some(ref mut history) = self.prompt_history {
@@ -385,6 +449,11 @@ impl Input {
     pub fn set_text(&mut self, text: &str) {
         self.textarea = TextArea::default();
         self.textarea.set_cursor_line_style(Style::default());
+        self.textarea.set_selection_style(
+            Style::default()
+                .bg(ratatui::style::Color::Rgb(255, 140, 0))
+                .fg(ratatui::style::Color::Reset),
+        );
         self.textarea.insert_str(text);
         self.viewport_top = 0;
     }

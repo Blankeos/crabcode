@@ -17,6 +17,7 @@ pub enum WhichKeyAction {
     ShowModels,
     ShowThemes,
     ShowSessions,
+    ShowTimeline,
     NewSession,
     Quit,
     ScrollUp,
@@ -43,6 +44,11 @@ pub struct WhichKeyState {
 impl WhichKeyState {
     pub fn new() -> Self {
         let bindings = vec![
+            KeyBinding {
+                key: "g".to_string(),
+                description: "Open Messages Timeline dialog".to_string(),
+                action: WhichKeyAction::ShowTimeline,
+            },
             KeyBinding {
                 key: "m".to_string(),
                 description: "Open Models dialog".to_string(),
@@ -121,6 +127,10 @@ impl WhichKeyState {
         self.update_last_key_time();
 
         match event.code {
+            KeyCode::Char('g') | KeyCode::Char('G') => {
+                self.hide();
+                WhichKeyAction::ShowTimeline
+            }
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 self.hide();
                 WhichKeyAction::ShowModels
@@ -214,11 +224,11 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                      // top margin
-            Constraint::Length(1),                      // title
-            Constraint::Length(bindings_count as u16),  // bindings
-            Constraint::Length(1),                      // spacer
-            Constraint::Length(1),                      // footer
+            Constraint::Length(1),                     // top margin
+            Constraint::Length(1),                     // title
+            Constraint::Length(bindings_count as u16), // bindings
+            Constraint::Length(1),                     // spacer
+            Constraint::Length(1),                     // footer
         ])
         .split(content_area);
 
@@ -279,10 +289,7 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
         }
     }
 
-    f.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Left),
-        chunks[2],
-    );
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), chunks[2]);
 
     // Footer — dim hint matching Dialog footer style
     f.render_widget(

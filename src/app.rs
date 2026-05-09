@@ -92,6 +92,7 @@ pub enum OverlayFocus {
     SessionRenameDialog,
     PermissionDialog,
     SkillsDialog,
+    TimelineDialog,
     WhichKey,
 }
 
@@ -129,6 +130,7 @@ pub struct App {
     pub permission_dialog_state: PermissionDialogState,
     pub skills_dialog_state: crate::views::SkillsDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
+    pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     openai_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<OpenAIOAuthTaskMessage>>,
     openai_oauth_in_progress: bool,
@@ -191,6 +193,7 @@ impl App {
         let permission_dialog_state = init_permission_dialog();
         let skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
         let which_key_state = crate::views::which_key::init_which_key();
+        let timeline_dialog_state = crate::views::timeline_dialog::init_timeline_dialog();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
         let session_manager = SessionManager::new()
@@ -200,7 +203,7 @@ impl App {
         let prefs_dao = match crate::persistence::PrefsDAO::new() {
             Ok(dao) => Some(dao),
             Err(e) => {
-                eprintln!("Warning: Failed to initialize preferences DAO: {}", e);
+                crate::startup_diag!("Warning: Failed to initialize preferences DAO: {}", e);
                 None
             }
         };
@@ -208,16 +211,16 @@ impl App {
         let loaded_config = crate::config::ConfigLoader::load()?;
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
-                eprintln!("Config: {}", msg);
+                crate::startup_diag!("Config: {}", msg);
             }
         }
         if !loaded_config.diagnostics.warnings.is_empty() {
             for msg in &loaded_config.diagnostics.warnings {
-                eprintln!("Config warning: {}", msg);
+                crate::startup_diag!("Config warning: {}", msg);
             }
         }
         if !loaded_config.diagnostics.unimplemented_keys.is_empty() {
-            eprintln!(
+            crate::startup_diag!(
                 "Config: unimplemented keys present: {}",
                 loaded_config.diagnostics.unimplemented_keys.join(", ")
             );
@@ -239,7 +242,7 @@ impl App {
             crate::sound::resolve_effective_sounds(&loaded_config.merged_config.sounds);
         if !sound_warnings.is_empty() {
             for msg in &sound_warnings {
-                eprintln!("Sound warning: {}", msg);
+                crate::startup_diag!("Sound warning: {}", msg);
             }
         }
 
@@ -325,6 +328,7 @@ impl App {
             permission_dialog_state,
             skills_dialog_state,
             which_key_state,
+            timeline_dialog_state,
             api_key_input,
             openai_oauth_receiver: None,
             openai_oauth_in_progress: false,
@@ -494,9 +498,76 @@ impl App {
         self.dark_mode = !self.dark_mode;
     }
 
+    fn try_copy_selection(&mut self) -> bool {
+        // Check chat selection
+        if self.chat_state.chat.has_selection() {
+            let colors = self.get_current_theme_colors();
+            let model = self.model.clone();
+            // Use a default max_width for text extraction
+            let max_width = 80;
+            if let Some(text) = self.chat_state.chat.get_selected_text(max_width, &model, &colors) {
+                let _ = crate::utils::clipboard::copy_text(&text);
+                push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
+            }
+            self.chat_state.chat.selection.clear();
+            return true;
+        }
+        // Check input selection
+        if self.input.has_selection() {
+            let text = self.input.get_selected_text();
+            if !text.is_empty() {
+                let _ = crate::utils::clipboard::copy_text(&text);
+                push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
+            }
+            self.input.clear_selection();
+            return true;
+        }
+        false
+    }
+
+    fn clear_selection(&mut self) -> bool {
+        if self.chat_state.chat.has_selection() {
+            self.chat_state.chat.selection.clear();
+            return true;
+        }
+        if self.input.has_selection() {
+            self.input.clear_selection();
+            return true;
+        }
+        false
+    }
+
+    fn copy_chat_selection(&mut self) {
+        if !self.chat_state.chat.has_selection() {
+            return;
+        }
+        // Don't copy zero-width selections (e.g., single click without drag)
+        let ((s_line, s_col), (e_line, e_col)) = self.chat_state.chat.selection.range();
+        if s_line == e_line && s_col == e_col {
+            return;
+        }
+        let colors = self.get_current_theme_colors();
+        let model = self.model.clone();
+        let max_width = self.last_frame_size.width.saturating_sub(4) as usize;
+        if let Some(text) = self.chat_state.chat.get_selected_text(
+            max_width.max(40),
+            &model,
+            &colors,
+        ) {
+            if !text.trim().is_empty() {
+                let _ = crate::utils::clipboard::copy_text(&text);
+                push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
+            }
+        }
+    }
+
     pub fn handle_keys(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers == event::KeyModifiers::CONTROL => {
+                // If text is selected (chat or input), copy to clipboard first
+                if self.try_copy_selection() {
+                    return;
+                }
                 let now = std::time::Instant::now();
                 if now.duration_since(self.last_ctrl_c_time).as_secs() < 1 {
                     self.ctrl_c_press_count += 1;
@@ -819,6 +890,29 @@ impl App {
                     }
                 }
             }
+            OverlayFocus::TimelineDialog => {
+                let action = crate::views::timeline_dialog::handle_timeline_dialog_key_event(
+                    &mut self.timeline_dialog_state,
+                    key,
+                );
+                match action {
+                    crate::views::timeline_dialog::TimelineDialogAction::Close => {
+                        self.overlay_focus = OverlayFocus::None;
+                        true
+                    }
+                    crate::views::timeline_dialog::TimelineDialogAction::Select(idx) => {
+                        self.chat_state.chat.scroll_to_message_index(idx);
+                        self.overlay_focus = OverlayFocus::None;
+                        true
+                    }
+                    crate::views::timeline_dialog::TimelineDialogAction::Navigate(idx) => {
+                        self.chat_state.chat.scroll_to_message_index(idx);
+                        true
+                    }
+                    crate::views::timeline_dialog::TimelineDialogAction::Handled => true,
+                    crate::views::timeline_dialog::TimelineDialogAction::NotHandled => false,
+                }
+            }
             OverlayFocus::WhichKey => {
                 let action = self.which_key_state.handle_key_event(key);
                 match action {
@@ -842,6 +936,10 @@ impl App {
                             let rt = tokio::runtime::Handle::current();
                             rt.block_on(self.process_input("/sessions"));
                         });
+                    }
+                    crate::views::which_key::WhichKeyAction::ShowTimeline => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.open_timeline_dialog();
                     }
                     crate::views::which_key::WhichKeyAction::NewSession => {
                         self.overlay_focus = OverlayFocus::None;
@@ -919,6 +1017,10 @@ impl App {
                 true
             }
             KeyCode::Esc => {
+                // If text is selected, clear selection first
+                if self.clear_selection() {
+                    return true;
+                }
                 if self.is_streaming {
                     self.cancel_streaming();
                     return true;
@@ -948,6 +1050,10 @@ impl App {
     }
 
     fn handle_input_and_app_keys(&mut self, key: KeyEvent) {
+        // If chat text is selected and user presses a key, clear the selection
+        // (unless it's Ctrl+C or Escape which are handled earlier)
+        self.chat_state.chat.selection.clear();
+
         match key.code {
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
                 if self.is_streaming {
@@ -1000,6 +1106,19 @@ impl App {
     }
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        // If text is selected and user clicks on an overlay, clear selection instead
+        if self.overlay_focus != OverlayFocus::None
+            && self.chat_state.chat.has_selection()
+            && matches!(
+                mouse.kind,
+                ratatui::crossterm::event::MouseEventKind::Down(_)
+            )
+        {
+            self.copy_chat_selection();
+            self.chat_state.chat.selection.clear();
+            return;
+        }
+
         if self.overlay_focus == OverlayFocus::ModelsDialog {
             handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
             if !self.models_dialog_state.dialog.is_visible() {
@@ -1088,11 +1207,20 @@ impl App {
             if !self.skills_dialog_state.dialog.is_visible() {
                 self.overlay_focus = OverlayFocus::None;
             }
+        } else if self.overlay_focus == OverlayFocus::TimelineDialog {
+            if let Some(idx) = crate::views::timeline_dialog::handle_timeline_dialog_mouse_event(
+                &mut self.timeline_dialog_state,
+                mouse,
+            ) {
+                self.chat_state.chat.scroll_to_message_index(idx);
+            }
+            if !self.timeline_dialog_state.dialog.is_visible() {
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::None {
-            // Handle mouse events for chat scrolling when in chat mode
-            if self.base_focus == BaseFocus::Chat {
+            // If chat has a selection and user clicks outside chat area, clear it
+            if self.chat_state.chat.has_selection() && self.base_focus == BaseFocus::Chat {
                 let size = self.last_frame_size;
-                // We need to calculate the chat area similar to render_chat
                 let main_chunks = ratatui::layout::Layout::default()
                     .direction(ratatui::layout::Direction::Vertical)
                     .constraints(
@@ -1108,23 +1236,93 @@ impl App {
                     .direction(ratatui::layout::Direction::Vertical)
                     .constraints(
                         [
-                            ratatui::layout::Constraint::Min(0),
+                            ratatui::layout::Constraint::Length(1),  // Top padding
+                            ratatui::layout::Constraint::Min(0),     // Chat content
+                            ratatui::layout::Constraint::Length(1),  // Bottom padding
                             ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(1),
-                            ratatui::layout::Constraint::Length(1),
+                            ratatui::layout::Constraint::Length(1),  // Help bar
+                            ratatui::layout::Constraint::Length(1),  // Blank
                         ]
                         .as_ref(),
                     )
                     .split(main_chunks[0]);
-                let chat_area = above_status_chunks[0];
+                let chat_area = above_status_chunks[1];
+
+                let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+                if !chat_area.contains(point) {
+                    // Click outside chat area, copy selection before clearing
+                    self.copy_chat_selection();
+                    self.chat_state.chat.selection.clear();
+                }
+            }
+
+            // Handle mouse events for chat scrolling/selection when in chat mode
+            if self.base_focus == BaseFocus::Chat {
+                let size = self.last_frame_size;
+                let main_chunks = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints(
+                        [
+                            ratatui::layout::Constraint::Min(0),
+                            ratatui::layout::Constraint::Length(1),
+                        ]
+                        .as_ref(),
+                    )
+                    .split(size);
+                let input_height = self.input.get_height() as u16;
+                let above_status_chunks = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints(
+                        [
+                            ratatui::layout::Constraint::Length(1),  // Top padding
+                            ratatui::layout::Constraint::Min(0),     // Chat content
+                            ratatui::layout::Constraint::Length(1),  // Bottom padding
+                            ratatui::layout::Constraint::Length(input_height),
+                            ratatui::layout::Constraint::Length(1),  // Help bar
+                            ratatui::layout::Constraint::Length(1),  // Blank
+                        ]
+                        .as_ref(),
+                    )
+                    .split(main_chunks[0]);
+                let chat_area = above_status_chunks[1];
+
+                let had_selection = self.chat_state.chat.has_selection();
+                let was_dragging = self.chat_state.chat.selection.is_dragging;
 
                 if self.chat_state.chat.handle_mouse_event(mouse, chat_area) {
+                    // Auto-copy when selection is finalized (mouse up after drag)
+                    if !had_selection && self.chat_state.chat.has_selection() {
+                        // New selection just started, don't copy yet
+                    } else if was_dragging && !self.chat_state.chat.selection.is_dragging {
+                        // Selection was just finalized (mouse up)
+                        self.copy_chat_selection();
+                    }
                     return;
                 }
             }
 
             // Handle mouse events for the main input when no overlay is focused
+            let was_input_selecting = self.input.has_selection();
             if self.input.handle_mouse_event(mouse) {
+                // Auto-copy input selection on mouse up (after drag select)
+                if matches!(
+                    mouse.kind,
+                    ratatui::crossterm::event::MouseEventKind::Up(
+                        ratatui::crossterm::event::MouseButton::Left
+                    )
+                ) && !was_input_selecting
+                    && self.input.has_selection()
+                {
+                    let text = self.input.get_selected_text();
+                    if !text.is_empty() {
+                        let _ = crate::utils::clipboard::copy_text(&text);
+                        push_toast(Toast::new(
+                            "Copied to clipboard",
+                            ToastLevel::Info,
+                            None,
+                        ));
+                    }
+                }
                 self.update_suggestions();
             }
         }
@@ -1543,6 +1741,19 @@ impl App {
             .collect();
 
         self.sessions_dialog_state.refresh_items(items);
+    }
+
+    fn open_timeline_dialog(&mut self) {
+        let messages: Vec<crate::session::types::Message> = match self.session_manager.get_current_session() {
+            Some(s) => s.messages.clone(),
+            None => return,
+        };
+
+        let model = self.model.clone();
+        self.timeline_dialog_state
+            .refresh_messages(&messages, &model);
+        self.timeline_dialog_state.show();
+        self.overlay_focus = OverlayFocus::TimelineDialog;
     }
 
     fn refresh_models_dialog(&mut self) {
@@ -2648,6 +2859,17 @@ impl App {
             crate::views::skills_dialog::render_skills_dialog(
                 f,
                 &mut self.skills_dialog_state,
+                size,
+                colors,
+            );
+        }
+
+        if self.overlay_focus == OverlayFocus::TimelineDialog
+            && self.timeline_dialog_state.dialog.is_visible()
+        {
+            crate::views::timeline_dialog::render_timeline_dialog(
+                f,
+                &mut self.timeline_dialog_state,
                 size,
                 colors,
             );

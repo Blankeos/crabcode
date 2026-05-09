@@ -87,7 +87,7 @@ impl SkillStore {
         for match_path in &matches {
             if let Some(info) = parse_skill_file(match_path) {
                 if let Some(existing) = skills.get(&info.name) {
-                    eprintln!(
+                    crate::startup_diag!(
                         "Warning: duplicate skill name '{}' (existing: {}, duplicate: {})",
                         info.name,
                         existing.location.display(),
@@ -99,7 +99,7 @@ impl SkillStore {
         }
 
         if !skills.is_empty() {
-            eprintln!("Loaded {} skills", skills.len());
+            crate::startup_diag!("Loaded {} skills", skills.len());
         }
 
         Self {
@@ -156,7 +156,7 @@ fn scan(state: &mut ScanState, root: &Path, pattern: &str, dot: bool) {
             }
             Err(e) => {
                 if !dot {
-                    eprintln!("Warning: glob error scanning {}: {}", root.display(), e);
+                    crate::startup_diag!("Warning: glob error scanning {}: {}", root.display(), e);
                 }
             }
         }

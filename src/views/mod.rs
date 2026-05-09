@@ -9,6 +9,7 @@ pub mod sessions_dialog;
 pub mod skills_dialog;
 pub mod suggestions_popup;
 pub mod themes_dialog;
+pub mod timeline_dialog;
 pub mod which_key;
 
 pub use chat::ChatState;
@@ -22,6 +23,7 @@ pub use sessions_dialog::SessionsDialogState;
 pub use skills_dialog::SkillsDialogState;
 pub use suggestions_popup::SuggestionsPopupState;
 pub use themes_dialog::ThemesDialogState;
+pub use timeline_dialog::TimelineDialogState;
 #[allow(unused_imports)]
 pub use which_key::WhichKeyAction;
 pub use which_key::WhichKeyState;

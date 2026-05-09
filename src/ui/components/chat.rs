@@ -1,6 +1,7 @@
 use crate::session::types::{Message, MessageRole};
 use crate::theme::ThemeColors;
 use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
+use crate::ui::selection::Selection;
 use crate::utils::token_counter::StreamingTokenCounter;
 use ratatui::{
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
@@ -44,6 +45,10 @@ pub struct Chat {
     streaming_renderer: Option<SimpleStreamingRenderer>,
     /// Index of the message currently being rendered by streaming_renderer
     streaming_message_idx: Option<usize>,
+    /// Starting line positions for each message in the rendered content
+    pub message_line_positions: Vec<usize>,
+    /// Text selection state for copy-on-select
+    pub selection: Selection,
 }
 
 // Minimum elapsed time before showing tokens/s (250ms)
@@ -87,6 +92,8 @@ impl Chat {
             last_tps_calculated: None,
             streaming_renderer: None,
             streaming_message_idx: None,
+            message_line_positions: Vec::new(),
+            selection: Selection::new(),
         }
     }
 
@@ -114,6 +121,8 @@ impl Chat {
             last_tps_calculated: None,
             streaming_renderer: None,
             streaming_message_idx: None,
+            message_line_positions: Vec::new(),
+            selection: Selection::new(),
         }
     }
 
@@ -238,6 +247,7 @@ impl Chat {
         self.streaming_pause_started_at = None;
         self.streaming_paused_duration = std::time::Duration::default();
         self.streaming_token_counter = None;
+        self.selection.clear();
     }
 
     pub fn begin_streaming_turn(&mut self) {
@@ -484,6 +494,49 @@ impl Chat {
         self.update_scrollbar();
     }
 
+    pub fn get_message_line_positions(&self, max_width: usize, model: &str, colors: &ThemeColors) -> Vec<usize> {
+        let mut positions = Vec::with_capacity(self.messages.len());
+        let mut line = 0;
+        let message_count = self.messages.len();
+        let streaming_idx = self.streaming_assistant_idx();
+        let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
+
+        for (idx, message) in self.messages.iter().enumerate() {
+            positions.push(line);
+            let attached_to_assistant =
+                idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
+            let message_lines = self.format_message(
+                message,
+                max_width,
+                idx,
+                message_count,
+                streaming_content,
+                streaming_idx,
+                model,
+                colors,
+                attached_to_assistant,
+            );
+            line += message_lines.len();
+        }
+
+        positions
+    }
+
+    pub fn scroll_to_message_index(&mut self, idx: usize) {
+        if idx >= self.messages.len() {
+            return;
+        }
+
+        let line_pos = self.message_line_positions.get(idx).copied().unwrap_or(0);
+
+        // Scroll so the message is visible (near top of viewport, with a small margin)
+        let target_offset = line_pos.saturating_sub(2);
+        let max_offset = self.content_height.saturating_sub(self.viewport_height);
+        self.scroll_offset = target_offset.min(max_offset);
+        self.user_scrolled_up = true;
+        self.update_scrollbar();
+    }
+
     fn update_scrollbar(&mut self) {
         let max_offset = self.content_height.saturating_sub(self.viewport_height);
         let content_length = max_offset.saturating_add(1).max(1);
@@ -492,14 +545,57 @@ impl Chat {
         self.scrollbar_state = self.scrollbar_state.position(position);
     }
 
+    pub fn has_selection(&self) -> bool {
+        self.selection.active
+    }
+
+    pub fn get_selected_text<'a>(
+        &'a self,
+        max_width: usize,
+        model: &'a str,
+        colors: &'a ThemeColors,
+    ) -> Option<String> {
+        if !self.selection.active {
+            return None;
+        }
+        let lines = self.render_visible_messages_without_selection_styling(
+            max_width, model, colors,
+        );
+        crate::ui::selection::extract_selected_text(&lines, &self.selection)
+    }
+
+    /// Like render_visible_messages but without applying selection styling
+    /// (used internally by get_selected_text to get clean text)
+    fn render_visible_messages_without_selection_styling<'a>(
+        &'a self,
+        max_width: usize,
+        model: &'a str,
+        colors: &'a ThemeColors,
+    ) -> Vec<Line<'a>> {
+        self.build_all_lines(max_width, model, colors)
+    }
+
     pub fn handle_mouse_event(&mut self, event: MouseEvent, area: Rect) -> bool {
         use ratatui::layout::Position;
         let point = Position::new(event.column, event.row);
 
         if !area.contains(point) {
             self.is_dragging_scrollbar = false;
+            // If dragging selection outside area, finalize it
+            if self.selection.is_dragging {
+                self.selection.finish();
+                // Copy will be handled by app.rs on mouse up
+            }
             return false;
         }
+
+        // Calculate the content area (exclude scrollbar column)
+        let content_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width.saturating_sub(2),
+            height: area.height,
+        };
 
         // Calculate scrollbar area (rightmost column)
         let scrollbar_area = Rect {
@@ -510,6 +606,7 @@ impl Chat {
         };
 
         let is_on_scrollbar = scrollbar_area.contains(point);
+        let is_in_content = content_area.contains(point);
 
         match event.kind {
             MouseEventKind::ScrollDown => {
@@ -525,6 +622,13 @@ impl Chat {
                     self.is_dragging_scrollbar = true;
                     self.scroll_to_position(event.row, scrollbar_area);
                     true
+                } else if is_in_content {
+                    // Start text selection
+                    let content_line = (event.row.saturating_sub(content_area.y) as usize)
+                        .saturating_add(self.scroll_offset);
+                    let content_col = event.column.saturating_sub(content_area.x) as usize;
+                    self.selection.start(content_line, content_col);
+                    true
                 } else {
                     false
                 }
@@ -533,13 +637,38 @@ impl Chat {
                 if self.is_dragging_scrollbar {
                     self.scroll_to_position(event.row, scrollbar_area);
                     true
+                } else if is_in_content && self.selection.is_dragging {
+                    // Extend text selection
+                    let content_line = (event.row.saturating_sub(content_area.y) as usize)
+                        .saturating_add(self.scroll_offset);
+                    let content_col = event.column.saturating_sub(content_area.x) as usize;
+                    self.selection.extend(content_line, content_col);
+                    true
                 } else {
                     false
                 }
             }
-            MouseEventKind::Up(_) => {
+            MouseEventKind::Up(MouseButton::Left) => {
                 if self.is_dragging_scrollbar {
                     self.is_dragging_scrollbar = false;
+                    true
+                } else if self.selection.is_dragging {
+                    // Finalize text selection
+                    self.selection.finish();
+                    // If selection is zero-width (click without drag), clear it
+                    let ((s_line, s_col), (e_line, e_col)) = self.selection.range();
+                    if s_line == e_line && s_col == e_col {
+                        self.selection.clear();
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            MouseEventKind::Up(MouseButton::Right) => {
+                // Right-click clears selection
+                if self.selection.active {
+                    self.selection.clear();
                     true
                 } else {
                     false
@@ -633,7 +762,7 @@ impl Chat {
     }
 
     fn calculate_content_height(
-        &self,
+        &mut self,
         max_width: usize,
         model: &str,
         colors: &ThemeColors,
@@ -643,7 +772,11 @@ impl Chat {
         let streaming_idx = self.streaming_assistant_idx();
         let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
 
+        self.message_line_positions.clear();
+        self.message_line_positions.reserve(message_count);
+
         for (idx, message) in self.messages.iter().enumerate() {
+            self.message_line_positions.push(total_height);
             let attached_to_assistant =
                 idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
             let message_lines = self.format_message(
@@ -664,6 +797,16 @@ impl Chat {
     }
 
     fn render_visible_messages<'a>(
+        &'a self,
+        max_width: usize,
+        model: &'a str,
+        colors: &'a ThemeColors,
+    ) -> Vec<Line<'a>> {
+        let lines = self.build_all_lines(max_width, model, colors);
+        crate::ui::selection::apply_selection_to_lines(lines, &self.selection, colors.accent)
+    }
+
+    fn build_all_lines<'a>(
         &'a self,
         max_width: usize,
         model: &'a str,

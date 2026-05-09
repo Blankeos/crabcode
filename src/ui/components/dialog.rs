@@ -17,6 +17,13 @@ use std::collections::HashMap;
 use tui_textarea::{Input as TuiInput, TextArea};
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DialogPosition {
+    Left,
+    Center,
+    Right,
+}
+
 #[derive(Debug)]
 pub struct DialogItem {
     pub id: String,
@@ -64,6 +71,7 @@ pub struct Dialog {
     pub is_dragging_scrollbar: bool,
     pub visible_row_count: usize,
     pub actions: Vec<DialogAction>,
+    pub position: DialogPosition,
     matcher: Matcher,
 }
 
@@ -93,8 +101,14 @@ impl Dialog {
             is_dragging_scrollbar: false,
             visible_row_count: 0,
             actions: Vec::new(),
+            position: DialogPosition::Center,
             matcher: Matcher::new(Config::DEFAULT),
         }
+    }
+
+    pub fn with_position(mut self, position: DialogPosition) -> Self {
+        self.position = position;
+        self
     }
 
     pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
@@ -434,14 +448,27 @@ impl Dialog {
         if self.visible_row_count > 0 {
             self.visible_row_count
         } else {
-            const DIALOG_WIDTH: u16 = 70;
-            const DIALOG_HEIGHT: u16 = 25;
+            const DIALOG_WIDTH_CENTER: u16 = 70;
+            const DIALOG_HEIGHT_CENTER: u16 = 25;
+            const DIALOG_WIDTH_SIDE: u16 = 40;
             const PADDING: u16 = 3;
 
             let total_fixed_height = 1 + 1 + 3 + 1 + 1;
             let padding_total = PADDING * 2;
-            let list_area_height = DIALOG_HEIGHT.saturating_sub(total_fixed_height + padding_total);
-            list_area_height as usize
+
+            match self.position {
+                DialogPosition::Center => {
+                    let list_area_height =
+                        DIALOG_HEIGHT_CENTER.saturating_sub(total_fixed_height + padding_total);
+                    list_area_height as usize
+                }
+                DialogPosition::Left | DialogPosition::Right => {
+                    // Side panels use full height, minus fixed chrome + padding
+                    let list_area_height =
+                        40u16.saturating_sub(total_fixed_height + padding_total);
+                    list_area_height as usize
+                }
+            }
         }
     }
 
@@ -514,12 +541,15 @@ impl Dialog {
             return true;
         }
 
-        const PADDING: u16 = 3;
+        let padding = match self.position {
+            DialogPosition::Center => 3u16,
+            DialogPosition::Left | DialogPosition::Right => 1u16,
+        };
         let content_area = Rect {
-            x: self.dialog_area.x + PADDING,
-            y: self.dialog_area.y + PADDING,
-            width: self.dialog_area.width.saturating_sub(PADDING * 2),
-            height: self.dialog_area.height.saturating_sub(PADDING * 2),
+            x: self.dialog_area.x + padding,
+            y: self.dialog_area.y + padding,
+            width: self.dialog_area.width.saturating_sub(padding * 2),
+            height: self.dialog_area.height.saturating_sub(padding * 2),
         };
 
         if !content_area.contains(point) {
@@ -667,27 +697,55 @@ impl Dialog {
             return;
         }
 
-        const DIALOG_WIDTH: u16 = 70;
-        const DIALOG_HEIGHT: u16 = 25;
+        const DIALOG_WIDTH_CENTER: u16 = 70;
+        const DIALOG_HEIGHT_CENTER: u16 = 25;
+        const DIALOG_WIDTH_SIDE: u16 = 45;
 
-        let dialog_width = area.width.min(DIALOG_WIDTH);
-        let dialog_height = area.height.min(DIALOG_HEIGHT);
+        match self.position {
+            DialogPosition::Center => {
+                let dialog_width = area.width.min(DIALOG_WIDTH_CENTER);
+                let dialog_height = area.height.min(DIALOG_HEIGHT_CENTER);
 
-        self.dialog_area = Rect {
-            x: (area.width - dialog_width) / 2,
-            y: (area.height - dialog_height) / 2,
-            width: dialog_width,
-            height: dialog_height,
-        };
+                self.dialog_area = Rect {
+                    x: (area.width - dialog_width) / 2,
+                    y: (area.height - dialog_height) / 2,
+                    width: dialog_width,
+                    height: dialog_height,
+                };
+            }
+            DialogPosition::Right => {
+                let dialog_width = area.width.min(DIALOG_WIDTH_SIDE);
+
+                self.dialog_area = Rect {
+                    x: area.width.saturating_sub(dialog_width),
+                    y: area.y,
+                    width: dialog_width,
+                    height: area.height,
+                };
+            }
+            DialogPosition::Left => {
+                let dialog_width = area.width.min(DIALOG_WIDTH_SIDE);
+
+                self.dialog_area = Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: dialog_width,
+                    height: area.height,
+                };
+            }
+        }
 
         frame.render_widget(Clear, self.dialog_area);
 
-        const PADDING: u16 = 3;
+        let padding = match self.position {
+            DialogPosition::Center => 3u16,
+            DialogPosition::Left | DialogPosition::Right => 1u16,
+        };
         self.content_area = Rect {
-            x: self.dialog_area.x + PADDING,
-            y: self.dialog_area.y + PADDING,
-            width: self.dialog_area.width.saturating_sub(PADDING * 2),
-            height: self.dialog_area.height.saturating_sub(PADDING * 2),
+            x: self.dialog_area.x + padding,
+            y: self.dialog_area.y + padding,
+            width: self.dialog_area.width.saturating_sub(padding * 2),
+            height: self.dialog_area.height.saturating_sub(padding * 2),
         };
 
         frame.render_widget(
@@ -930,6 +988,7 @@ impl Clone for Dialog {
             is_dragging_scrollbar: self.is_dragging_scrollbar,
             visible_row_count: self.visible_row_count,
             actions: self.actions.clone(),
+            position: self.position,
             matcher: Matcher::new(Config::DEFAULT),
         }
     }

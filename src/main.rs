@@ -45,6 +45,28 @@ use std::time::Duration;
 
 const POST_CLOSE_LOGO: &str = include_str!("../crabcode-logo.txt");
 
+lazy_static::lazy_static! {
+    static ref STARTUP_DIAGNOSTICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+}
+
+pub fn push_startup_diag(msg: String) {
+    STARTUP_DIAGNOSTICS.lock().unwrap().push(msg);
+}
+
+#[macro_export]
+macro_rules! startup_diag {
+    ($($arg:tt)*) => {
+        $crate::push_startup_diag(format!($($arg)*))
+    };
+}
+
+fn flush_startup_diagnostics() {
+    let diags = std::mem::take(&mut *STARTUP_DIAGNOSTICS.lock().unwrap());
+    for msg in diags {
+        eprintln!("{}", msg);
+    }
+}
+
 struct PostCloseInfo {
     session_id: String,
     session_title: String,
@@ -166,6 +188,8 @@ async fn main() -> Result<()> {
         )?;
     }
     terminal.show_cursor()?;
+
+    flush_startup_diagnostics();
 
     print!("{}", format_post_close_message(close_info.as_ref()));
 
