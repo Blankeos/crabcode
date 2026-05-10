@@ -107,8 +107,14 @@ pub fn render(
             .border_style(Style::default().fg(agent_color));
         let inner_area = border.inner(area);
 
+        let bg_area = Rect {
+            x: inner_area.x,
+            y: inner_area.y,
+            width: inner_area.width,
+            height: inner_area.height.saturating_sub(1),
+        };
         let bg = Block::default().style(Style::default().bg(colors.background_element));
-        frame.render_widget(bg, inner_area);
+        frame.render_widget(bg, bg_area);
 
         let line_count = self.textarea.lines().len().max(1);
         let textarea_height = line_count.min(6) as u16;
@@ -172,17 +178,16 @@ pub fn render(
         let info_paragraph = Paragraph::new(info_text);
         frame.render_widget(info_paragraph, v_chunks[3]);
 
-        let full_width = area.width as usize;
-        let cap_dashes = "▀".repeat(full_width - 1);
+        frame.render_widget(border, area);
 
         let cap_row = Paragraph::new(ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled("╹", Style::default().fg(agent_color)),
-            ratatui::text::Span::styled(cap_dashes, Style::default().fg(colors.background_element)),
+            ratatui::text::Span::styled(
+                "▀".repeat(area.width as usize),
+                Style::default().fg(colors.background_element),
+            ),
         ]));
         let cap_row_area = Rect::new(area.x, v_chunks[4].y, area.width, 1);
         frame.render_widget(cap_row, cap_row_area);
-
-        frame.render_widget(border, area);
     }
 
     pub fn get_height(&self) -> u16 {
