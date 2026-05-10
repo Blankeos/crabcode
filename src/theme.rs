@@ -301,8 +301,7 @@ impl Theme {
                 let interactive = parse_hex(&mode.seeds.interactive);
                 let background = parse_hex(&mode.overrides.background_base);
                 let dialog_background = parse_hex(dialog_background);
-                let background_element =
-                    resolve_override(mode.overrides.background_weak.as_deref(), dialog_background);
+                let background_element = dialog_background;
                 let text = parse_hex(&mode.overrides.text_base);
                 let text_weak = parse_hex(&mode.overrides.text_weak);
                 let text_strong = parse_hex(&mode.overrides.text_strong);
