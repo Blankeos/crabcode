@@ -5,7 +5,8 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::prelude::{Rect, Style};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::symbols::border;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use tui_textarea::{CursorMove, Input as TuiInput, TextArea};
 use unicode_width::UnicodeWidthChar;
 
@@ -84,7 +85,7 @@ impl Input {
         self
     }
 
-    pub fn render(
+pub fn render(
         &mut self,
         frame: &mut ratatui::Frame,
         area: Rect,
@@ -95,17 +96,33 @@ impl Input {
     ) {
         let agent_color = agent_color(agent, colors);
 
-        let border = Block::bordered()
-            .borders(ratatui::widgets::Borders::LEFT)
-            .border_style(ratatui::style::Style::default().fg(agent_color))
-            .border_type(ratatui::widgets::BorderType::Thick)
-            .padding(ratatui::widgets::Padding::horizontal(1));
+        let border_set = border::Set {
+            vertical_left: "┃",
+            ..border::PLAIN
+        };
+
+        let border = Block::new()
+            .borders(Borders::LEFT)
+            .border_set(border_set)
+            .border_style(Style::default().fg(agent_color));
         let inner_area = border.inner(area);
+
+        let bg = Block::default().style(Style::default().bg(colors.background_element));
+        frame.render_widget(bg, inner_area);
 
         let line_count = self.textarea.lines().len().max(1);
         let textarea_height = line_count.min(6) as u16;
 
-        let chunks = ratatui::layout::Layout::default()
+        let h_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Length(2),
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(2),
+            ])
+            .split(inner_area);
+
+        let v_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([
                 ratatui::layout::Constraint::Length(1),
@@ -114,48 +131,64 @@ impl Input {
                 ratatui::layout::Constraint::Length(1),
                 ratatui::layout::Constraint::Length(1),
             ])
-            .split(inner_area);
+            .split(h_chunks[1]);
 
-        // Store the textarea area for mouse event handling
-        self.textarea_area = Some(chunks[1]);
+        self.textarea_area = Some(v_chunks[1]);
 
-        // Configure selection style to match theme
         self.textarea.set_selection_style(
-            ratatui::style::Style::default()
+            Style::default()
                 .bg(colors.accent)
                 .fg(colors.text),
         );
+        self.textarea
+            .set_style(Style::default().fg(colors.text).bg(colors.background_element));
 
-        // Ensure viewport_top stays within valid bounds
         let line_count = self.textarea.lines().len();
-        let visible_lines = chunks[1].height as usize;
+        let visible_lines = v_chunks[1].height as usize;
         let max_viewport_top = line_count.saturating_sub(visible_lines);
         self.viewport_top = self.viewport_top.min(max_viewport_top);
 
-        frame.render_widget(&self.textarea, chunks[1]);
+        frame.render_widget(&self.textarea, v_chunks[1]);
 
         let info_text = ratatui::text::Line::from(vec![
             ratatui::text::Span::styled(
                 agent.to_string(),
-                ratatui::style::Style::default().fg(agent_color),
+                Style::default().fg(agent_color),
             ),
             ratatui::text::Span::raw("  "),
             ratatui::text::Span::styled(
                 model.to_string(),
-                ratatui::style::Style::default().fg(colors.text),
+                Style::default().fg(colors.text),
             ),
             ratatui::text::Span::raw("  "),
             ratatui::text::Span::styled(
                 provider_name.to_string(),
-                ratatui::style::Style::default()
+                Style::default()
                     .fg(colors.text_weak)
                     .add_modifier(ratatui::style::Modifier::DIM),
             ),
         ]);
 
         let info_paragraph = Paragraph::new(info_text);
-        frame.render_widget(info_paragraph, chunks[3]);
+        frame.render_widget(info_paragraph, v_chunks[3]);
+
+        let full_width = area.width as usize;
+        let cap_dashes = "▀".repeat(full_width - 1);
+
+        let cap_row = Paragraph::new(ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled("╹", Style::default().fg(agent_color)),
+            ratatui::text::Span::styled(cap_dashes, Style::default().fg(colors.background_element)),
+        ]));
+        let cap_row_area = Rect::new(area.x, v_chunks[4].y, area.width, 1);
+        frame.render_widget(cap_row, cap_row_area);
+
         frame.render_widget(border, area);
+    }
+
+    pub fn get_height(&self) -> u16 {
+        let line_count = self.textarea.lines().len().max(1);
+        let textarea_height = line_count.min(6) as u16;
+        textarea_height + 4
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
@@ -589,12 +622,6 @@ impl Input {
             }
         }
         Vec::new()
-    }
-
-    pub fn get_height(&self) -> u16 {
-        let line_count = self.textarea.lines().len().max(1);
-        let textarea_height = line_count.min(6) as u16;
-        textarea_height + 4
     }
 }
 
