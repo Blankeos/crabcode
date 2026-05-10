@@ -182,7 +182,11 @@ pub fn render(
 
         let cap_row = Paragraph::new(ratatui::text::Line::from(vec![
             ratatui::text::Span::styled(
-                "▀".repeat(area.width as usize),
+                "╹",
+                Style::default().fg(agent_color),
+            ),
+            ratatui::text::Span::styled(
+                "▀".repeat(area.width as usize - 1),
                 Style::default().fg(colors.background_element),
             ),
         ]));
