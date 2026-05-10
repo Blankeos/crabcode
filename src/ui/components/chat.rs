@@ -816,19 +816,15 @@ impl Chat {
                 if end > start {
                     let hl_bg = colors.interactive;
                     let hl_fg = contrast_text(hl_bg);
-                    let mut removed = 0usize;
 
-                    for i in (start..end).rev() {
+                    for i in start..end {
                         let line = &mut all_lines[i];
                         let current_width: usize = line
                             .spans
                             .iter()
                             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                             .sum();
-                        if current_width == 0 {
-                            all_lines.remove(i);
-                            removed += 1;
-                        } else {
+                        if current_width > 0 {
                             for span in line.spans.iter_mut() {
                                 span.style = span.style.bg(hl_bg).fg(hl_fg);
                             }
@@ -839,13 +835,6 @@ impl Chat {
                                 );
                             }
                         }
-                    }
-
-                    if removed > 0 {
-                        for p in positions.iter_mut().skip(hl + 1) {
-                            *p = p.saturating_sub(removed);
-                        }
-                        content_height = all_lines.len();
                     }
                 }
             }
