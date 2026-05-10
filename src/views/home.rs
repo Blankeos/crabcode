@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::theme::ThemeColors;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
@@ -109,17 +111,9 @@ pub fn render_home(
         ])
         .split(home_chunks[0]);
 
-    let mascot_lines: Vec<Line> = MASCO[home_state.frame()]
+    let mascot_raw: Vec<&str> = MASCO[home_state.frame()]
         .lines()
         .filter(|l| !l.is_empty())
-        .map(|line| {
-            Line::styled(
-                line,
-                Style::default()
-                    .fg(colors.primary)
-                    .add_modifier(Modifier::BOLD),
-            )
-        })
         .collect();
 
     let logo_lines: Vec<Line> = LOGO
@@ -150,6 +144,17 @@ pub fn render_home(
             ])
             .split(logo_chunks[1]);
 
+        let mascot_lines: Vec<Line> = mascot_raw
+            .iter()
+            .map(|line| {
+                Line::styled(
+                    *line,
+                    Style::default()
+                        .fg(colors.primary)
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect();
         let mascot = Paragraph::new(Text::from(mascot_lines));
         let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
 
@@ -165,7 +170,23 @@ pub fn render_home(
             ])
             .split(logo_chunks[1]);
 
-        let mascot = Paragraph::new(Text::from(mascot_lines)).alignment(Alignment::Center);
+        let max_mascot_width = mascot_raw.iter().map(|l| UnicodeWidthStr::width(*l)).max().unwrap_or(0);
+        let left_pad = ((stack[0].width as usize).saturating_sub(max_mascot_width)) / 2;
+        let padding = " ".repeat(left_pad);
+
+        let mascot_lines: Vec<Line> = mascot_raw
+            .iter()
+            .map(|line| {
+                let padded = format!("{}{}", padding, line);
+                Line::styled(
+                    padded,
+                    Style::default()
+                        .fg(colors.primary)
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect();
+        let mascot = Paragraph::new(Text::from(mascot_lines));
         let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
 
         f.render_widget(mascot, stack[0]);
