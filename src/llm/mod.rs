@@ -13,6 +13,10 @@ pub enum ChunkMessage {
     ToolCalls(Vec<ToolCall>),
     ToolResult(ToolCallResult),
     PermissionRequest(crate::tools::PermissionPrompt),
+    QuestionRequest {
+        questions: serde_json::Value,
+        response_tx: tokio::sync::oneshot::Sender<serde_json::Value>,
+    },
     End,
     Failed(String),
     Cancelled,

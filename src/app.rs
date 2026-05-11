@@ -2944,6 +2944,14 @@ impl App {
                     self.permission_dialog_state.enqueue(prompt);
                     self.overlay_focus = OverlayFocus::PermissionDialog;
                 }
+                crate::llm::ChunkMessage::QuestionRequest {
+                    questions,
+                    response_tx,
+                } => {
+                    self.chat_state.chat.pause_streaming_tps_timer();
+                    let answers = auto_answer_questions(&questions);
+                    let _ = response_tx.send(answers);
+                }
             }
         }
     }
@@ -3310,6 +3318,30 @@ fn format_token_count(count: usize) -> String {
     }
     let m = count as f64 / 1_000_000.0;
     format!("{:.1}M", m)
+}
+
+fn auto_answer_questions(questions: &serde_json::Value) -> serde_json::Value {
+    let arr = match questions {
+        serde_json::Value::Array(a) => a,
+        _ => return serde_json::Value::Array(vec![]),
+    };
+
+    let answers: Vec<serde_json::Value> = arr
+        .iter()
+        .map(|q| {
+            let options = q.get("options").and_then(|o| o.as_array());
+            match options {
+                Some(opts) if !opts.is_empty() => {
+                    let labels: Vec<serde_json::Value> =
+                        vec![opts[0].get("label").cloned().unwrap_or(serde_json::Value::Null)];
+                    serde_json::Value::Array(labels)
+                }
+                _ => serde_json::Value::Array(vec![]),
+            }
+        })
+        .collect();
+
+    serde_json::Value::Array(answers)
 }
 
 impl Default for App {

@@ -294,6 +294,31 @@ Tool use:
             }
         }
 
+        // Add available subagents listing
+        let subagents = crate::agent::subagent::SubAgentDef::all();
+        if !subagents.is_empty() {
+            let subagents_xml = subagents
+                .iter()
+                .map(|s| {
+                    format!(
+                        "  <subagent>\n    <name>{}</name>\n    <description>{}</description>\n  </subagent>",
+                        s.name, s.description
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let subagents_block = format!(
+                "\n\n<available_subagents>\n{}\n</available_subagents>",
+                subagents_xml
+            );
+
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(&subagents_block);
+        }
+
         instructions
     }
 }

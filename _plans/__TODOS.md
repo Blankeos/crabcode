@@ -40,4 +40,4 @@
 
 - [ ] Bug: skill loading on conflict. i.e. duplicate frontend-design skill. Warning: duplicate skill name 'frontend-design' (existing: /Users/carlo/.claude/skills/frontend-design/SKILL.md, duplicate: /Users/carlo/.config/opencode/skill/frontend-design/SKILL.md)
 
-- [ ] Bug: Timeline livescroll and actual chat UI consistency - make them the same.
+- [x] Bug: Timeline livescroll and actual chat UI consistency - make them the same.

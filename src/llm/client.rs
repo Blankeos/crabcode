@@ -95,6 +95,22 @@ pub async fn stream_llm_with_cancellation(
     let aisdk_messages = convert_messages(&messages);
 
     let tool_registry = crate::tools::initialize_tool_registry().await;
+
+    crate::tools::register_dynamic_tools(&tool_registry, Some(sender.clone())).await;
+
+    // Set LLM session config for subagent use
+    crate::agent::config::set_llm_session(crate::agent::config::LlmSessionConfig {
+        provider_name: request_config.provider_name.clone(),
+        model: request_config.model_name.clone(),
+        api_key: request_config.api_key.clone(),
+        provider_kind: match request_config.kind {
+            ProviderKind::OpenAI => crate::agent::config::ProviderKind::OpenAI,
+            ProviderKind::OpenAICompatible => crate::agent::config::ProviderKind::OpenAICompatible,
+            ProviderKind::Anthropic => crate::agent::config::ProviderKind::Anthropic,
+        },
+        base_url: request_config.base_url.clone(),
+    });
+
     let aisdk_tools = convert_to_aisdk_tools(
         &tool_registry,
         Some(sender.clone()),
