@@ -1,5 +1,5 @@
 use crate::session::types::{Message, MessageRole};
-use crate::theme::ThemeColors;
+use crate::theme::{contrast_text, ThemeColors};
 use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
 use crate::ui::selection::Selection;
 use crate::utils::token_counter::StreamingTokenCounter;
@@ -8,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
 use serde_json::Value as JsonValue;
@@ -801,20 +801,11 @@ impl Chat {
 
         let content_height = all_lines.len();
 
-        let content_lines =
-            crate::ui::selection::apply_selection_to_lines(all_lines, &self.selection, colors.accent);
-
         let viewport = self.viewport_height;
         let max_offset = content_height.saturating_sub(viewport);
         let clamped_scroll = self.scroll_offset.min(max_offset);
 
-        let paragraph = Paragraph::new(Text::from(content_lines))
-            .wrap(Wrap { trim: false })
-            .scroll((clamped_scroll as u16, 0));
-
-        f.render_widget(paragraph, content_area);
-
-        // Render timeline highlight as a left-edge overlay band (preserves layout)
+        // Render timeline highlight as a full-width background overlay
         if let Some(hl) = self.highlighted_message_index {
             if hl < positions.len() {
                 let start = positions[hl];
@@ -826,26 +817,43 @@ impl Chat {
 
                 if end > start {
                     let hl_color = colors.interactive;
-                    let band_line = Line::from(Span::styled("▌", Style::default().fg(hl_color)));
+                    let hl_fg = contrast_text(hl_color);
 
-                    for i in start..end {
-                        if i >= clamped_scroll && i < clamped_scroll.saturating_add(viewport) {
-                            let line_y = content_area.y.saturating_add((i - clamped_scroll) as u16);
-                            let band_area = Rect {
+                    for line in all_lines.iter_mut().take(end).skip(start) {
+                        for span in line.spans.iter_mut() {
+                            span.style = span.style.fg(hl_fg);
+                        }
+                    }
+
+                    let vis_start = start.max(clamped_scroll);
+                    let vis_end = end.min(clamped_scroll.saturating_add(viewport));
+
+                    if vis_end > vis_start {
+                        let y = content_area.y.saturating_add((vis_start - clamped_scroll) as u16);
+                        let height = (vis_end - vis_start).saturating_sub(1) as u16;
+                        if height > 0 {
+                            let hl_area = Rect {
                                 x: content_area.x,
-                                y: line_y,
-                                width: 1,
-                                height: 1,
+                                y,
+                                width: content_area.width,
+                                height,
                             };
-                            f.render_widget(
-                                Paragraph::new(band_line.clone()),
-                                band_area,
-                            );
+                            let hl_block = Block::new().style(Style::default().bg(hl_color));
+                            f.render_widget(hl_block, hl_area);
                         }
                     }
                 }
             }
         }
+
+        let content_lines =
+            crate::ui::selection::apply_selection_to_lines(all_lines, &self.selection, colors.accent);
+
+        let paragraph = Paragraph::new(Text::from(content_lines))
+            .wrap(Wrap { trim: false })
+            .scroll((clamped_scroll as u16, 0));
+
+        f.render_widget(paragraph, content_area);
 
         self.content_height = content_height;
         self.message_line_positions = positions;

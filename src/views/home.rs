@@ -37,7 +37,7 @@ pub struct HomeState {
     tick_count: u32,
 }
 
-const PHASE_DURATIONS: [u32; 5] = [20, 10, 10, 10, 20];
+const PHASE_DURATIONS: [u32; 5] = [14, 7, 7, 7, 14];
 const PHASE_FRAMES: [usize; 5] = [0, 1, 0, 1, 0];
 
 impl HomeState {
