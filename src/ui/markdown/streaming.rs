@@ -500,4 +500,46 @@ mod tests {
         assert!(output.contains('┐'), "Expected ┐ in output, got:\n{}", output);
         assert!(!output.contains("| A |"), "Raw markdown table should be replaced");
     }
+
+    #[test]
+    fn test_render_markdown_real_table_widths() {
+        let colors = test_colors();
+        // Test WITHOUT backticks first - should work
+        let input_no_code = "| Category | Tool | Description |\n|----------|------|-------------|\n| File Operations | read | Read file or directory contents with pagination |\n| | write | Create or overwrite a file |";
+        let lines = render_markdown(input_no_code, 80, &colors);
+        let line_strings: Vec<String> = lines.iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+        
+        let table_lines: Vec<_> = line_strings.iter()
+            .filter(|l| l.contains('│') || l.contains('┌') || l.contains('┐') || l.contains('├') || l.contains('┤') || l.contains('└') || l.contains('┘'))
+            .collect();
+        
+        let first_width = unicode_width::UnicodeWidthStr::width(table_lines[0].as_str());
+        for line in &table_lines {
+            let width = unicode_width::UnicodeWidthStr::width(line.as_str());
+            assert_eq!(width, first_width, 
+                "Table lines should have consistent width. Expected {}, got {}.\nLine: {}", 
+                first_width, width, line);
+        }
+        
+        // Test WITH backticks - this will fail until we fix it
+        let input_with_code = "| Category | Tool | Description |\n|----------|------|-------------|\n| File Operations | `read` | Read file or directory contents with pagination |\n| | `write` | Create or overwrite a file |";
+        let lines = render_markdown(input_with_code, 80, &colors);
+        let line_strings: Vec<String> = lines.iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+        
+        let table_lines: Vec<_> = line_strings.iter()
+            .filter(|l| l.contains('│') || l.contains('┌') || l.contains('┐') || l.contains('├') || l.contains('┤') || l.contains('└') || l.contains('┘'))
+            .collect();
+        
+        let first_width = unicode_width::UnicodeWidthStr::width(table_lines[0].as_str());
+        for line in &table_lines {
+            let width = unicode_width::UnicodeWidthStr::width(line.as_str());
+            assert_eq!(width, first_width, 
+                "Table lines WITH code should also have consistent width. Expected {}, got {}.\nLine: {}", 
+                first_width, width, line);
+        }
+    }
 }

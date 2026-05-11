@@ -44,7 +44,7 @@
 
 - [ ] Parity: Like opencode, I wanna be able to queue messages. By sending some message even though it's still streaming, won't stop the agent, will just keep going.
 
-- [ ] Markdown: Proper Table rendering.
+- [x] Markdown: Proper Table rendering.
 
 - [ ] Rendering: Thinking Rendering always has this massive space below it, even if the agent didn't really think much.
 

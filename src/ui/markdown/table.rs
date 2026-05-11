@@ -62,9 +62,9 @@ pub fn preprocess_tables(content: &str, max_width: usize) -> String {
                 current_cell.push_str(&text);
             }
             Event::Code(code) if in_table => {
-                current_cell.push('`');
+                // Don't wrap with backticks — tui-markdown will render inline code
+                // styling itself, and including backticks breaks width calculations
                 current_cell.push_str(&code);
-                current_cell.push('`');
             }
             Event::SoftBreak if in_table => {
                 current_cell.push(' ');
@@ -296,7 +296,9 @@ mod tests {
     fn test_table_cell_with_code() {
         let input = "| Tool | Desc |\n| --- | --- |\n| `read` | Read files |\n";
         let result = preprocess_tables(input, 80);
-        assert!(result.contains("`read`"));
+        // Backticks are stripped — tui-markdown handles inline code styling
+        assert!(result.contains("read"));
+        assert!(!result.contains("`read`"));
     }
 
     #[test]
@@ -325,7 +327,7 @@ mod tests {
         let result = preprocess_tables(input, 80);
         assert!(result.contains("File Operations"));
         assert!(result.contains("Specialized Skills"));
-        assert!(result.contains("`todowrite`"));
+        assert!(result.contains("todowrite"));
         // Each row should have 3 cells — no concatenation
         assert!(!result.contains("File Operations`read`"));
         assert!(!result.contains('|'));

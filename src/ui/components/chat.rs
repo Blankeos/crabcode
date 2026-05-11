@@ -278,7 +278,7 @@ impl Chat {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Bump this whenever rendering logic changes (tables, markdown, etc.)
-        const RENDER_VERSION: u64 = 1;
+        const RENDER_VERSION: u64 = 2;
         RENDER_VERSION.hash(&mut h);
         self.messages.len().hash(&mut h);
         for msg in &self.messages {
@@ -961,7 +961,8 @@ impl Chat {
             MessageRole::Assistant => {
                 // Display reasoning/thinking tokens if present
                 if let Some(ref reasoning) = message.reasoning {
-                    if !reasoning.is_empty() {
+                    let reasoning_trimmed = reasoning.trim();
+                    if !reasoning_trimmed.is_empty() {
                         let reasoning_prefix = "💭 Thinking...";
                         lines.push(Line::from(vec![Span::styled(
                             reasoning_prefix,
@@ -970,7 +971,7 @@ impl Chat {
                                 .add_modifier(Modifier::ITALIC),
                         )]));
 
-                        let wrapped_reasoning = textwrap::wrap(reasoning, max_width);
+                        let wrapped_reasoning = textwrap::wrap(reasoning_trimmed, max_width);
                         for line in wrapped_reasoning {
                             lines.push(Line::from(Span::styled(
                                 line.to_string(),
