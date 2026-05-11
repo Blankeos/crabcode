@@ -1,13 +1,10 @@
-use aisdk::{
-    core::{
-        capabilities::ToolCallSupport,
-        language_model::{LanguageModelStream, StopReason},
-        utils::step_count_is,
-        DynamicModel, LanguageModel, LanguageModelRequest, LanguageModelStreamChunkType,
-        Message as AisdkMessage, StreamTextResponse, Tool,
-    },
-    providers::{Anthropic, OpenAI, OpenAICompatible},
+use aisdk::core::{
+    chunk::ChunkType,
+    response::{stream_with_tools, LanguageModelStream, StreamTextResponse},
+    stop::{step_count_is, StopReason},
+    Message as AisdkMessage, Tool,
 };
+use aisdk::{Anthropic, OpenAI, OpenAICompatible};
 use futures::StreamExt;
 use std::{collections::HashMap, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -139,6 +136,11 @@ pub async fn stream_llm_with_cancellation(
     )
     .await?;
 
+    let stop_reason = response.stop_reason().await;
+    let _ = log(&format!(
+        "Stream completed: outcome={stream_outcome:?}, stop_reason={stop_reason:?}, agent_max_steps={agent_max_steps:?}",
+    ));
+
     if stream_outcome == StreamRelayOutcome::Ended {
         return Ok(());
     }
@@ -154,9 +156,7 @@ pub async fn stream_llm_with_cancellation(
     );
 
     let mut follow_up_messages = response.messages().await;
-    follow_up_messages.push(AisdkMessage::Assistant(
-        MAX_STEPS_REACHED_PROMPT.to_string().into(),
-    ));
+    follow_up_messages.push(AisdkMessage::assistant(MAX_STEPS_REACHED_PROMPT));
 
     let mut summary_response =
         stream_provider_request(&request_config, follow_up_messages, Vec::new(), None).await?;
@@ -344,122 +344,70 @@ async fn stream_provider_request(
     tools: Vec<Tool>,
     max_steps: Option<usize>,
 ) -> Result<StreamTextResponse, DynError> {
+    let stop_when = max_steps.map(|s| step_count_is(s));
+    let headers = HashMap::new();
+
     match config.kind {
         ProviderKind::OpenAICompatible => {
-            let provider = build_openai_compatible_provider(config)?;
-            stream_with_model(provider, messages, tools, max_steps).await
+            let mut builder = OpenAICompatible::builder()
+                .base_url(&config.base_url)
+                .model_name(&config.model_name)
+                .provider_name(&config.provider_name);
+            if let Some(key) = config.api_key.as_deref() {
+                builder = builder.api_key(key);
+            }
+            let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
+            stream_with_tools(provider, messages, tools, max_steps, stop_when, headers)
+                .await
+                .map_err(|e| Box::new(e) as DynError)
         }
         ProviderKind::Anthropic => {
-            let provider = build_anthropic_provider(config)?;
-            stream_with_model(provider, messages, tools, max_steps).await
+            let mut builder = Anthropic::builder()
+                .base_url(&config.base_url)
+                .model_name(&config.model_name)
+                .provider_name(&config.provider_name);
+            if let Some(key) = config.api_key.as_deref() {
+                builder = builder.api_key(key);
+            }
+            let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
+            stream_with_tools(provider, messages, tools, max_steps, stop_when, headers)
+                .await
+                .map_err(|e| Box::new(e) as DynError)
         }
         ProviderKind::OpenAI => {
-            let provider = build_openai_provider(config)?;
-            stream_with_model(provider, messages, tools, max_steps).await
+            let mut builder = OpenAI::builder()
+                .base_url(&config.base_url)
+                .model_name(&config.model_name)
+                .provider_name(&config.provider_name);
+            if let Some(key) = config.api_key.as_deref() {
+                builder = builder.api_key(key);
+            }
+
+            if let Some(responses_path) = &config.openai_options.response_path {
+                builder = builder.responses_path(responses_path);
+            }
+            if config.openai_options.force_store_false {
+                builder = builder.store_override(false);
+            }
+            if let Some(instructions) = &config.openai_options.default_instructions {
+                builder = builder.default_instructions(instructions.clone());
+            }
+            if config.openai_options.disallow_system_messages {
+                builder = builder.strip_system_and_developer_messages(true);
+            }
+            if config.openai_options.force_tool_strict_false {
+                builder = builder.tool_strict_override(false);
+            }
+            if !config.openai_options.additional_headers.is_empty() {
+                builder = builder.headers(config.openai_options.additional_headers.clone());
+            }
+
+            let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
+            stream_with_tools(provider, messages, tools, max_steps, stop_when, headers)
+                .await
+                .map_err(|e| Box::new(e) as DynError)
         }
     }
-}
-
-async fn stream_with_model<M>(
-    model: M,
-    messages: Vec<AisdkMessage>,
-    tools: Vec<Tool>,
-    max_steps: Option<usize>,
-) -> Result<StreamTextResponse, DynError>
-where
-    M: LanguageModel + ToolCallSupport,
-{
-    let mut builder = LanguageModelRequest::builder()
-        .model(model)
-        .messages(messages);
-
-    if let Some(max_steps) = max_steps {
-        builder = builder.stop_when(step_count_is(max_steps));
-    }
-
-    for tool in tools {
-        builder = builder.with_tool(tool);
-    }
-
-    let mut request = builder.build();
-    request
-        .stream_text()
-        .await
-        .map_err(|e| Box::new(e) as DynError)
-}
-
-fn build_openai_compatible_provider(
-    config: &ProviderRequestConfig,
-) -> Result<OpenAICompatible<DynamicModel>, DynError> {
-    let mut provider_builder = OpenAICompatible::<DynamicModel>::builder()
-        .base_url(&config.base_url)
-        .model_name(&config.model_name)
-        .provider_name(&config.provider_name);
-
-    if let Some(key) = config.api_key.as_deref() {
-        provider_builder = provider_builder.api_key(key);
-    }
-
-    provider_builder
-        .build()
-        .map_err(|e| Box::new(e) as DynError)
-}
-
-fn build_anthropic_provider(
-    config: &ProviderRequestConfig,
-) -> Result<Anthropic<DynamicModel>, DynError> {
-    let mut provider_builder = Anthropic::<DynamicModel>::builder()
-        .base_url(&config.base_url)
-        .model_name(&config.model_name)
-        .provider_name(&config.provider_name);
-
-    if let Some(key) = config.api_key.as_deref() {
-        provider_builder = provider_builder.api_key(key);
-    }
-
-    provider_builder
-        .build()
-        .map_err(|e| Box::new(e) as DynError)
-}
-
-fn build_openai_provider(config: &ProviderRequestConfig) -> Result<OpenAI<DynamicModel>, DynError> {
-    let mut provider_builder = OpenAI::<DynamicModel>::builder()
-        .base_url(&config.base_url)
-        .model_name(&config.model_name)
-        .provider_name(&config.provider_name);
-
-    if let Some(key) = config.api_key.as_deref() {
-        provider_builder = provider_builder.api_key(key);
-    }
-
-    if let Some(responses_path) = &config.openai_options.response_path {
-        provider_builder = provider_builder.responses_path(responses_path);
-    }
-
-    if config.openai_options.force_store_false {
-        provider_builder = provider_builder.store_override(false);
-    }
-
-    if let Some(instructions) = &config.openai_options.default_instructions {
-        provider_builder = provider_builder.default_instructions(instructions.clone());
-    }
-
-    if config.openai_options.disallow_system_messages {
-        provider_builder = provider_builder.strip_system_and_developer_messages(true);
-    }
-
-    if config.openai_options.force_tool_strict_false {
-        provider_builder = provider_builder.tool_strict_override(false);
-    }
-
-    if !config.openai_options.additional_headers.is_empty() {
-        provider_builder =
-            provider_builder.headers(config.openai_options.additional_headers.clone());
-    }
-
-    provider_builder
-        .build()
-        .map_err(|e| Box::new(e) as DynError)
 }
 
 async fn relay_stream_to_sender(
@@ -469,26 +417,35 @@ async fn relay_stream_to_sender(
     token_count: &mut usize,
     start_time: &Instant,
 ) -> Result<StreamRelayOutcome, DynError> {
-    while let Some(chunk) = stream.next().await {
-        if cancel_token.is_cancelled() {
-            let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
-            return Err(anyhow::anyhow!("Streaming cancelled by user").into());
-        }
+    let _ = log("[RELAY] relay_stream_to_sender started");
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
+                return Err(anyhow::anyhow!("Streaming cancelled by user").into());
+            }
+            chunk = stream.next() => chunk,
+        };
+
+        let chunk = match chunk {
+            Some(c) => c,
+            None => break,
+        };
 
         match chunk {
-            LanguageModelStreamChunkType::Text(text) => {
+            ChunkType::Text(text) => {
                 *token_count += estimate_tokens(&text);
                 let _ = sender.send(crate::llm::ChunkMessage::Text(text));
             }
-            LanguageModelStreamChunkType::Reasoning(reasoning) => {
+            ChunkType::Reasoning(reasoning) => {
                 *token_count += estimate_tokens(&reasoning);
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
-            LanguageModelStreamChunkType::ToolCall(_tool_call) => {
-                // Tool execution is handled internally by aisdk::stream_text().
-                // We intentionally don't surface argument deltas here.
+            ChunkType::ToolCall(_tool_call) => {
+                let _ = log("[RELAY] ToolCall chunk received");
             }
-            LanguageModelStreamChunkType::End(_msg) => {
+            ChunkType::End(_msg) => {
+                let _ = log("[RELAY] End chunk — returning Ended");
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 let _ = sender.send(crate::llm::ChunkMessage::Metrics {
                     token_count: *token_count,
@@ -497,17 +454,20 @@ async fn relay_stream_to_sender(
                 let _ = sender.send(crate::llm::ChunkMessage::End);
                 return Ok(StreamRelayOutcome::Ended);
             }
-            LanguageModelStreamChunkType::Start => {}
-            LanguageModelStreamChunkType::Failed(err) => {
+            ChunkType::Start => {
+                let _ = log("[RELAY] Start chunk received");
+            }
+            ChunkType::Failed(err) => {
                 let _ = sender.send(crate::llm::ChunkMessage::Failed(err.clone()));
                 let _ = log(&format!("Stream Chunk Failed {}", err));
                 return Err(anyhow::anyhow!("Streaming failed: {}", err).into());
             }
-            LanguageModelStreamChunkType::Incomplete(_msg) => {}
-            LanguageModelStreamChunkType::NotSupported(_msg) => {}
+            ChunkType::Incomplete(_msg) => {}
+            ChunkType::NotSupported(_msg) => {}
         }
     }
 
+    let _ = log("[RELAY] stream exhausted — returning Exhausted");
     Ok(StreamRelayOutcome::Exhausted)
 }
 
@@ -516,25 +476,22 @@ async fn reached_step_limit(agent_max_steps: Option<usize>, response: &StreamTex
 }
 
 fn estimate_tokens(content: &str) -> usize {
-    // Estimate tokens: ~4 characters per token on average
     content.chars().count().max(1) / 4
 }
 
 fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMessage> {
-    use aisdk::core::Message::{Assistant, System, User};
-
     let mut aisdk_messages = Vec::new();
 
     for msg in messages {
         match msg.role {
             crate::session::types::MessageRole::System => {
-                aisdk_messages.push(System(msg.content.clone().into()));
+                aisdk_messages.push(AisdkMessage::system(msg.content.clone()));
             }
             crate::session::types::MessageRole::User => {
-                aisdk_messages.push(User(msg.content.clone().into()));
+                aisdk_messages.push(AisdkMessage::user(msg.content.clone()));
             }
             crate::session::types::MessageRole::Assistant => {
-                aisdk_messages.push(Assistant(msg.content.clone().into()));
+                aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));
             }
             crate::session::types::MessageRole::Tool => {
                 continue;
@@ -567,11 +524,6 @@ enum ProviderKind {
 
 impl ProviderKind {
     fn from_provider(_provider_name: &str, npm_package: &str) -> Self {
-        // Dirty: But add any workaround/overrides here in case npm_package can be treated differently.
-        // if provider_name == "kimi-for-coding" {
-        //     return Self::OpenAICompatible;
-        // }
-
         match npm_package {
             "@ai-sdk/openai-compatible" => Self::OpenAICompatible,
             "@ai-sdk/anthropic" => Self::Anthropic,

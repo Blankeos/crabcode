@@ -232,6 +232,8 @@ impl Chat {
             self.add_message(msg);
         }
 
+        self.invalidate_cache();
+
         let now = std::time::Instant::now();
         if self.streaming_start_time.is_none() {
             self.streaming_start_time = Some(now);
@@ -275,9 +277,15 @@ impl Chat {
     fn compute_fingerprint(&self, max_width: usize) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
+        // Bump this whenever rendering logic changes (tables, markdown, etc.)
+        const RENDER_VERSION: u64 = 1;
+        RENDER_VERSION.hash(&mut h);
         self.messages.len().hash(&mut h);
         for msg in &self.messages {
             msg.content.len().hash(&mut h);
+            if let Some(ref reasoning) = msg.reasoning {
+                reasoning.len().hash(&mut h);
+            }
         }
         max_width.hash(&mut h);
         h.finish()
@@ -972,8 +980,10 @@ impl Chat {
                             )));
                         }
 
-                        // Add separator between reasoning and content
-                        lines.push(Line::from(""));
+                        // Add separator between reasoning and content (only if there's content)
+                        if !message.content.is_empty() {
+                            lines.push(Line::from(""));
+                        }
                     }
                 }
 

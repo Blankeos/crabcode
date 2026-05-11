@@ -110,3 +110,5 @@ Produce a markdown table with these columns:
 |---|---------|----------|----------|-----|
 
 Then a separate section with PRIORITY-ranked actionable gaps (CRITICAL/HIGH/MEDIUM/LOW) with specific file locations and implementation notes.
+
+Write it in _docs/__PARITY.md

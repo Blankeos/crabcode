@@ -1,4 +1,5 @@
 use crate::theme::ThemeColors;
+use crate::ui::markdown::table::preprocess_tables;
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -130,14 +131,18 @@ impl tui_markdown::StyleSheet for MarkdownStyleSheet {
 }
 
 /// Render markdown content to lines
-/// This uses tui-markdown to parse and render the markdown
+/// This uses tui-markdown to parse and render the markdown.
+/// Tables are pre-processed and rendered with Unicode box-drawing characters.
 pub fn render_markdown(
     content: &str,
     max_width: usize,
     colors: &ThemeColors,
 ) -> Vec<Line<'static>> {
+    // Pre-process tables: render them as Unicode box-drawing text
+    let processed = preprocess_tables(content, max_width);
+
     let options = tui_markdown::Options::new(MarkdownStyleSheet::new(*colors));
-    let text = tui_markdown::from_str_with_options(content, &options);
+    let text = tui_markdown::from_str_with_options(&processed, &options);
 
     // Convert to our ratatui version's Line type and wrap to max_width
     let mut result = Vec::new();
@@ -474,5 +479,25 @@ mod tests {
         );
         // Should produce multiple lines due to wrapping
         assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn test_render_markdown_with_table() {
+        let colors = test_colors();
+        let input = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+        let lines = render_markdown(input, 80, &colors);
+        
+        // Convert lines to string for inspection
+        let output: String = lines.iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        
+        eprintln!("render_markdown output:\n{}", output);
+        
+        // Should contain our Unicode box-drawing corners, not raw markdown
+        assert!(output.contains('┌'), "Expected ┌ in output, got:\n{}", output);
+        assert!(output.contains('┐'), "Expected ┐ in output, got:\n{}", output);
+        assert!(!output.contains("| A |"), "Raw markdown table should be replaced");
     }
 }

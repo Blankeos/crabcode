@@ -45,3 +45,12 @@
 - [ ] Parity: Like opencode, I wanna be able to queue messages. By sending some message even though it's still streaming, won't stop the agent, will just keep going.
 
 - [ ] Markdown: Proper Table rendering.
+
+- [ ] Rendering: Thinking Rendering always has this massive space below it, even if the agent didn't really think much.
+
+- [ ] Tool call rendering:
+  - [ ] editing files w/ diffs, like opencode does.
+  - [ ] todowrite - better looking, like opencode does.
+  - [ ] rendering subagents - just like opencode, clickable to go into their page.. OR I can do `ctrl-x ↓` to go into it if there's a subagent running. I can also switch between subagents with `←` and `→`
+
+- [ ] Bug: I can type a command see autosuggest, but can't press 'enter' to run the command. Pls fix.

@@ -1,5 +1,6 @@
 use crate::tools::{ToolContext, ToolRegistry};
-use aisdk::core::{tools::ToolExecute, Tool};
+use aisdk::core::tools::ToolExecute;
+use aisdk::core::Tool;
 use schemars::Schema;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,7 +9,6 @@ use crate::llm::ChunkSender;
 
 static TOOL_CALL_SEQ: AtomicUsize = AtomicUsize::new(0);
 
-/// Convert our ToolRegistry to AISDK Tools
 pub async fn convert_to_aisdk_tools(
     registry: &ToolRegistry,
     sender: Option<ChunkSender>,
@@ -34,8 +34,7 @@ pub async fn convert_to_aisdk_tools(
         let agent_mode = agent_mode.clone();
         let permissions = permissions.clone();
 
-        // Create the execute function
-        let execute = ToolExecute::new(Box::new(move |input: Value| {
+        let execute = ToolExecute::new(move |input: Value| {
             let tool_id = tool_id.clone();
             let tool_id_for_exec = tool_id.clone();
             let tool_id_for_ui = tool_id.clone();
@@ -47,130 +46,101 @@ pub async fn convert_to_aisdk_tools(
             let agent_mode = agent_mode.clone();
             let permissions = permissions.clone();
 
-            let call_seq = TOOL_CALL_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-            let call_id = format!("call_{call_seq}");
+            async move {
+                let call_seq = TOOL_CALL_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+                let call_id = format!("call_{call_seq}");
 
-            if let Some(ref sender) = sender {
-                // Surface tool call start to the UI
-                let args = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
-                let _ = sender.send(crate::llm::ChunkMessage::ToolCalls(vec![
-                    crate::llm::ToolCall {
-                        id: call_id.clone(),
-                        call_type: "function".to_string(),
-                        function: crate::llm::FunctionCall {
-                            name: tool_id.clone(),
-                            arguments: args,
-                        },
-                    },
-                ]));
-            }
-
-            let sender_for_block = sender.clone();
-            let call_id_for_block = call_id.clone();
-            let tool_id_for_ui_block = tool_id_for_ui.clone();
-
-            // aisdk tool execution is synchronous (Fn(Value) -> Result<String, String>),
-            // but our tools are async. Bridge by blocking in-place on the current runtime.
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async move {
-                    let _ = crate::logging::log(&format!(
-                        "[AISDK_TOOL] call {} args={} ",
-                        tool_id_for_exec, input
-                    ));
-
-                    let handler = registry
-                        .get(&tool_id_for_exec)
-                        .await
-                        .ok_or_else(|| format!("Tool '{}' not found", tool_id_for_exec))?;
-
-                    if let Err(e) = handler.validate(&input) {
-                        return Err(format!("Validation error: {}", e));
-                    }
-
-                    permissions
-                        .preflight(
-                            &agent_mode,
-                            &tool_id_for_exec,
-                            &input,
-                            sender_for_block.as_ref(),
-                        )
-                        .await
-                        .map_err(|e| format!("{}", e))?;
-
-                    let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-                    let ctx = ToolContext::new("session", "message", agent_mode.clone(), abort_rx);
-
-                    let tool_result = handler
-                        .execute(input, &ctx)
-                        .await
-                        .map_err(|e| format!("Execution error: {}", e))?;
-
-                    let _ = crate::logging::log(&format!(
-                        "[AISDK_TOOL] result {} bytes={}",
-                        tool_id_for_exec,
-                        tool_result.output.len()
-                    ));
-
-                    if let Some(ref sender) = sender_for_block {
-                        let preview_limit: usize = 4000;
-                        let mut preview = tool_result.output.clone();
-                        if preview.len() > preview_limit {
-                            let boundary = preview.floor_char_boundary(preview_limit);
-                            preview.truncate(boundary);
-                            preview.push_str("... (truncated)");
-                        }
-
-                        let line_count = tool_result.output.lines().count();
-                        let meta = serde_json::Value::Object(
-                            tool_result
-                                .metadata
-                                .into_iter()
-                                .collect::<serde_json::Map<String, serde_json::Value>>(),
-                        );
-
-                        let payload = serde_json::json!({
-                            "status": "ok",
-                            "title": tool_result.title,
-                            "output_preview": preview,
-                            "line_count": line_count,
-                            "metadata": meta,
-                        })
-                        .to_string();
-
-                        let _ = sender.send(crate::llm::ChunkMessage::ToolResult(
-                            crate::llm::ToolCallResult {
-                                tool_call_id: call_id_for_block.clone(),
-                                role: "tool".to_string(),
-                                name: tool_id_for_ui_block.clone(),
-                                content: payload,
+                if let Some(ref sender) = sender {
+                    let args = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+                    let _ = sender.send(crate::llm::ChunkMessage::ToolCalls(vec![
+                        crate::llm::ToolCall {
+                            id: call_id.clone(),
+                            call_type: "function".to_string(),
+                            function: crate::llm::FunctionCall {
+                                name: tool_id.clone(),
+                                arguments: args,
                             },
-                        ));
+                        },
+                    ]));
+                }
+
+                let _ = crate::logging::log(&format!(
+                    "[AISDK_TOOL] call {} args={}",
+                    tool_id_for_exec, input
+                ));
+
+                let handler = registry
+                    .get(&tool_id_for_exec)
+                    .await
+                    .ok_or_else(|| format!("Tool '{}' not found", tool_id_for_exec))?;
+
+                if let Err(e) = handler.validate(&input) {
+                    return Err(format!("Validation error: {}", e));
+                }
+
+                permissions
+                    .preflight(
+                        &agent_mode,
+                        &tool_id_for_exec,
+                        &input,
+                        sender.as_ref(),
+                    )
+                    .await
+                    .map_err(|e| format!("{}", e))?;
+
+                let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
+                let ctx = ToolContext::new("session", "message", agent_mode.clone(), abort_rx);
+
+                let tool_result = handler
+                    .execute(input, &ctx)
+                    .await
+                    .map_err(|e| format!("Execution error: {}", e))?;
+
+                let _ = crate::logging::log(&format!(
+                    "[AISDK_TOOL] result {} bytes={}",
+                    tool_id_for_exec,
+                    tool_result.output.len()
+                ));
+
+                if let Some(ref sender) = sender {
+                    let preview_limit: usize = 4000;
+                    let mut preview = tool_result.output.clone();
+                    if preview.len() > preview_limit {
+                        let boundary = preview.floor_char_boundary(preview_limit);
+                        preview.truncate(boundary);
+                        preview.push_str("... (truncated)");
                     }
 
-                    Ok(tool_result.output)
-                })
-            });
+                    let line_count = tool_result.output.lines().count();
+                    let meta = serde_json::Value::Object(
+                        tool_result
+                            .metadata
+                            .into_iter()
+                            .collect::<serde_json::Map<String, serde_json::Value>>(),
+                    );
 
-            if let (Err(err), Some(ref sender)) = (&result, sender.as_ref()) {
-                // Error path: emit structured error payload.
-                let payload = serde_json::json!({
-                    "status": "error",
-                    "title": tool_description_for_ui,
-                    "output_preview": format!("{}", err),
-                })
-                .to_string();
-                let _ = sender.send(crate::llm::ChunkMessage::ToolResult(
-                    crate::llm::ToolCallResult {
-                        tool_call_id: call_id.clone(),
-                        role: "tool".to_string(),
-                        name: tool_id_for_ui.clone(),
-                        content: payload,
-                    },
-                ));
+                    let payload = serde_json::json!({
+                        "status": "ok",
+                        "title": tool_result.title,
+                        "output_preview": preview,
+                        "line_count": line_count,
+                        "metadata": meta,
+                    })
+                    .to_string();
+
+                    let _ = sender.send(crate::llm::ChunkMessage::ToolResult(
+                        crate::llm::ToolCallResult {
+                            tool_call_id: call_id.clone(),
+                            role: "tool".to_string(),
+                            name: tool_id_for_ui.clone(),
+                            content: payload,
+                        },
+                    ));
+                }
+
+                Ok(tool_result.output)
             }
-
-            result
-        }));
+        });
 
         // Build the tool schema from parameters
         let mut properties = serde_json::Map::new();

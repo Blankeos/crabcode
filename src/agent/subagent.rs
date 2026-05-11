@@ -123,10 +123,13 @@ pub async fn run_subagent(
     full_registry: &ToolRegistry,
 ) -> Result<String, String> {
     use aisdk::core::{
-        language_model::{LanguageModelStreamChunkType},
-        DynamicModel, LanguageModelRequest, Message as AisdkMessage,
+        chunk::ChunkType,
+        response::{stream_with_tools, StreamTextResponse},
+        Message as AisdkMessage,
     };
+    use aisdk::{Anthropic, OpenAI, OpenAICompatible};
     use futures::StreamExt;
+    use std::collections::HashMap;
 
     let session = get_llm_session().ok_or("LLM session not configured")?;
     let cwd = std::env::current_dir()
@@ -150,13 +153,15 @@ pub async fn run_subagent(
     );
 
     let messages = vec![
-        AisdkMessage::System(system_prompt.into()),
-        AisdkMessage::User(user_content.into()),
+        AisdkMessage::system(system_prompt),
+        AisdkMessage::user(user_content),
     ];
 
-    let mut response = match session.provider_kind {
+    let headers = HashMap::new();
+
+    let mut response: StreamTextResponse = match session.provider_kind {
         ProviderKind::OpenAICompatible => {
-            let provider = aisdk::providers::OpenAICompatible::<DynamicModel>::builder()
+            let provider = OpenAICompatible::builder()
                 .base_url(&session.base_url)
                 .model_name(&session.model)
                 .provider_name(&session.provider_name)
@@ -164,18 +169,12 @@ pub async fn run_subagent(
                 .build()
                 .map_err(|e| format!("Failed to build OpenAICompatible provider: {}", e))?;
 
-            let mut request = LanguageModelRequest::builder()
-                .model(provider)
-                .messages(messages);
-
-            for tool in aisdk_tools {
-                request = request.with_tool(tool);
-            }
-
-            request.build().stream_text().await.map_err(|e| format!("Stream error: {}", e))?
+            stream_with_tools(provider, messages, aisdk_tools, None, None, headers)
+                .await
+                .map_err(|e| format!("Stream error: {}", e))?
         }
         ProviderKind::Anthropic => {
-            let provider = aisdk::providers::Anthropic::<DynamicModel>::builder()
+            let provider = Anthropic::builder()
                 .base_url(&session.base_url)
                 .model_name(&session.model)
                 .provider_name(&session.provider_name)
@@ -183,18 +182,12 @@ pub async fn run_subagent(
                 .build()
                 .map_err(|e| format!("Failed to build Anthropic provider: {}", e))?;
 
-            let mut request = LanguageModelRequest::builder()
-                .model(provider)
-                .messages(messages);
-
-            for tool in aisdk_tools {
-                request = request.with_tool(tool);
-            }
-
-            request.build().stream_text().await.map_err(|e| format!("Stream error: {}", e))?
+            stream_with_tools(provider, messages, aisdk_tools, None, None, headers)
+                .await
+                .map_err(|e| format!("Stream error: {}", e))?
         }
         ProviderKind::OpenAI => {
-            let provider = aisdk::providers::OpenAI::<DynamicModel>::builder()
+            let provider = OpenAI::builder()
                 .base_url(&session.base_url)
                 .model_name(&session.model)
                 .provider_name(&session.provider_name)
@@ -202,15 +195,9 @@ pub async fn run_subagent(
                 .build()
                 .map_err(|e| format!("Failed to build OpenAI provider: {}", e))?;
 
-            let mut request = LanguageModelRequest::builder()
-                .model(provider)
-                .messages(messages);
-
-            for tool in aisdk_tools {
-                request = request.with_tool(tool);
-            }
-
-            request.build().stream_text().await.map_err(|e| format!("Stream error: {}", e))?
+            stream_with_tools(provider, messages, aisdk_tools, None, None, headers)
+                .await
+                .map_err(|e| format!("Stream error: {}", e))?
         }
     };
 
@@ -218,13 +205,13 @@ pub async fn run_subagent(
 
     while let Some(chunk) = response.stream.next().await {
         match chunk {
-            LanguageModelStreamChunkType::Text(text) => {
+            ChunkType::Text(text) => {
                 collected_text.push_str(&text);
             }
-            LanguageModelStreamChunkType::Failed(err) => {
+            ChunkType::Failed(err) => {
                 return Err(format!("Subagent streaming failed: {}", err));
             }
-            LanguageModelStreamChunkType::End(_) => {
+            ChunkType::End(_) => {
                 break;
             }
             _ => {}
