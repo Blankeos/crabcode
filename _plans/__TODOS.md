@@ -41,3 +41,7 @@
 - [ ] Bug: skill loading on conflict. i.e. duplicate frontend-design skill. Warning: duplicate skill name 'frontend-design' (existing: /Users/carlo/.claude/skills/frontend-design/SKILL.md, duplicate: /Users/carlo/.config/opencode/skill/frontend-design/SKILL.md)
 
 - [x] Bug: Timeline livescroll and actual chat UI consistency - make them the same.
+
+- [ ] Parity: Like opencode, I wanna be able to queue messages. By sending some message even though it's still streaming, won't stop the agent, will just keep going.
+
+- [ ] Markdown: Proper Table rendering.

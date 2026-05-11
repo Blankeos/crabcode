@@ -188,7 +188,7 @@ impl App {
             .unwrap_or_else(|| "?".to_string());
 
         let home_state = init_home();
-        let mut agent = "Plan".to_string();
+        let mut agent = "Build".to_string();
         let chat = Chat::new();
         let suggestions_popup_state = init_suggestions_popup(Popup::new());
         let models_dialog_state = init_models_dialog("Models", vec![]);
