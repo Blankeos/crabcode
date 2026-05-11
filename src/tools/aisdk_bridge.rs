@@ -20,6 +20,10 @@ pub async fn convert_to_aisdk_tools(
 
     for tool_def in tools {
         if !permissions.is_tool_allowed_for_agent(&agent_mode, &tool_def.id) {
+            let _ = crate::logging::log(&format!(
+                "[AISDK_TOOLS] Skipping '{}': not allowed in {} mode",
+                tool_def.id, agent_mode
+            ));
             continue;
         }
 

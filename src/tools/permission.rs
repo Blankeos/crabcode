@@ -107,8 +107,8 @@ impl AgentToolPolicies {
         }
 
         if mode == "plan" {
-            // Plan mode is intentionally read/search-only by default.
-            return matches!(tool.as_str(), "read" | "list" | "glob" | "grep");
+            // Plan mode: deny file modifications and bash; allow everything else (read, search, web, etc.)
+            return !matches!(tool.as_str(), "write" | "edit" | "bash");
         }
 
         if mode == "build" {
