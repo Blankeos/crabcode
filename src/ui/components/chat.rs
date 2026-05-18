@@ -1060,22 +1060,43 @@ impl Chat {
                 // User message: Box with left border colored by agent mode
                 let border_color =
                     crate::theme::agent_mode_color(message.agent_mode.as_deref(), colors);
+                let bg = colors.background_element;
+                let border_style = Style::default().fg(border_color);
+                let pad_style = Style::default().bg(bg);
+                let text_style = Style::default().fg(colors.text).bg(bg);
                 let content = message.content.clone();
+                let horizontal_padding = 2usize;
+                let right_padding = 2usize;
+                let wrap_width = max_width
+                    .saturating_sub(1 + horizontal_padding + right_padding)
+                    .max(1);
+
+                let padding_line = || {
+                    Line::from(vec![
+                        Span::styled("▌", border_style),
+                        Span::styled(" ".repeat(max_width.saturating_sub(1)), pad_style),
+                    ])
+                };
 
                 // Wrap content to fit within max_width - padding
-                let wrapped_lines = textwrap::wrap(&content, max_width.saturating_sub(4).max(1));
+                let wrapped_lines = textwrap::wrap(&content, wrap_width);
+
+                lines.push(padding_line());
 
                 for line in wrapped_lines.iter() {
-                    let left_border = "▌ ";
                     let line_width = UnicodeWidthStr::width(line.as_ref());
-                    let right_padding = " ".repeat(max_width.saturating_sub(line_width + 3));
+                    let trailing_padding =
+                        " ".repeat(max_width.saturating_sub(1 + horizontal_padding + line_width));
 
                     lines.push(Line::from(vec![
-                        Span::styled(left_border, Style::default().fg(border_color)),
-                        Span::raw(line.to_string()),
-                        Span::raw(right_padding),
+                        Span::styled("▌", border_style),
+                        Span::styled(" ".repeat(horizontal_padding), pad_style),
+                        Span::styled(line.to_string(), text_style),
+                        Span::styled(trailing_padding, pad_style),
                     ]));
                 }
+
+                lines.push(padding_line());
 
                 // Add empty line after user message
                 lines.push(Line::from(""));
@@ -2365,7 +2386,8 @@ mod tests {
     fn test_short_chat_content_renders_at_top() {
         use ratatui::{backend::TestBackend, Terminal};
 
-        let colors = test_colors();
+        let mut colors = test_colors();
+        colors.background_element = Color::Indexed(236);
         let mut chat = Chat::new();
         chat.add_user_message("hello");
 
@@ -2380,9 +2402,18 @@ mod tests {
             .map(|y| buffer_row_text(buffer, 38, y))
             .collect::<Vec<_>>();
 
-        assert!(rows[0].contains("hello"));
-        assert!(rows[1].trim().is_empty());
-        assert!(rows[2].trim().is_empty());
+        assert!(rows[0].starts_with("▌"));
+        assert!(!rows[0].contains("hello"));
+        assert!(rows[1].starts_with("▌"));
+        assert!(rows[1].contains("hello"));
+        assert!(rows[2].starts_with("▌"));
+        assert!(!rows[2].contains("hello"));
+        assert!(rows[3].trim().is_empty());
+
+        assert_eq!(buffer[(1, 0)].bg, colors.background_element);
+        assert_eq!(buffer[(1, 1)].bg, colors.background_element);
+        assert_eq!(buffer[(1, 2)].bg, colors.background_element);
+        assert_ne!(buffer[(1, 3)].bg, colors.background_element);
     }
 
     #[test]
