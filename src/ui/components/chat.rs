@@ -1,7 +1,9 @@
 use crate::session::types::{Message, MessageRole};
 use crate::theme::{contrast_text, ThemeColors};
 use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
-use crate::ui::scrollbar::{render_scrollbar, scrollbar_offset_from_row, ScrollMetrics};
+use crate::ui::scrollbar::{
+    render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
+};
 use crate::ui::selection::Selection;
 use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
 use crate::utils::token_counter::StreamingTokenCounter;
@@ -22,6 +24,7 @@ pub struct Chat {
     pub scroll_offset: usize,
     pub scrollbar_state: ScrollbarState,
     pub is_dragging_scrollbar: bool,
+    scrollbar_drag_offset: Option<u16>,
     pub content_height: usize,
     pub viewport_height: usize,
     // Streaming metrics tracking (per streaming turn)
@@ -86,6 +89,7 @@ impl Chat {
             scroll_offset: 0,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
+            scrollbar_drag_offset: None,
             content_height: 0,
             viewport_height: 0,
             streaming_start_time: None,
@@ -120,6 +124,7 @@ impl Chat {
             scroll_offset: 0,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
+            scrollbar_drag_offset: None,
             content_height: 0,
             viewport_height: 0,
             streaming_start_time: None,
@@ -261,6 +266,8 @@ impl Chat {
         self.messages.clear();
         self.scroll_offset = 0;
         self.scrollbar_state = ScrollbarState::default();
+        self.is_dragging_scrollbar = false;
+        self.scrollbar_drag_offset = None;
         self.content_height = 0;
         self.streaming_start_time = None;
         self.streaming_first_token_time = None;
@@ -282,12 +289,13 @@ impl Chat {
         self.cached_fingerprint = 0;
     }
 
-    fn compute_fingerprint(&self, max_width: usize) -> u64 {
+    fn compute_fingerprint(&self, max_width: usize, colors: &ThemeColors) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Bump this whenever rendering logic changes (tables, markdown, etc.)
         const RENDER_VERSION: u64 = 3;
         RENDER_VERSION.hash(&mut h);
+        colors.hash(&mut h);
         self.messages.len().hash(&mut h);
         for msg in &self.messages {
             std::mem::discriminant(&msg.role).hash(&mut h);
@@ -649,8 +657,31 @@ impl Chat {
         use ratatui::layout::Position;
         let point = Position::new(event.column, event.row);
 
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+
+        if self.is_dragging_scrollbar {
+            match event.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.scroll_to_position(event.row, scrollbar_area);
+                    return true;
+                }
+                MouseEventKind::Up(_) => {
+                    self.is_dragging_scrollbar = false;
+                    self.scrollbar_drag_offset = None;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
         if !area.contains(point) {
             self.is_dragging_scrollbar = false;
+            self.scrollbar_drag_offset = None;
             // If dragging selection outside area, finalize it
             if self.selection.is_dragging {
                 self.selection.finish();
@@ -676,14 +707,6 @@ impl Chat {
             height: content_area.height.saturating_sub(visual_y_offset),
         };
 
-        // Calculate scrollbar area (rightmost column)
-        let scrollbar_area = Rect {
-            x: area.x + area.width.saturating_sub(1),
-            y: area.y,
-            width: 1,
-            height: area.height,
-        };
-
         let is_on_scrollbar = scrollbar_area.contains(point);
         let is_in_content = rendered_content_area.contains(point);
 
@@ -698,9 +721,21 @@ impl Chat {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if is_on_scrollbar {
-                    self.is_dragging_scrollbar = true;
-                    self.scroll_to_position(event.row, scrollbar_area);
-                    true
+                    let metrics = ScrollMetrics::new(
+                        self.content_height,
+                        self.viewport_height,
+                        self.scroll_offset,
+                    );
+                    if let Some(grab_offset) =
+                        scrollbar_grab_offset(metrics, scrollbar_area, event.row)
+                    {
+                        self.is_dragging_scrollbar = true;
+                        self.scrollbar_drag_offset = Some(grab_offset);
+                        self.scroll_to_position(event.row, scrollbar_area);
+                        true
+                    } else {
+                        false
+                    }
                 } else if is_in_content {
                     let content_line = (event.row.saturating_sub(rendered_content_area.y) as usize)
                         .saturating_add(self.scroll_offset);
@@ -740,6 +775,7 @@ impl Chat {
             MouseEventKind::Up(MouseButton::Left) => {
                 if self.is_dragging_scrollbar {
                     self.is_dragging_scrollbar = false;
+                    self.scrollbar_drag_offset = None;
                     true
                 } else if self.selection.is_dragging {
                     let ((s_line, s_col), (e_line, e_col)) = self.selection.range();
@@ -799,7 +835,12 @@ impl Chat {
             self.viewport_height,
             self.scroll_offset,
         );
-        let new_offset = scrollbar_offset_from_row(metrics, scrollbar_area, row);
+        let grab_offset = self
+            .scrollbar_drag_offset
+            .or_else(|| scrollbar_grab_offset(metrics, scrollbar_area, row))
+            .unwrap_or(0);
+        let new_offset =
+            scrollbar_offset_from_row_with_grab(metrics, scrollbar_area, row, grab_offset);
         self.scroll_offset = new_offset.min(max_offset);
         // Track if user scrolled away from bottom
         self.user_scrolled_up = self.scroll_offset < max_offset;
@@ -827,7 +868,7 @@ impl Chat {
 
         let max_width = content_area.width as usize;
 
-        let fingerprint = self.compute_fingerprint(max_width);
+        let fingerprint = self.compute_fingerprint(max_width, colors);
         let cache_valid = !self.cached_lines.is_empty() && fingerprint == self.cached_fingerprint;
 
         let mut positions: Vec<usize>;
@@ -2022,10 +2063,26 @@ mod tests {
     fn test_render_fingerprint_changes_for_same_length_content_mutation() {
         let mut chat = Chat::new();
         chat.add_assistant_message("abcd");
+        let colors = test_colors();
 
-        let before = chat.compute_fingerprint(80);
+        let before = chat.compute_fingerprint(80, &colors);
         chat.messages[0].content = "wxyz".to_string();
-        let after = chat.compute_fingerprint(80);
+        let after = chat.compute_fingerprint(80, &colors);
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn test_render_fingerprint_changes_when_theme_changes() {
+        let mut chat = Chat::new();
+        chat.add_assistant_message("plain markdown text");
+        let mut first = test_colors();
+        first.markdown_text = Color::Rgb(10, 20, 30);
+        let mut second = first;
+        second.markdown_text = Color::Rgb(200, 210, 220);
+
+        let before = chat.compute_fingerprint(80, &first);
+        let after = chat.compute_fingerprint(80, &second);
 
         assert_ne!(before, after);
     }
@@ -2462,6 +2519,67 @@ mod tests {
         chat.scroll_offset = 10;
         chat.scroll_to_bottom();
         assert_eq!(chat.scroll_offset, 80);
+    }
+
+    #[test]
+    fn test_chat_scrollbar_drag_continues_outside_area() {
+        let mut chat = chat_with_content_height(100);
+        let area = Rect::new(0, 0, 40, 10);
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                39,
+                0,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+        assert!(chat.is_dragging_scrollbar);
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                80,
+                9,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+        assert_eq!(chat.scroll_offset, 90);
+        assert!(chat.is_dragging_scrollbar);
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                80,
+                9,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+        assert!(!chat.is_dragging_scrollbar);
+        assert_eq!(chat.scrollbar_drag_offset, None);
+    }
+
+    #[test]
+    fn test_chat_scrollbar_thumb_click_preserves_grab_point() {
+        let mut chat = chat_with_content_height(30);
+        chat.scroll_offset = 6;
+        let area = Rect::new(0, 0, 40, 10);
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                39,
+                4,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+
+        assert_eq!(chat.scroll_offset, 6);
+        assert_eq!(chat.scrollbar_drag_offset, Some(2));
     }
 
     #[test]

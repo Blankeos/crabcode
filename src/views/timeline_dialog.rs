@@ -3,7 +3,7 @@ use crate::theme::ThemeColors;
 use crate::ui::components::dialog::{
     Dialog, DialogAction as FooterAction, DialogItem, DialogPosition,
 };
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{layout::Rect, Frame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,24 +191,42 @@ pub fn handle_timeline_dialog_key_event(
 pub fn handle_timeline_dialog_mouse_event(
     state: &mut TimelineDialogState,
     event: MouseEvent,
-) -> Option<usize> {
+) -> TimelineDialogAction {
+    let was_visible = state.dialog.is_visible();
     let prev_selected = state.dialog.selected_index;
+    let clicked_item = if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+        state.dialog.item_index_at_position(event.column, event.row)
+    } else {
+        None
+    };
+
     let handled = state.dialog.handle_mouse_event(event);
 
-    if !state.dialog.is_visible() {
-        return None;
+    if was_visible && !state.dialog.is_visible() {
+        return TimelineDialogAction::Close;
     }
 
-    // On click selection, return the selected message index
-    if handled && state.dialog.selected_index != prev_selected {
+    if clicked_item.is_some() {
         if let Some(selected) = state.dialog.get_selected() {
             if let Ok(idx) = selected.id.parse::<usize>() {
-                return Some(idx);
+                return TimelineDialogAction::Select(idx);
             }
         }
     }
 
-    None
+    if handled && state.dialog.selected_index != prev_selected {
+        if let Some(selected) = state.dialog.get_selected() {
+            if let Ok(idx) = selected.id.parse::<usize>() {
+                return TimelineDialogAction::Navigate(idx);
+            }
+        }
+    }
+
+    if handled {
+        TimelineDialogAction::Handled
+    } else {
+        TimelineDialogAction::NotHandled
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -223,6 +241,7 @@ pub enum TimelineDialogAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::crossterm::event::KeyModifiers;
 
     fn item_names(state: &TimelineDialogState) -> Vec<String> {
         state
@@ -240,6 +259,15 @@ mod tests {
             .iter()
             .map(|item| item.id.clone())
             .collect()
+    }
+
+    fn left_click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     #[test]
@@ -282,5 +310,43 @@ mod tests {
 
         assert_eq!(item_names(&state), vec!["You: Run tools", "Agent: (empty)"]);
         assert_eq!(item_ids(&state), vec!["0", "1"]);
+    }
+
+    #[test]
+    fn mouse_click_on_item_selects_message() {
+        let messages = vec![
+            Message::user("First prompt"),
+            Message::assistant("First answer"),
+        ];
+        let mut state = TimelineDialogState::build_from_messages(&messages);
+        state.show();
+        state.dialog.dialog_area = Rect {
+            x: 0,
+            y: 0,
+            width: 45,
+            height: 30,
+        };
+
+        let action = handle_timeline_dialog_mouse_event(&mut state, left_click(2, 6));
+
+        assert_eq!(action, TimelineDialogAction::Select(0));
+    }
+
+    #[test]
+    fn mouse_click_outside_closes_timeline() {
+        let messages = vec![Message::user("First prompt")];
+        let mut state = TimelineDialogState::build_from_messages(&messages);
+        state.show();
+        state.dialog.dialog_area = Rect {
+            x: 10,
+            y: 0,
+            width: 45,
+            height: 30,
+        };
+
+        let action = handle_timeline_dialog_mouse_event(&mut state, left_click(2, 6));
+
+        assert_eq!(action, TimelineDialogAction::Close);
+        assert!(!state.dialog.is_visible());
     }
 }

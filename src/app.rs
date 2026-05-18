@@ -1173,9 +1173,6 @@ impl App {
             }
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
                 if self.overlay_focus == OverlayFocus::SuggestionsPopup {
-                    if self.is_streaming {
-                        return true;
-                    }
                     self.autocomplete_and_submit();
                     true
                 } else {
@@ -1193,14 +1190,16 @@ impl App {
 
         match key.code {
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
-                if self.is_streaming {
-                    return;
-                }
                 let input_text = self.input.get_text();
                 if !input_text.is_empty() {
                     use crate::command::parser::parse_input;
 
-                    match parse_input(&input_text) {
+                    let input_type = parse_input(&input_text);
+                    if !Self::can_submit_input(&input_type, self.is_streaming) {
+                        return;
+                    }
+
+                    match input_type {
                         crate::command::parser::InputType::Command(parsed) => {
                             // Don't save commands to prompt history
                             tokio::task::block_in_place(|| {
@@ -1216,7 +1215,7 @@ impl App {
                     }
 
                     self.input.clear();
-                    clear_suggestions(&mut self.suggestions_popup_state);
+                    self.clear_suggestions_and_blur();
                 }
             }
             _ => {
@@ -1224,6 +1223,10 @@ impl App {
                 self.update_suggestions();
             }
         }
+    }
+
+    fn can_submit_input(input_type: &InputType<'_>, is_streaming: bool) -> bool {
+        matches!(input_type, InputType::Command(_)) || !is_streaming
     }
 
     fn update_suggestions(&mut self) {
@@ -1271,7 +1274,56 @@ impl App {
         }
 
         if self.overlay_focus == OverlayFocus::ModelsDialog {
-            handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
+            let action = handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
+            match action {
+                crate::views::models_dialog::ModelsDialogAction::SelectModel {
+                    provider_id,
+                    model_id,
+                } => {
+                    let model_id_clone = model_id.clone();
+                    let provider_id_clone = provider_id.clone();
+                    self.model = model_id_clone.clone();
+                    self.provider_name = provider_id_clone;
+
+                    if let Some(ref dao) = self.prefs_dao {
+                        if let Err(e) =
+                            dao.set_active_model(provider_id.clone(), model_id_clone.clone())
+                        {
+                            eprintln!("Failed to save active model: {}", e);
+                        }
+                    }
+
+                    push_toast(Toast::new(
+                        format!("Switched to: {}", model_id_clone),
+                        ToastLevel::Info,
+                        None,
+                    ));
+                }
+                crate::views::models_dialog::ModelsDialogAction::ToggleFavorite {
+                    provider_id,
+                    model_id,
+                } => {
+                    let is_favorite = if let Some(ref dao) = self.prefs_dao {
+                        dao.toggle_favorite(provider_id.clone(), model_id.clone())
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    push_toast(Toast::new(
+                        if is_favorite {
+                            "Added to favorites"
+                        } else {
+                            "Removed from favorites"
+                        },
+                        ToastLevel::Info,
+                        None,
+                    ));
+
+                    self.refresh_models_dialog();
+                }
+                crate::views::models_dialog::ModelsDialogAction::None => {}
+            }
             if !self.models_dialog_state.dialog.is_visible() {
                 self.overlay_focus = OverlayFocus::None;
             }
@@ -1280,30 +1332,10 @@ impl App {
         } else if self.overlay_focus == OverlayFocus::QuestionDialog {
             let _ = handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::ThemesDialog {
-            let before = self
-                .themes_dialog_state
-                .dialog
-                .get_selected()
-                .map(|it| it.id.clone());
+            let action = handle_themes_dialog_mouse_event(&mut self.themes_dialog_state, mouse);
 
-            handle_themes_dialog_mouse_event(&mut self.themes_dialog_state, mouse);
-
-            if !self.themes_dialog_state.dialog.is_visible() {
-                if !self.themes_dialog_committed {
-                    self.current_theme_index = self.themes_dialog_original_theme_index;
-                }
-                self.overlay_focus = OverlayFocus::None;
-                return;
-            }
-
-            let after = self
-                .themes_dialog_state
-                .dialog
-                .get_selected()
-                .map(|it| it.id.clone());
-
-            if before != after {
-                if let Some(theme_id) = after {
+            match action {
+                crate::views::themes_dialog::ThemesDialogAction::PreviewTheme { theme_id } => {
                     if let Some((idx, _)) = self
                         .themes
                         .iter()
@@ -1313,6 +1345,31 @@ impl App {
                         self.current_theme_index = idx;
                     }
                 }
+                crate::views::themes_dialog::ThemesDialogAction::SelectTheme { theme_id } => {
+                    if let Some((idx, theme)) = self
+                        .themes
+                        .iter()
+                        .enumerate()
+                        .find(|(_, t)| t.id == theme_id)
+                    {
+                        self.current_theme_index = idx;
+                        self.themes_dialog_committed = true;
+                        push_toast(Toast::new(
+                            format!("Theme: {}", theme.id),
+                            ToastLevel::Info,
+                            None,
+                        ));
+                    }
+                }
+                crate::views::themes_dialog::ThemesDialogAction::None => {}
+            }
+
+            if !self.themes_dialog_state.dialog.is_visible() {
+                if !self.themes_dialog_committed {
+                    self.current_theme_index = self.themes_dialog_original_theme_index;
+                }
+                self.overlay_focus = OverlayFocus::None;
+                return;
             }
         } else if self.overlay_focus == OverlayFocus::ConnectDialog {
             handle_connect_dialog_mouse_event(&mut self.connect_dialog_state, mouse);
@@ -1380,12 +1437,26 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
             }
         } else if self.overlay_focus == OverlayFocus::TimelineDialog {
-            if let Some(idx) = crate::views::timeline_dialog::handle_timeline_dialog_mouse_event(
+            let action = crate::views::timeline_dialog::handle_timeline_dialog_mouse_event(
                 &mut self.timeline_dialog_state,
                 mouse,
-            ) {
-                self.chat_state.chat.scroll_to_message_index(idx);
-                self.chat_state.chat.set_highlighted_message(Some(idx));
+            );
+            match action {
+                crate::views::timeline_dialog::TimelineDialogAction::Close => {
+                    self.chat_state.chat.clear_highlighted_message();
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                crate::views::timeline_dialog::TimelineDialogAction::Select(idx) => {
+                    self.chat_state.chat.scroll_to_message_index(idx);
+                    self.chat_state.chat.set_highlighted_message(Some(idx));
+                    self.show_message_actions(idx);
+                }
+                crate::views::timeline_dialog::TimelineDialogAction::Navigate(idx) => {
+                    self.chat_state.chat.scroll_to_message_index(idx);
+                    self.chat_state.chat.set_highlighted_message(Some(idx));
+                }
+                crate::views::timeline_dialog::TimelineDialogAction::Handled
+                | crate::views::timeline_dialog::TimelineDialogAction::NotHandled => {}
             }
             if !self.timeline_dialog_state.dialog.is_visible() {
                 self.chat_state.chat.clear_highlighted_message();
@@ -1642,9 +1713,6 @@ impl App {
     }
 
     fn autocomplete_and_submit(&mut self) {
-        if self.is_streaming {
-            return;
-        }
         if let Some(selected) = get_selected_suggestion(&self.suggestions_popup_state) {
             let command = format!("/{}", selected.name);
 
@@ -1655,7 +1723,73 @@ impl App {
 
             self.input.clear();
         }
+        self.clear_suggestions_and_blur();
+    }
+
+    fn clear_suggestions_and_blur(&mut self) {
         clear_suggestions(&mut self.suggestions_popup_state);
+        if self.overlay_focus == OverlayFocus::SuggestionsPopup {
+            self.overlay_focus = OverlayFocus::None;
+        }
+    }
+
+    fn copy_session_transcript(&mut self) {
+        let messages = &self.chat_state.chat.messages;
+        let session_title = self
+            .session_manager
+            .get_current_session()
+            .map(|s| s.title.clone())
+            .unwrap_or_else(|| "Untitled".to_string());
+        let mut transcript = format!("# {}\n\n", session_title);
+        for msg in messages {
+            match msg.role {
+                crate::session::types::MessageRole::User => {
+                    transcript.push_str("## User\n\n");
+                    transcript.push_str(&msg.content);
+                    transcript.push_str("\n\n---\n\n");
+                }
+                crate::session::types::MessageRole::Assistant => {
+                    let agent = msg.agent_mode.as_ref().map_or("Build", |a| a.as_str());
+                    let model = msg.model.as_deref().unwrap_or("unknown");
+                    let duration = msg
+                        .duration_ms
+                        .map(|ms| format!(" · {:.1}s", ms as f64 / 1000.0))
+                        .unwrap_or_default();
+                    transcript.push_str(&format!("## Assistant ({agent} · {model}{duration})\n\n"));
+                    transcript.push_str(&msg.content);
+                    transcript.push_str("\n\n---\n\n");
+                }
+                crate::session::types::MessageRole::Tool => {
+                    transcript.push_str("**Tool Result**\n\n");
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                            transcript.push_str(&format!("**Tool:** {}\n", name));
+                        }
+                        if let Some(preview) = v.get("output_preview").and_then(|p| p.as_str()) {
+                            transcript.push_str(&format!("```\n{}\n```\n", preview));
+                        }
+                    }
+                    transcript.push_str("\n---\n\n");
+                }
+                _ => {}
+            }
+        }
+        match crate::utils::clipboard::copy_text(&transcript) {
+            Ok(_) => {
+                push_toast(Toast::new(
+                    "Session transcript copied to clipboard!",
+                    ToastLevel::Info,
+                    None,
+                ));
+            }
+            Err(e) => {
+                push_toast(Toast::new(
+                    format!("Failed to copy: {}", e),
+                    ToastLevel::Error,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+            }
+        }
     }
 
     async fn process_input(&mut self, input: &str) {
@@ -1664,68 +1798,7 @@ impl App {
         match parse_input(input) {
             InputType::Command(mut parsed) => {
                 if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
-                    let messages = &self.chat_state.chat.messages;
-                    let session_title = self
-                        .session_manager
-                        .get_current_session()
-                        .map(|s| s.title.clone())
-                        .unwrap_or_else(|| "Untitled".to_string());
-                    let mut transcript = format!("# {}\n\n", session_title);
-                    for msg in messages {
-                        match msg.role {
-                            crate::session::types::MessageRole::User => {
-                                transcript.push_str("## User\n\n");
-                                transcript.push_str(&msg.content);
-                                transcript.push_str("\n\n---\n\n");
-                            }
-                            crate::session::types::MessageRole::Assistant => {
-                                let agent = msg.agent_mode.as_ref().map_or("Build", |a| a.as_str());
-                                let model = msg.model.as_deref().unwrap_or("unknown");
-                                let duration = msg
-                                    .duration_ms
-                                    .map(|ms| format!(" · {:.1}s", ms as f64 / 1000.0))
-                                    .unwrap_or_default();
-                                transcript.push_str(&format!(
-                                    "## Assistant ({agent} · {model}{duration})\n\n"
-                                ));
-                                transcript.push_str(&msg.content);
-                                transcript.push_str("\n\n---\n\n");
-                            }
-                            crate::session::types::MessageRole::Tool => {
-                                transcript.push_str("**Tool Result**\n\n");
-                                if let Ok(v) =
-                                    serde_json::from_str::<serde_json::Value>(&msg.content)
-                                {
-                                    if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
-                                        transcript.push_str(&format!("**Tool:** {}\n", name));
-                                    }
-                                    if let Some(preview) =
-                                        v.get("output_preview").and_then(|p| p.as_str())
-                                    {
-                                        transcript.push_str(&format!("```\n{}\n```\n", preview));
-                                    }
-                                }
-                                transcript.push_str("\n---\n\n");
-                            }
-                            _ => {}
-                        }
-                    }
-                    match crate::utils::clipboard::copy_text(&transcript) {
-                        Ok(_) => {
-                            push_toast(Toast::new(
-                                "Session transcript copied to clipboard!",
-                                ToastLevel::Info,
-                                None,
-                            ));
-                        }
-                        Err(e) => {
-                            push_toast(Toast::new(
-                                format!("Failed to copy: {}", e),
-                                ToastLevel::Error,
-                                Some(std::time::Duration::from_secs(3)),
-                            ));
-                        }
-                    }
+                    self.copy_session_transcript();
                     return;
                 }
                 if parsed.name == "themes" {
@@ -1867,8 +1940,16 @@ impl App {
         &mut self,
         mut parsed: crate::command::parser::ParsedCommand<'_>,
     ) {
+        if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
+            self.copy_session_transcript();
+            return;
+        }
         if parsed.name == "themes" {
             self.show_themes_dialog();
+            return;
+        }
+        if parsed.name == "skills" {
+            self.show_skills_dialog();
             return;
         }
         if parsed.name == "rename" && parsed.args.is_empty() && self.base_focus == BaseFocus::Chat {
@@ -3410,5 +3491,26 @@ fn format_token_count(count: usize) -> String {
 impl Default for App {
     fn default() -> Self {
         Self::new().expect("Failed to initialize App")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::parser::parse_input;
+
+    #[test]
+    fn commands_can_submit_while_streaming() {
+        let input_type = parse_input("/models");
+
+        assert!(App::can_submit_input(&input_type, true));
+    }
+
+    #[test]
+    fn messages_wait_until_streaming_finishes() {
+        let input_type = parse_input("send another prompt");
+
+        assert!(!App::can_submit_input(&input_type, true));
+        assert!(App::can_submit_input(&input_type, false));
     }
 }

@@ -1,5 +1,7 @@
 use crate::theme::{contrast_text, ThemeColors};
-use crate::ui::scrollbar::{render_scrollbar, scrollbar_offset_from_row, ScrollMetrics};
+use crate::ui::scrollbar::{
+    render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
+};
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher,
@@ -70,6 +72,7 @@ pub struct Dialog {
     pub search_textarea: TextArea<'static>,
     pub scrollbar_state: ScrollbarState,
     pub is_dragging_scrollbar: bool,
+    scrollbar_drag_offset: Option<u16>,
     pub visible_row_count: usize,
     pub actions: Vec<DialogAction>,
     pub position: DialogPosition,
@@ -101,6 +104,7 @@ impl Dialog {
             search_textarea,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
+            scrollbar_drag_offset: None,
             visible_row_count: 0,
             actions: Vec::new(),
             position: DialogPosition::Center,
@@ -183,6 +187,8 @@ impl Dialog {
         self.search_query.clear();
         self.search_textarea = TextArea::default();
         self.search_textarea.set_placeholder_text("Search");
+        self.is_dragging_scrollbar = false;
+        self.scrollbar_drag_offset = None;
     }
 
     pub fn toggle(&mut self) {
@@ -535,14 +541,6 @@ impl Dialog {
         use ratatui::layout::Position;
         let point = Position::new(event.column, event.row);
 
-        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
-            && !self.dialog_area.contains(point)
-        {
-            self.hide();
-            self.is_dragging_scrollbar = false;
-            return true;
-        }
-
         let padding = match self.position {
             DialogPosition::Center => 3u16,
             DialogPosition::Left | DialogPosition::Right => 1u16,
@@ -553,11 +551,6 @@ impl Dialog {
             width: self.dialog_area.width.saturating_sub(padding * 2),
             height: self.dialog_area.height.saturating_sub(padding * 2),
         };
-
-        if !content_area.contains(point) {
-            self.is_dragging_scrollbar = false;
-            return false;
-        }
 
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
@@ -573,11 +566,39 @@ impl Dialog {
 
         let list_area = chunks[3];
         let scrollbar_area = Rect {
-            x: list_area.x + list_area.width - 1,
+            x: list_area.x + list_area.width.saturating_sub(1),
             y: list_area.y,
             width: 1,
             height: list_area.height,
         };
+
+        if self.is_dragging_scrollbar {
+            match event.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.scroll_to_position(event.row, scrollbar_area);
+                    return true;
+                }
+                MouseEventKind::Up(_) => {
+                    self.is_dragging_scrollbar = false;
+                    self.scrollbar_drag_offset = None;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            && !self.dialog_area.contains(point)
+        {
+            self.hide();
+            return true;
+        }
+
+        if !content_area.contains(point) {
+            self.is_dragging_scrollbar = false;
+            self.scrollbar_drag_offset = None;
+            return false;
+        }
 
         let is_on_scrollbar = scrollbar_area.contains(point);
 
@@ -592,9 +613,19 @@ impl Dialog {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if is_on_scrollbar {
-                    self.is_dragging_scrollbar = true;
-                    self.scroll_to_position(event.row, scrollbar_area);
-                    true
+                    let total_lines = self.get_content_line_count();
+                    let visible_rows = scrollbar_area.height as usize;
+                    let metrics = ScrollMetrics::new(total_lines, visible_rows, self.scroll_offset);
+                    if let Some(grab_offset) =
+                        scrollbar_grab_offset(metrics, scrollbar_area, event.row)
+                    {
+                        self.is_dragging_scrollbar = true;
+                        self.scrollbar_drag_offset = Some(grab_offset);
+                        self.scroll_to_position(event.row, scrollbar_area);
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     if let Some(item_index) = self.item_index_at_position(event.column, event.row) {
                         self.selected_index = item_index;
@@ -624,6 +655,7 @@ impl Dialog {
             MouseEventKind::Up(_) => {
                 if self.is_dragging_scrollbar {
                     self.is_dragging_scrollbar = false;
+                    self.scrollbar_drag_offset = None;
                     true
                 } else {
                     false
@@ -729,7 +761,12 @@ impl Dialog {
         let visible_rows = scrollbar_area.height as usize;
         let max_offset = total_lines.saturating_sub(visible_rows);
         let metrics = ScrollMetrics::new(total_lines, visible_rows, self.scroll_offset);
-        let new_offset = scrollbar_offset_from_row(metrics, scrollbar_area, row);
+        let grab_offset = self
+            .scrollbar_drag_offset
+            .or_else(|| scrollbar_grab_offset(metrics, scrollbar_area, row))
+            .unwrap_or(0);
+        let new_offset =
+            scrollbar_offset_from_row_with_grab(metrics, scrollbar_area, row, grab_offset);
         self.scroll_offset = new_offset.min(max_offset);
 
         let flat_items = self.get_flat_items();
@@ -1053,6 +1090,7 @@ impl Clone for Dialog {
             search_textarea: self.search_textarea.clone(),
             scrollbar_state: self.scrollbar_state,
             is_dragging_scrollbar: self.is_dragging_scrollbar,
+            scrollbar_drag_offset: self.scrollbar_drag_offset,
             visible_row_count: self.visible_row_count,
             actions: self.actions.clone(),
             position: self.position,
@@ -1093,6 +1131,19 @@ mod tests {
                 provider_id: "provider2".to_string(),
             },
         ]
+    }
+
+    fn create_many_test_items(count: usize) -> Vec<DialogItem> {
+        (0..count)
+            .map(|idx| DialogItem {
+                id: idx.to_string(),
+                name: format!("Model {}", idx),
+                group: "Group".to_string(),
+                description: "".to_string(),
+                tip: None,
+                provider_id: "p".to_string(),
+            })
+            .collect()
     }
 
     fn create_fuzzy_test_items() -> Vec<DialogItem> {
@@ -1211,6 +1262,56 @@ mod tests {
 
         assert!(!handled);
         assert!(dialog.is_visible());
+    }
+
+    #[test]
+    fn test_dialog_scrollbar_drag_continues_outside_content_area() {
+        let mut dialog = Dialog::with_items("Models", create_many_test_items(40));
+        dialog.show();
+        dialog.dialog_area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 20,
+        };
+        dialog.visible_row_count = 7;
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 36,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(handled);
+        assert!(dialog.is_dragging_scrollbar);
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 80,
+            row: 14,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(handled);
+        assert!(dialog.is_dragging_scrollbar);
+        assert_eq!(
+            dialog.scroll_offset,
+            dialog
+                .get_content_line_count()
+                .saturating_sub(dialog.get_visible_row_count())
+        );
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 80,
+            row: 14,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(handled);
+        assert!(!dialog.is_dragging_scrollbar);
+        assert_eq!(dialog.scrollbar_drag_offset, None);
     }
 
     #[test]

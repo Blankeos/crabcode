@@ -53,9 +53,9 @@
   - [ ] todowrite - better looking, like opencode does.
   - [ ] rendering subagents - just like opencode, clickable to go into their page.. OR I can do `ctrl-x ↓` to go into it if there's a subagent running. I can also switch between subagents with `←` and `→`
 
-- [ ] Fix: Chat content colors. Currently no matter what theme I use, the color of the chat especially the main text colors in markdown, are the default theme colors that were set during start time - meaning at config. Whatever I change via `/themes` dialog, it doesn't update the chat colors themes.
+- [x] Fix: Chat content colors. Currently no matter what theme I use, the color of the chat especially the main text colors in markdown, are the default theme colors that were set during start time - meaning at config. Whatever I change via `/themes` dialog, it doesn't update the chat colors themes.
 
-- [ ] Bug: I can type a command see autosuggest, but can't press 'enter' to run the command. Pls fix.
+- [x] Bug: I can type a command see autosuggest, but can't press 'enter' to run the command. Pls fix.
 
 - [x] A single AI response, is considered 1 message. So combine all its parts into a single message record. Not that every message part becomes a separate message in the timeline dialog.
 

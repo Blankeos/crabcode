@@ -72,10 +72,38 @@ pub(crate) fn scrollbar_offset_from_row(metrics: ScrollMetrics, track: Rect, row
         return 0;
     };
 
-    let clamped_row = row.clamp(track.y, track.y + track.height.saturating_sub(1));
+    scrollbar_offset_from_row_with_grab(metrics, track, row, thumb.len / 2)
+}
+
+pub(crate) fn scrollbar_grab_offset(metrics: ScrollMetrics, track: Rect, row: u16) -> Option<u16> {
+    let thumb = scrollbar_thumb(metrics, track)?;
+    let clamped_row = row.clamp(
+        track.y,
+        track.y.saturating_add(track.height.saturating_sub(1)),
+    );
+    if clamped_row >= thumb.top && clamped_row < thumb.top.saturating_add(thumb.len) {
+        Some(clamped_row.saturating_sub(thumb.top))
+    } else {
+        Some(thumb.len / 2)
+    }
+}
+
+pub(crate) fn scrollbar_offset_from_row_with_grab(
+    metrics: ScrollMetrics,
+    track: Rect,
+    row: u16,
+    grab_offset: u16,
+) -> usize {
+    if scrollbar_thumb(metrics, track).is_none() {
+        return 0;
+    }
+
+    let clamped_row = row.clamp(
+        track.y,
+        track.y.saturating_add(track.height.saturating_sub(1)),
+    );
     let row_offset = clamped_row.saturating_sub(track.y) as usize;
-    let thumb_center = (thumb.len as usize) / 2;
-    let desired_top = row_offset.saturating_sub(thumb_center);
+    let desired_top = row_offset.saturating_sub(grab_offset as usize);
     scrollbar_offset_from_thumb_top(metrics, track, desired_top)
 }
 
@@ -151,6 +179,32 @@ mod tests {
         assert_eq!(scrollbar_offset_from_row(metrics, track, 4), 0);
         assert_eq!(scrollbar_offset_from_row(metrics, track, 6), 10);
         assert_eq!(scrollbar_offset_from_row(metrics, track, 8), 20);
+    }
+
+    #[test]
+    fn scrollbar_drag_preserves_grab_point_inside_thumb() {
+        let metrics = ScrollMetrics::new(30, 10, 6);
+        let track = Rect::new(9, 0, 1, 10);
+        let thumb = scrollbar_thumb(metrics, track).expect("thumb");
+        let row = thumb.top + thumb.len - 1;
+        let grab_offset = scrollbar_grab_offset(metrics, track, row).expect("grab");
+
+        assert_eq!(grab_offset, thumb.len - 1);
+        assert_eq!(
+            scrollbar_offset_from_row_with_grab(metrics, track, row, grab_offset),
+            6
+        );
+    }
+
+    #[test]
+    fn scrollbar_drag_clamps_after_pointer_leaves_track_vertically() {
+        let metrics = ScrollMetrics::new(100, 10, 0);
+        let track = Rect::new(9, 5, 1, 10);
+
+        assert_eq!(
+            scrollbar_offset_from_row_with_grab(metrics, track, 100, 0),
+            90
+        );
     }
 
     #[test]

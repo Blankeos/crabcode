@@ -1,4 +1,4 @@
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{layout::Rect, Frame};
 
 use crate::theme::ThemeColors;
@@ -98,6 +98,125 @@ pub fn handle_themes_dialog_key_event(
 pub fn handle_themes_dialog_mouse_event(
     dialog_state: &mut ThemesDialogState,
     event: MouseEvent,
-) -> bool {
-    dialog_state.dialog.handle_mouse_event(event)
+) -> ThemesDialogAction {
+    if !dialog_state.dialog.is_visible() {
+        return ThemesDialogAction::None;
+    }
+
+    let before = dialog_state.dialog.get_selected().map(|it| it.id.clone());
+    let clicked_item = if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+        dialog_state
+            .dialog
+            .item_index_at_position(event.column, event.row)
+    } else {
+        None
+    };
+
+    dialog_state.dialog.handle_mouse_event(event);
+
+    if clicked_item.is_some() && dialog_state.dialog.is_visible() {
+        if let Some(selected) = dialog_state.dialog.get_selected() {
+            let theme_id = selected.id.clone();
+            dialog_state.dialog.hide();
+            return ThemesDialogAction::SelectTheme { theme_id };
+        }
+    }
+
+    if dialog_state.dialog.is_visible() {
+        let after = dialog_state.dialog.get_selected().map(|it| it.id.clone());
+
+        if before != after {
+            if let Some(theme_id) = after {
+                return ThemesDialogAction::PreviewTheme { theme_id };
+            }
+        }
+    }
+
+    ThemesDialogAction::None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::KeyModifiers;
+
+    fn theme_item(id: &str, name: &str) -> DialogItem {
+        DialogItem {
+            id: id.to_string(),
+            name: name.to_string(),
+            group: "Built in".to_string(),
+            description: String::new(),
+            tip: None,
+            provider_id: String::new(),
+        }
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_click_on_item_selects_theme() {
+        let mut state = init_themes_dialog(
+            "Themes",
+            vec![
+                theme_item("ayu", "Ayu"),
+                theme_item("tokyonight", "Tokyo Night"),
+            ],
+        );
+        state.dialog.show();
+        state.dialog.dialog_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 30,
+        };
+
+        let action = handle_themes_dialog_mouse_event(
+            &mut state,
+            mouse(MouseEventKind::Down(MouseButton::Left), 4, 10),
+        );
+
+        assert_eq!(
+            action,
+            ThemesDialogAction::SelectTheme {
+                theme_id: "tokyonight".to_string(),
+            }
+        );
+        assert!(!state.dialog.is_visible());
+    }
+
+    #[test]
+    fn mouse_move_previews_theme() {
+        let mut state = init_themes_dialog(
+            "Themes",
+            vec![
+                theme_item("ayu", "Ayu"),
+                theme_item("tokyonight", "Tokyo Night"),
+            ],
+        );
+        state.dialog.show();
+        state.dialog.dialog_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 30,
+        };
+
+        let action =
+            handle_themes_dialog_mouse_event(&mut state, mouse(MouseEventKind::Moved, 4, 10));
+
+        assert_eq!(
+            action,
+            ThemesDialogAction::PreviewTheme {
+                theme_id: "tokyonight".to_string(),
+            }
+        );
+        assert!(state.dialog.is_visible());
+    }
 }
