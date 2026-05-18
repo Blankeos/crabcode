@@ -14,7 +14,7 @@ use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
 use crate::utils::git;
 
-use crate::views::chat::{init_chat, render_chat};
+use crate::views::chat::{init_chat, render_chat, SubagentTab, SubagentTabs};
 use crate::views::connect_dialog::{
     get_pending_selection, handle_connect_dialog_key_event, handle_connect_dialog_mouse_event,
     init_connect_dialog, render_connect_dialog,
@@ -122,6 +122,17 @@ struct SessionStreamState {
     streaming_model: Option<String>,
     streaming_provider: Option<String>,
     chat_len_before_assistant: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalStreamState {
+    streaming_model: Option<String>,
+    streaming_provider: Option<String>,
+    chat_len_before_assistant: usize,
+}
+
+#[derive(Debug, Default)]
+struct ToolCallViewState {
     tool_call_message_indices: std::collections::HashMap<String, usize>,
     tool_call_order: Vec<String>,
 }
@@ -131,6 +142,8 @@ struct ClientSessionState {
     chat: Chat,
     input_draft: String,
     stream: Option<SessionStreamState>,
+    external_stream: Option<ExternalStreamState>,
+    tool_calls: ToolCallViewState,
     unread_completed: bool,
 }
 
@@ -140,6 +153,8 @@ impl ClientSessionState {
             chat: Chat::with_messages(messages),
             input_draft: String::new(),
             stream: None,
+            external_stream: None,
+            tool_calls: ToolCallViewState::default(),
             unread_completed: false,
         }
     }
@@ -534,7 +549,7 @@ impl App {
             self.chat_state.chat.scroll_to_bottom_on_next_render();
             self.input.set_text(&state.input_draft);
             state.unread_completed = false;
-            self.is_streaming = state.stream.is_some();
+            self.is_streaming = state.stream.is_some() || state.external_stream.is_some();
         } else {
             self.chat_state.chat.clear();
             self.input.clear();
@@ -557,6 +572,110 @@ impl App {
             BaseFocus::Chat
         };
         true
+    }
+
+    fn should_handle_child_session_arrow(&self) -> bool {
+        if self.base_focus != BaseFocus::Chat || !self.input.get_text().is_empty() {
+            return false;
+        }
+
+        self.session_manager
+            .get_current_session_id()
+            .is_some_and(|id| self.session_manager.parent_id_of(id).is_some())
+    }
+
+    fn switch_to_first_child_session(&mut self) -> bool {
+        let Some(current_id) = self.session_manager.get_current_session_id().cloned() else {
+            return false;
+        };
+        let Some(root_id) = self.session_manager.root_session_id_for(&current_id) else {
+            return false;
+        };
+        let Some(first_child) = self.session_manager.child_sessions(&root_id).first().cloned()
+        else {
+            return false;
+        };
+
+        self.switch_to_session(&first_child.id)
+    }
+
+    fn switch_to_parent_session(&mut self) -> bool {
+        let Some(current_id) = self.session_manager.get_current_session_id().cloned() else {
+            return false;
+        };
+        let Some(parent_id) = self.session_manager.parent_id_of(&current_id).map(str::to_string)
+        else {
+            return false;
+        };
+
+        self.switch_to_session(&parent_id)
+    }
+
+    fn switch_child_session(&mut self, direction: isize) -> bool {
+        let Some(current_id) = self.session_manager.get_current_session_id().cloned() else {
+            return false;
+        };
+        let Some(root_id) = self.session_manager.root_session_id_for(&current_id) else {
+            return false;
+        };
+
+        let children = self.session_manager.child_sessions(&root_id);
+        if children.len() <= 1 {
+            return false;
+        }
+
+        let Some(current_idx) = children.iter().position(|child| child.id == current_id) else {
+            return false;
+        };
+
+        let len = children.len() as isize;
+        let next_idx = (current_idx as isize + direction).rem_euclid(len) as usize;
+        self.switch_to_session(&children[next_idx].id)
+    }
+
+    fn subagent_tabs_for_current_session(&self) -> Option<SubagentTabs> {
+        let current_id = self.session_manager.get_current_session_id()?.clone();
+        let root_id = self.session_manager.root_session_id_for(&current_id)?;
+        let root = self.session_manager.get_session_ref(&root_id)?;
+        let children = self.session_manager.child_sessions(&root_id);
+        if children.is_empty() {
+            return None;
+        }
+
+        let mut tabs = Vec::with_capacity(children.len() + 1);
+        tabs.push(SubagentTab {
+            label: "main".to_string(),
+            active: current_id == root_id,
+            running: root.status.is_active()
+                || self
+                    .session_view_states
+                    .get(&root_id)
+                    .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some()),
+        });
+
+        for child in children {
+            let label = child
+                .title
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let running = child.status.is_active()
+                || self
+                    .session_view_states
+                    .get(&child.id)
+                    .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some());
+            tabs.push(SubagentTab {
+                label: if label.is_empty() { child.id.clone() } else { label },
+                active: current_id == child.id,
+                running,
+            });
+        }
+
+        Some(SubagentTabs {
+            is_child_session: current_id != root_id,
+            tabs,
+        })
     }
 
     fn start_blank_session(&mut self, title: Option<String>) {
@@ -612,12 +731,34 @@ impl App {
             .and_then(|state| state.stream.as_mut())
     }
 
+    fn streaming_boundary_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<(usize, Option<String>, Option<String>)> {
+        let state = self.session_view_states.get(session_id)?;
+        if let Some(stream) = state.stream.as_ref() {
+            return Some((
+                stream.chat_len_before_assistant,
+                stream.streaming_model.clone(),
+                stream.streaming_provider.clone(),
+            ));
+        }
+
+        state.external_stream.as_ref().map(|stream| {
+            (
+                stream.chat_len_before_assistant,
+                stream.streaming_model.clone(),
+                stream.streaming_provider.clone(),
+            )
+        })
+    }
+
     fn sync_active_streaming_flag(&mut self) {
         self.is_streaming = self
             .session_manager
             .get_current_session_id()
             .and_then(|id| self.session_view_states.get(id))
-            .is_some_and(|state| state.stream.is_some());
+            .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some());
     }
 
     fn get_random_placeholder() -> String {
@@ -1333,6 +1474,22 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         self.open_timeline_dialog();
                     }
+                    crate::views::which_key::WhichKeyAction::GoChild => {
+                        self.overlay_focus = OverlayFocus::None;
+                        let _ = self.switch_to_first_child_session();
+                    }
+                    crate::views::which_key::WhichKeyAction::GoParent => {
+                        self.overlay_focus = OverlayFocus::None;
+                        let _ = self.switch_to_parent_session();
+                    }
+                    crate::views::which_key::WhichKeyAction::PreviousChild => {
+                        self.overlay_focus = OverlayFocus::None;
+                        let _ = self.switch_child_session(-1);
+                    }
+                    crate::views::which_key::WhichKeyAction::NextChild => {
+                        self.overlay_focus = OverlayFocus::None;
+                        let _ = self.switch_child_session(1);
+                    }
                     crate::views::which_key::WhichKeyAction::NewSession => {
                         self.overlay_focus = OverlayFocus::None;
                         tokio::task::block_in_place(|| {
@@ -1395,6 +1552,24 @@ impl App {
                     .set_chat_active(self.base_focus == BaseFocus::Chat);
                 self.which_key_state.show();
                 true
+            }
+            KeyCode::Left
+                if key.modifiers == event::KeyModifiers::NONE
+                    && self.should_handle_child_session_arrow() =>
+            {
+                self.switch_child_session(-1)
+            }
+            KeyCode::Right
+                if key.modifiers == event::KeyModifiers::NONE
+                    && self.should_handle_child_session_arrow() =>
+            {
+                self.switch_child_session(1)
+            }
+            KeyCode::Up
+                if key.modifiers == event::KeyModifiers::NONE
+                    && self.should_handle_child_session_arrow() =>
+            {
+                self.switch_to_parent_session()
             }
             KeyCode::Tab => {
                 if self.agent == "Plan" {
@@ -2366,12 +2541,16 @@ impl App {
         let filter = self.sessions_dialog_state.filter;
 
         sessions.retain(|session| {
+            if session.parent_id.is_some() {
+                return false;
+            }
+
             let is_archived = session.archived_at.is_some();
             let is_running = session.status.is_active()
                 || self
                     .session_view_states
                     .get(&session.id)
-                    .is_some_and(|state| state.stream.is_some());
+                    .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some());
 
             match filter {
                 SessionsDialogFilter::Active => {
@@ -2394,7 +2573,8 @@ impl App {
             .into_iter()
             .map(|session| {
                 let view_state = self.session_view_states.get(&session.id);
-                let is_streaming = view_state.is_some_and(|state| state.stream.is_some())
+                let is_streaming = view_state
+                    .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some())
                     || session.status.is_active();
                 let unread_completed = view_state.is_some_and(|state| state.unread_completed);
                 let marker = if is_streaming {
@@ -3207,6 +3387,7 @@ impl App {
 
         if let Some(state) = self.session_view_states.get_mut(session_id) {
             state.stream = None;
+            state.external_stream = None;
         }
 
         if was_active {
@@ -3257,7 +3438,7 @@ impl App {
             || self
                 .session_view_states
                 .values()
-                .any(|state| state.stream.is_some())
+                .any(|state| state.stream.is_some() || state.external_stream.is_some())
             || (self.overlay_focus == OverlayFocus::SessionsDialog
                 && self.sessions_dialog_state.dialog.is_visible())
     }
@@ -3330,6 +3511,29 @@ impl App {
             crate::llm::ChunkMessage::ToolResult(result) => {
                 self.add_tool_result_to_session(session_id, result);
             }
+            crate::llm::ChunkMessage::SubagentStarted {
+                parent_session_id,
+                session_id,
+                title,
+                subagent_type,
+                description,
+                prompt,
+            } => {
+                self.start_subagent_session(
+                    parent_session_id,
+                    session_id,
+                    title,
+                    subagent_type,
+                    description,
+                    prompt,
+                );
+            }
+            crate::llm::ChunkMessage::SubagentChunk {
+                session_id,
+                chunk,
+            } => {
+                self.process_streaming_chunk_for_session(&session_id, *chunk);
+            }
             crate::llm::ChunkMessage::PermissionRequest(prompt) => {
                 let _ = self.session_manager.set_session_status(
                     session_id,
@@ -3368,14 +3572,76 @@ impl App {
         }
     }
 
+    fn start_subagent_session(
+        &mut self,
+        parent_session_id: String,
+        session_id: String,
+        title: String,
+        subagent_type: String,
+        description: String,
+        prompt: String,
+    ) {
+        if self
+            .session_manager
+            .get_session_ref(&session_id)
+            .is_none()
+        {
+            self.session_manager.create_child_session(
+                parent_session_id,
+                session_id.clone(),
+                title.clone(),
+            );
+        }
+
+        self.ensure_session_view_state(&session_id);
+
+        let user_content = format!(
+            "## Task Description\n{}\n\n## Task Prompt\n{}",
+            description, prompt
+        );
+
+        let mut user_message = crate::session::types::Message::user(&user_content);
+        user_message.agent_mode = Some(subagent_type.clone());
+
+        let mut persist_user = false;
+        if let Some(state) = self.session_view_states.get_mut(&session_id) {
+            state.chat = Chat::with_messages(Vec::new());
+            state.tool_calls = ToolCallViewState::default();
+            state.chat.add_message(user_message.clone());
+            state.chat.add_assistant_message("");
+            if let Some(last_msg) = state.chat.messages.last_mut() {
+                last_msg.is_complete = false;
+                last_msg.agent_mode = Some(subagent_type);
+            }
+            state.chat.begin_streaming_turn();
+            state.external_stream = Some(ExternalStreamState {
+                streaming_model: Some(self.model.clone()),
+                streaming_provider: Some(self.provider_name.clone()),
+                chat_len_before_assistant: 1,
+            });
+            state.unread_completed = true;
+            persist_user = true;
+        }
+
+        if persist_user {
+            let _ = self
+                .session_manager
+                .add_message_to_session(&session_id, &user_message);
+        }
+
+        let _ = self.session_manager.set_session_status(
+            &session_id,
+            crate::session::types::SessionStatus::Streaming,
+            None,
+        );
+
+        self.refresh_sessions_dialog();
+        self.sync_active_streaming_flag();
+    }
+
     fn finish_streaming_session(&mut self, session_id: &str) {
-        let (start, model, provider) = match self.stream_for_session_mut(session_id) {
-            Some(stream) => (
-                stream.chat_len_before_assistant,
-                stream.streaming_model.clone(),
-                stream.streaming_provider.clone(),
-            ),
-            None => return,
+        let Some((start, model, provider)) = self.streaming_boundary_for_session(session_id) else {
+            return;
         };
 
         let mut messages_to_persist = Vec::new();
@@ -3430,8 +3696,8 @@ impl App {
 
     fn fail_streaming_session(&mut self, session_id: &str, error: String) {
         let start = self
-            .stream_for_session_mut(session_id)
-            .map(|stream| stream.chat_len_before_assistant)
+            .streaming_boundary_for_session(session_id)
+            .map(|(start, _, _)| start)
             .unwrap_or(0);
 
         if let Some(chat) = self.chat_for_session_mut(session_id) {
@@ -3457,8 +3723,8 @@ impl App {
 
     fn cancelled_streaming_session(&mut self, session_id: &str) {
         let start = self
-            .stream_for_session_mut(session_id)
-            .map(|stream| stream.chat_len_before_assistant)
+            .streaming_boundary_for_session(session_id)
+            .map(|(start, _, _)| start)
             .unwrap_or(0);
 
         if let Some(chat) = self.chat_for_session_mut(session_id) {
@@ -3517,19 +3783,21 @@ impl App {
             }
         }
 
-        if let Some(stream) = self.stream_for_session_mut(session_id) {
+        if let Some(state) = self.session_view_states.get_mut(session_id) {
             for (call_id, idx) in inserted {
-                stream
+                state
+                    .tool_calls
                     .tool_call_message_indices
                     .insert(call_id.clone(), idx);
-                stream.tool_call_order.push(call_id);
+                state.tool_calls.tool_call_order.push(call_id);
             }
         }
     }
 
     fn add_tool_result_to_session(&mut self, session_id: &str, result: crate::llm::ToolCallResult) {
-        let target_idx = self.stream_for_session_mut(session_id).and_then(|stream| {
-            stream
+        let target_idx = self.session_view_states.get(session_id).and_then(|state| {
+            state
+                .tool_calls
                 .tool_call_message_indices
                 .get(&result.tool_call_id)
                 .copied()
@@ -3646,9 +3914,8 @@ impl App {
                 streaming_model: streaming_model.clone(),
                 streaming_provider: streaming_provider.clone(),
                 chat_len_before_assistant,
-                tool_call_message_indices: std::collections::HashMap::new(),
-                tool_call_order: Vec::new(),
             });
+            state.tool_calls = ToolCallViewState::default();
             state.unread_completed = false;
         }
         let _ = self.session_manager.set_session_status(
@@ -3699,6 +3966,7 @@ impl App {
         tokio::spawn(async move {
             let stream = stream_llm_with_cancellation(
                 cancel_token,
+                session_id,
                 provider_name,
                 model,
                 agent_mode,
@@ -3850,6 +4118,7 @@ impl App {
                 }
             }
             BaseFocus::Chat => {
+                let subagent_tabs = self.subagent_tabs_for_current_session();
                 render_chat(
                     f,
                     &mut self.chat_state,
@@ -3863,6 +4132,7 @@ impl App {
                     &colors,
                     self.is_streaming,
                     &usage_text,
+                    subagent_tabs,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -4122,5 +4392,66 @@ mod tests {
         assert!(!handled);
         assert!(app.session_manager.get_current_session_id().is_some());
         assert_eq!(app.session_manager.list_sessions().len(), 1);
+    }
+
+    #[test]
+    fn child_session_navigation_matches_opencode_flow() {
+        let mut app = test_app();
+        let parent_id = app.create_new_session(Some("Parent".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        app.start_subagent_session(
+            parent_id.clone(),
+            "child-a".to_string(),
+            "Explore task (@explore subagent)".to_string(),
+            "explore".to_string(),
+            "Explore task".to_string(),
+            "Find files".to_string(),
+        );
+        app.start_subagent_session(
+            parent_id.clone(),
+            "child-b".to_string(),
+            "General task (@general subagent)".to_string(),
+            "general".to_string(),
+            "General task".to_string(),
+            "Check implementation".to_string(),
+        );
+
+        assert_eq!(
+            app.session_manager.get_current_session_id(),
+            Some(&parent_id)
+        );
+        assert!(app.switch_to_first_child_session());
+        assert_eq!(
+            app.session_manager.get_current_session_id().map(String::as_str),
+            Some("child-a")
+        );
+
+        assert!(app.handle_base_keys(KeyEvent::new(
+            KeyCode::Right,
+            event::KeyModifiers::NONE,
+        )));
+        assert_eq!(
+            app.session_manager.get_current_session_id().map(String::as_str),
+            Some("child-b")
+        );
+
+        assert!(app.handle_base_keys(KeyEvent::new(
+            KeyCode::Left,
+            event::KeyModifiers::NONE,
+        )));
+        assert_eq!(
+            app.session_manager.get_current_session_id().map(String::as_str),
+            Some("child-a")
+        );
+
+        assert!(app.handle_base_keys(KeyEvent::new(
+            KeyCode::Up,
+            event::KeyModifiers::NONE,
+        )));
+        assert_eq!(
+            app.session_manager.get_current_session_id(),
+            Some(&parent_id)
+        );
     }
 }

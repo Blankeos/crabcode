@@ -18,6 +18,10 @@ pub enum WhichKeyAction {
     ShowThemes,
     ShowSessions,
     ShowTimeline,
+    GoChild,
+    GoParent,
+    PreviousChild,
+    NextChild,
     NewSession,
     Quit,
     ScrollUp,
@@ -72,6 +76,26 @@ impl WhichKeyState {
         ];
 
         let chat_bindings = vec![
+            KeyBinding {
+                key: "↓".to_string(),
+                description: "Go to first subagent session".to_string(),
+                action: WhichKeyAction::GoChild,
+            },
+            KeyBinding {
+                key: "↑".to_string(),
+                description: "Go to parent session".to_string(),
+                action: WhichKeyAction::GoParent,
+            },
+            KeyBinding {
+                key: "←".to_string(),
+                description: "Previous subagent session".to_string(),
+                action: WhichKeyAction::PreviousChild,
+            },
+            KeyBinding {
+                key: "→".to_string(),
+                description: "Next subagent session".to_string(),
+                action: WhichKeyAction::NextChild,
+            },
             KeyBinding {
                 key: "g".to_string(),
                 description: "Open Messages Timeline dialog".to_string(),
@@ -130,6 +154,22 @@ impl WhichKeyState {
             KeyCode::Char('g') | KeyCode::Char('G') if self.is_chat_active => {
                 self.hide();
                 WhichKeyAction::ShowTimeline
+            }
+            KeyCode::Down if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::GoChild
+            }
+            KeyCode::Up if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::GoParent
+            }
+            KeyCode::Left if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::PreviousChild
+            }
+            KeyCode::Right if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::NextChild
             }
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 self.hide();

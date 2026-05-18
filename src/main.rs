@@ -155,6 +155,7 @@ async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let _ = stream_llm_with_cancellation(
             cancel_token,
+            cuid2::create_id(),
             provider_name_clone,
             model_clone,
             agent_mode.clone(),

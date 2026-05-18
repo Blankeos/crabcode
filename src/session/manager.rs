@@ -15,9 +15,10 @@ impl From<anyhow::Error> for SessionError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub id: String,
+    pub parent_id: Option<String>,
     pub title: String,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
@@ -92,6 +93,7 @@ impl SessionManager {
             };
 
             session.id = db_session.session_identifier.clone();
+            session.parent_id = db_session.parent_session_identifier.clone();
             session.title = db_session.name;
             session.created_at = std::time::UNIX_EPOCH
                 + std::time::Duration::from_secs(db_session.created_at as u64);
@@ -124,25 +126,47 @@ impl SessionManager {
     }
 
     pub fn create_session(&mut self, name: Option<String>) -> String {
+        self.create_session_record(name, None, None, true)
+    }
+
+    pub fn create_child_session(
+        &mut self,
+        parent_id: String,
+        session_id: String,
+        name: String,
+    ) -> String {
+        self.create_session_record(Some(name), Some(session_id), Some(parent_id), false)
+    }
+
+    fn create_session_record(
+        &mut self,
+        name: Option<String>,
+        requested_id: Option<String>,
+        parent_id: Option<String>,
+        make_current: bool,
+    ) -> String {
         self.session_counter += 1;
         let title = name
             .clone()
             .unwrap_or_else(|| format!("session-{}", self.session_counter));
 
-        let session_id = cuid2::create_id();
+        let session_id = requested_id.unwrap_or_else(cuid2::create_id);
 
         let mut session = Session::with_title(title.clone());
         session.id = session_id.clone();
+        session.parent_id = parent_id.clone();
         session.workspace_id = self.current_workspace_id;
         session.workspace_path = self.current_workspace_path.clone();
         session.workspace_name = self.current_workspace_name.clone();
 
         self.sessions.insert(session_id.clone(), session);
-        self.current_session_id = Some(session_id.clone());
+        if make_current {
+            self.current_session_id = Some(session_id.clone());
+        }
 
         if let Some(ref dao) = self.history_dao {
             let db_id = dao
-                .create_session(&session_id, title.clone())
+                .create_session_with_parent(&session_id, title.clone(), parent_id.as_deref())
                 .unwrap_or_else(|_| self.session_counter as i64);
             self.id_mapping.insert(session_id.clone(), db_id);
             self.db_id_to_id.insert(db_id, session_id.clone());
@@ -156,6 +180,7 @@ impl SessionManager {
             .iter()
             .map(|(id, session)| SessionInfo {
                 id: id.clone(),
+                parent_id: session.parent_id.clone(),
                 title: session.title.clone(),
                 created_at: session.created_at,
                 updated_at: session.updated_at,
@@ -180,6 +205,48 @@ impl SessionManager {
 
     pub fn get_session(&mut self, id: &str) -> Option<&mut Session> {
         self.sessions.get_mut(id)
+    }
+
+    pub fn get_session_ref(&self, id: &str) -> Option<&Session> {
+        self.sessions.get(id)
+    }
+
+    pub fn parent_id_of(&self, id: &str) -> Option<&str> {
+        self.sessions.get(id).and_then(|s| s.parent_id.as_deref())
+    }
+
+    pub fn root_session_id_for(&self, id: &str) -> Option<String> {
+        let session = self.sessions.get(id)?;
+        Some(session.parent_id.clone().unwrap_or_else(|| id.to_string()))
+    }
+
+    pub fn child_sessions(&self, parent_id: &str) -> Vec<SessionInfo> {
+        let mut children: Vec<SessionInfo> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.parent_id.as_deref() == Some(parent_id))
+            .map(|(id, session)| SessionInfo {
+                id: id.clone(),
+                parent_id: session.parent_id.clone(),
+                title: session.title.clone(),
+                created_at: session.created_at,
+                updated_at: session.updated_at,
+                message_count: session.messages.len(),
+                workspace_id: session.workspace_id,
+                workspace_path: session.workspace_path.clone(),
+                workspace_name: session.workspace_name.clone(),
+                status: session.status,
+                pinned_at: session.pinned_at,
+                archived_at: session.archived_at,
+            })
+            .collect();
+
+        children.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        children
     }
 
     pub fn switch_session(&mut self, id: &str) -> bool {

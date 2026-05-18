@@ -9,13 +9,20 @@ use std::sync::Arc;
 
 pub struct TaskTool {
     tool_registry: Arc<ToolRegistry>,
+    sender: Option<crate::llm::ChunkSender>,
 }
 
 impl TaskTool {
     pub fn new(tool_registry: ToolRegistry) -> Self {
         Self {
             tool_registry: Arc::new(tool_registry),
+            sender: None,
         }
+    }
+
+    pub fn with_sender_opt(mut self, sender: Option<crate::llm::ChunkSender>) -> Self {
+        self.sender = sender;
+        self
     }
 }
 
@@ -75,19 +82,94 @@ impl ToolHandler for TaskTool {
             return Err(ToolError::Execution("Subagent cancelled".to_string()));
         }
 
+        let child_session_id = cuid2::create_id();
+        let title = format!(
+            "{} (@{} subagent)",
+            if description.trim().is_empty() {
+                "Task"
+            } else {
+                description.trim()
+            },
+            subagent_type.name()
+        );
+
+        let child_sender = self.start_child_session_stream(
+            ctx.session_id.clone(),
+            child_session_id.clone(),
+            title.clone(),
+            subagent_type.name().to_string(),
+            description.clone(),
+            prompt.clone(),
+        );
+
+        let started_at = std::time::Instant::now();
         let result = subagent::run_subagent(
             subagent_type.clone(),
             &description,
             &prompt,
             &self.tool_registry,
+            child_sender.clone(),
+            child_session_id.clone(),
         )
         .await
-        .map_err(|e| ToolError::Execution(format!("Subagent error: {}", e)))?;
+        .map_err(|e| {
+            if let Some(sender) = child_sender.as_ref() {
+                let _ = sender.send(crate::llm::ChunkMessage::Failed(e.clone()));
+            }
+            ToolError::Execution(format!("Subagent error: {}", e))
+        })?;
+
+        if let Some(sender) = child_sender.as_ref() {
+            let _ = sender.send(crate::llm::ChunkMessage::End);
+        }
+        let duration_ms = started_at.elapsed().as_millis() as u64;
 
         Ok(ToolResult::new(
             format!("Subagent ({}) result", subagent_type.name()),
-            result,
+            result.output,
         )
-        .with_metadata("subagent_type", serde_json::json!(subagent_type.name())))
+        .with_metadata("subagent_type", serde_json::json!(subagent_type.name()))
+        .with_metadata("child_session_id", serde_json::json!(child_session_id))
+        .with_metadata("child_session_title", serde_json::json!(title))
+        .with_metadata(
+            "child_tool_call_count",
+            serde_json::json!(result.tool_call_count),
+        )
+        .with_metadata("duration_ms", serde_json::json!(duration_ms)))
+    }
+}
+
+impl TaskTool {
+    fn start_child_session_stream(
+        &self,
+        parent_session_id: String,
+        session_id: String,
+        title: String,
+        subagent_type: String,
+        description: String,
+        prompt: String,
+    ) -> Option<crate::llm::ChunkSender> {
+        let ui_sender = self.sender.as_ref()?.clone();
+        let (child_tx, mut child_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let _ = ui_sender.send(crate::llm::ChunkMessage::SubagentStarted {
+            parent_session_id,
+            session_id: session_id.clone(),
+            title,
+            subagent_type,
+            description,
+            prompt,
+        });
+
+        tokio::spawn(async move {
+            while let Some(chunk) = child_rx.recv().await {
+                let _ = ui_sender.send(crate::llm::ChunkMessage::SubagentChunk {
+                    session_id: session_id.clone(),
+                    chunk: Box::new(chunk),
+                });
+            }
+        });
+
+        Some(child_tx)
     }
 }

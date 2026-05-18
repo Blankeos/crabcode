@@ -12,6 +12,18 @@ pub enum ChunkMessage {
     Warning(String),
     ToolCalls(Vec<ToolCall>),
     ToolResult(ToolCallResult),
+    SubagentStarted {
+        parent_session_id: String,
+        session_id: String,
+        title: String,
+        subagent_type: String,
+        description: String,
+        prompt: String,
+    },
+    SubagentChunk {
+        session_id: String,
+        chunk: Box<ChunkMessage>,
+    },
     PermissionRequest(crate::tools::PermissionPrompt),
     QuestionRequest {
         questions: serde_json::Value,

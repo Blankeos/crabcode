@@ -12,6 +12,10 @@ pub fn run_migrations(db: &mut Connection) -> Result<()> {
         migrate_to_v2(db)?;
     }
 
+    if current_version < 3 {
+        migrate_to_v3(db)?;
+    }
+
     Ok(())
 }
 
@@ -147,6 +151,30 @@ fn migrate_to_v2(db: &mut Connection) -> Result<()> {
 
     tx.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at) VALUES (2, strftime('%s', 'now'))",
+        params![],
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_v3(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction()?;
+
+    let _ = tx.execute(
+        "ALTER TABLE sessions ADD COLUMN parent_session_identifier TEXT",
+        [],
+    );
+
+    tx.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_sessions_parent_identifier
+            ON sessions(parent_session_identifier, updated_at DESC);
+        "#,
+    )?;
+
+    tx.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at) VALUES (3, strftime('%s', 'now'))",
         params![],
     )?;
 

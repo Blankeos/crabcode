@@ -27,10 +27,10 @@ pub async fn register_dynamic_tools(
     sender: Option<crate::llm::ChunkSender>,
 ) {
     registry
-        .register(Arc::new(QuestionTool::new().with_sender_opt(sender)))
+        .register(Arc::new(QuestionTool::new().with_sender_opt(sender.clone())))
         .await;
 
     registry
-        .register(Arc::new(TaskTool::new(registry.clone())))
+        .register(Arc::new(TaskTool::new(registry.clone()).with_sender_opt(sender)))
         .await;
 }

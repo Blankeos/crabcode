@@ -19,6 +19,7 @@ pub struct Workspace {
 pub struct Session {
     pub id: i64,
     pub session_identifier: String,
+    pub parent_session_identifier: Option<String>,
     pub name: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -81,6 +82,10 @@ impl HistoryDAO {
             "ALTER TABLE sessions ADD COLUMN session_identifier TEXT NOT NULL DEFAULT ''",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN parent_session_identifier TEXT",
+            [],
+        );
 
         let current_workspace_path = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -112,10 +117,26 @@ impl HistoryDAO {
     }
 
     pub fn create_session(&self, identifier: &str, name: String) -> Result<i64> {
+        self.create_session_with_parent(identifier, name, None)
+    }
+
+    pub fn create_session_with_parent(
+        &self,
+        identifier: &str,
+        name: String,
+        parent_identifier: Option<&str>,
+    ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO sessions (session_identifier, name, workspace_id, status)
-             VALUES (?1, ?2, ?3, 'idle')",
-            params![identifier, name, self.current_workspace_id],
+            "INSERT INTO sessions (
+                 session_identifier, parent_session_identifier, name, workspace_id, status
+             )
+             VALUES (?1, ?2, ?3, ?4, 'idle')",
+            params![
+                identifier,
+                parent_identifier,
+                name,
+                self.current_workspace_id
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -156,7 +177,8 @@ impl HistoryDAO {
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.id, s.session_identifier, s.name, s.created_at, s.updated_at,
+            "SELECT s.id, s.session_identifier, s.parent_session_identifier,
+                    s.name, s.created_at, s.updated_at,
                     s.total_tokens, s.total_cost, s.total_time_sec, s.avg_tokens_per_sec,
                     COALESCE(s.workspace_id, ?1) AS workspace_id,
                     COALESCE(w.root_path, ?2) AS workspace_path,
@@ -179,19 +201,20 @@ impl HistoryDAO {
                 Ok(Session {
                     id: row.get(0)?,
                     session_identifier: row.get(1)?,
-                    name: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    total_tokens: row.get(5)?,
-                    total_cost: row.get(6)?,
-                    total_time_sec: row.get(7)?,
-                    avg_tokens_per_sec: row.get(8)?,
-                    workspace_id: row.get(9)?,
-                    workspace_path: row.get(10)?,
-                    workspace_name: row.get(11)?,
-                    status: row.get(12)?,
-                    pinned_at: row.get(13)?,
-                    archived_at: row.get(14)?,
+                    parent_session_identifier: row.get(2)?,
+                    name: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    total_tokens: row.get(6)?,
+                    total_cost: row.get(7)?,
+                    total_time_sec: row.get(8)?,
+                    avg_tokens_per_sec: row.get(9)?,
+                    workspace_id: row.get(10)?,
+                    workspace_path: row.get(11)?,
+                    workspace_name: row.get(12)?,
+                    status: row.get(13)?,
+                    pinned_at: row.get(14)?,
+                    archived_at: row.get(15)?,
                 })
             },
         )?;
@@ -202,7 +225,8 @@ impl HistoryDAO {
 
     pub fn get_session(&self, id: i64) -> Result<Option<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.id, s.session_identifier, s.name, s.created_at, s.updated_at,
+            "SELECT s.id, s.session_identifier, s.parent_session_identifier,
+                    s.name, s.created_at, s.updated_at,
                     s.total_tokens, s.total_cost, s.total_time_sec, s.avg_tokens_per_sec,
                     COALESCE(s.workspace_id, ?2) AS workspace_id,
                     COALESCE(w.root_path, ?3) AS workspace_path,
@@ -225,19 +249,20 @@ impl HistoryDAO {
             Ok(Some(Session {
                 id: row.get(0)?,
                 session_identifier: row.get(1)?,
-                name: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                total_tokens: row.get(5)?,
-                total_cost: row.get(6)?,
-                total_time_sec: row.get(7)?,
-                avg_tokens_per_sec: row.get(8)?,
-                workspace_id: row.get(9)?,
-                workspace_path: row.get(10)?,
-                workspace_name: row.get(11)?,
-                status: row.get(12)?,
-                pinned_at: row.get(13)?,
-                archived_at: row.get(14)?,
+                parent_session_identifier: row.get(2)?,
+                name: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+                total_tokens: row.get(6)?,
+                total_cost: row.get(7)?,
+                total_time_sec: row.get(8)?,
+                avg_tokens_per_sec: row.get(9)?,
+                workspace_id: row.get(10)?,
+                workspace_path: row.get(11)?,
+                workspace_name: row.get(12)?,
+                status: row.get(13)?,
+                pinned_at: row.get(14)?,
+                archived_at: row.get(15)?,
             }))
         } else {
             Ok(None)

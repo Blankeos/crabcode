@@ -84,6 +84,11 @@ pub struct SubAgentDef {
     pub description: String,
 }
 
+pub struct SubAgentRunResult {
+    pub output: String,
+    pub tool_call_count: usize,
+}
+
 impl SubAgentDef {
     pub fn all() -> Vec<SubAgentDef> {
         vec![
@@ -126,7 +131,9 @@ pub async fn run_subagent(
     description: &str,
     prompt: &str,
     full_registry: &ToolRegistry,
-) -> Result<String, String> {
+    sender: Option<crate::llm::ChunkSender>,
+    session_id: String,
+) -> Result<SubAgentRunResult, String> {
     use aisdk::core::{
         chunk::ChunkType,
         response::{stream_with_tools, StreamTextResponse},
@@ -144,9 +151,11 @@ pub async fn run_subagent(
 
     let aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
         &scoped_registry,
-        None,
+        sender.clone(),
         "build".to_string(),
         permissions,
+        Some(session_id),
+        None,
     )
     .await;
 
@@ -206,13 +215,32 @@ pub async fn run_subagent(
     };
 
     let mut collected_text = String::new();
+    let mut tool_call_count = 0usize;
 
     while let Some(chunk) = response.stream.next().await {
         match chunk {
             ChunkType::Text(text) => {
                 collected_text.push_str(&text);
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send(crate::llm::ChunkMessage::Text(text));
+                }
+            }
+            ChunkType::Reasoning(reasoning) => {
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
+                }
+            }
+            ChunkType::ToolCall(tool_call) => {
+                let calls = serde_json::from_str::<serde_json::Value>(&tool_call)
+                    .ok()
+                    .and_then(|value| value.as_array().map(|items| items.len()))
+                    .unwrap_or(1);
+                tool_call_count = tool_call_count.saturating_add(calls);
             }
             ChunkType::Failed(err) => {
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send(crate::llm::ChunkMessage::Failed(err.clone()));
+                }
                 return Err(format!("Subagent streaming failed: {}", err));
             }
             ChunkType::End(_) => {
@@ -222,9 +250,37 @@ pub async fn run_subagent(
         }
     }
 
-    if collected_text.trim().is_empty() {
-        return Err("Subagent returned no output".to_string());
+    Ok(SubAgentRunResult {
+        output: normalize_subagent_output(collected_text),
+        tool_call_count,
+    })
+}
+
+fn normalize_subagent_output(output: String) -> String {
+    if output.trim().is_empty() {
+        "Subagent completed without a final text response.".to_string()
+    } else {
+        output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_subagent_output;
+
+    #[test]
+    fn empty_subagent_output_is_not_an_error_payload() {
+        assert_eq!(
+            normalize_subagent_output("   \n".to_string()),
+            "Subagent completed without a final text response."
+        );
     }
 
-    Ok(collected_text)
+    #[test]
+    fn non_empty_subagent_output_is_preserved() {
+        assert_eq!(
+            normalize_subagent_output("Hi there".to_string()),
+            "Hi there"
+        );
+    }
 }

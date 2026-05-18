@@ -14,6 +14,8 @@ pub async fn convert_to_aisdk_tools(
     sender: Option<ChunkSender>,
     agent_mode: String,
     permissions: crate::tools::ToolPermissions,
+    session_id: Option<String>,
+    message_id: Option<String>,
 ) -> Vec<Tool> {
     let mut aisdk_tools = Vec::new();
     let tools = registry.list().await;
@@ -33,6 +35,8 @@ pub async fn convert_to_aisdk_tools(
         let sender = sender.clone();
         let agent_mode = agent_mode.clone();
         let permissions = permissions.clone();
+        let session_id = session_id.clone();
+        let message_id = message_id.clone();
 
         let execute = ToolExecute::new(move |input: Value| {
             let tool_id = tool_id.clone();
@@ -45,6 +49,8 @@ pub async fn convert_to_aisdk_tools(
             let sender = sender.clone();
             let agent_mode = agent_mode.clone();
             let permissions = permissions.clone();
+            let session_id = session_id.clone();
+            let message_id = message_id.clone();
 
             async move {
                 let call_seq = TOOL_CALL_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
@@ -84,7 +90,13 @@ pub async fn convert_to_aisdk_tools(
                     .map_err(|e| format!("{}", e))?;
 
                 let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-                let ctx = ToolContext::new("session", "message", agent_mode.clone(), abort_rx);
+                let ctx = ToolContext::new(
+                    session_id.unwrap_or_else(|| "session".to_string()),
+                    message_id.unwrap_or_else(|| "message".to_string()),
+                    agent_mode.clone(),
+                    abort_rx,
+                )
+                .with_call_id(call_id.clone());
 
                 let tool_result = handler
                     .execute(input, &ctx)

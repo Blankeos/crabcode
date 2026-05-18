@@ -138,6 +138,7 @@ impl Message {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     pub id: String,
+    pub parent_id: Option<String>,
     pub title: String,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
@@ -161,6 +162,7 @@ impl Session {
         let now = SystemTime::now();
         Self {
             id: cuid2::create_id(),
+            parent_id: None,
             title: "New Session".to_string(),
             created_at: now,
             updated_at: now,
@@ -178,6 +180,7 @@ impl Session {
         let now = SystemTime::now();
         Self {
             id: cuid2::create_id(),
+            parent_id: None,
             title: title.into(),
             created_at: now,
             updated_at: now,

@@ -18,6 +18,19 @@ pub struct ChatState {
     pub wave_spinner: WaveSpinner,
 }
 
+#[derive(Debug, Clone)]
+pub struct SubagentTab {
+    pub label: String,
+    pub active: bool,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentTabs {
+    pub is_child_session: bool,
+    pub tabs: Vec<SubagentTab>,
+}
+
 impl ChatState {
     pub fn new(chat: Chat, agent_color: ratatui::style::Color) -> Self {
         Self {
@@ -57,6 +70,7 @@ pub fn render_chat(
     colors: &ThemeColors,
     is_streaming: bool,
     usage_text: &str,
+    subagent_tabs: Option<SubagentTabs>,
 ) {
     let size = f.area();
 
@@ -80,6 +94,10 @@ pub fn render_chat(
             .as_ref(),
         )
         .split(main_chunks[0]);
+
+    if let Some(tabs) = subagent_tabs.as_ref() {
+        render_subagent_tabs(f, above_status_chunks[0], tabs, colors);
+    }
 
     chat_state
         .chat
@@ -182,4 +200,51 @@ pub fn render_chat(
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
     status_bar.render(f, main_chunks[1], colors);
+}
+
+fn render_subagent_tabs(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    tabs: &SubagentTabs,
+    colors: &ThemeColors,
+) {
+    if tabs.tabs.is_empty() || area.width == 0 {
+        return;
+    }
+
+    let mut spans = Vec::new();
+    let hint = if tabs.is_child_session {
+        "up parent  left/right siblings"
+    } else {
+        "ctrl+x down subagents"
+    };
+
+    spans.push(Span::styled(
+        hint,
+        Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM),
+    ));
+    spans.push(Span::raw("  "));
+
+    for tab in &tabs.tabs {
+        let style = if tab.active {
+            Style::default()
+                .fg(colors.background)
+                .bg(colors.primary)
+                .add_modifier(Modifier::BOLD)
+        } else if tab.running {
+            Style::default().fg(colors.info)
+        } else {
+            Style::default().fg(colors.text_weak)
+        };
+        let suffix = if tab.running { " ~" } else { "" };
+        spans.push(Span::styled(
+            format!(" {}{} ", tab.label, suffix),
+            style,
+        ));
+        spans.push(Span::raw(" "));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

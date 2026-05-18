@@ -121,10 +121,11 @@ pub fn session_to_persistence(name: String, session: &Session) -> (String, Vec<M
 }
 
 pub fn persistence_to_session(
-    _persistence_session: PersistenceSession,
+    persistence_session: PersistenceSession,
     messages: Vec<Message>,
 ) -> Result<Session, anyhow::Error> {
     let mut session = Session::new();
+    session.parent_id = persistence_session.parent_session_identifier;
     for msg in messages {
         session.add_message(msg.try_into()?);
     }

@@ -1354,6 +1354,22 @@ impl Chat {
             }
         }
 
+        fn titlecase_ascii(value: &str) -> String {
+            let mut chars = value.chars();
+            let Some(first) = chars.next() else {
+                return String::new();
+            };
+            first.to_ascii_uppercase().to_string() + chars.as_str()
+        }
+
+        fn format_duration_ms(ms: u64) -> String {
+            if ms >= 1000 {
+                format!("{:.1}s", ms as f64 / 1000.0)
+            } else {
+                format!("{}ms", ms)
+            }
+        }
+
         fn push_wrapped<'a>(
             out: &mut Vec<Line<'a>>,
             line: Line<'static>,
@@ -1447,6 +1463,7 @@ impl Chat {
             "grep" => "Grep",
             "todowrite" => "Todos",
             "question" => "Questions",
+            "task" => "Task",
             other => other,
         };
 
@@ -1567,6 +1584,92 @@ impl Chat {
             }
 
             out.extend(panel_lines);
+        } else if name == "task" {
+            let subagent_type = args_obj
+                .and_then(|o| o.get("subagent_type"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.get("subagent_type"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("general");
+            let description = args_obj
+                .and_then(|o| o.get("description"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("Task");
+            let header_text = format!(
+                "{} Task — {}",
+                titlecase_ascii(subagent_type),
+                description.trim()
+            );
+
+            let count = metadata
+                .as_ref()
+                .and_then(|m| m.get("child_tool_call_count"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let plural = if count == 1 { "toolcall" } else { "toolcalls" };
+            let duration = metadata
+                .as_ref()
+                .and_then(|m| m.get("duration_ms"))
+                .and_then(|v| v.as_u64())
+                .map(format_duration_ms);
+            let stats = match status.as_str() {
+                "running" => "running".to_string(),
+                "error" => "failed".to_string(),
+                _ => {
+                    let base = format!("{} {}", count, plural);
+                    duration
+                        .map(|d| format!("{} · {}", base, d))
+                        .unwrap_or(base)
+                }
+            };
+
+            let connector_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM);
+            let header_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM);
+            let stats_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM);
+            let hint_key_style = Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD);
+            let hint_style = Style::default().fg(colors.text_weak);
+
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled("  ┌ ", connector_style),
+                    Span::styled(header_text, header_style),
+                ]),
+                max_width,
+                Line::from(Span::styled("    ", header_style)),
+            );
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled("  │ ", connector_style),
+                    Span::styled(stats, stats_style),
+                ]),
+                max_width,
+                Line::from(Span::styled("    ", stats_style)),
+            );
+
+            out.push(Line::from(""));
+            out.push(Line::from(vec![
+                Span::styled("ctrl+x", hint_key_style),
+                Span::raw(" "),
+                Span::styled("down", hint_key_style),
+                Span::raw(" "),
+                Span::styled("view subagents", hint_style),
+            ]));
+            out.push(Line::from(""));
         } else if name == "todowrite" && status == "ok" {
             if let Some(ref preview) = output_preview {
                 let bg = colors.background_element;
@@ -1823,6 +1926,7 @@ fn is_compact_tool_panel(content: &str) -> bool {
             Some(match name {
                 "question" => status != "error",
                 "todowrite" => status == "ok",
+                "task" => true,
                 _ => false,
             })
         })
@@ -2168,6 +2272,44 @@ mod tests {
 
         assert!(rendered.iter().any(|line| line.trim() == "Location"));
         assert!(!rendered.iter().any(|line| line.trim() == "Question"));
+    }
+
+    #[test]
+    fn test_task_tool_renders_opencode_style_summary() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "task",
+            "status": "ok",
+            "args": {
+                "subagent_type": "general",
+                "description": "Say hi",
+                "prompt": "Say hi"
+            },
+            "metadata": {
+                "subagent_type": "general",
+                "child_tool_call_count": 0,
+                "duration_ms": 4100
+            },
+            "output_preview": "Hi there!"
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("General Task") && line.contains("Say hi")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("0 toolcalls") && line.contains("4.1s")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("ctrl+x down view subagents")));
+        assert!(!rendered.iter().any(|line| line.contains("prompt=\"Say hi\"")));
+        assert!(!rendered.iter().any(|line| line.contains("Hi there!")));
     }
 
     #[test]

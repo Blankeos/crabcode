@@ -78,6 +78,7 @@ enum StreamRelayOutcome {
 
 pub async fn stream_llm_with_cancellation(
     cancel_token: CancellationToken,
+    session_id: String,
     provider_name: String,
     model: String,
     agent_mode: String,
@@ -113,6 +114,8 @@ pub async fn stream_llm_with_cancellation(
         Some(sender.clone()),
         agent_mode,
         tool_permissions,
+        Some(session_id),
+        None,
     )
     .await;
 
@@ -520,12 +523,42 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
                 aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));
             }
             crate::session::types::MessageRole::Tool => {
-                continue;
+                aisdk_messages.push(AisdkMessage::user(tool_message_observation(&msg.content)));
             }
         }
     }
 
     aisdk_messages
+}
+
+fn tool_message_observation(content: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return format!("Tool result:\n{}", content);
+    };
+
+    let Some(obj) = value.as_object() else {
+        return format!("Tool result:\n{}", content);
+    };
+
+    let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+    let status = obj.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
+    let title = obj.get("title").and_then(|v| v.as_str());
+    let output = obj
+        .get("output_preview")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("");
+
+    let mut observation = format!("Tool `{}` result ({})", name, status);
+    if let Some(title) = title {
+        observation.push_str(&format!(": {}", title));
+    }
+    if !output.is_empty() {
+        observation.push_str("\n");
+        observation.push_str(output);
+    }
+
+    observation
 }
 
 fn is_openai_oauth_model_allowed(model: &str) -> bool {
