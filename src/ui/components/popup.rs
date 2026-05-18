@@ -8,6 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem},
     Frame,
 };
+use std::ops::Range;
 
 const MAX_VISIBLE_ITEMS: usize = 8;
 const ITEM_HORIZONTAL_PADDING: usize = 1;
@@ -65,6 +66,21 @@ impl Popup {
         self.suggestions.get(self.selected_index)
     }
 
+    fn visible_range(&self) -> Range<usize> {
+        let item_count = self.suggestions.len();
+        if item_count == 0 {
+            return 0..0;
+        }
+
+        let visible_count = item_count.min(MAX_VISIBLE_ITEMS);
+        let selected_index = self.selected_index.min(item_count.saturating_sub(1));
+        let start = selected_index
+            .saturating_add(1)
+            .saturating_sub(visible_count);
+
+        start..start + visible_count
+    }
+
     pub fn handle_key_event(&mut self, event: KeyEvent) -> PopupAction {
         if !self.visible {
             return PopupAction::NotHandled;
@@ -102,7 +118,8 @@ impl Popup {
 
         let popup_width = area.width;
         let item_width = popup_width.saturating_sub(2) as usize;
-        let popup_height = (self.suggestions.len() as u16).min(MAX_VISIBLE_ITEMS as u16) + 2;
+        let visible_range = self.visible_range();
+        let popup_height = (visible_range.len() as u16) + 2;
 
         let popup_area = Rect {
             x: area.x,
@@ -126,6 +143,8 @@ impl Popup {
             .suggestions
             .iter()
             .enumerate()
+            .skip(visible_range.start)
+            .take(visible_range.len())
             .map(|(i, suggestion)| {
                 let (bg_style, name_fg, desc_fg) = if i == self.selected_index {
                     let fg = contrast_text(colors.primary);
@@ -322,6 +341,33 @@ mod tests {
         assert_eq!(popup.get_selected().map(|s| s.name.as_str()), Some("item1"));
         popup.next();
         assert_eq!(popup.get_selected().map(|s| s.name.as_str()), Some("item2"));
+    }
+
+    #[test]
+    fn test_visible_range_keeps_selected_item_in_view() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(
+            (0..10)
+                .map(|i| Suggestion {
+                    name: format!("item{}", i),
+                    description: String::new(),
+                })
+                .collect(),
+        );
+
+        assert_eq!(popup.visible_range(), 0..8);
+
+        popup.selected_index = 8;
+        assert_eq!(popup.visible_range(), 1..9);
+
+        popup.selected_index = 9;
+        assert_eq!(popup.visible_range(), 2..10);
+    }
+
+    #[test]
+    fn test_visible_range_empty() {
+        let popup = Popup::new();
+        assert_eq!(popup.visible_range(), 0..0);
     }
 
     #[test]

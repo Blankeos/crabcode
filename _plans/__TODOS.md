@@ -38,7 +38,7 @@
 
 - [ ] Bug: theme is not persisted? Or is it by config? Just make theme be based on state now, no more config for it.
 
-- [ ] Bug: skill loading on conflict. i.e. duplicate frontend-design skill. Warning: duplicate skill name 'frontend-design' (existing: /Users/carlo/.claude/skills/frontend-design/SKILL.md, duplicate: /Users/carlo/.config/opencode/skill/frontend-design/SKILL.md)
+- [x] Bug: skill loading on conflict. i.e. duplicate frontend-design skill. Warning: duplicate skill name 'frontend-design' (existing: /Users/carlo/.claude/skills/frontend-design/SKILL.md, duplicate: /Users/carlo/.config/opencode/skill/frontend-design/SKILL.md)
 
 - [x] Bug: Timeline livescroll and actual chat UI consistency - make them the same.
 
@@ -65,6 +65,6 @@
 
 - [x] Better question handling for skipped (Skipped, if I didn't press enter. like when I do `arrow right` immediately)
 
-- [ ] Scroll like herdr. Stuff I like: as thin, as tall (no arrows - currently ours also has no arrows but it was a hack, we just remove the arrows with "" chars so they still take a height. The one from herdr looks like it's a pure scrollbar thumb without arrows and thin enough that I like)
+- [x] Scroll like herdr. Stuff I like: as thin, as tall (no arrows - currently ours also has no arrows but it was a hack, we just remove the arrows with "" chars so they still take a height. The one from herdr looks like it's a pure scrollbar thumb without arrows and thin enough that I like)
 
-- [ ] Highlight enhancements, if I click 1 place, then shift+click another. Treat it like the highlight in the browser that doesn't need a drag. Whatever I last clicked (without shift+click), treat it as the anchor for the "select start", and then whatever I shift+click after, treat it as a "select end" and autohighlight that part.
+- [x] Highlight enhancements, if I click 1 place, then shift+click another. Treat it like the highlight in the browser that doesn't need a drag. Whatever I last clicked (without shift+click), treat it as the anchor for the "select start", and then whatever I shift+click after, treat it as a "select end" and autohighlight that part. (not supported)

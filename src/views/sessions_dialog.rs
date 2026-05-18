@@ -1,6 +1,8 @@
 use crate::theme::ThemeColors;
 use crate::ui::components::dialog::{Dialog, DialogAction as FooterAction, DialogItem};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{layout::Rect, Frame};
 
 #[derive(Debug)]
@@ -151,8 +153,40 @@ pub fn handle_sessions_dialog_key_event(
 pub fn handle_sessions_dialog_mouse_event(
     dialog_state: &mut SessionsDialogState,
     event: MouseEvent,
-) -> bool {
-    dialog_state.dialog.handle_mouse_event(event)
+) -> SessionsDialogAction {
+    let was_visible = dialog_state.dialog.is_visible();
+    let previous_index = dialog_state.dialog.selected_index;
+    let clicked_item = if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+        dialog_state
+            .dialog
+            .item_index_at_position(event.column, event.row)
+    } else {
+        None
+    };
+
+    let handled = dialog_state.dialog.handle_mouse_event(event);
+
+    if dialog_state.dialog.selected_index != previous_index {
+        dialog_state.pending_delete = None;
+    }
+
+    if was_visible && !dialog_state.dialog.is_visible() {
+        dialog_state.pending_delete = None;
+        return SessionsDialogAction::Close;
+    }
+
+    if clicked_item.is_some() {
+        dialog_state.pending_delete = None;
+        if let Some(selected) = dialog_state.dialog.get_selected() {
+            return SessionsDialogAction::Select(selected.id.clone());
+        }
+    }
+
+    if handled {
+        SessionsDialogAction::Handled
+    } else {
+        SessionsDialogAction::NotHandled
+    }
 }
 
 pub fn get_pending_delete(dialog_state: &mut SessionsDialogState) -> Option<String> {
@@ -168,4 +202,73 @@ pub enum SessionsDialogAction {
     Delete(String),
     PendingDelete(String),
     Rename(String, String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_item(id: &str, name: &str) -> DialogItem {
+        DialogItem {
+            id: id.to_string(),
+            name: name.to_string(),
+            group: "Today".to_string(),
+            description: String::new(),
+            tip: None,
+            provider_id: String::new(),
+        }
+    }
+
+    fn left_click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_click_on_item_selects_session() {
+        let mut state = init_sessions_dialog(
+            "Sessions",
+            vec![
+                session_item("session-1", "First session"),
+                session_item("session-2", "Second session"),
+            ],
+        );
+        state.dialog.show();
+        state.dialog.dialog_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 30,
+        };
+
+        let action = handle_sessions_dialog_mouse_event(&mut state, left_click(4, 10));
+
+        assert_eq!(
+            action,
+            SessionsDialogAction::Select("session-2".to_string())
+        );
+        assert_eq!(state.dialog.selected_index, 1);
+    }
+
+    #[test]
+    fn mouse_click_on_group_header_does_not_select_session() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+        state.dialog.dialog_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 30,
+        };
+
+        let action = handle_sessions_dialog_mouse_event(&mut state, left_click(4, 8));
+
+        assert_eq!(action, SessionsDialogAction::NotHandled);
+        assert_eq!(state.dialog.selected_index, 0);
+    }
 }

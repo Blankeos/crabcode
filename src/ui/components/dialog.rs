@@ -596,7 +596,7 @@ impl Dialog {
                     self.scroll_to_position(event.row, scrollbar_area);
                     true
                 } else {
-                    if let Some(item_index) = self.get_item_index_from_y(event.row, list_area) {
+                    if let Some(item_index) = self.item_index_at_position(event.column, event.row) {
                         self.selected_index = item_index;
                         return true;
                     }
@@ -613,7 +613,7 @@ impl Dialog {
             }
             MouseEventKind::Moved => {
                 if !is_on_scrollbar {
-                    if let Some(item_index) = self.get_item_index_from_y(event.row, list_area) {
+                    if let Some(item_index) = self.item_index_at_position(event.column, event.row) {
                         if item_index != self.selected_index {
                             self.selected_index = item_index;
                         }
@@ -631,6 +631,60 @@ impl Dialog {
             }
             _ => false,
         }
+    }
+
+    pub fn item_index_at_position(&self, column: u16, row: u16) -> Option<usize> {
+        if !self.visible {
+            return None;
+        }
+
+        use ratatui::layout::Position;
+        let point = Position::new(column, row);
+
+        if !self.dialog_area.contains(point) {
+            return None;
+        }
+
+        let padding = match self.position {
+            DialogPosition::Center => 3u16,
+            DialogPosition::Left | DialogPosition::Right => 1u16,
+        };
+        let content_area = Rect {
+            x: self.dialog_area.x + padding,
+            y: self.dialog_area.y + padding,
+            width: self.dialog_area.width.saturating_sub(padding * 2),
+            height: self.dialog_area.height.saturating_sub(padding * 2),
+        };
+
+        if !content_area.contains(point) {
+            return None;
+        }
+
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(3),
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .split(content_area);
+
+        let list_area = chunks[3];
+        let list_content_area = Rect {
+            x: list_area.x,
+            y: list_area.y,
+            width: list_area.width.saturating_sub(2),
+            height: list_area.height,
+        };
+
+        if !list_content_area.contains(point) {
+            return None;
+        }
+
+        self.get_item_index_from_y(row, list_area)
     }
 
     fn get_item_index_from_y(&self, row: u16, list_area: Rect) -> Option<usize> {

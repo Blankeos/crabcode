@@ -1348,9 +1348,28 @@ impl App {
                 }
             }
         } else if self.overlay_focus == OverlayFocus::SessionsDialog {
-            handle_sessions_dialog_mouse_event(&mut self.sessions_dialog_state, mouse);
-            if !self.sessions_dialog_state.dialog.is_visible() {
-                self.overlay_focus = OverlayFocus::None;
+            let action = handle_sessions_dialog_mouse_event(&mut self.sessions_dialog_state, mouse);
+            match action {
+                SessionsDialogAction::Select(id) => {
+                    self.session_manager.switch_session(&id);
+                    if let Some(session) = self.session_manager.get_session(&id) {
+                        self.chat_state.chat.clear();
+                        for message in &session.messages {
+                            self.chat_state.chat.add_message(message.clone());
+                        }
+                    }
+                    self.base_focus = BaseFocus::Chat;
+                    self.sessions_dialog_state.dialog.hide();
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                SessionsDialogAction::Close => {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                _ => {
+                    if !self.sessions_dialog_state.dialog.is_visible() {
+                        self.overlay_focus = OverlayFocus::None;
+                    }
+                }
             }
         } else if self.overlay_focus == OverlayFocus::SkillsDialog {
             crate::views::skills_dialog::handle_skills_dialog_mouse_event(
