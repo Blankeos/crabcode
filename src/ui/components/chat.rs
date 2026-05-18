@@ -1272,6 +1272,68 @@ impl Chat {
             }
         }
 
+        fn arg_string<'v>(
+            obj: Option<&'v serde_json::Map<String, JsonValue>>,
+            keys: &[&str],
+        ) -> Option<&'v str> {
+            keys.iter()
+                .find_map(|key| obj.and_then(|o| o.get(*key)).and_then(|v| v.as_str()))
+                .filter(|value| !value.trim().is_empty())
+        }
+
+        fn strip_tool_title<'v>(title: Option<&'v str>, label: &str) -> Option<&'v str> {
+            let prefix = format!("{}:", label);
+            title
+                .and_then(|value| value.strip_prefix(&prefix))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }
+
+        fn display_path(raw: &str, basename_only: bool) -> String {
+            let trimmed = raw.trim();
+            let path = std::path::Path::new(trimmed);
+
+            if basename_only {
+                return path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(trimmed)
+                    .to_string();
+            }
+
+            if path.is_absolute() {
+                if let Ok(cwd) = std::env::current_dir() {
+                    if let Ok(rel) = path.strip_prefix(cwd) {
+                        let rendered = rel.to_string_lossy();
+                        return if rendered.is_empty() {
+                            ".".to_string()
+                        } else {
+                            rendered.into_owned()
+                        };
+                    }
+                }
+            }
+
+            trimmed.to_string()
+        }
+
+        fn explored_tool_target(
+            name: &str,
+            args_obj: Option<&serde_json::Map<String, JsonValue>>,
+            title: Option<&str>,
+        ) -> Option<String> {
+            match name {
+                "read" => arg_string(args_obj, &["file_path", "filePath", "path"])
+                    .or_else(|| strip_tool_title(title, "Read"))
+                    .map(|path| display_path(path, true)),
+                "list" => arg_string(args_obj, &["path"])
+                    .or_else(|| strip_tool_title(title, "List"))
+                    .map(|path| display_path(path, false)),
+                _ => None,
+            }
+        }
+
         fn question_values(
             args: &Option<JsonValue>,
             metadata: &Option<JsonValue>,
@@ -1485,6 +1547,48 @@ impl Chat {
         };
 
         let args_obj = args.as_ref().and_then(|v| v.as_object());
+        if status != "error" {
+            if let Some(target) = explored_tool_target(&name, args_obj, title.as_deref()) {
+                let action_label = if name == "read" { "Read" } else { "List" };
+                let gutter_style = Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM);
+                let title_style = Style::default()
+                    .fg(colors.text)
+                    .add_modifier(Modifier::BOLD);
+                let action_style = Style::default()
+                    .fg(colors.accent)
+                    .add_modifier(Modifier::BOLD);
+                let target_style = Style::default().fg(colors.text);
+                let marker = if status == "running" { "~" } else { "•" };
+                let heading = if status == "running" {
+                    "Exploring"
+                } else {
+                    "Explored"
+                };
+
+                out.push(Line::from(vec![
+                    Span::styled(marker, gutter_style),
+                    Span::raw(" "),
+                    Span::styled(heading, title_style),
+                ]));
+
+                push_wrapped(
+                    &mut out,
+                    Line::from(vec![
+                        Span::styled("  └ ", gutter_style),
+                        Span::styled(action_label, action_style),
+                        Span::raw(" "),
+                        Span::styled(target, target_style),
+                    ]),
+                    max_width,
+                    Line::from(Span::styled("    ", gutter_style)),
+                );
+
+                return out;
+            }
+        }
+
         let args_str = if name == "glob" {
             let pat = args_obj
                 .and_then(|o| o.get("pattern"))
@@ -2228,6 +2332,44 @@ mod tests {
 
         assert!(rendered.iter().any(|line| line.contains('…')));
         assert!(rendered.len() <= TOOL_RESULT_MAX_SCREEN_LINES + 2);
+    }
+
+    #[test]
+    fn test_read_tool_renders_codex_style_explored_summary() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "read",
+            "status": "ok",
+            "args": { "file_path": "/Users/carlo/Desktop/Projects/crabcode/AGENTS.md" },
+            "output_preview": "00001| # Agent Context\n00002| More content",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 80, &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["• Explored", "  └ Read AGENTS.md"]);
+    }
+
+    #[test]
+    fn test_list_tool_renders_codex_style_explored_summary() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "list",
+            "status": "ok",
+            "args": { "path": "src/ui" },
+            "output_preview": "src/ui\ncomponents\nmarkdown",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 80, &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["• Explored", "  └ List src/ui"]);
     }
 
     #[test]

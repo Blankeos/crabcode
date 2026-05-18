@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::llm::ChunkSender;
 
+const TOOL_UI_PREVIEW_LIMIT: usize = 4_000;
+const TOOL_MODEL_OUTPUT_LIMIT: usize = 60_000;
+
 static TOOL_CALL_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 pub async fn convert_to_aisdk_tools(
@@ -30,7 +33,6 @@ pub async fn convert_to_aisdk_tools(
         }
 
         let tool_id = tool_def.id.clone();
-        let tool_description = tool_def.description.clone();
         let registry = registry.clone();
         let sender = sender.clone();
         let agent_mode = agent_mode.clone();
@@ -43,8 +45,6 @@ pub async fn convert_to_aisdk_tools(
             let tool_id_for_exec = tool_id.clone();
             let tool_id_for_ui = tool_id.clone();
 
-            let tool_description = tool_description.clone();
-            let tool_description_for_ui = tool_description.clone();
             let registry = registry.clone();
             let sender = sender.clone();
             let agent_mode = agent_mode.clone();
@@ -109,14 +109,11 @@ pub async fn convert_to_aisdk_tools(
                     tool_result.output.len()
                 ));
 
+                let model_output =
+                    truncate_tool_output(&tool_result.output, TOOL_MODEL_OUTPUT_LIMIT);
+
                 if let Some(ref sender) = sender {
-                    let preview_limit: usize = 4000;
-                    let mut preview = tool_result.output.clone();
-                    if preview.len() > preview_limit {
-                        let boundary = preview.floor_char_boundary(preview_limit);
-                        preview.truncate(boundary);
-                        preview.push_str("... (truncated)");
-                    }
+                    let preview = truncate_tool_output(&tool_result.output, TOOL_UI_PREVIEW_LIMIT);
 
                     let line_count = tool_result.output.lines().count();
                     let meta = serde_json::Value::Object(
@@ -145,7 +142,7 @@ pub async fn convert_to_aisdk_tools(
                     ));
                 }
 
-                Ok(tool_result.output)
+                Ok(model_output)
             }
         });
 
@@ -198,6 +195,20 @@ pub async fn convert_to_aisdk_tools(
     aisdk_tools
 }
 
+fn truncate_tool_output(output: &str, limit: usize) -> String {
+    if output.len() <= limit {
+        return output.to_string();
+    }
+
+    let boundary = output.floor_char_boundary(limit);
+    let mut truncated = output[..boundary].to_string();
+    truncated.push_str(&format!(
+        "\n\n... (tool output truncated to {} bytes; narrow the request for more)",
+        limit
+    ));
+    truncated
+}
+
 fn param_to_json_schema(param_type: &crate::tools::ParameterType) -> serde_json::Value {
     use crate::tools::ParameterType;
 
@@ -221,5 +232,27 @@ fn param_to_json_schema(param_type: &crate::tools::ParameterType) -> serde_json:
                 "properties": properties
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_tool_output;
+
+    #[test]
+    fn truncate_tool_output_bounds_large_results() {
+        let output = "a".repeat(70_000);
+
+        let truncated = truncate_tool_output(&output, 60_000);
+
+        assert!(truncated.len() < output.len());
+        assert!(truncated.contains("tool output truncated to 60000 bytes"));
+    }
+
+    #[test]
+    fn truncate_tool_output_preserves_small_results() {
+        let output = "small result";
+
+        assert_eq!(truncate_tool_output(output, 60_000), output);
     }
 }
