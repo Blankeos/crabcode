@@ -72,7 +72,7 @@ pub fn render_chat(
             [
                 Constraint::Length(1), // Top padding
                 Constraint::Min(0),    // Chat content
-                Constraint::Length(1), // Bottom padding
+                Constraint::Length(0), // Bottom padding
                 Constraint::Length(input_height),
                 Constraint::Length(1),
                 Constraint::Length(1),

@@ -32,10 +32,7 @@ fn char_boundary_before(s: &str, byte_idx: usize) -> usize {
     if s.is_char_boundary(idx) {
         idx
     } else {
-        (0..idx)
-            .rev()
-            .find(|&i| s.is_char_boundary(i))
-            .unwrap_or(0)
+        (0..idx).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
     }
 }
 
@@ -85,7 +82,7 @@ impl Input {
         self
     }
 
-pub fn render(
+    pub fn render(
         &mut self,
         frame: &mut ratatui::Frame,
         area: Rect,
@@ -141,13 +138,13 @@ pub fn render(
 
         self.textarea_area = Some(v_chunks[1]);
 
-        self.textarea.set_selection_style(
-            Style::default()
-                .bg(colors.accent)
-                .fg(colors.text),
-        );
         self.textarea
-            .set_style(Style::default().fg(colors.text).bg(colors.background_element));
+            .set_selection_style(Style::default().bg(colors.accent).fg(colors.text));
+        self.textarea.set_style(
+            Style::default()
+                .fg(colors.text)
+                .bg(colors.background_element),
+        );
 
         let line_count = self.textarea.lines().len();
         let visible_lines = v_chunks[1].height as usize;
@@ -157,15 +154,9 @@ pub fn render(
         frame.render_widget(&self.textarea, v_chunks[1]);
 
         let info_text = ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(
-                agent.to_string(),
-                Style::default().fg(agent_color),
-            ),
+            ratatui::text::Span::styled(agent.to_string(), Style::default().fg(agent_color)),
             ratatui::text::Span::raw("  "),
-            ratatui::text::Span::styled(
-                model.to_string(),
-                Style::default().fg(colors.text),
-            ),
+            ratatui::text::Span::styled(model.to_string(), Style::default().fg(colors.text)),
             ratatui::text::Span::raw("  "),
             ratatui::text::Span::styled(
                 provider_name.to_string(),
@@ -181,10 +172,7 @@ pub fn render(
         frame.render_widget(border, area);
 
         let cap_row = Paragraph::new(ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(
-                "╹",
-                Style::default().fg(agent_color),
-            ),
+            ratatui::text::Span::styled("╹", Style::default().fg(agent_color)),
             ratatui::text::Span::styled(
                 "▀".repeat(area.width as usize - 1),
                 Style::default().fg(colors.background_element),
@@ -444,8 +432,16 @@ pub fn render(
             if i < start_row || i > end_row {
                 continue;
             }
-            let start = if i == start_row { start_col.min(line.len()) } else { 0 };
-            let end = if i == end_row { end_col.min(line.len()) } else { line.len() };
+            let start = if i == start_row {
+                start_col.min(line.len())
+            } else {
+                0
+            };
+            let end = if i == end_row {
+                end_col.min(line.len())
+            } else {
+                line.len()
+            };
 
             if start >= end {
                 continue;

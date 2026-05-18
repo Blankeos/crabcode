@@ -1,6 +1,6 @@
+use crate::theme::ThemeColors;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use crate::theme::ThemeColors;
 use unicode_width::UnicodeWidthStr;
 
 const MAX_DIFF_LINES: usize = 40;
@@ -129,12 +129,21 @@ pub fn render_unified_diff(
             let padding = "─".repeat(remaining);
             let mut spans = vec![
                 Span::styled(gutter.to_string(), gutter_style),
-                Span::styled(format!("⋯{}", padding), content_style.add_modifier(Modifier::DIM)),
+                Span::styled(
+                    format!("⋯{}", padding),
+                    content_style.add_modifier(Modifier::DIM),
+                ),
             ];
             // Pad to full width if the ellipsis line is shorter
-            let visible_width: usize = spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            let visible_width: usize = spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
             if visible_width < max_width {
-                spans.push(Span::styled(" ".repeat(max_width - visible_width), pad_style));
+                spans.push(Span::styled(
+                    " ".repeat(max_width - visible_width),
+                    pad_style,
+                ));
             }
             lines.push(Line::from(spans));
             continue;
@@ -153,9 +162,15 @@ pub fn render_unified_diff(
                 Span::styled(chunk.to_string(), content_style),
             ];
             // Pad to full width so the background spans the entire row
-            let visible_width: usize = spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            let visible_width: usize = spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
             if visible_width < max_width {
-                spans.push(Span::styled(" ".repeat(max_width - visible_width), pad_style));
+                spans.push(Span::styled(
+                    " ".repeat(max_width - visible_width),
+                    pad_style,
+                ));
             }
             lines.push(Line::from(spans));
         }

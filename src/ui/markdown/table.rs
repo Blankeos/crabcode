@@ -107,8 +107,7 @@ fn render_table(rows: &[Vec<String>], alignments: &[Alignment], max_width: usize
     // So per column: 1 (left pad) + width + 1 (right pad), plus 1 for the left border
     let padding_per_col = 2; // one space left, one space right
     let border_chars = num_cols + 1; // left border + separators between cols + right border
-    let available_for_content =
-        max_width.saturating_sub(border_chars + num_cols * padding_per_col);
+    let available_for_content = max_width.saturating_sub(border_chars + num_cols * padding_per_col);
 
     // Distribute available width among columns
     let total_natural: usize = col_widths.iter().sum();
@@ -312,8 +311,7 @@ mod tests {
 
     #[test]
     fn test_multiple_tables() {
-        let input =
-            "| A |\n| --- |\n| 1 |\n\nMiddle text\n\n| X |\n| --- |\n| 9 |\n";
+        let input = "| A |\n| --- |\n| 1 |\n\nMiddle text\n\n| X |\n| --- |\n| 9 |\n";
         let result = preprocess_tables(input, 80);
         // Count table borders — should have 2 tables
         let top_border_count = result.matches("┌").count();

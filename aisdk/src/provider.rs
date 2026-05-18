@@ -30,5 +30,4 @@ pub trait Provider: Send + Sync + std::fmt::Debug + Clone + 'static {
     ) -> Result<ProviderStream>;
 }
 
-pub type ProviderStream =
-    Pin<Box<dyn Stream<Item = Result<ChunkType>> + Send>>;
+pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<ChunkType>> + Send>>;

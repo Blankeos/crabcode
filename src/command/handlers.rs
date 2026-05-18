@@ -430,9 +430,7 @@ pub fn handle_timeline<'a>(
 
     Box::pin(async move {
         if !args.is_empty() {
-            return CommandResult::Error(
-                "Usage: /timeline".to_string(),
-            );
+            return CommandResult::Error("Usage: /timeline".to_string());
         }
 
         CommandResult::Success(String::new())

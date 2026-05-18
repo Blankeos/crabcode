@@ -77,9 +77,11 @@ impl ToolHandler for WebfetchTool {
             .build()
             .map_err(|e| ToolError::Execution(format!("Failed to create HTTP client: {}", e)))?;
 
-        let response = client.get(&url).send().await.map_err(|e| {
-            ToolError::Execution(format!("Failed to fetch URL: {}", e))
-        })?;
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ToolError::Execution(format!("Failed to fetch URL: {}", e)))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -97,9 +99,10 @@ impl ToolHandler for WebfetchTool {
             .unwrap_or("text/plain")
             .to_lowercase();
 
-        let body = response.text().await.map_err(|e| {
-            ToolError::Execution(format!("Failed to read response body: {}", e))
-        })?;
+        let body = response
+            .text()
+            .await
+            .map_err(|e| ToolError::Execution(format!("Failed to read response body: {}", e)))?;
 
         let output = match format.as_str() {
             "html" => body,
@@ -162,7 +165,9 @@ fn html_to_markdown(html: &str) -> String {
                     link_href.clear();
                     if let Some(href_start) = tn.find("href=") {
                         let after = &tn[href_start + 5..];
-                        if let Some(rest) = after.strip_prefix('"').or_else(|| after.strip_prefix('\'')) {
+                        if let Some(rest) =
+                            after.strip_prefix('"').or_else(|| after.strip_prefix('\''))
+                        {
                             if let Some(end) = rest.find('"').or_else(|| rest.find('\'')) {
                                 link_href = rest[..end].to_string();
                             }
@@ -178,9 +183,21 @@ fn html_to_markdown(html: &str) -> String {
                     link_text.clear();
                 } else if tn == "br" || tn == "br/" || tn == "hr" || tn == "hr/" {
                     result.push('\n');
-                } else if tn == "p" || tn == "/p" || tn == "div" || tn == "/div"
-                    || tn == "/h1" || tn == "/h2" || tn == "/h3" || tn == "/h4" || tn == "/h5" || tn == "/h6"
-                    || tn == "/li" || tn == "/ul" || tn == "/ol" || tn == "/tr" || tn == "/blockquote"
+                } else if tn == "p"
+                    || tn == "/p"
+                    || tn == "div"
+                    || tn == "/div"
+                    || tn == "/h1"
+                    || tn == "/h2"
+                    || tn == "/h3"
+                    || tn == "/h4"
+                    || tn == "/h5"
+                    || tn == "/h6"
+                    || tn == "/li"
+                    || tn == "/ul"
+                    || tn == "/ol"
+                    || tn == "/tr"
+                    || tn == "/blockquote"
                 {
                     if !result.ends_with('\n') {
                         result.push('\n');
@@ -189,8 +206,12 @@ fn html_to_markdown(html: &str) -> String {
                     newlines_since_text = 2;
                 } else if tn == "li" || tn.starts_with("li ") {
                     result.push_str("\n- ");
-                } else if tn.starts_with("h1 ") || tn.starts_with("h2 ") || tn.starts_with("h3 ")
-                    || tn.starts_with("h4 ") || tn.starts_with("h5 ") || tn.starts_with("h6 ")
+                } else if tn.starts_with("h1 ")
+                    || tn.starts_with("h2 ")
+                    || tn.starts_with("h3 ")
+                    || tn.starts_with("h4 ")
+                    || tn.starts_with("h5 ")
+                    || tn.starts_with("h6 ")
                 {
                     if !result.ends_with('\n') {
                         result.push('\n');

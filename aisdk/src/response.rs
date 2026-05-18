@@ -175,30 +175,25 @@ pub async fn stream_with_tools<P: Provider>(
                 break;
             }
 
-            for (call_id, tool_name, args) in &tool_calls_to_execute {
+            for (_call_id, tool_name, args) in &tool_calls_to_execute {
                 let tool = tools.iter().find(|t| &t.name == tool_name);
                 match tool {
                     Some(t) => match t.execute.call(args.clone()).await {
                         Ok(result) => {
-                            current_messages.push(Message::assistant(format!(
-                                "[tool result: {}] {}",
-                                tool_name, result
-                            )));
-                            messages_arc.lock().await.push(Message::assistant(format!(
-                                "{{\"tool_call_id\":\"{}\",\"role\":\"tool\",\"name\":\"{}\",\"content\":{}}}",
-                                call_id, tool_name, result
-                            )));
+                            let observation = format!("Tool `{}` result:\n{}", tool_name, result);
+                            current_messages.push(Message::user(observation.clone()));
+                            messages_arc.lock().await.push(Message::user(observation));
                         }
                         Err(e) => {
                             let _ = tx_loop.send(ChunkType::Failed(format!(
-                                "Tool '{}' error: {}", tool_name, e
+                                "Tool '{}' error: {}",
+                                tool_name, e
                             )));
                         }
                     },
                     None => {
-                        let _ = tx_loop.send(ChunkType::Failed(format!(
-                            "Tool not found: {}", tool_name
-                        )));
+                        let _ = tx_loop
+                            .send(ChunkType::Failed(format!("Tool not found: {}", tool_name)));
                     }
                 }
             }
@@ -218,9 +213,10 @@ fn parse_tool_calls(
 
     if let Some(arr) = parsed.as_array() {
         for item in arr {
-            if let (Some(id), Some(function)) =
-                (item.get("id").and_then(|v| v.as_str()), item.get("function"))
-            {
+            if let (Some(id), Some(function)) = (
+                item.get("id").and_then(|v| v.as_str()),
+                item.get("function"),
+            ) {
                 let name = function
                     .get("name")
                     .and_then(|v| v.as_str())

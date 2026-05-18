@@ -1,7 +1,7 @@
 use crate::agent::subagent::{self, SubAgentType};
 use crate::tools::{
     get_string_param, validate_required, ParameterSchema, ParameterType, Tool, ToolContext,
-    ToolError, ToolHandler, ToolResult, ToolRegistry,
+    ToolError, ToolHandler, ToolRegistry, ToolResult,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -67,10 +67,9 @@ impl ToolHandler for TaskTool {
         let description = get_string_param(&params, "description").unwrap_or_default();
         let prompt = get_string_param(&params, "prompt").unwrap_or_default();
 
-        let subagent_type = SubAgentType::from_str(&subagent_type_str)
-            .ok_or_else(|| ToolError::Validation(format!(
-                "Unknown subagent type: {}", subagent_type_str
-            )))?;
+        let subagent_type = SubAgentType::from_str(&subagent_type_str).ok_or_else(|| {
+            ToolError::Validation(format!("Unknown subagent type: {}", subagent_type_str))
+        })?;
 
         if ctx.is_aborted() {
             return Err(ToolError::Execution("Subagent cancelled".to_string()));

@@ -1,5 +1,6 @@
 use crate::theme::ThemeColors;
 use crate::ui::markdown::table::preprocess_tables;
+use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -138,6 +139,7 @@ pub fn render_markdown(
     max_width: usize,
     colors: &ThemeColors,
 ) -> Vec<Line<'static>> {
+    let max_width = max_width.max(1);
     // Pre-process tables: render them as Unicode box-drawing text
     let processed = preprocess_tables(content, max_width);
 
@@ -157,21 +159,69 @@ pub fn render_markdown(
         let line_str = line_to_string(&converted_line);
         let line_width = unicode_width::UnicodeWidthStr::width(line_str.as_str());
 
-        if line_width <= max_width {
+        if line_width <= max_width || is_preprocessed_table_line(&line_str) {
             result.push(converted_line);
         } else {
-            // Wrap the line
-            let wrap_style = converted_line
+            let indent_style = converted_line
                 .spans
                 .first()
                 .map(|span| span.style)
                 .unwrap_or_else(|| Style::default().fg(colors.markdown_text));
-            let wrapped = wrap_line(&line_str, max_width, wrap_style);
+            let continuation_indent = markdown_continuation_indent(&line_str, indent_style);
+            let wrapped = wrap_styled_line(
+                &converted_line,
+                WrapOptions::new(max_width).subsequent_indent(continuation_indent),
+            );
             result.extend(wrapped);
         }
     }
 
     result
+}
+
+fn is_preprocessed_table_line(line: &str) -> bool {
+    line.contains('│')
+        || line.contains('┌')
+        || line.contains('┐')
+        || line.contains('├')
+        || line.contains('┤')
+        || line.contains('└')
+        || line.contains('┘')
+}
+
+fn markdown_continuation_indent(line: &str, style: Style) -> Line<'static> {
+    let leading_spaces = line.chars().take_while(|ch| *ch == ' ').count();
+    let trimmed = &line[leading_spaces..];
+    let base = " ".repeat(leading_spaces);
+
+    if trimmed.starts_with("> ") {
+        return Line::from(Span::styled(format!("{base}> "), style));
+    }
+
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+        return Line::from(Span::styled(format!("{base}  "), style));
+    }
+
+    let mut marker_len = 0usize;
+    let mut saw_digit = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            marker_len += ch.len_utf8();
+            continue;
+        }
+        if saw_digit && ch == '.' {
+            marker_len += ch.len_utf8();
+            continue;
+        }
+        if saw_digit && ch == ' ' {
+            marker_len += ch.len_utf8();
+            return Line::from(Span::styled(" ".repeat(leading_spaces + marker_len), style));
+        }
+        break;
+    }
+
+    Line::from(Span::styled(base, style))
 }
 
 fn apply_markdown_theme(line: &mut Line<'_>, in_code_block: &mut bool, colors: &ThemeColors) {
@@ -369,16 +419,6 @@ fn line_to_string(line: &Line<'_>) -> String {
         .collect::<String>()
 }
 
-/// Wrap a line string into multiple lines respecting max_width
-fn wrap_line(line_str: &str, max_width: usize, style: Style) -> Vec<Line<'static>> {
-    let wrapped = textwrap::wrap(line_str, max_width);
-
-    wrapped
-        .into_iter()
-        .map(|s| Line::from(Span::styled(s.to_string(), style)))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,19 +531,36 @@ mod tests {
         let colors = test_colors();
         let input = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
         let lines = render_markdown(input, 80, &colors);
-        
+
         // Convert lines to string for inspection
-        let output: String = lines.iter()
-            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        let output: String = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        
+
         eprintln!("render_markdown output:\n{}", output);
-        
+
         // Should contain our Unicode box-drawing corners, not raw markdown
-        assert!(output.contains('┌'), "Expected ┌ in output, got:\n{}", output);
-        assert!(output.contains('┐'), "Expected ┐ in output, got:\n{}", output);
-        assert!(!output.contains("| A |"), "Raw markdown table should be replaced");
+        assert!(
+            output.contains('┌'),
+            "Expected ┌ in output, got:\n{}",
+            output
+        );
+        assert!(
+            output.contains('┐'),
+            "Expected ┐ in output, got:\n{}",
+            output
+        );
+        assert!(
+            !output.contains("| A |"),
+            "Raw markdown table should be replaced"
+        );
     }
 
     #[test]
@@ -512,39 +569,73 @@ mod tests {
         // Test WITHOUT backticks first - should work
         let input_no_code = "| Category | Tool | Description |\n|----------|------|-------------|\n| File Operations | read | Read file or directory contents with pagination |\n| | write | Create or overwrite a file |";
         let lines = render_markdown(input_no_code, 80, &colors);
-        let line_strings: Vec<String> = lines.iter()
-            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        let line_strings: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
-        
-        let table_lines: Vec<_> = line_strings.iter()
-            .filter(|l| l.contains('│') || l.contains('┌') || l.contains('┐') || l.contains('├') || l.contains('┤') || l.contains('└') || l.contains('┘'))
+
+        let table_lines: Vec<_> = line_strings
+            .iter()
+            .filter(|l| {
+                l.contains('│')
+                    || l.contains('┌')
+                    || l.contains('┐')
+                    || l.contains('├')
+                    || l.contains('┤')
+                    || l.contains('└')
+                    || l.contains('┘')
+            })
             .collect();
-        
+
         let first_width = unicode_width::UnicodeWidthStr::width(table_lines[0].as_str());
         for line in &table_lines {
             let width = unicode_width::UnicodeWidthStr::width(line.as_str());
-            assert_eq!(width, first_width, 
-                "Table lines should have consistent width. Expected {}, got {}.\nLine: {}", 
-                first_width, width, line);
+            assert_eq!(
+                width, first_width,
+                "Table lines should have consistent width. Expected {}, got {}.\nLine: {}",
+                first_width, width, line
+            );
         }
-        
+
         // Test WITH backticks - this will fail until we fix it
         let input_with_code = "| Category | Tool | Description |\n|----------|------|-------------|\n| File Operations | `read` | Read file or directory contents with pagination |\n| | `write` | Create or overwrite a file |";
         let lines = render_markdown(input_with_code, 80, &colors);
-        let line_strings: Vec<String> = lines.iter()
-            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        let line_strings: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
-        
-        let table_lines: Vec<_> = line_strings.iter()
-            .filter(|l| l.contains('│') || l.contains('┌') || l.contains('┐') || l.contains('├') || l.contains('┤') || l.contains('└') || l.contains('┘'))
+
+        let table_lines: Vec<_> = line_strings
+            .iter()
+            .filter(|l| {
+                l.contains('│')
+                    || l.contains('┌')
+                    || l.contains('┐')
+                    || l.contains('├')
+                    || l.contains('┤')
+                    || l.contains('└')
+                    || l.contains('┘')
+            })
             .collect();
-        
+
         let first_width = unicode_width::UnicodeWidthStr::width(table_lines[0].as_str());
         for line in &table_lines {
             let width = unicode_width::UnicodeWidthStr::width(line.as_str());
-            assert_eq!(width, first_width, 
-                "Table lines WITH code should also have consistent width. Expected {}, got {}.\nLine: {}", 
-                first_width, width, line);
+            assert_eq!(
+                width, first_width,
+                "Table lines WITH code should also have consistent width. Expected {}, got {}.\nLine: {}",
+                first_width, width, line
+            );
         }
     }
 }

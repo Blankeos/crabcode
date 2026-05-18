@@ -127,7 +127,11 @@ impl Selection {
     /// Return the selection range within a specific line.
     /// Returns None if the line is not in the selection.
     /// Returns (start_col, end_col) if partially or fully selected.
-    pub fn selection_range_in_line(&self, line: usize, line_width: usize) -> Option<(usize, usize)> {
+    pub fn selection_range_in_line(
+        &self,
+        line: usize,
+        line_width: usize,
+    ) -> Option<(usize, usize)> {
         if !self.active {
             return None;
         }
@@ -215,15 +219,15 @@ pub fn extract_selected_text(
         if line_idx < s_line || line_idx > e_line {
             continue;
         }
-        let full_text: String = line
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let line_width = unicode_width::UnicodeWidthStr::width(full_text.as_str());
 
         let start = if line_idx == s_line { s_col } else { 0 };
-        let end = if line_idx == e_line { e_col } else { line_width };
+        let end = if line_idx == e_line {
+            e_col
+        } else {
+            line_width
+        };
 
         if start >= end || start > full_text.len() {
             continue;

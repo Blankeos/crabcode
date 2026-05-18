@@ -58,3 +58,5 @@
 - [ ] Bug: I can type a command see autosuggest, but can't press 'enter' to run the command. Pls fix.
 
 - [ ] A single AI response, is considered 1 message. So combine all its parts into a single message record. Not that every message part becomes a separate message in the timeline dialog.
+
+- [ ] Allow me to paste images i.e. [Image #1] [Image #2] [Image #3]. When I click on them, the image would be opened with my Finder (OS-specific)

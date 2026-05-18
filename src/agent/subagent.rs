@@ -1,5 +1,5 @@
-use crate::tools::ToolRegistry;
 use crate::agent::config::{get_llm_session, ProviderKind};
+use crate::tools::ToolRegistry;
 
 const EXPLORE_SYSTEM_PROMPT: &str = r#"You are a fast, read-only code exploration agent. Your job is to search codebases, find files, and answer questions about code structure.
 
@@ -71,7 +71,9 @@ impl SubAgentType {
     pub fn allowed_tools(&self) -> Vec<&'static str> {
         match self {
             Self::Explore => vec!["glob", "grep", "read", "list"],
-            Self::General => vec!["bash", "edit", "write", "read", "grep", "glob", "list", "skill", "webfetch"],
+            Self::General => vec![
+                "bash", "edit", "write", "read", "grep", "glob", "list", "skill", "webfetch",
+            ],
         }
     }
 }
@@ -99,7 +101,10 @@ impl SubAgentDef {
     }
 }
 
-pub async fn build_scoped_registry(full_registry: &ToolRegistry, subagent_type: &SubAgentType) -> ToolRegistry {
+pub async fn build_scoped_registry(
+    full_registry: &ToolRegistry,
+    subagent_type: &SubAgentType,
+) -> ToolRegistry {
     let scoped = ToolRegistry::new();
     let allowed = subagent_type.allowed_tools();
 
@@ -132,8 +137,7 @@ pub async fn run_subagent(
     use std::collections::HashMap;
 
     let session = get_llm_session().ok_or("LLM session not configured")?;
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
     let scoped_registry = build_scoped_registry(full_registry, &subagent_type).await;
     let permissions = crate::tools::ToolPermissions::new(cwd.clone());

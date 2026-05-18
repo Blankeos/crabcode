@@ -32,6 +32,10 @@ use crate::views::permission_dialog::{
     handle_permission_dialog_key_event, handle_permission_dialog_mouse_event,
     init_permission_dialog, render_permission_dialog, PermissionDialogAction,
 };
+use crate::views::question_dialog::{
+    handle_question_dialog_key_event, handle_question_dialog_mouse_event, init_question_dialog,
+    render_question_dialog, QuestionDialogAction,
+};
 use crate::views::session_rename_dialog::{
     handle_session_rename_dialog_key_event, init_session_rename_dialog,
     render_session_rename_dialog, RenameAction,
@@ -50,8 +54,8 @@ use crate::views::themes_dialog::{
 };
 use crate::views::{
     ChatState, ConnectDialogState, HomeState, ModelsDialogState, OpenAIOAuthFlowState,
-    PermissionDialogState, SessionRenameDialogState, SessionsDialogState, SuggestionsPopupState,
-    ThemesDialogState,
+    PermissionDialogState, QuestionDialogState, SessionRenameDialogState, SessionsDialogState,
+    SuggestionsPopupState, ThemesDialogState,
 };
 
 use crate::{
@@ -91,6 +95,7 @@ pub enum OverlayFocus {
     SessionsDialog,
     SessionRenameDialog,
     PermissionDialog,
+    QuestionDialog,
     SkillsDialog,
     TimelineDialog,
     MessageActions,
@@ -129,6 +134,7 @@ pub struct App {
     pub sessions_dialog_state: SessionsDialogState,
     pub session_rename_dialog_state: SessionRenameDialogState,
     pub permission_dialog_state: PermissionDialogState,
+    pub question_dialog_state: QuestionDialogState,
     pub skills_dialog_state: crate::views::SkillsDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
@@ -197,6 +203,7 @@ impl App {
         let openai_oauth_flow_state = init_openai_oauth_flow();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
         let permission_dialog_state = init_permission_dialog();
+        let question_dialog_state = init_question_dialog();
         let skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
         let which_key_state = crate::views::which_key::init_which_key();
         let timeline_dialog_state = crate::views::timeline_dialog::init_timeline_dialog();
@@ -331,6 +338,7 @@ impl App {
             sessions_dialog_state,
             session_rename_dialog_state,
             permission_dialog_state,
+            question_dialog_state,
             skills_dialog_state,
             which_key_state,
             timeline_dialog_state,
@@ -478,10 +486,9 @@ impl App {
                 }
             }
 
-            if let Some(cost) = discovery.get_model_pricing(
-                &self.provider_name.to_lowercase(),
-                &self.model,
-            ) {
+            if let Some(cost) =
+                discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
+            {
                 let output_tokens: usize = self
                     .chat_state
                     .chat
@@ -860,8 +867,7 @@ impl App {
                         false
                     }
                     SessionsDialogAction::PendingDelete(_id) => {
-                        self.sessions_dialog_state.dialog.pending_delete_id =
-                            Some(_id.clone());
+                        self.sessions_dialog_state.dialog.pending_delete_id = Some(_id.clone());
                         true
                     }
                     SessionsDialogAction::Select(id) => {
@@ -950,6 +956,30 @@ impl App {
                     }
                     PermissionDialogAction::Handled => true,
                     PermissionDialogAction::NotHandled => true,
+                }
+            }
+            OverlayFocus::QuestionDialog => {
+                let action = handle_question_dialog_key_event(&mut self.question_dialog_state, key);
+                match action {
+                    QuestionDialogAction::Submit => {
+                        self.question_dialog_state.submit_current();
+                        if self.question_dialog_state.has_active() {
+                            self.overlay_focus = OverlayFocus::QuestionDialog;
+                        } else {
+                            self.chat_state.chat.resume_streaming_tps_timer();
+                            self.overlay_focus = OverlayFocus::None;
+                        }
+                        true
+                    }
+                    QuestionDialogAction::Cancel => {
+                        self.question_dialog_state.clear_with_empty();
+                        self.chat_state.chat.resume_streaming_tps_timer();
+                        self.overlay_focus = OverlayFocus::None;
+                        self.cancel_streaming();
+                        true
+                    }
+                    QuestionDialogAction::Handled => true,
+                    QuestionDialogAction::NotHandled => true,
                 }
             }
             OverlayFocus::SkillsDialog => {
@@ -1198,7 +1228,9 @@ impl App {
 
     fn update_suggestions(&mut self) {
         if self.input.should_show_suggestions() {
-            let suggestions = self.input.get_autocomplete_suggestions(self.base_focus == BaseFocus::Chat);
+            let suggestions = self
+                .input
+                .get_autocomplete_suggestions(self.base_focus == BaseFocus::Chat);
             if !suggestions.is_empty() {
                 set_suggestions(&mut self.suggestions_popup_state, suggestions);
                 self.overlay_focus = OverlayFocus::SuggestionsPopup;
@@ -1233,6 +1265,8 @@ impl App {
             }
         } else if self.overlay_focus == OverlayFocus::PermissionDialog {
             let _ = handle_permission_dialog_mouse_event(&mut self.permission_dialog_state, mouse);
+        } else if self.overlay_focus == OverlayFocus::QuestionDialog {
+            let _ = handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::ThemesDialog {
             let before = self
                 .themes_dialog_state
@@ -1369,7 +1403,7 @@ impl App {
                         [
                             ratatui::layout::Constraint::Length(1), // Top padding
                             ratatui::layout::Constraint::Min(0),    // Chat content
-                            ratatui::layout::Constraint::Length(1), // Bottom padding
+                            ratatui::layout::Constraint::Length(0), // Bottom padding
                             ratatui::layout::Constraint::Length(input_height),
                             ratatui::layout::Constraint::Length(1), // Help bar
                             ratatui::layout::Constraint::Length(1), // Blank
@@ -1407,7 +1441,7 @@ impl App {
                         [
                             ratatui::layout::Constraint::Length(1), // Top padding
                             ratatui::layout::Constraint::Min(0),    // Chat content
-                            ratatui::layout::Constraint::Length(1), // Bottom padding
+                            ratatui::layout::Constraint::Length(0), // Bottom padding
                             ratatui::layout::Constraint::Length(input_height),
                             ratatui::layout::Constraint::Length(1), // Help bar
                             ratatui::layout::Constraint::Length(1), // Blank
@@ -1569,6 +1603,9 @@ impl App {
                 self.input.insert_str(&text);
                 self.update_suggestions();
             }
+            (_, OverlayFocus::QuestionDialog) => {
+                self.question_dialog_state.insert_text(&text);
+            }
             _ => {}
         }
     }
@@ -1595,69 +1632,72 @@ impl App {
 
         match parse_input(input) {
             InputType::Command(mut parsed) => {
-        if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
-            let messages = &self.chat_state.chat.messages;
-            let session_title = self
-                .session_manager
-                .get_current_session()
-                .map(|s| s.title.clone())
-                .unwrap_or_else(|| "Untitled".to_string());
-            let mut transcript = format!("# {}\n\n", session_title);
-            for msg in messages {
-                match msg.role {
-                    crate::session::types::MessageRole::User => {
-                        transcript.push_str("## User\n\n");
-                        transcript.push_str(&msg.content);
-                        transcript.push_str("\n\n---\n\n");
-                    }
-                    crate::session::types::MessageRole::Assistant => {
-                        let agent = msg.agent_mode.as_ref().map_or("Build", |a| a.as_str());
-                        let model = msg.model.as_deref().unwrap_or("unknown");
-                        let duration = msg
-                            .duration_ms
-                            .map(|ms| format!(" · {:.1}s", ms as f64 / 1000.0))
-                            .unwrap_or_default();
-                        transcript.push_str(&format!(
-                            "## Assistant ({agent} · {model}{duration})\n\n"
-                        ));
-                        transcript.push_str(&msg.content);
-                        transcript.push_str("\n\n---\n\n");
-                    }
-                    crate::session::types::MessageRole::Tool => {
-                        transcript.push_str("**Tool Result**\n\n");
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-                            if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
-                                transcript.push_str(&format!("**Tool:** {}\n", name));
+                if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
+                    let messages = &self.chat_state.chat.messages;
+                    let session_title = self
+                        .session_manager
+                        .get_current_session()
+                        .map(|s| s.title.clone())
+                        .unwrap_or_else(|| "Untitled".to_string());
+                    let mut transcript = format!("# {}\n\n", session_title);
+                    for msg in messages {
+                        match msg.role {
+                            crate::session::types::MessageRole::User => {
+                                transcript.push_str("## User\n\n");
+                                transcript.push_str(&msg.content);
+                                transcript.push_str("\n\n---\n\n");
                             }
-                            if let Some(preview) = v.get("output_preview").and_then(|p| p.as_str())
-                            {
-                                transcript.push_str(&format!("```\n{}\n```\n", preview));
+                            crate::session::types::MessageRole::Assistant => {
+                                let agent = msg.agent_mode.as_ref().map_or("Build", |a| a.as_str());
+                                let model = msg.model.as_deref().unwrap_or("unknown");
+                                let duration = msg
+                                    .duration_ms
+                                    .map(|ms| format!(" · {:.1}s", ms as f64 / 1000.0))
+                                    .unwrap_or_default();
+                                transcript.push_str(&format!(
+                                    "## Assistant ({agent} · {model}{duration})\n\n"
+                                ));
+                                transcript.push_str(&msg.content);
+                                transcript.push_str("\n\n---\n\n");
                             }
+                            crate::session::types::MessageRole::Tool => {
+                                transcript.push_str("**Tool Result**\n\n");
+                                if let Ok(v) =
+                                    serde_json::from_str::<serde_json::Value>(&msg.content)
+                                {
+                                    if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                                        transcript.push_str(&format!("**Tool:** {}\n", name));
+                                    }
+                                    if let Some(preview) =
+                                        v.get("output_preview").and_then(|p| p.as_str())
+                                    {
+                                        transcript.push_str(&format!("```\n{}\n```\n", preview));
+                                    }
+                                }
+                                transcript.push_str("\n---\n\n");
+                            }
+                            _ => {}
                         }
-                        transcript.push_str("\n---\n\n");
                     }
-                    _ => {}
+                    match crate::utils::clipboard::copy_text(&transcript) {
+                        Ok(_) => {
+                            push_toast(Toast::new(
+                                "Session transcript copied to clipboard!",
+                                ToastLevel::Info,
+                                None,
+                            ));
+                        }
+                        Err(e) => {
+                            push_toast(Toast::new(
+                                format!("Failed to copy: {}", e),
+                                ToastLevel::Error,
+                                Some(std::time::Duration::from_secs(3)),
+                            ));
+                        }
+                    }
+                    return;
                 }
-            }
-            match crate::utils::clipboard::copy_text(&transcript) {
-                Ok(_) => {
-                    push_toast(Toast::new(
-                        "Session transcript copied to clipboard!",
-                        ToastLevel::Info,
-                        None,
-                    ));
-                }
-                Err(e) => {
-                    push_toast(Toast::new(
-                        format!("Failed to copy: {}", e),
-                        ToastLevel::Error,
-                        Some(std::time::Duration::from_secs(3)),
-                    ));
-                }
-            }
-            return;
-        }
-        if parsed.name == "themes" {
+                if parsed.name == "themes" {
                     self.show_themes_dialog();
                     return;
                 }
@@ -1665,7 +1705,10 @@ impl App {
                     self.show_skills_dialog();
                     return;
                 }
-                if parsed.name == "rename" && parsed.args.is_empty() && self.base_focus == BaseFocus::Chat {
+                if parsed.name == "rename"
+                    && parsed.args.is_empty()
+                    && self.base_focus == BaseFocus::Chat
+                {
                     if let Some(session) = self.session_manager.get_current_session() {
                         let id = session.id.clone();
                         let title = session.title.clone();
@@ -2084,10 +2127,7 @@ impl App {
             "undo" => {
                 let undone_content: Option<String> = {
                     if let Some(session) = self.session_manager.get_current_session() {
-                        let content = session
-                            .messages
-                            .get(idx)
-                            .map(|m| m.content.clone());
+                        let content = session.messages.get(idx).map(|m| m.content.clone());
                         session.messages.truncate(idx);
                         content
                     } else {
@@ -2712,7 +2752,11 @@ impl App {
     fn cleanup_streaming(&mut self) {
         self.chat_state.chat.resume_streaming_tps_timer();
         self.permission_dialog_state.clear_with_deny();
+        self.question_dialog_state.clear_with_empty();
         if self.overlay_focus == OverlayFocus::PermissionDialog {
+            self.overlay_focus = OverlayFocus::None;
+        }
+        if self.overlay_focus == OverlayFocus::QuestionDialog {
             self.overlay_focus = OverlayFocus::None;
         }
         self.chunk_sender = None;
@@ -2953,9 +2997,10 @@ impl App {
                     questions,
                     response_tx,
                 } => {
+                    self.play_sound_event(crate::sound::SoundEvent::Question);
                     self.chat_state.chat.pause_streaming_tps_timer();
-                    let answers = auto_answer_questions(&questions);
-                    let _ = response_tx.send(answers);
+                    self.question_dialog_state.enqueue(questions, response_tx);
+                    self.overlay_focus = OverlayFocus::QuestionDialog;
                 }
             }
         }
@@ -3305,6 +3350,12 @@ impl App {
             render_permission_dialog(f, &mut self.permission_dialog_state, size, colors);
         }
 
+        if self.overlay_focus == OverlayFocus::QuestionDialog
+            && self.question_dialog_state.has_active()
+        {
+            render_question_dialog(f, &mut self.question_dialog_state, size, colors);
+        }
+
         if self.overlay_focus == OverlayFocus::WhichKey {
             crate::views::which_key::render_which_key(f, &self.which_key_state, &colors);
         }
@@ -3323,30 +3374,6 @@ fn format_token_count(count: usize) -> String {
     }
     let m = count as f64 / 1_000_000.0;
     format!("{:.1}M", m)
-}
-
-fn auto_answer_questions(questions: &serde_json::Value) -> serde_json::Value {
-    let arr = match questions {
-        serde_json::Value::Array(a) => a,
-        _ => return serde_json::Value::Array(vec![]),
-    };
-
-    let answers: Vec<serde_json::Value> = arr
-        .iter()
-        .map(|q| {
-            let options = q.get("options").and_then(|o| o.as_array());
-            match options {
-                Some(opts) if !opts.is_empty() => {
-                    let labels: Vec<serde_json::Value> =
-                        vec![opts[0].get("label").cloned().unwrap_or(serde_json::Value::Null)];
-                    serde_json::Value::Array(labels)
-                }
-                _ => serde_json::Value::Array(vec![]),
-            }
-        })
-        .collect();
-
-    serde_json::Value::Array(answers)
 }
 
 impl Default for App {

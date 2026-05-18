@@ -466,8 +466,7 @@ impl Dialog {
                 }
                 DialogPosition::Left | DialogPosition::Right => {
                     // Side panels use full height, minus fixed chrome + padding
-                    let list_area_height =
-                        40u16.saturating_sub(total_fixed_height + padding_total);
+                    let list_area_height = 40u16.saturating_sub(total_fixed_height + padding_total);
                     list_area_height as usize
                 }
             }

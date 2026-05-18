@@ -29,10 +29,7 @@ impl SkillTool {
                     desc.push_str(&format!("  <skill>\n"));
                     desc.push_str(&format!("    <name>{}</name>\n", skill.name));
                     if let Some(ref desc_text) = skill.description {
-                        desc.push_str(&format!(
-                            "    <description>{}</description>\n",
-                            desc_text
-                        ));
+                        desc.push_str(&format!("    <description>{}</description>\n", desc_text));
                     }
                     desc.push_str(&format!(
                         "    <location>file://{}</location>\n",
@@ -80,14 +77,16 @@ impl ToolHandler for SkillTool {
         let name = get_string_param(&params, "name").unwrap_or_default();
         let name = name.trim();
 
-        let store = crate::skill::get_skill_store().ok_or_else(|| {
-            ToolError::Execution("Skill store not initialized".to_string())
-        })?;
+        let store = crate::skill::get_skill_store()
+            .ok_or_else(|| ToolError::Execution("Skill store not initialized".to_string()))?;
 
         let info = store.get(name).ok_or_else(|| {
             let available: Vec<String> = store.all().iter().map(|s| s.name.clone()).collect();
             let msg = if available.is_empty() {
-                format!("Skill \"{}\" not found. No skills are currently available.", name)
+                format!(
+                    "Skill \"{}\" not found. No skills are currently available.",
+                    name
+                )
             } else {
                 format!(
                     "Skill \"{}\" not found. Available skills: {}",

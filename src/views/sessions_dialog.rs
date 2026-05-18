@@ -81,12 +81,10 @@ pub fn render_sessions_dialog(
         let existing_actions = dialog_state.dialog.actions.clone();
         let has_confirm = existing_actions.iter().any(|a| a.label == "confirm");
         if !has_confirm {
-            dialog_state.dialog.actions = vec![
-                crate::ui::components::dialog::DialogAction {
-                    label: "confirm".to_string(),
-                    key: "ctrl+d".to_string(),
-                },
-            ];
+            dialog_state.dialog.actions = vec![crate::ui::components::dialog::DialogAction {
+                label: "confirm".to_string(),
+                key: "ctrl+d".to_string(),
+            }];
         }
     } else {
         dialog_state.dialog.actions = vec![

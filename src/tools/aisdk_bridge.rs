@@ -79,12 +79,7 @@ pub async fn convert_to_aisdk_tools(
                 }
 
                 permissions
-                    .preflight(
-                        &agent_mode,
-                        &tool_id_for_exec,
-                        &input,
-                        sender.as_ref(),
-                    )
+                    .preflight(&agent_mode, &tool_id_for_exec, &input, sender.as_ref())
                     .await
                     .map_err(|e| format!("{}", e))?;
 

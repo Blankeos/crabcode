@@ -170,7 +170,11 @@ pub fn render_home(
             ])
             .split(logo_chunks[1]);
 
-        let max_mascot_width = mascot_raw.iter().map(|l| UnicodeWidthStr::width(*l)).max().unwrap_or(0);
+        let max_mascot_width = mascot_raw
+            .iter()
+            .map(|l| UnicodeWidthStr::width(*l))
+            .max()
+            .unwrap_or(0);
         let left_pad = ((stack[0].width as usize).saturating_sub(max_mascot_width)) / 2;
         let padding = " ".repeat(left_pad);
 

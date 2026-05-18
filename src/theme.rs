@@ -363,10 +363,30 @@ impl Theme {
                 let markdown_code_block =
                     resolve_override(mode.overrides.markdown_code_block.as_deref(), markdown_text);
 
-                let diff_add = mode.seeds.diff_add.as_deref().map(parse_hex).unwrap_or(success);
-                let diff_remove = mode.seeds.diff_delete.as_deref().map(parse_hex).unwrap_or(error);
-                let diff_add_bg = mode.overrides.surface_diff_add_base.as_deref().map(parse_hex).unwrap_or(success);
-                let diff_remove_bg = mode.overrides.surface_diff_delete_base.as_deref().map(parse_hex).unwrap_or(error);
+                let diff_add = mode
+                    .seeds
+                    .diff_add
+                    .as_deref()
+                    .map(parse_hex)
+                    .unwrap_or(success);
+                let diff_remove = mode
+                    .seeds
+                    .diff_delete
+                    .as_deref()
+                    .map(parse_hex)
+                    .unwrap_or(error);
+                let diff_add_bg = mode
+                    .overrides
+                    .surface_diff_add_base
+                    .as_deref()
+                    .map(parse_hex)
+                    .unwrap_or(success);
+                let diff_remove_bg = mode
+                    .overrides
+                    .surface_diff_delete_base
+                    .as_deref()
+                    .map(parse_hex)
+                    .unwrap_or(error);
                 let diff_gutter = text_weak;
 
                 ThemeColors {

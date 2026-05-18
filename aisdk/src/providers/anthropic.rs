@@ -53,10 +53,16 @@ impl AnthropicBuilder {
 
     pub fn build(self) -> Result<Anthropic> {
         Ok(Anthropic {
-            base_url: self.base_url.ok_or(Error::MissingField("base_url".into()))?,
+            base_url: self
+                .base_url
+                .ok_or(Error::MissingField("base_url".into()))?,
             api_key: self.api_key.ok_or(Error::MissingField("api_key".into()))?,
-            model_name: self.model_name.ok_or(Error::MissingField("model_name".into()))?,
-            provider_name: self.provider_name.unwrap_or_else(|| "anthropic".to_string()),
+            model_name: self
+                .model_name
+                .ok_or(Error::MissingField("model_name".into()))?,
+            provider_name: self
+                .provider_name
+                .unwrap_or_else(|| "anthropic".to_string()),
         })
     }
 }
@@ -178,27 +184,21 @@ impl Provider for Anthropic {
                                 "content_block_delta" => {
                                     let delta = &value["delta"];
                                     match delta["type"].as_str() {
-                                        Some("text_delta") => {
-                                            futures::future::ready(
-                                                delta["text"].as_str().map(|t| {
-                                                    Ok(ChunkType::Text(t.to_string()))
-                                                }),
-                                            )
-                                        }
-                                        Some("thinking_delta") => {
-                                            futures::future::ready(
-                                                delta["thinking"].as_str().map(|t| {
-                                                    Ok(ChunkType::Reasoning(t.to_string()))
-                                                }),
-                                            )
-                                        }
-                                        Some("input_json_delta") => {
-                                            futures::future::ready(
-                                                delta["partial_json"].as_str().map(|j| {
-                                                    Ok(ChunkType::ToolCall(j.to_string()))
-                                                }),
-                                            )
-                                        }
+                                        Some("text_delta") => futures::future::ready(
+                                            delta["text"]
+                                                .as_str()
+                                                .map(|t| Ok(ChunkType::Text(t.to_string()))),
+                                        ),
+                                        Some("thinking_delta") => futures::future::ready(
+                                            delta["thinking"]
+                                                .as_str()
+                                                .map(|t| Ok(ChunkType::Reasoning(t.to_string()))),
+                                        ),
+                                        Some("input_json_delta") => futures::future::ready(
+                                            delta["partial_json"]
+                                                .as_str()
+                                                .map(|j| Ok(ChunkType::ToolCall(j.to_string()))),
+                                        ),
                                         _ => futures::future::ready(None),
                                     }
                                 }
@@ -216,9 +216,10 @@ impl Provider for Anthropic {
                                 }
                                 _ => futures::future::ready(None),
                             },
-                            Err(e) => futures::future::ready(Some(Ok(ChunkType::Failed(
-                                format!("Invalid SSE data: {}", e),
-                            )))),
+                            Err(e) => futures::future::ready(Some(Ok(ChunkType::Failed(format!(
+                                "Invalid SSE data: {}",
+                                e
+                            ))))),
                         }
                     }
                     Err(e) => {

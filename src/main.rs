@@ -83,7 +83,10 @@ fn format_post_close_message(info: Option<&PostCloseInfo>) -> String {
     if let Some(info) = info {
         msg.push('\n');
         msg.push_str(&format!("  {:<10}{}\n", "Session", info.session_title));
-        msg.push_str(&format!("  {:<10}crabcode -s {}\n", "Continue", info.session_id));
+        msg.push_str(&format!(
+            "  {:<10}crabcode -s {}\n",
+            "Continue", info.session_id
+        ));
     }
 
     msg
@@ -99,7 +102,9 @@ async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()
     let prefs_dao = crate::persistence::PrefsDAO::new().ok();
 
     let (provider_name, model_id) = {
-        let active = prefs_dao.as_ref().and_then(|d| d.get_active_model().ok().flatten());
+        let active = prefs_dao
+            .as_ref()
+            .and_then(|d| d.get_active_model().ok().flatten());
         if let Some((pid, mid)) = active {
             (pid, mid)
         } else if let Some(m) = loaded_config.merged_config.model.clone() {
@@ -131,16 +136,11 @@ async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()
         std::env::consts::OS,
     );
     let system_prompt = composer.compose().await;
-    let messages = vec![
-        Message::system(system_prompt),
-        Message::user(prompt),
-    ];
+    let messages = vec![Message::system(system_prompt), Message::user(prompt)];
 
     let (sender, mut receiver) = mpsc::unbounded_channel();
 
-    let tool_permissions = crate::tools::ToolPermissions::new(
-        std::path::PathBuf::from(&cwd),
-    );
+    let tool_permissions = crate::tools::ToolPermissions::new(std::path::PathBuf::from(&cwd));
 
     let agent_max_steps = loaded_config
         .merged_config
@@ -338,7 +338,7 @@ async fn run_event_loop(
 ) -> Result<()> {
     // Adaptive poll duration: fast when animations run (home page / streaming),
     // slow otherwise to avoid wasting CPU on unnecessary re-renders.
-    const FAST_POLL: Duration = Duration::from_millis(16);  // ~60fps for animations
+    const FAST_POLL: Duration = Duration::from_millis(16); // ~60fps for animations
     const SLOW_POLL: Duration = Duration::from_millis(250); // ~4fps idle
 
     while app.running {

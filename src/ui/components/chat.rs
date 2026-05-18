@@ -2,17 +2,18 @@ use crate::session::types::{Message, MessageRole};
 use crate::theme::{contrast_text, ThemeColors};
 use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
 use crate::ui::selection::Selection;
+use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
 use crate::utils::token_counter::StreamingTokenCounter;
 use ratatui::{
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 use serde_json::Value as JsonValue;
-
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Default)]
 pub struct Chat {
@@ -60,6 +61,7 @@ pub struct Chat {
 
 // Minimum elapsed time before showing tokens/s (250ms)
 const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
+const TOOL_RESULT_MAX_SCREEN_LINES: usize = 8;
 
 fn now_epoch_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -278,14 +280,23 @@ impl Chat {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Bump this whenever rendering logic changes (tables, markdown, etc.)
-        const RENDER_VERSION: u64 = 2;
+        const RENDER_VERSION: u64 = 3;
         RENDER_VERSION.hash(&mut h);
         self.messages.len().hash(&mut h);
         for msg in &self.messages {
-            msg.content.len().hash(&mut h);
-            if let Some(ref reasoning) = msg.reasoning {
-                reasoning.len().hash(&mut h);
-            }
+            std::mem::discriminant(&msg.role).hash(&mut h);
+            msg.content.hash(&mut h);
+            msg.reasoning.hash(&mut h);
+            msg.is_complete.hash(&mut h);
+            msg.agent_mode.hash(&mut h);
+            msg.token_count.hash(&mut h);
+            msg.duration_ms.hash(&mut h);
+            msg.t0_ms.hash(&mut h);
+            msg.t1_ms.hash(&mut h);
+            msg.tn_ms.hash(&mut h);
+            msg.output_tokens.hash(&mut h);
+            msg.model.hash(&mut h);
+            msg.provider.hash(&mut h);
         }
         max_width.hash(&mut h);
         h.finish()
@@ -535,7 +546,12 @@ impl Chat {
         self.update_scrollbar();
     }
 
-    pub fn get_message_line_positions(&self, max_width: usize, model: &str, colors: &ThemeColors) -> Vec<usize> {
+    pub fn get_message_line_positions(
+        &self,
+        max_width: usize,
+        model: &str,
+        colors: &ThemeColors,
+    ) -> Vec<usize> {
         let mut positions = Vec::with_capacity(self.messages.len());
         let mut line = 0;
         let message_count = self.messages.len();
@@ -607,9 +623,8 @@ impl Chat {
         if !self.selection.active {
             return None;
         }
-        let lines = self.render_visible_messages_without_selection_styling(
-            max_width, model, colors,
-        );
+        let lines =
+            self.render_visible_messages_without_selection_styling(max_width, model, colors);
         crate::ui::selection::extract_selected_text(&lines, &self.selection)
     }
 
@@ -645,6 +660,14 @@ impl Chat {
             width: area.width.saturating_sub(2),
             height: area.height,
         };
+        let visual_y_offset =
+            content_visual_y_offset(self.content_height, self.viewport_height) as u16;
+        let rendered_content_area = Rect {
+            x: content_area.x,
+            y: content_area.y.saturating_add(visual_y_offset),
+            width: content_area.width,
+            height: content_area.height.saturating_sub(visual_y_offset),
+        };
 
         // Calculate scrollbar area (rightmost column)
         let scrollbar_area = Rect {
@@ -655,7 +678,7 @@ impl Chat {
         };
 
         let is_on_scrollbar = scrollbar_area.contains(point);
-        let is_in_content = content_area.contains(point);
+        let is_in_content = rendered_content_area.contains(point);
 
         match event.kind {
             MouseEventKind::ScrollDown => {
@@ -673,9 +696,9 @@ impl Chat {
                     true
                 } else if is_in_content {
                     // Start text selection
-                    let content_line = (event.row.saturating_sub(content_area.y) as usize)
+                    let content_line = (event.row.saturating_sub(rendered_content_area.y) as usize)
                         .saturating_add(self.scroll_offset);
-                    let content_col = event.column.saturating_sub(content_area.x) as usize;
+                    let content_col = event.column.saturating_sub(rendered_content_area.x) as usize;
                     self.selection.start(content_line, content_col);
                     true
                 } else {
@@ -688,9 +711,9 @@ impl Chat {
                     true
                 } else if is_in_content && self.selection.is_dragging {
                     // Extend text selection
-                    let content_line = (event.row.saturating_sub(content_area.y) as usize)
+                    let content_line = (event.row.saturating_sub(rendered_content_area.y) as usize)
                         .saturating_add(self.scroll_offset);
-                    let content_col = event.column.saturating_sub(content_area.x) as usize;
+                    let content_col = event.column.saturating_sub(rendered_content_area.x) as usize;
                     self.selection.extend(content_line, content_col);
                     true
                 } else {
@@ -786,8 +809,7 @@ impl Chat {
 
             for (idx, message) in self.messages.iter().enumerate() {
                 positions.push(all_lines.len());
-                let attached =
-                    idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
+                let attached = idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
                 let message_lines = self.format_message(
                     message,
                     max_width,
@@ -812,6 +834,13 @@ impl Chat {
         let viewport = self.viewport_height;
         let max_offset = content_height.saturating_sub(viewport);
         let clamped_scroll = self.scroll_offset.min(max_offset);
+        let visual_y_offset = content_visual_y_offset(content_height, viewport) as u16;
+        let render_area = Rect {
+            x: content_area.x,
+            y: content_area.y.saturating_add(visual_y_offset),
+            width: content_area.width,
+            height: content_area.height.saturating_sub(visual_y_offset),
+        };
 
         // Render timeline highlight as a full-width background overlay
         if let Some(hl) = self.highlighted_message_index {
@@ -837,7 +866,10 @@ impl Chat {
                     let vis_end = end.min(clamped_scroll.saturating_add(viewport));
 
                     if vis_end > vis_start {
-                        let y = content_area.y.saturating_add((vis_start - clamped_scroll) as u16);
+                        let y = content_area
+                            .y
+                            .saturating_add(visual_y_offset)
+                            .saturating_add((vis_start - clamped_scroll) as u16);
                         let height = (vis_end - vis_start).saturating_sub(1) as u16;
                         if height > 0 {
                             let hl_area = Rect {
@@ -854,14 +886,25 @@ impl Chat {
             }
         }
 
-        let content_lines =
-            crate::ui::selection::apply_selection_to_lines(all_lines, &self.selection, colors.accent);
+        render_line_backgrounds(
+            f,
+            render_area,
+            &all_lines,
+            clamped_scroll,
+            render_area.height as usize,
+            colors.background_element,
+        );
 
-        let paragraph = Paragraph::new(Text::from(content_lines))
-            .wrap(Wrap { trim: false })
-            .scroll((clamped_scroll as u16, 0));
+        let content_lines = crate::ui::selection::apply_selection_to_lines(
+            all_lines,
+            &self.selection,
+            colors.accent,
+        );
 
-        f.render_widget(paragraph, content_area);
+        let paragraph =
+            Paragraph::new(Text::from(content_lines)).scroll((clamped_scroll as u16, 0));
+
+        f.render_widget(paragraph, render_area);
 
         self.content_height = content_height;
         self.message_line_positions = positions;
@@ -930,6 +973,7 @@ impl Chat {
         attached_to_assistant: bool,
     ) -> Vec<Line<'a>> {
         let mut lines: Vec<Line<'a>> = Vec::new();
+        let max_width = max_width.max(1);
 
         let _ = message_count;
 
@@ -941,12 +985,12 @@ impl Chat {
                 let content = message.content.clone();
 
                 // Wrap content to fit within max_width - padding
-                let wrapped_lines = textwrap::wrap(&content, max_width.saturating_sub(4));
+                let wrapped_lines = textwrap::wrap(&content, max_width.saturating_sub(4).max(1));
 
                 for line in wrapped_lines.iter() {
                     let left_border = "▌ ";
-
-                    let right_padding = " ".repeat(max_width.saturating_sub(line.len() + 3));
+                    let line_width = UnicodeWidthStr::width(line.as_ref());
+                    let right_padding = " ".repeat(max_width.saturating_sub(line_width + 3));
 
                     lines.push(Line::from(vec![
                         Span::styled(left_border, Style::default().fg(border_color)),
@@ -959,10 +1003,19 @@ impl Chat {
                 lines.push(Line::from(""));
             }
             MessageRole::Assistant => {
+                let visible_content = if is_synthetic_tool_result_text(&message.content) {
+                    ""
+                } else {
+                    message.content.as_str()
+                };
+                let has_visible_content = !visible_content.trim().is_empty();
+                let mut emitted_anything = false;
+
                 // Display reasoning/thinking tokens if present
                 if let Some(ref reasoning) = message.reasoning {
                     let reasoning_trimmed = reasoning.trim();
                     if !reasoning_trimmed.is_empty() {
+                        emitted_anything = true;
                         let reasoning_prefix = "💭 Thinking...";
                         lines.push(Line::from(vec![Span::styled(
                             reasoning_prefix,
@@ -971,18 +1024,20 @@ impl Chat {
                                 .add_modifier(Modifier::ITALIC),
                         )]));
 
-                        let wrapped_reasoning = textwrap::wrap(reasoning_trimmed, max_width);
-                        for line in wrapped_reasoning {
-                            lines.push(Line::from(Span::styled(
-                                line.to_string(),
-                                Style::default()
-                                    .fg(colors.text_weak)
-                                    .add_modifier(Modifier::ITALIC),
-                            )));
-                        }
+                        let reasoning_style = Style::default()
+                            .fg(colors.text_weak)
+                            .add_modifier(Modifier::ITALIC);
+                        let reasoning_line = Line::from(Span::styled(
+                            reasoning_trimmed.to_string(),
+                            reasoning_style,
+                        ));
+                        lines.extend(wrap_styled_line(
+                            &reasoning_line,
+                            WrapOptions::new(max_width.max(1)),
+                        ));
 
                         // Add separator between reasoning and content (only if there's content)
-                        if !message.content.is_empty() {
+                        if has_visible_content {
                             lines.push(Line::from(""));
                         }
                     }
@@ -990,7 +1045,7 @@ impl Chat {
 
                 let is_streaming = streaming_idx == Some(idx) && !message.is_complete;
 
-                if is_streaming {
+                if has_visible_content && is_streaming {
                     // Use the streaming renderer content for markdown
                     if let Some(content) = streaming_content {
                         let markdown_lines = render_markdown(content, max_width, colors);
@@ -998,18 +1053,22 @@ impl Chat {
                     } else {
                         // Fallback to plain text if renderer not available
                         let content = message.content.clone();
-                        let wrapped_lines = textwrap::wrap(&content, max_width);
-                        for line in wrapped_lines {
-                            lines.push(Line::from(Span::styled(
-                                line.to_string(),
-                                Style::default().fg(colors.markdown_text),
-                            )));
-                        }
+                        let line = Line::from(Span::styled(
+                            content,
+                            Style::default().fg(colors.markdown_text),
+                        ));
+                        lines.extend(wrap_styled_line(&line, WrapOptions::new(max_width.max(1))));
                     }
-                } else {
+                    emitted_anything = true;
+                } else if has_visible_content {
                     // For complete messages, use tui-markdown directly
-                    let markdown_lines = render_markdown(&message.content, max_width, colors);
+                    let markdown_lines = render_markdown(visible_content, max_width, colors);
                     lines.extend(markdown_lines);
+                    emitted_anything = true;
+                }
+
+                if !emitted_anything {
+                    return lines;
                 }
 
                 // Add empty line before metadata for spacing
@@ -1027,20 +1086,13 @@ impl Chat {
                     lines.push(Line::from(""));
                 } else {
                     // Keep spacing consistent between segments, but skip the
-                    // blank line when the next message is a todowrite panel.
-                    let next_is_todowrite = self
+                    // blank line when the next message is a compact tool panel.
+                    let next_is_compact_tool_panel = self
                         .messages
                         .get(idx + 1)
-                        .map(|m| {
-                            m.role == MessageRole::Tool
-                                && serde_json::from_str::<serde_json::Value>(&m.content)
-                                    .ok()
-                                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
-                                    .map(|n| n == "todowrite")
-                                    .unwrap_or(false)
-                        })
+                        .map(|m| m.role == MessageRole::Tool && is_compact_tool_panel(&m.content))
                         .unwrap_or(false);
-                    if !next_is_todowrite {
+                    if !next_is_compact_tool_panel {
                         lines.push(Line::from(""));
                     }
                 }
@@ -1049,14 +1101,8 @@ impl Chat {
                 // System messages: simple display
                 let prefix = "System: ";
                 let content = format!("{}{}", prefix, message.content);
-                let wrapped_lines = textwrap::wrap(&content, max_width);
-
-                for line in wrapped_lines {
-                    lines.push(Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default().fg(Color::Yellow),
-                    )));
-                }
+                let line = Line::from(Span::styled(content, Style::default().fg(Color::Yellow)));
+                lines.extend(wrap_styled_line(&line, WrapOptions::new(max_width.max(1))));
                 lines.push(Line::from(""));
             }
             MessageRole::Tool => {
@@ -1066,13 +1112,8 @@ impl Chat {
                     colors,
                     attached_to_assistant,
                 ));
-                // Only add trailing blank line for non-todowrite tools.
-                let is_todowrite = serde_json::from_str::<serde_json::Value>(&message.content)
-                    .ok()
-                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
-                    .map(|n| n == "todowrite")
-                    .unwrap_or(false);
-                if !is_todowrite {
+                // Panel-style tools already own their vertical spacing.
+                if !is_compact_tool_panel(&message.content) {
                     lines.push(Line::from(""));
                 }
             }
@@ -1088,6 +1129,18 @@ impl Chat {
         colors: &'a ThemeColors,
         attached: bool,
     ) -> Vec<Line<'a>> {
+        let max_width = max_width.max(1);
+
+        fn truncate_chars(mut s: String, max_len: usize) -> String {
+            if s.chars().count() <= max_len {
+                return s;
+            }
+
+            s = s.chars().take(max_len).collect();
+            s.push('…');
+            s
+        }
+
         fn preview_value(v: &JsonValue, max_len: usize) -> String {
             let mut s = match v {
                 JsonValue::String(s) => s.clone(),
@@ -1096,10 +1149,7 @@ impl Chat {
                 JsonValue::Null => "null".to_string(),
                 other => other.to_string(),
             };
-            if s.len() > max_len {
-                s.truncate(max_len);
-                s.push_str("…");
-            }
+            s = truncate_chars(s, max_len);
             if matches!(v, JsonValue::String(_)) {
                 format!("\"{}\"", s)
             } else {
@@ -1121,6 +1171,127 @@ impl Chat {
             } else {
                 preview_value(args, 64)
             }
+        }
+
+        fn question_values(
+            args: &Option<JsonValue>,
+            metadata: &Option<JsonValue>,
+        ) -> Vec<JsonValue> {
+            let from_metadata = metadata.as_ref().and_then(|m| m.get("questions")).cloned();
+            let from_args = args.as_ref().and_then(|a| a.get("questions")).cloned();
+
+            match from_metadata.or(from_args) {
+                Some(JsonValue::Array(items)) => items,
+                Some(JsonValue::Object(obj)) => vec![JsonValue::Object(obj)],
+                Some(JsonValue::String(s)) => {
+                    let trimmed = s.trim();
+                    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+                        match serde_json::from_str::<JsonValue>(trimmed) {
+                            Ok(JsonValue::Array(items)) => items,
+                            Ok(JsonValue::Object(obj)) => vec![JsonValue::Object(obj)],
+                            _ => vec![JsonValue::String(s)],
+                        }
+                    } else {
+                        vec![JsonValue::String(s)]
+                    }
+                }
+                _ => Vec::new(),
+            }
+        }
+
+        fn answer_values(
+            metadata: &Option<JsonValue>,
+            output_preview: &Option<String>,
+        ) -> Vec<JsonValue> {
+            if let Some(JsonValue::Array(items)) = metadata.as_ref().and_then(|m| m.get("answers"))
+            {
+                return items.clone();
+            }
+
+            output_preview
+                .as_ref()
+                .and_then(|preview| serde_json::from_str::<JsonValue>(preview).ok())
+                .and_then(|value| match value {
+                    JsonValue::Array(items) => Some(items),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        }
+
+        fn question_text(value: &JsonValue) -> String {
+            if let Some(text) = value.as_str() {
+                return text.to_string();
+            }
+
+            value
+                .as_object()
+                .and_then(|obj| {
+                    ["question", "text", "prompt"]
+                        .iter()
+                        .find_map(|key| obj.get(*key).and_then(|v| v.as_str()))
+                })
+                .unwrap_or("Question")
+                .to_string()
+        }
+
+        fn format_answer(value: Option<&JsonValue>) -> String {
+            match value {
+                Some(JsonValue::Array(items)) => {
+                    let labels: Vec<String> = items
+                        .iter()
+                        .filter_map(|item| {
+                            item.as_str()
+                                .map(|s| s.to_string())
+                                .or_else(|| Some(item.to_string()))
+                        })
+                        .collect();
+                    if labels.is_empty() {
+                        "Skipped".to_string()
+                    } else {
+                        labels.join(", ")
+                    }
+                }
+                Some(JsonValue::String(s)) if !s.trim().is_empty() => s.clone(),
+                Some(value) if !value.is_null() => value.to_string(),
+                _ => "Skipped".to_string(),
+            }
+        }
+
+        fn push_wrapped<'a>(
+            out: &mut Vec<Line<'a>>,
+            line: Line<'static>,
+            max_width: usize,
+            subsequent_indent: Line<'static>,
+        ) {
+            out.extend(wrap_styled_line(
+                &line,
+                WrapOptions::new(max_width.max(1)).subsequent_indent(subsequent_indent),
+            ));
+        }
+
+        fn push_limited_wrapped<'a>(
+            out: &mut Vec<Line<'a>>,
+            line: Line<'static>,
+            max_width: usize,
+            subsequent_indent: Line<'static>,
+            max_lines: usize,
+            style: Style,
+        ) {
+            let wrapped = wrap_styled_line(
+                &line,
+                WrapOptions::new(max_width.max(1)).subsequent_indent(subsequent_indent),
+            );
+            if wrapped.len() <= max_lines {
+                out.extend(wrapped);
+                return;
+            }
+
+            let omitted = wrapped.len().saturating_sub(max_lines.saturating_sub(1));
+            out.extend(wrapped.into_iter().take(max_lines.saturating_sub(1)));
+            out.push(Line::from(Span::styled(
+                format!("  … +{} lines", omitted),
+                style,
+            )));
         }
 
         let _ = attached;
@@ -1178,6 +1349,7 @@ impl Chat {
             "list" => "List",
             "grep" => "Grep",
             "todowrite" => "Todos",
+            "question" => "Questions",
             other => other,
         };
 
@@ -1231,9 +1403,72 @@ impl Chat {
             }
         }
 
-        // For todowrite, render everything (header + body) inside a single
-        // solid-background panel. Skip the normal dim header for this tool.
-        if name == "todowrite" && status == "ok" {
+        // Panel-style tools render header and body inside one solid background
+        // and skip the normal dim header path.
+        if name == "question" && status != "error" {
+            let bg = colors.background_element;
+            let pad_style = Style::default().bg(bg);
+            let header_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM)
+                .bg(bg);
+            let question_style = Style::default().fg(colors.text_weak).bg(bg);
+            let answer_style = Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD)
+                .bg(bg);
+
+            let panel_width = max_width.saturating_sub(2).max(10);
+            let questions = question_values(&args, &metadata);
+            let answers = answer_values(&metadata, &output_preview);
+            let mut panel_lines: Vec<Line<'_>> = Vec::new();
+
+            panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
+            panel_lines.push(Line::from(vec![Span::styled("# Questions", header_style)]));
+
+            if status == "running" {
+                let count = questions.len();
+                let text = if count == 1 {
+                    "Asking 1 question...".to_string()
+                } else if count > 1 {
+                    format!("Asking {} questions...", count)
+                } else {
+                    "Asking questions...".to_string()
+                };
+                panel_lines.push(Line::from(vec![Span::styled(text, question_style)]));
+            } else {
+                for (idx, question) in questions.iter().enumerate() {
+                    if idx > 0 {
+                        panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
+                    }
+                    let q_line =
+                        Line::from(vec![Span::styled(question_text(question), question_style)]);
+                    panel_lines.extend(wrap_styled_line(
+                        &q_line,
+                        WrapOptions::new(panel_width)
+                            .subsequent_indent(Line::from(Span::styled("  ", question_style))),
+                    ));
+
+                    let answer = format_answer(answers.get(idx));
+                    let a_line = Line::from(vec![
+                        Span::styled("  -> ", header_style),
+                        Span::styled(answer, answer_style),
+                    ]);
+                    panel_lines.extend(wrap_styled_line(
+                        &a_line,
+                        WrapOptions::new(panel_width)
+                            .subsequent_indent(Line::from(Span::styled("     ", answer_style))),
+                    ));
+                }
+            }
+
+            panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
+            for line in &mut panel_lines {
+                line.spans.insert(0, Span::styled(" ", pad_style));
+            }
+
+            out.extend(panel_lines);
+        } else if name == "todowrite" && status == "ok" {
             if let Some(ref preview) = output_preview {
                 let bg = colors.background_element;
                 let pad_style = Style::default().bg(bg);
@@ -1263,31 +1498,20 @@ impl Chat {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    let wrapped = textwrap::wrap(trimmed, panel_width);
-                    for w in wrapped {
-                        panel_lines.push(Line::from(vec![Span::styled(
-                            w.to_string(),
-                            item_style,
-                        )]));
-                    }
+                    let line = Line::from(vec![Span::styled(trimmed.to_string(), item_style)]);
+                    panel_lines.extend(wrap_styled_line(
+                        &line,
+                        WrapOptions::new(panel_width)
+                            .subsequent_indent(Line::from(Span::styled("  ", item_style))),
+                    ));
                 }
 
                 // Padding bottom
                 panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
 
-                // Pad every line to panel_width and indent by 1 space so the
-                // panel reads as a single solid block.
+                // Indent text one cell; the panel background is painted in a
+                // separate pass so padding rows do not wrap.
                 for line in &mut panel_lines {
-                    let text: String = line
-                        .spans
-                        .iter()
-                        .map(|s| s.content.as_ref())
-                        .collect();
-                    let text_width = unicode_width::UnicodeWidthStr::width(text.as_str());
-                    if text_width < panel_width {
-                        let pad = " ".repeat(panel_width - text_width);
-                        line.spans.push(Span::styled(pad, pad_style));
-                    }
                     line.spans.insert(0, Span::styled(" ", pad_style));
                 }
 
@@ -1295,34 +1519,24 @@ impl Chat {
             }
         } else {
             // Default header for all other tools.
-            let wrapped = textwrap::wrap(&header, max_width);
-            for line in wrapped {
-                out.push(Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default()
-                        .fg(colors.text_weak)
-                        .add_modifier(Modifier::DIM),
-                )));
-            }
+            let header_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM);
+            push_wrapped(
+                &mut out,
+                Line::from(Span::styled(header, header_style)),
+                max_width,
+                Line::from(Span::styled("  ", header_style)),
+            );
 
             // For edit tools, render a unified diff preview of old_string -> new_string
             if name == "edit" {
                 if let Some(obj) = args_obj {
-                    let old_str = obj
-                        .get("old_string")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let new_str = obj
-                        .get("new_string")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let old_str = obj.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+                    let new_str = obj.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
                     if !old_str.is_empty() || !new_str.is_empty() {
-                        let diff_lines = crate::ui::diff::format_edit_diff(
-                            old_str,
-                            new_str,
-                            max_width,
-                            colors,
-                        );
+                        let diff_lines =
+                            crate::ui::diff::format_edit_diff(old_str, new_str, max_width, colors);
                         out.extend(diff_lines);
                     }
                 }
@@ -1331,17 +1545,10 @@ impl Chat {
             // For write tools, render the content as an all-additions diff.
             if name == "write" {
                 if let Some(obj) = args_obj {
-                    let content = obj
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let content = obj.get("content").and_then(|v| v.as_str()).unwrap_or("");
                     if !content.is_empty() {
-                        let diff_lines = crate::ui::diff::format_edit_diff(
-                            "",
-                            content,
-                            max_width,
-                            colors,
-                        );
+                        let diff_lines =
+                            crate::ui::diff::format_edit_diff("", content, max_width, colors);
                         out.extend(diff_lines);
                     }
                 }
@@ -1357,13 +1564,28 @@ impl Chat {
                             result_text = format!("{} — {}", t, preview);
                         }
                     }
-                    let result_line = format!("  → {}", result_text);
-                    let wrapped = textwrap::wrap(&result_line, max_width);
-                    for line in wrapped {
-                        out.push(Line::from(Span::styled(
-                            line.to_string(),
-                            Style::default().fg(colors.text_weak),
-                        )));
+                    let result_style = Style::default().fg(colors.text_weak);
+                    let mut emitted = 0usize;
+                    for (line_idx, raw_line) in result_text.lines().enumerate() {
+                        if emitted >= TOOL_RESULT_MAX_SCREEN_LINES {
+                            out.push(Line::from(Span::styled("  …", result_style)));
+                            break;
+                        }
+                        let prefix = if line_idx == 0 { "  → " } else { "    " };
+                        let line = Line::from(Span::styled(
+                            format!("{}{}", prefix, raw_line),
+                            result_style,
+                        ));
+                        let before = out.len();
+                        push_limited_wrapped(
+                            &mut out,
+                            line,
+                            max_width,
+                            Line::from(Span::styled("    ", result_style)),
+                            TOOL_RESULT_MAX_SCREEN_LINES.saturating_sub(emitted),
+                            result_style,
+                        );
+                        emitted += out.len().saturating_sub(before);
                     }
                 }
             }
@@ -1373,11 +1595,7 @@ impl Chat {
             if let Some(preview) = output_preview {
                 let first = preview.lines().next().unwrap_or("").trim();
                 if !first.is_empty() {
-                    let mut line = first.to_string();
-                    if line.len() > max_width.saturating_sub(6) {
-                        line.truncate(max_width.saturating_sub(6));
-                        line.push_str("…");
-                    }
+                    let line = truncate_chars(first.to_string(), max_width.saturating_sub(6));
                     out.push(Line::from(Span::styled(
                         format!("{}    {}", indent, line),
                         Style::default().fg(colors.error),
@@ -1497,12 +1715,105 @@ impl Chat {
     }
 }
 
+fn is_compact_tool_panel(content: &str) -> bool {
+    serde_json::from_str::<JsonValue>(content)
+        .ok()
+        .and_then(|v| {
+            let name = v.get("name").and_then(|n| n.as_str())?;
+            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("ok");
+            Some(match name {
+                "question" => status != "error",
+                "todowrite" => status == "ok",
+                _ => false,
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn is_synthetic_tool_result_text(content: &str) -> bool {
+    content.trim_start().starts_with("[tool result:")
+}
+
+fn content_visual_y_offset(content_height: usize, viewport_height: usize) -> usize {
+    if content_height == 0 {
+        0
+    } else {
+        viewport_height.saturating_sub(content_height)
+    }
+}
+
+fn render_line_backgrounds(
+    f: &mut Frame,
+    area: Rect,
+    lines: &[Line<'_>],
+    scroll_offset: usize,
+    viewport_height: usize,
+    bg: Color,
+) {
+    if area.width == 0 || area.height == 0 || viewport_height == 0 {
+        return;
+    }
+
+    let visible_start = scroll_offset.min(lines.len());
+    let visible_end = lines
+        .len()
+        .min(scroll_offset.saturating_add(viewport_height));
+    let mut run_start: Option<usize> = None;
+
+    for idx in visible_start..visible_end {
+        let is_panel_line = line_uses_background(&lines[idx], bg);
+        match (run_start, is_panel_line) {
+            (None, true) => run_start = Some(idx),
+            (Some(start), false) => {
+                render_background_run(f, area, scroll_offset, start, idx, bg);
+                run_start = None;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(start) = run_start {
+        render_background_run(f, area, scroll_offset, start, visible_end, bg);
+    }
+}
+
+fn render_background_run(
+    f: &mut Frame,
+    area: Rect,
+    scroll_offset: usize,
+    start: usize,
+    end: usize,
+    bg: Color,
+) {
+    let y_offset = start.saturating_sub(scroll_offset) as u16;
+    let height = end.saturating_sub(start) as u16;
+    if height == 0 {
+        return;
+    }
+
+    let bg_area = Rect {
+        x: area.x,
+        y: area.y.saturating_add(y_offset),
+        width: area.width,
+        height,
+    };
+    f.render_widget(Block::default().style(Style::default().bg(bg)), bg_area);
+}
+
+fn line_uses_background(line: &Line<'_>, bg: Color) -> bool {
+    line.spans.iter().any(|span| span.style.bg == Some(bg))
+}
+
 fn line_to_static(line: Line<'_>) -> Line<'static> {
     Line {
-        spans: line.spans.into_iter().map(|span| Span {
-            content: std::borrow::Cow::Owned(span.content.into_owned()),
-            style: span.style,
-        }).collect(),
+        spans: line
+            .spans
+            .into_iter()
+            .map(|span| Span {
+                content: std::borrow::Cow::Owned(span.content.into_owned()),
+                style: span.style,
+            })
+            .collect(),
         style: Style::default(),
         alignment: line.alignment,
     }
@@ -1513,6 +1824,62 @@ use ratatui::text::Text;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+
+    fn test_colors() -> ThemeColors {
+        ThemeColors {
+            primary: Color::Reset,
+            secondary: Color::Reset,
+            accent: Color::Reset,
+            interactive: Color::Reset,
+            background: Color::Reset,
+            dialog_background: Color::Reset,
+            background_element: Color::Reset,
+            text: Color::Reset,
+            text_weak: Color::Reset,
+            text_strong: Color::Reset,
+            border: Color::Reset,
+            border_weak_focus: Color::Reset,
+            border_focus: Color::Reset,
+            border_strong_focus: Color::Reset,
+            success: Color::Reset,
+            warning: Color::Reset,
+            error: Color::Reset,
+            info: Color::Reset,
+            markdown_text: Color::Reset,
+            markdown_heading: Color::Reset,
+            markdown_link: Color::Reset,
+            markdown_link_text: Color::Reset,
+            markdown_code: Color::Reset,
+            markdown_block_quote: Color::Reset,
+            markdown_emph: Color::Reset,
+            markdown_strong: Color::Reset,
+            markdown_horizontal_rule: Color::Reset,
+            markdown_list_item: Color::Reset,
+            markdown_list_enumeration: Color::Reset,
+            markdown_image: Color::Reset,
+            markdown_image_text: Color::Reset,
+            markdown_code_block: Color::Reset,
+            diff_add: Color::Reset,
+            diff_add_bg: Color::Reset,
+            diff_remove: Color::Reset,
+            diff_remove_bg: Color::Reset,
+            diff_gutter: Color::Reset,
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn buffer_row_text(buffer: &ratatui::buffer::Buffer, width: u16, y: u16) -> String {
+        (0..width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    }
 
     #[test]
     fn test_chat_new() {
@@ -1579,6 +1946,141 @@ mod tests {
         chat.append_to_last_assistant(" assistant");
         assert_eq!(chat.messages.len(), 3);
         assert_eq!(chat.messages[2].content, " assistant");
+    }
+
+    #[test]
+    fn test_render_fingerprint_changes_for_same_length_content_mutation() {
+        let mut chat = Chat::new();
+        chat.add_assistant_message("abcd");
+
+        let before = chat.compute_fingerprint(80);
+        chat.messages[0].content = "wxyz".to_string();
+        let after = chat.compute_fingerprint(80);
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn test_tool_result_preview_is_bounded() {
+        let chat = Chat::new();
+        let output_preview = (0..40)
+            .map(|idx| format!("line {}", idx))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = serde_json::json!({
+            "name": "bash",
+            "status": "ok",
+            "args": { "command": "printf lots" },
+            "output_preview": output_preview,
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 40, &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains('…')));
+        assert!(rendered.len() <= TOOL_RESULT_MAX_SCREEN_LINES + 2);
+    }
+
+    #[test]
+    fn test_question_panel_keeps_padding_without_extra_gap() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "question",
+            "status": "ok",
+            "args": {
+                "questions": [{ "question": "Question" }]
+            },
+            "metadata": {
+                "questions": [{ "question": "Question" }],
+                "answers": ["Provide columns and rows"]
+            }
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 5);
+        assert!(rendered[0].trim().is_empty());
+        assert_eq!(rendered[1].trim(), "# Questions");
+        assert!(rendered[3].contains("Provide columns and rows"));
+        assert!(rendered[4].trim().is_empty());
+    }
+
+    #[test]
+    fn test_todowrite_panel_keeps_padding_without_extra_gap() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "todowrite",
+            "status": "ok",
+            "output_preview": "[ ] Define table data\n[ ] Choose rendering file\n[ ] Implement rendering\n",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 6);
+        assert!(rendered[0].trim().is_empty());
+        assert_eq!(rendered[1].trim(), "# Todos");
+        assert!(rendered[4].contains("Implement rendering"));
+        assert!(rendered[5].trim().is_empty());
+    }
+
+    #[test]
+    fn test_short_tool_panel_renders_without_trailing_blank_row() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut colors = test_colors();
+        colors.background_element = Color::Indexed(236);
+
+        let content = serde_json::json!({
+            "name": "todowrite",
+            "status": "ok",
+            "output_preview": "[ ] Define table data\n[ ] Choose rendering file\n[ ] Implement rendering\n",
+        })
+        .to_string();
+        let mut chat = Chat::new();
+        chat.add_message(Message::tool(content));
+
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| chat.render(f, Rect::new(0, 0, 40, 8), "Plan", "model", &colors))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rows = (0..8)
+            .map(|y| buffer_row_text(buffer, 38, y))
+            .collect::<Vec<_>>();
+
+        assert!(rows[0].trim().is_empty());
+        assert!(rows[1].trim().is_empty());
+        assert!(rows[2].trim().is_empty());
+        assert_eq!(rows[3].trim(), "# Todos");
+        assert!(rows[6].contains("Implement rendering"));
+        assert!(rows[7].trim().is_empty());
+        assert_eq!(buffer[(0, 7)].bg, colors.background_element);
+    }
+
+    #[test]
+    fn test_synthetic_tool_result_assistant_text_is_hidden() {
+        let chat = Chat::new();
+        let msg = Message::assistant(
+            "[tool result: todowrite] [ ] Add unit tests [tool result: todowrite] [ ] Refactor",
+        );
+        let colors = test_colors();
+
+        let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
+
+        assert!(lines.is_empty());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use crate::tools::{
     fs::{GlobTool, GrepTool, ListTool, ReadTool, WriteTool},
-    BashTool, EditTool, QuestionTool, SkillTool, TaskTool, TodowriteTool, ToolRegistry, WebfetchTool,
+    BashTool, EditTool, QuestionTool, SkillTool, TaskTool, TodowriteTool, ToolRegistry,
+    WebfetchTool,
 };
 use std::sync::Arc;
 

@@ -1,6 +1,8 @@
 use crate::session::types::{Message, MessageRole};
 use crate::theme::ThemeColors;
-use crate::ui::components::dialog::{Dialog, DialogAction as FooterAction, DialogItem, DialogPosition};
+use crate::ui::components::dialog::{
+    Dialog, DialogAction as FooterAction, DialogItem, DialogPosition,
+};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{layout::Rect, Frame};
 
@@ -12,12 +14,10 @@ pub struct TimelineDialogState {
 impl TimelineDialogState {
     pub fn new() -> Self {
         let mut dialog = Dialog::new("Timeline").with_position(DialogPosition::Right);
-        dialog = dialog.with_actions(vec![
-            FooterAction {
-                label: "Jump actions".to_string(),
-                key: "enter".to_string(),
-            },
-        ]);
+        dialog = dialog.with_actions(vec![FooterAction {
+            label: "Jump actions".to_string(),
+            key: "enter".to_string(),
+        }]);
         Self { dialog }
     }
 
@@ -61,10 +61,7 @@ impl TimelineDialogState {
             let description = String::new();
 
             let tip = {
-                let duration = message
-                    .timestamp
-                    .elapsed()
-                    .unwrap_or_default();
+                let duration = message.timestamp.elapsed().unwrap_or_default();
                 let secs = duration.as_secs();
                 if secs < 60 {
                     format!("{}s ago", secs)
@@ -90,16 +87,13 @@ impl TimelineDialogState {
         let last_index = items.len().saturating_sub(1);
 
         let was_visible = self.dialog.is_visible();
-        let mut dialog = Dialog::with_items("Timeline", items)
-            .with_position(DialogPosition::Right);
+        let mut dialog = Dialog::with_items("Timeline", items).with_position(DialogPosition::Right);
         dialog.selected_index = last_index;
         dialog.adjust_scroll();
-        dialog = dialog.with_actions(vec![
-            FooterAction {
-                label: "Jump actions".to_string(),
-                key: "enter".to_string(),
-            },
-        ]);
+        dialog = dialog.with_actions(vec![FooterAction {
+            label: "Jump actions".to_string(),
+            key: "enter".to_string(),
+        }]);
 
         if was_visible {
             dialog.show();

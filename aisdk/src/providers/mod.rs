@@ -1,7 +1,7 @@
-pub mod openai;
 pub mod anthropic;
 pub mod compatible;
+pub mod openai;
 
-pub use openai::OpenAI;
 pub use anthropic::Anthropic;
 pub use compatible::OpenAICompatible;
+pub use openai::OpenAI;

@@ -440,7 +440,10 @@ async fn relay_stream_to_sender(
             }
             ChunkType::Reasoning(reasoning) => {
                 *token_count += estimate_tokens(&reasoning);
-                let _ = log(&format!("[RELAY] Reasoning chunk ({} chars)", reasoning.len()));
+                let _ = log(&format!(
+                    "[RELAY] Reasoning chunk ({} chars)",
+                    reasoning.len()
+                ));
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
             ChunkType::ToolCall(_tool_call) => {

@@ -3,3 +3,4 @@ pub mod diff;
 pub mod layout;
 pub mod markdown;
 pub mod selection;
+pub mod wrapping;

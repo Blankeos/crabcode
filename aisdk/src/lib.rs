@@ -1,11 +1,11 @@
-pub mod message;
-pub mod tool;
 pub mod chunk;
-pub mod stop;
-pub mod response;
 pub mod error;
+pub mod message;
 pub mod provider;
 pub mod providers;
+pub mod response;
+pub mod stop;
+pub mod tool;
 
 pub mod core {
     pub use crate::chunk::ChunkType;
@@ -17,8 +17,8 @@ pub mod core {
     pub mod language_model {
         pub use crate::chunk::ChunkType as LanguageModelStreamChunkType;
         pub use crate::response::LanguageModelStream;
-        pub use crate::stop::StopReason;
         pub use crate::stop::step_count_is;
+        pub use crate::stop::StopReason;
     }
 
     pub mod utils {

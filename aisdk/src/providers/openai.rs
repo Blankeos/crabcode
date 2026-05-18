@@ -94,9 +94,13 @@ impl OpenAIBuilder {
     }
 
     pub fn build(self) -> Result<OpenAI> {
-        let base_url = self.base_url.ok_or(Error::MissingField("base_url".into()))?;
+        let base_url = self
+            .base_url
+            .ok_or(Error::MissingField("base_url".into()))?;
         let api_key = self.api_key.ok_or(Error::MissingField("api_key".into()))?;
-        let model_name = self.model_name.ok_or(Error::MissingField("model_name".into()))?;
+        let model_name = self
+            .model_name
+            .ok_or(Error::MissingField("model_name".into()))?;
         let provider_name = self.provider_name.unwrap_or_else(|| "openai".to_string());
 
         let responses_path = {
@@ -284,16 +288,12 @@ impl Provider for OpenAI {
                                         // Stream exhausts naturally — no End chunk forwarded
                                         futures::future::ready(None)
                                     }
-                                    "response.incomplete" => {
-                                        futures::future::ready(Some(Ok(ChunkType::Incomplete(
-                                            "Response incomplete".to_string(),
-                                        ))))
-                                    }
-                                    "response.failed" => {
-                                        futures::future::ready(Some(Ok(ChunkType::Failed(
-                                            "Response failed".to_string(),
-                                        ))))
-                                    }
+                                    "response.incomplete" => futures::future::ready(Some(Ok(
+                                        ChunkType::Incomplete("Response incomplete".to_string()),
+                                    ))),
+                                    "response.failed" => futures::future::ready(Some(Ok(
+                                        ChunkType::Failed("Response failed".to_string()),
+                                    ))),
                                     _ => {
                                         if event_type.contains("tool_call") {
                                             futures::future::ready(Some(Ok(ChunkType::ToolCall(
@@ -323,10 +323,7 @@ impl Provider for OpenAI {
     }
 }
 
-fn build_openai_messages(
-    messages: &[Message],
-    strip_system: bool,
-) -> Vec<serde_json::Value> {
+fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_json::Value> {
     messages
         .iter()
         .filter_map(|msg| {
@@ -352,4 +349,3 @@ fn build_openai_messages(
         })
         .collect()
 }
-
