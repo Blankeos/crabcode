@@ -143,7 +143,8 @@ impl ToolHandler for EditTool {
             return Ok(ToolResult::new(
                 format!("Edit: {}", file_path),
                 format!("Replaced {} occurrence(s)", count),
-            ));
+            )
+            .with_metadata("replace_count", serde_json::json!(count)));
         }
 
         match Self::find_best_match(&content, &old_string) {
@@ -162,7 +163,9 @@ impl ToolHandler for EditTool {
                 Ok(ToolResult::new(
                     format!("Edit: {}", file_path),
                     format!("Replaced at line {}", line_num),
-                ))
+                )
+                .with_metadata("line_number", serde_json::json!(line_num))
+                .with_metadata("replace_count", serde_json::json!(1)))
             }
             None => Err(ToolError::NotFound(format!(
                 "Could not find text to replace: {}",

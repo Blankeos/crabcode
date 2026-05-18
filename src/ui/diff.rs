@@ -1,5 +1,5 @@
 use crate::theme::ThemeColors;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -15,35 +15,63 @@ pub enum DiffLineType {
 
 pub struct DiffLine {
     pub line_type: DiffLineType,
+    pub line_number: Option<usize>,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffStats {
+    pub added: usize,
+    pub removed: usize,
 }
 
 /// Compute a unified line-based diff between old and new text.
 /// Returns at most `MAX_DIFF_LINES` with `CONTEXT_LINES` of context around changes.
 pub fn compute_unified_diff(old_text: &str, new_text: &str) -> Vec<DiffLine> {
-    let raw_diff = diff::lines(old_text, new_text);
+    compute_unified_diff_with_start(old_text, new_text, 1, 1)
+}
+
+/// Compute a unified line-based diff with explicit old/new starting line numbers.
+pub fn compute_unified_diff_with_start(
+    old_text: &str,
+    new_text: &str,
+    old_start_line: usize,
+    new_start_line: usize,
+) -> Vec<DiffLine> {
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    let new_lines: Vec<&str> = new_text.lines().collect();
+    let raw_diff = diff::slice(&old_lines, &new_lines);
 
     // First pass: collect all lines with their type
     let mut all_lines: Vec<DiffLine> = Vec::new();
+    let mut old_line = old_start_line.max(1);
+    let mut new_line = new_start_line.max(1);
     for result in raw_diff {
         match result {
             diff::Result::Left(line) => {
                 all_lines.push(DiffLine {
                     line_type: DiffLineType::Remove,
-                    text: line.to_string(),
+                    line_number: Some(old_line),
+                    text: (*line).to_string(),
                 });
+                old_line += 1;
             }
             diff::Result::Both(line, _) => {
                 all_lines.push(DiffLine {
                     line_type: DiffLineType::Context,
-                    text: line.to_string(),
+                    line_number: Some(new_line),
+                    text: (*line).to_string(),
                 });
+                old_line += 1;
+                new_line += 1;
             }
             diff::Result::Right(line) => {
                 all_lines.push(DiffLine {
                     line_type: DiffLineType::Add,
-                    text: line.to_string(),
+                    line_number: Some(new_line),
+                    text: (*line).to_string(),
                 });
+                new_line += 1;
             }
         }
     }
@@ -86,6 +114,7 @@ pub fn compute_unified_diff(old_text: &str, new_text: &str) -> Vec<DiffLine> {
         } else if !in_ellipsis {
             result.push(DiffLine {
                 line_type: DiffLineType::Context,
+                line_number: None,
                 text: "⋯".to_string(),
             });
             in_ellipsis = true;
@@ -95,6 +124,25 @@ pub fn compute_unified_diff(old_text: &str, new_text: &str) -> Vec<DiffLine> {
     result
 }
 
+pub fn compute_diff_stats(old_text: &str, new_text: &str) -> DiffStats {
+    let mut stats = DiffStats {
+        added: 0,
+        removed: 0,
+    };
+
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    let new_lines: Vec<&str> = new_text.lines().collect();
+    for result in diff::slice(&old_lines, &new_lines) {
+        match result {
+            diff::Result::Left(_) => stats.removed += 1,
+            diff::Result::Right(_) => stats.added += 1,
+            diff::Result::Both(_, _) => {}
+        }
+    }
+
+    stats
+}
+
 /// Render a unified diff as ratatui Lines with proper colors and gutter.
 /// Every line is padded to `max_width` so the background spans the full row.
 pub fn render_unified_diff(
@@ -102,33 +150,57 @@ pub fn render_unified_diff(
     max_width: usize,
     colors: &ThemeColors,
 ) -> Vec<Line<'static>> {
-    let gutter_width = 2usize; // "- ", "+ ", "  "
-    let content_width = max_width.saturating_sub(gutter_width).max(1);
+    render_unified_diff_with_indent(diff_lines, max_width, colors, "")
+}
+
+/// Render a unified diff with a fixed left indent before the line-number gutter.
+pub fn render_unified_diff_with_indent(
+    diff_lines: &[DiffLine],
+    max_width: usize,
+    colors: &ThemeColors,
+    indent: &str,
+) -> Vec<Line<'static>> {
+    let max_line_number = diff_lines
+        .iter()
+        .filter_map(|line| line.line_number)
+        .max()
+        .unwrap_or(1);
+    let line_number_width = max_line_number.to_string().len().max(1);
+    let indent_width = UnicodeWidthStr::width(indent);
+    let gutter_width = line_number_width + 2; // line number, spacer, sign
+    let content_width = max_width.saturating_sub(indent_width + gutter_width).max(1);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    if max_width < 4 {
+    if max_width < indent_width + gutter_width + 1 {
         return lines;
     }
 
     for diff_line in diff_lines {
-        let (gutter, fg, bg) = match diff_line.line_type {
-            DiffLineType::Remove => ("- ", colors.diff_remove, colors.diff_remove_bg),
-            DiffLineType::Add => ("+ ", colors.diff_add, colors.diff_add_bg),
-            DiffLineType::Context => ("  ", colors.text_weak, colors.background),
+        let (sign, fg, bg) = match diff_line.line_type {
+            DiffLineType::Remove => ('-', colors.diff_remove, colors.diff_remove_bg),
+            DiffLineType::Add => ('+', colors.diff_add, colors.diff_add_bg),
+            DiffLineType::Context => (' ', colors.text_weak, colors.background),
         };
 
-        let gutter_style = Style::default().fg(colors.diff_gutter).bg(bg);
+        let indent_style = Style::default().bg(bg);
+        let gutter_style = Style::default()
+            .fg(colors.diff_gutter)
+            .bg(bg)
+            .add_modifier(Modifier::DIM);
+        let sign_style = Style::default().fg(fg).bg(bg);
         let content_style = Style::default().fg(fg).bg(bg);
         let pad_style = Style::default().bg(bg);
 
         // Handle ellipsis specially
         if diff_line.text == "⋯" {
-            let full_line = format!("{}⋯", gutter);
-            let remaining = max_width.saturating_sub(full_line.len());
+            let number = " ".repeat(line_number_width);
+            let full_line = format!("{}{}  ⋯", indent, number);
+            let remaining = max_width.saturating_sub(UnicodeWidthStr::width(full_line.as_str()));
             let padding = "─".repeat(remaining);
             let mut spans = vec![
-                Span::styled(gutter.to_string(), gutter_style),
+                Span::styled(indent.to_string(), indent_style),
+                Span::styled(format!("{}  ", number), gutter_style),
                 Span::styled(
                     format!("⋯{}", padding),
                     content_style.add_modifier(Modifier::DIM),
@@ -152,13 +224,23 @@ pub fn render_unified_diff(
         // Wrap content if needed
         let wrapped = textwrap::wrap(&diff_line.text, content_width);
         for (chunk_idx, chunk) in wrapped.iter().enumerate() {
-            let gutter_text = if chunk_idx == 0 {
-                gutter.to_string()
+            let number_text = if chunk_idx == 0 {
+                diff_line
+                    .line_number
+                    .map(|line_number| format!("{line_number:>line_number_width$} "))
+                    .unwrap_or_else(|| format!("{:line_number_width$} ", ""))
             } else {
-                "  ".to_string()
+                format!("{:line_number_width$} ", "")
+            };
+            let sign_text = if chunk_idx == 0 {
+                sign.to_string()
+            } else {
+                " ".to_string()
             };
             let mut spans = vec![
-                Span::styled(gutter_text.clone(), gutter_style),
+                Span::styled(indent.to_string(), indent_style),
+                Span::styled(number_text, gutter_style),
+                Span::styled(sign_text, sign_style),
                 Span::styled(chunk.to_string(), content_style),
             ];
             // Pad to full width so the background spans the entire row
@@ -186,8 +268,20 @@ pub fn format_edit_diff(
     max_width: usize,
     colors: &ThemeColors,
 ) -> Vec<Line<'static>> {
-    let diff_lines = compute_unified_diff(old_string, new_string);
-    render_unified_diff(&diff_lines, max_width, colors)
+    format_edit_diff_with_start(old_string, new_string, 1, max_width, colors, "")
+}
+
+pub fn format_edit_diff_with_start(
+    old_string: &str,
+    new_string: &str,
+    start_line: usize,
+    max_width: usize,
+    colors: &ThemeColors,
+    indent: &str,
+) -> Vec<Line<'static>> {
+    let diff_lines =
+        compute_unified_diff_with_start(old_string, new_string, start_line, start_line);
+    render_unified_diff_with_indent(&diff_lines, max_width, colors, indent)
 }
 
 #[cfg(test)]
@@ -263,6 +357,13 @@ mod tests {
         assert_eq!(diff[0].text, "line1");
         assert_eq!(diff[1].line_type, DiffLineType::Add);
         assert_eq!(diff[1].text, "line2");
+    }
+
+    #[test]
+    fn test_compute_diff_stats_ignores_terminal_newline() {
+        let stats = compute_diff_stats("", "line1\n");
+        assert_eq!(stats.added, 1);
+        assert_eq!(stats.removed, 0);
     }
 
     #[test]

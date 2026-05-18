@@ -243,6 +243,27 @@ fn exploration_tool_item_for_message(message: &Message) -> Option<ExplorationToo
         .and_then(exploration_tool_item)
 }
 
+fn metadata_usize(metadata: Option<&JsonValue>, keys: &[&str]) -> Option<usize> {
+    keys.iter()
+        .find_map(|key| {
+            metadata
+                .and_then(|m| m.get(*key))
+                .and_then(|value| value.as_u64())
+        })
+        .map(|value| value as usize)
+}
+
+fn parse_line_number(text: &str) -> Option<usize> {
+    let lower = text.to_ascii_lowercase();
+    let start = lower.find("line ")? + "line ".len();
+    let digits: String = lower[start..]
+        .chars()
+        .skip_while(|ch| ch.is_ascii_whitespace())
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
 impl Chat {
     pub fn new() -> Self {
         Self {
@@ -1968,6 +1989,103 @@ impl Chat {
 
                 out.extend(panel_lines);
             }
+        } else if matches!(name.as_str(), "edit" | "write") && status != "error" {
+            let file_path = args_obj
+                .and_then(|o| o.get("file_path").or_else(|| o.get("filePath")))
+                .and_then(|v| v.as_str())
+                .or_else(|| strip_tool_title(title.as_deref(), tool_label))
+                .map(|path| display_path(path, false))
+                .unwrap_or_else(|| "file".to_string());
+
+            let (old_str, new_str) = if name == "edit" {
+                args_obj
+                    .map(|obj| {
+                        (
+                            obj.get("old_string").and_then(|v| v.as_str()).unwrap_or(""),
+                            obj.get("new_string").and_then(|v| v.as_str()).unwrap_or(""),
+                        )
+                    })
+                    .unwrap_or(("", ""))
+            } else {
+                (
+                    "",
+                    args_obj
+                        .and_then(|obj| obj.get("content"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                )
+            };
+
+            let stats = crate::ui::diff::compute_diff_stats(old_str, new_str);
+            let active = matches!(status.as_str(), "running" | "pending");
+            let verb = if name == "edit" {
+                if active {
+                    "Editing"
+                } else {
+                    "Edited"
+                }
+            } else if active {
+                "Writing"
+            } else if output_preview
+                .as_deref()
+                .map(|preview| preview.starts_with("Created file"))
+                .unwrap_or(false)
+            {
+                "Added"
+            } else if output_preview
+                .as_deref()
+                .map(|preview| preview.starts_with("Updated file"))
+                .unwrap_or(false)
+            {
+                "Edited"
+            } else {
+                "Wrote"
+            };
+
+            let marker = if active { "~" } else { "•" };
+            let marker_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM);
+            let title_style = Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD);
+            let target_style = Style::default().fg(colors.text);
+            let add_style = Style::default()
+                .fg(colors.diff_add)
+                .add_modifier(Modifier::BOLD);
+            let remove_style = Style::default()
+                .fg(colors.diff_remove)
+                .add_modifier(Modifier::BOLD);
+
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled(marker.to_string(), marker_style),
+                    Span::raw(" "),
+                    Span::styled(verb.to_string(), title_style),
+                    Span::raw(" "),
+                    Span::styled(file_path, target_style),
+                    Span::raw(" ("),
+                    Span::styled(format!("+{}", stats.added), add_style),
+                    Span::raw(" "),
+                    Span::styled(format!("-{}", stats.removed), remove_style),
+                    Span::raw(")"),
+                ]),
+                max_width,
+                Line::from(Span::styled("  ", marker_style)),
+            );
+
+            let start_line =
+                metadata_usize(metadata.as_ref(), &["line_number", "line", "start_line"])
+                    .or_else(|| output_preview.as_deref().and_then(parse_line_number))
+                    .unwrap_or(1);
+
+            if !old_str.is_empty() || !new_str.is_empty() {
+                let diff_lines = crate::ui::diff::format_edit_diff_with_start(
+                    old_str, new_str, start_line, max_width, colors, "    ",
+                );
+                out.extend(diff_lines);
+            }
         } else {
             // Default header for all other tools.
             let header_style = Style::default()
@@ -1979,31 +2097,6 @@ impl Chat {
                 max_width,
                 Line::from(Span::styled("  ", header_style)),
             );
-
-            // For edit tools, render a unified diff preview of old_string -> new_string
-            if name == "edit" {
-                if let Some(obj) = args_obj {
-                    let old_str = obj.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-                    let new_str = obj.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-                    if !old_str.is_empty() || !new_str.is_empty() {
-                        let diff_lines =
-                            crate::ui::diff::format_edit_diff(old_str, new_str, max_width, colors);
-                        out.extend(diff_lines);
-                    }
-                }
-            }
-
-            // For write tools, render the content as an all-additions diff.
-            if name == "write" {
-                if let Some(obj) = args_obj {
-                    let content = obj.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    if !content.is_empty() {
-                        let diff_lines =
-                            crate::ui::diff::format_edit_diff("", content, max_width, colors);
-                        out.extend(diff_lines);
-                    }
-                }
-            }
 
             // Render a subtle result line for completed tools.
             if status == "ok" {
@@ -2321,6 +2414,10 @@ mod tests {
             .collect()
     }
 
+    fn trimmed_line_text(line: &Line<'_>) -> String {
+        line_text(line).trim_end().to_string()
+    }
+
     fn buffer_row_text(buffer: &ratatui::buffer::Buffer, width: u16, y: u16) -> String {
         (0..width)
             .map(|x| buffer[(x, y)].symbol())
@@ -2569,6 +2666,64 @@ mod tests {
         assert_eq!(
             rendered,
             vec!["• Explored", "  └ Read README.md, AGENTS.md", ""]
+        );
+    }
+
+    #[test]
+    fn test_edit_tool_renders_codex_style_diff_summary() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "edit",
+            "status": "ok",
+            "args": {
+                "file_path": "/Users/carlo/Desktop/Projects/crabcode/README.md",
+                "old_string": "alpha\nbeta\nomega",
+                "new_string": "alpha\nbravo\nomega",
+            },
+            "metadata": { "line_number": 3 },
+            "output_preview": "Replaced at line 3",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 80, &colors, false);
+        let rendered = lines.iter().map(trimmed_line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "• Edited README.md (+1 -1)",
+                "    3  alpha",
+                "    4 -beta",
+                "    4 +bravo",
+                "    5  omega",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_write_tool_renders_added_diff_summary() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "write",
+            "status": "ok",
+            "args": {
+                "file_path": "src/new.rs",
+                "content": "fn main() {}\n",
+            },
+            "output_preview": "Created file with 13 bytes",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 80, &colors, false);
+        let rendered = lines.iter().map(trimmed_line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec!["• Added src/new.rs (+1 -0)", "    1 +fn main() {}"]
         );
     }
 
