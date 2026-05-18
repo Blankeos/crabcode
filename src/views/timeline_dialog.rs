@@ -6,6 +6,12 @@ use crate::ui::components::dialog::{
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{layout::Rect, Frame};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineRole {
+    User,
+    Assistant,
+}
+
 #[derive(Debug)]
 pub struct TimelineDialogState {
     pub dialog: Dialog,
@@ -29,33 +35,34 @@ impl TimelineDialogState {
 
     pub fn refresh_messages(&mut self, messages: &[Message]) {
         let mut items: Vec<DialogItem> = Vec::new();
+        let mut last_timeline_role: Option<TimelineRole> = None;
+        let mut last_assistant_preview_empty = false;
 
         for (idx, message) in messages.iter().enumerate() {
-            match message.role {
-                MessageRole::User | MessageRole::Assistant => {}
+            let timeline_role = match message.role {
+                MessageRole::User => TimelineRole::User,
+                MessageRole::Assistant => TimelineRole::Assistant,
                 _ => continue,
-            }
-
-            let role_label = match message.role {
-                MessageRole::User => "You",
-                MessageRole::Assistant => "Agent",
-                _ => unreachable!(),
             };
 
-            let preview = message
-                .content
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .map(|line| {
-                    let trimmed = line.trim();
-                    let truncated: String = trimmed.chars().take(20).collect();
-                    if truncated.len() < trimmed.len() {
-                        format!("{}...", truncated)
-                    } else {
-                        truncated
+            let preview = message_preview(message);
+
+            if timeline_role == TimelineRole::Assistant
+                && last_timeline_role == Some(TimelineRole::Assistant)
+            {
+                if last_assistant_preview_empty && preview != "(empty)" {
+                    if let Some(item) = items.last_mut() {
+                        item.name = format!("Agent: {}", preview);
+                        last_assistant_preview_empty = false;
                     }
-                })
-                .unwrap_or_else(|| "(empty)".to_string());
+                }
+                continue;
+            }
+
+            let role_label = match timeline_role {
+                TimelineRole::User => "You",
+                TimelineRole::Assistant => "Agent",
+            };
 
             let name = format!("{}: {}", role_label, preview);
             let description = String::new();
@@ -80,6 +87,9 @@ impl TimelineDialogState {
                 tip: Some(tip),
                 provider_id: String::new(),
             });
+            last_timeline_role = Some(timeline_role);
+            last_assistant_preview_empty =
+                timeline_role == TimelineRole::Assistant && preview == "(empty)";
         }
 
         // Chronological order: oldest first, newest at bottom
@@ -109,6 +119,23 @@ impl TimelineDialogState {
     pub fn hide(&mut self) {
         self.dialog.hide();
     }
+}
+
+fn message_preview(message: &Message) -> String {
+    message
+        .content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| {
+            let trimmed = line.trim();
+            let truncated: String = trimmed.chars().take(20).collect();
+            if truncated.len() < trimmed.len() {
+                format!("{}...", truncated)
+            } else {
+                truncated
+            }
+        })
+        .unwrap_or_else(|| "(empty)".to_string())
 }
 
 pub fn init_timeline_dialog() -> TimelineDialogState {
@@ -191,4 +218,69 @@ pub enum TimelineDialogAction {
     Close,
     Select(usize),
     Navigate(usize),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item_names(state: &TimelineDialogState) -> Vec<String> {
+        state
+            .dialog
+            .items
+            .iter()
+            .map(|item| item.name.clone())
+            .collect()
+    }
+
+    fn item_ids(state: &TimelineDialogState) -> Vec<String> {
+        state
+            .dialog
+            .items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn assistant_segments_between_user_messages_collapse_into_one_timeline_item() {
+        let messages = vec![
+            Message::user("Ask me 4 questions"),
+            Message::assistant(""),
+            Message::tool("question tool panel"),
+            Message::assistant(""),
+            Message::tool("another tool panel"),
+            Message::assistant("Final answer after tools"),
+            Message::user("Next prompt"),
+            Message::assistant("Next response"),
+        ];
+
+        let state = TimelineDialogState::build_from_messages(&messages);
+
+        assert_eq!(
+            item_names(&state),
+            vec![
+                "You: Ask me 4 questions",
+                "Agent: Final answer after t...",
+                "You: Next prompt",
+                "Agent: Next response",
+            ]
+        );
+        assert_eq!(item_ids(&state), vec!["0", "1", "6", "7"]);
+    }
+
+    #[test]
+    fn assistant_segments_without_visible_text_still_collapse() {
+        let messages = vec![
+            Message::user("Run tools"),
+            Message::assistant(""),
+            Message::tool("tool call"),
+            Message::assistant(""),
+        ];
+
+        let state = TimelineDialogState::build_from_messages(&messages);
+
+        assert_eq!(item_names(&state), vec!["You: Run tools", "Agent: (empty)"]);
+        assert_eq!(item_ids(&state), vec!["0", "1"]);
+    }
 }
