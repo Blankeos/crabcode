@@ -1,7 +1,9 @@
 use crate::theme::{contrast_text, ThemeColors};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
@@ -10,6 +12,7 @@ use ratatui::{
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use tokio::sync::oneshot;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Debug)]
 struct QuestionOption {
@@ -156,6 +159,13 @@ struct QuestionDialogRequest {
 pub struct QuestionDialogState {
     current: Option<QuestionDialogRequest>,
     queue: VecDeque<QuestionDialogRequest>,
+    tab_hitboxes: Vec<QuestionTabHitbox>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct QuestionTabHitbox {
+    area: Rect,
+    index: usize,
 }
 
 pub enum QuestionDialogAction {
@@ -174,6 +184,7 @@ impl QuestionDialogState {
         Self {
             current: None,
             queue: VecDeque::new(),
+            tab_hitboxes: Vec::new(),
         }
     }
 
@@ -181,6 +192,7 @@ impl QuestionDialogState {
         let request = QuestionDialogRequest::new(questions, response_tx);
         if self.current.is_none() {
             self.current = Some(request);
+            self.tab_hitboxes.clear();
         } else {
             self.queue.push_back(request);
         }
@@ -196,6 +208,7 @@ impl QuestionDialogState {
             let _ = request.response_tx.send(response);
         }
         self.current = self.queue.pop_front();
+        self.tab_hitboxes.clear();
     }
 
     pub fn cancel_current(&mut self) {
@@ -204,6 +217,7 @@ impl QuestionDialogState {
             let _ = request.response_tx.send(response);
         }
         self.current = self.queue.pop_front();
+        self.tab_hitboxes.clear();
     }
 
     pub fn clear_with_empty(&mut self) {
@@ -216,6 +230,7 @@ impl QuestionDialogState {
             let response = request.empty_response();
             let _ = request.response_tx.send(response);
         }
+        self.tab_hitboxes.clear();
     }
 
     pub fn insert_text(&mut self, text: &str) {
@@ -238,6 +253,13 @@ impl QuestionDialogState {
 
     fn queued_count(&self) -> usize {
         self.queue.len()
+    }
+
+    fn tab_index_at(&self, point: Position) -> Option<usize> {
+        self.tab_hitboxes
+            .iter()
+            .find(|hitbox| hitbox.area.contains(point))
+            .map(|hitbox| hitbox.index)
     }
 }
 
@@ -316,17 +338,12 @@ impl QuestionDialogRequest {
             return;
         }
 
-        let multiple = question.multiple;
-        let options_len = question.options.len();
         if let Some(answer) = self.current_answer_mut() {
             answer.cursor = if answer.cursor == 0 {
                 count - 1
             } else {
                 answer.cursor - 1
             };
-            if !multiple && answer.cursor < options_len {
-                answer.select_cursor();
-            }
         }
         self.editing_custom = false;
     }
@@ -340,13 +357,8 @@ impl QuestionDialogRequest {
             return;
         }
 
-        let multiple = question.multiple;
-        let options_len = question.options.len();
         if let Some(answer) = self.current_answer_mut() {
             answer.cursor = (answer.cursor + 1) % count;
-            if !multiple && answer.cursor < options_len {
-                answer.select_cursor();
-            }
         }
         self.editing_custom = false;
     }
@@ -465,6 +477,27 @@ impl QuestionDialogRequest {
                     answer.custom_selected = !answer.custom_selected;
                 }
             }
+        }
+    }
+
+    fn confirm_current_selection(&mut self) {
+        let Some(question) = self.current_question() else {
+            return;
+        };
+        if question.options.is_empty() || question.multiple {
+            return;
+        }
+
+        let options_len = question.options.len();
+        let mut selected = false;
+        if let Some(answer) = self.current_answer_mut() {
+            if answer.cursor < options_len {
+                answer.select_cursor();
+                selected = true;
+            }
+        }
+        if selected {
+            self.editing_custom = false;
         }
     }
 
@@ -626,13 +659,8 @@ impl QuestionDialogRequest {
 
 impl QuestionAnswerState {
     fn for_question(question: &QuestionItem) -> Self {
-        let mut selected = vec![false; question.options.len()];
-        if !question.multiple && !selected.is_empty() {
-            selected[0] = true;
-        }
-
         Self {
-            selected,
+            selected: vec![false; question.options.len()],
             cursor: 0,
             custom_text: String::new(),
             custom_cursor: 0,
@@ -819,10 +847,13 @@ pub fn handle_question_dialog_key_event(
             } else if request.current_is_custom_row() {
                 request.begin_custom_editing();
                 QuestionDialogAction::Handled
-            } else if request.next_question_or_submit() {
-                QuestionDialogAction::Submit
             } else {
-                QuestionDialogAction::Handled
+                request.confirm_current_selection();
+                if request.next_question_or_submit() {
+                    QuestionDialogAction::Submit
+                } else {
+                    QuestionDialogAction::Handled
+                }
             }
         }
         KeyCode::Char(ch)
@@ -837,10 +868,93 @@ pub fn handle_question_dialog_key_event(
 }
 
 pub fn handle_question_dialog_mouse_event(
-    _state: &mut QuestionDialogState,
-    _event: MouseEvent,
+    state: &mut QuestionDialogState,
+    event: MouseEvent,
 ) -> bool {
-    false
+    if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return false;
+    }
+
+    let point = Position::new(event.column, event.row);
+    let Some(tab_index) = state.tab_index_at(point) else {
+        return false;
+    };
+
+    let Some(request) = state.active_mut() else {
+        return false;
+    };
+
+    request.current_index = tab_index.min(request.questions.len());
+    request.sync_editing_for_current_focus();
+    true
+}
+
+fn push_tab_hitbox(
+    hitboxes: &mut Vec<QuestionTabHitbox>,
+    header_area: Rect,
+    x: &mut u16,
+    label: &str,
+    index: usize,
+) {
+    let label_width = UnicodeWidthStr::width(label) as u16;
+    if label_width == 0 || header_area.width == 0 {
+        return;
+    }
+
+    let label_start = *x;
+    let label_end = label_start.saturating_add(label_width);
+    let header_start = header_area.x;
+    let header_end = header_area.x.saturating_add(header_area.width);
+
+    if label_end > header_start && label_start < header_end {
+        let visible_start = label_start.max(header_start);
+        let visible_end = label_end.min(header_end);
+        if visible_end > visible_start {
+            hitboxes.push(QuestionTabHitbox {
+                area: Rect {
+                    x: visible_start,
+                    y: header_area.y,
+                    width: visible_end - visible_start,
+                    height: 1,
+                },
+                index,
+            });
+        }
+    }
+
+    *x = label_end;
+}
+
+fn question_tab_hitboxes(
+    request: &QuestionDialogRequest,
+    header_area: Rect,
+) -> Vec<QuestionTabHitbox> {
+    let mut hitboxes = Vec::new();
+    let mut x = header_area.x;
+
+    for idx in 0..request.questions.len() {
+        if idx > 0 {
+            x = x.saturating_add(2);
+        }
+
+        let label = stable_tab_label(&format!("Question {}", idx + 1));
+        push_tab_hitbox(&mut hitboxes, header_area, &mut x, &label, idx);
+    }
+
+    if !request.questions.is_empty() {
+        x = x.saturating_add(2);
+    }
+
+    let confirm_label = stable_tab_label("Confirm");
+    push_tab_hitbox(
+        &mut hitboxes,
+        header_area,
+        &mut x,
+        &confirm_label,
+        request.questions.len(),
+    );
+
+    hitboxes
 }
 
 pub fn render_question_dialog(
@@ -850,6 +964,7 @@ pub fn render_question_dialog(
     colors: ThemeColors,
 ) {
     let Some(request) = state.active() else {
+        state.tab_hitboxes.clear();
         return;
     };
 
@@ -912,6 +1027,7 @@ pub fn render_question_dialog(
         Paragraph::new(question_tabs_line(request, state.queued_count(), &colors)),
         header_chunks[0],
     );
+    let tab_hitboxes = question_tab_hitboxes(request, header_chunks[0]);
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             cancel_text,
@@ -947,6 +1063,7 @@ pub fn render_question_dialog(
 
     let footer = footer_line(request, &colors);
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Left), chunks[2]);
+    state.tab_hitboxes = tab_hitboxes;
 }
 
 fn parse_questions(value: Value) -> Vec<QuestionItem> {
@@ -1315,7 +1432,7 @@ fn answer_summary(question: &QuestionItem, answer: &QuestionAnswerState) -> Stri
         .unwrap_or_default();
 
     if labels.is_empty() {
-        "No answer".to_string()
+        "Skipped".to_string()
     } else {
         labels.join(", ")
     }
@@ -1452,7 +1569,7 @@ fn footer_line<'a>(request: &QuestionDialogRequest, colors: &ThemeColors) -> Lin
     };
 
     spans.push(Span::styled("↑↓", key_style));
-    spans.push(Span::raw(" select  "));
+    spans.push(Span::raw(" move  "));
 
     if question.multiple && answer.cursor < question.options.len() {
         spans.push(Span::styled("space", key_style));
@@ -1475,7 +1592,9 @@ fn footer_line<'a>(request: &QuestionDialogRequest, colors: &ThemeColors) -> Lin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+    use ratatui::crossterm::event::{
+        KeyEvent, KeyEventKind, KeyEventState, MouseButton, MouseEvent, MouseEventKind,
+    };
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
@@ -1486,8 +1605,33 @@ mod tests {
         }
     }
 
+    fn mouse_down(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
     #[test]
     fn response_returns_selected_option_labels() {
+        let (tx, _rx) = oneshot::channel();
+        let mut request = QuestionDialogRequest::new(
+            json!([{
+                "question": "Pick",
+                "header": "Choice",
+                "options": [{ "label": "A" }, { "label": "B" }]
+            }]),
+            tx,
+        );
+        request.confirm_current_selection();
+
+        assert_eq!(request.response(), json!([["A"]]));
+    }
+
+    #[test]
+    fn option_response_is_skipped_until_confirmed() {
         let (tx, _rx) = oneshot::channel();
         let request = QuestionDialogRequest::new(
             json!([{
@@ -1498,7 +1642,7 @@ mod tests {
             tx,
         );
 
-        assert_eq!(request.response(), json!([["A"]]));
+        assert_eq!(request.response(), json!([[]]));
     }
 
     #[test]
@@ -1528,7 +1672,7 @@ mod tests {
         request.next_option();
         request.insert_char('z');
 
-        assert_eq!(request.response(), json!([["A"]]));
+        assert_eq!(request.response(), json!([[]]));
         assert_eq!(request.answers[0].custom_text, "");
 
         request.begin_custom_editing();
@@ -1536,6 +1680,62 @@ mod tests {
         request.finish_custom_editing();
 
         assert_eq!(request.response(), json!([["z"]]));
+    }
+
+    #[test]
+    fn right_arrow_without_enter_keeps_question_skipped() {
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "Pick",
+                "header": "Choice",
+                "options": [{ "label": "A" }]
+            }]),
+            tx,
+        );
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Right, KeyModifiers::NONE));
+
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.current_index, 1);
+        assert_eq!(request.response(), json!([[]]));
+
+        let colors = crate::theme::Theme::load_from_file("src/theme.json")
+            .unwrap()
+            .get_colors(true);
+        let confirm_text = confirm_body_lines(request, &colors)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(confirm_text.contains("Skipped"));
+    }
+
+    #[test]
+    fn single_choice_arrow_navigation_requires_enter_to_answer() {
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "Pick",
+                "header": "Choice",
+                "options": [{ "label": "A" }, { "label": "B" }]
+            }]),
+            tx,
+        );
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Down, KeyModifiers::NONE));
+
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.answers[0].cursor, 1);
+        assert_eq!(request.response(), json!([[]]));
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.current_index, 1);
+        assert_eq!(request.response(), json!([["B"]]));
     }
 
     #[test]
@@ -1616,10 +1816,59 @@ mod tests {
             handle_question_dialog_key_event(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, QuestionDialogAction::Handled));
         assert_eq!(state.current.as_ref().unwrap().current_index, 1);
+        assert_eq!(state.current.as_ref().unwrap().response(), json!([["A"]]));
 
         let action =
             handle_question_dialog_key_event(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, QuestionDialogAction::Submit));
+    }
+
+    #[test]
+    fn mouse_clicking_tabs_changes_active_question() {
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([
+                {
+                    "question": "Pick one",
+                    "header": "One",
+                    "options": [{ "label": "A" }]
+                },
+                {
+                    "question": "Pick two",
+                    "header": "Two",
+                    "options": [{ "label": "B" }]
+                }
+            ]),
+            tx,
+        );
+
+        let header_area = Rect {
+            x: 4,
+            y: 2,
+            width: 80,
+            height: 1,
+        };
+        state.tab_hitboxes = {
+            let request = state.current.as_ref().unwrap();
+            question_tab_hitboxes(request, header_area)
+        };
+
+        let second = state.tab_hitboxes[1].area;
+        let handled = handle_question_dialog_mouse_event(
+            &mut state,
+            mouse_down(second.x.saturating_add(1), second.y),
+        );
+        assert!(handled);
+        assert_eq!(state.current.as_ref().unwrap().current_index, 1);
+
+        let confirm = state.tab_hitboxes[2].area;
+        let handled = handle_question_dialog_mouse_event(
+            &mut state,
+            mouse_down(confirm.x.saturating_add(1), confirm.y),
+        );
+        assert!(handled);
+        assert_eq!(state.current.as_ref().unwrap().current_index, 2);
     }
 
     #[test]
