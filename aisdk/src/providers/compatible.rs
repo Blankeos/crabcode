@@ -272,14 +272,15 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
         chunks.push(Ok(ChunkType::Reasoning(reasoning.to_string())));
     }
 
-    // Emit tool calls on tool_calls finish_reason. Stream exhausts naturally
-    // for all other finish_reasons — no explicit End chunk needed.
-    if finish_reason == "tool_calls" || finish_reason == "function_call" {
-        if let Some(tool_calls) = choice["delta"]["tool_calls"].as_array() {
-            if !tool_calls.is_empty() {
-                let json = serde_json::to_string(tool_calls).unwrap_or_default();
-                chunks.push(Ok(ChunkType::ToolCall(json)));
-            }
+    if let Some(tool_calls) = choice["delta"]["tool_calls"].as_array() {
+        if !tool_calls.is_empty() {
+            let json = serde_json::to_string(tool_calls).unwrap_or_default();
+            debug_log(&format!(
+                "[SSE] Tool call delta: count={} finish_reason='{}'",
+                tool_calls.len(),
+                finish_reason
+            ));
+            chunks.push(Ok(ChunkType::ToolCall(json)));
         }
     }
 
@@ -291,6 +292,40 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     }
 
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_call_chunks(data: &str) -> Vec<String> {
+        process_sse_data(data)
+            .into_iter()
+            .filter_map(|chunk| match chunk.expect("chunk should parse") {
+                ChunkType::ToolCall(value) => Some(value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn emits_tool_call_delta_without_finish_reason() {
+        let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"tool-1","index":0,"type":"function","function":{"name":"question","arguments":"{\"questions\":[{\"header\":\"Hobbies\",\"options\":[]}]}"}}]}}]}"#;
+
+        let chunks = tool_call_chunks(data);
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].contains("\"name\":\"question\""));
+    }
+
+    #[test]
+    fn emits_no_tool_call_for_empty_final_tool_call_chunk() {
+        let data = r#"{"choices":[{"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant","content":""}}]}"#;
+
+        let chunks = tool_call_chunks(data);
+
+        assert!(chunks.is_empty());
+    }
 }
 
 /// Convert a byte stream into a stream of lines, handling both SSE (`data: ...`) and raw NDJSON.

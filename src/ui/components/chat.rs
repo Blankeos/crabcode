@@ -1218,20 +1218,35 @@ impl Chat {
                 .unwrap_or_default()
         }
 
-        fn question_text(value: &JsonValue) -> String {
+        fn is_generic_question_label(text: &str) -> bool {
+            let text = text.trim();
+            text.is_empty() || text.eq_ignore_ascii_case("question")
+        }
+
+        fn question_text(value: &JsonValue, idx: usize) -> String {
             if let Some(text) = value.as_str() {
                 return text.to_string();
             }
 
-            value
-                .as_object()
-                .and_then(|obj| {
-                    ["question", "text", "prompt"]
-                        .iter()
-                        .find_map(|key| obj.get(*key).and_then(|v| v.as_str()))
-                })
-                .unwrap_or("Question")
-                .to_string()
+            let Some(obj) = value.as_object() else {
+                return format!("Question {}", idx + 1);
+            };
+
+            let primary = ["question", "text", "prompt"]
+                .iter()
+                .find_map(|key| obj.get(*key).and_then(|v| v.as_str()));
+            if let Some(text) = primary.filter(|text| !is_generic_question_label(text)) {
+                return text.trim().to_string();
+            }
+
+            let fallback = ["header", "title", "name"]
+                .iter()
+                .find_map(|key| obj.get(*key).and_then(|v| v.as_str()));
+            if let Some(text) = fallback.filter(|text| !is_generic_question_label(text)) {
+                return text.trim().to_string();
+            }
+
+            format!("Question {}", idx + 1)
         }
 
         fn format_answer(value: Option<&JsonValue>) -> String {
@@ -1441,8 +1456,10 @@ impl Chat {
                     if idx > 0 {
                         panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
                     }
-                    let q_line =
-                        Line::from(vec![Span::styled(question_text(question), question_style)]);
+                    let q_line = Line::from(vec![Span::styled(
+                        question_text(question, idx),
+                        question_style,
+                    )]);
                     panel_lines.extend(wrap_styled_line(
                         &q_line,
                         WrapOptions::new(panel_width)
@@ -2010,6 +2027,31 @@ mod tests {
         assert_eq!(rendered[1].trim(), "# Questions");
         assert!(rendered[3].contains("Provide columns and rows"));
         assert!(rendered[4].trim().is_empty());
+    }
+
+    #[test]
+    fn test_question_panel_uses_header_when_question_is_generic() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "question",
+            "status": "ok",
+            "args": {
+                "questions": [{ "question": "Question", "header": "Location" }]
+            },
+            "metadata": {
+                "questions": [{ "question": "Question", "header": "Location" }],
+                "answers": ["Indoor"]
+            }
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.trim() == "Location"));
+        assert!(!rendered.iter().any(|line| line.trim() == "Question"));
     }
 
     #[test]

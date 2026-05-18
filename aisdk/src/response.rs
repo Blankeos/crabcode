@@ -127,6 +127,7 @@ pub async fn stream_with_tools<P: Provider>(
                     }
                     Ok(ChunkType::ToolCall(json_str)) => {
                         has_tool_call = true;
+                        let _ = tx_loop.send(ChunkType::ToolCall(json_str.clone()));
                         if let Ok(parsed) = parse_tool_calls(&json_str) {
                             for (id, name, args) in parsed {
                                 tool_calls_to_execute.push((id, name, args));

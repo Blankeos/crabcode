@@ -446,8 +446,29 @@ async fn relay_stream_to_sender(
                 ));
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
-            ChunkType::ToolCall(_tool_call) => {
-                let _ = log("[RELAY] ToolCall chunk received");
+            ChunkType::ToolCall(tool_call) => {
+                let names = serde_json::from_str::<serde_json::Value>(&tool_call)
+                    .ok()
+                    .and_then(|value| {
+                        value.as_array().map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| {
+                                    item.get("function")
+                                        .and_then(|function| function.get("name"))
+                                        .and_then(|name| name.as_str())
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                    })
+                    .filter(|names| !names.is_empty())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let _ = log(&format!(
+                    "[RELAY] ToolCall chunk received names={} bytes={}",
+                    names,
+                    tool_call.len()
+                ));
             }
             ChunkType::End(_msg) => {
                 let _ = log("[RELAY] End chunk — returning Ended");
