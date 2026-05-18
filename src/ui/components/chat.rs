@@ -704,13 +704,11 @@ impl Chat {
             width: area.width.saturating_sub(2),
             height: area.height,
         };
-        let visual_y_offset =
-            content_visual_y_offset(self.content_height, self.viewport_height) as u16;
         let rendered_content_area = Rect {
             x: content_area.x,
-            y: content_area.y.saturating_add(visual_y_offset),
+            y: content_area.y,
             width: content_area.width,
-            height: content_area.height.saturating_sub(visual_y_offset),
+            height: content_area.height,
         };
 
         let is_on_scrollbar = scrollbar_area.contains(point);
@@ -918,12 +916,11 @@ impl Chat {
         let viewport = self.viewport_height;
         let max_offset = content_height.saturating_sub(viewport);
         let clamped_scroll = self.scroll_offset.min(max_offset);
-        let visual_y_offset = content_visual_y_offset(content_height, viewport) as u16;
         let render_area = Rect {
             x: content_area.x,
-            y: content_area.y.saturating_add(visual_y_offset),
+            y: content_area.y,
             width: content_area.width,
-            height: content_area.height.saturating_sub(visual_y_offset),
+            height: content_area.height,
         };
 
         // Render timeline highlight as a full-width background overlay
@@ -952,7 +949,6 @@ impl Chat {
                     if vis_end > vis_start {
                         let y = content_area
                             .y
-                            .saturating_add(visual_y_offset)
                             .saturating_add((vis_start - clamped_scroll) as u16);
                         let height = (vis_end - vis_start).saturating_sub(1) as u16;
                         if height > 0 {
@@ -1937,14 +1933,6 @@ fn is_synthetic_tool_result_text(content: &str) -> bool {
     content.trim_start().starts_with("[tool result:")
 }
 
-fn content_visual_y_offset(content_height: usize, viewport_height: usize) -> usize {
-    if content_height == 0 {
-        0
-    } else {
-        viewport_height.saturating_sub(content_height)
-    }
-}
-
 fn render_line_backgrounds(
     f: &mut Frame,
     area: Rect,
@@ -2308,7 +2296,9 @@ mod tests {
         assert!(rendered
             .iter()
             .any(|line| line.contains("ctrl+x down view subagents")));
-        assert!(!rendered.iter().any(|line| line.contains("prompt=\"Say hi\"")));
+        assert!(!rendered
+            .iter()
+            .any(|line| line.contains("prompt=\"Say hi\"")));
         assert!(!rendered.iter().any(|line| line.contains("Hi there!")));
     }
 
@@ -2362,12 +2352,37 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(rows[0].trim().is_empty());
+        assert_eq!(rows[1].trim(), "# Todos");
+        assert!(rows[4].contains("Implement rendering"));
+        assert!(rows[5].trim().is_empty());
+        assert_eq!(buffer[(0, 0)].bg, colors.background_element);
+        assert_eq!(buffer[(0, 5)].bg, colors.background_element);
+        assert!(rows[6].trim().is_empty());
+        assert!(rows[7].trim().is_empty());
+    }
+
+    #[test]
+    fn test_short_chat_content_renders_at_top() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = test_colors();
+        let mut chat = Chat::new();
+        chat.add_user_message("hello");
+
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| chat.render(f, Rect::new(0, 0, 40, 8), "Plan", "model", &colors))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rows = (0..8)
+            .map(|y| buffer_row_text(buffer, 38, y))
+            .collect::<Vec<_>>();
+
+        assert!(rows[0].contains("hello"));
         assert!(rows[1].trim().is_empty());
         assert!(rows[2].trim().is_empty());
-        assert_eq!(rows[3].trim(), "# Todos");
-        assert!(rows[6].contains("Implement rendering"));
-        assert!(rows[7].trim().is_empty());
-        assert_eq!(buffer[(0, 7)].bg, colors.background_element);
     }
 
     #[test]
