@@ -18,6 +18,8 @@ pub struct Selection {
     pub end_col: usize,
     /// Whether the user is currently dragging to extend selection
     pub is_dragging: bool,
+    /// Last non-shift click position used as the anchor for shift-click selection
+    pub anchor: Option<(usize, usize)>,
 }
 
 impl Selection {
@@ -31,6 +33,11 @@ impl Selection {
         self.is_dragging = false;
     }
 
+    /// Reset the selection and forget the click anchor
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     /// Start a new selection at the given rendered-content position
     pub fn start(&mut self, line: usize, col: usize) {
         self.active = true;
@@ -39,6 +46,22 @@ impl Selection {
         self.start_col = col;
         self.end_line = line;
         self.end_col = col;
+        self.anchor = Some((line, col));
+    }
+
+    /// Start a new selection from the last non-shift click anchor.
+    pub fn start_from_anchor_to(&mut self, line: usize, col: usize) -> bool {
+        let Some((anchor_line, anchor_col)) = self.anchor else {
+            return false;
+        };
+
+        self.active = true;
+        self.is_dragging = true;
+        self.start_line = anchor_line;
+        self.start_col = anchor_col;
+        self.end_line = line;
+        self.end_col = col;
+        true
     }
 
     /// Extend selection to the given position during drag

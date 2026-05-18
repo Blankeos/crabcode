@@ -86,10 +86,10 @@ curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | 
 
 ## Configuration
 
-Your credentials are stored in an OS-specific data directory:
+Your credentials are stored in crabcode's state directory:
 
-- macOS: `~/Library/Application Support/crabcode/auth.json`
-- Linux: `~/.local/share/crabcode/auth.json`
+- Default: `~/.local/state/crabcode/auth.json`
+- With `XDG_STATE_HOME`: `$XDG_STATE_HOME/crabcode/auth.json`
 
 Read the [extensive list of configs here](/_docs/config.mdx).
 

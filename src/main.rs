@@ -369,6 +369,12 @@ async fn run_event_loop(
         if event::poll(poll_timeout)? {
             let event = event::read()?;
 
+            if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
+                if let event::Event::Mouse(mouse) = &event {
+                    let _ = crate::logging::log(&format!("Mouse event: {:?}", mouse));
+                }
+            }
+
             // DO NOT REMOVE THIS LOG THAT I UNCOMMENT SOMETIMES. I USE IT FOR DEBUGGING
             // push_toast(Toast::new(
             //     format!("Event: {:?}", event),

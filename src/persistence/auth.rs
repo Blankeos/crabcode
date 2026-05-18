@@ -2,9 +2,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use super::get_data_dir;
+use super::{ensure_data_dir, get_data_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -34,14 +34,16 @@ pub struct AuthDAO {
 impl AuthDAO {
     pub fn new() -> Result<Self> {
         let auth_path = Self::auth_path();
-        if let Some(parent) = auth_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        Self::ensure_auth_parent()?;
         Ok(Self { auth_path })
     }
 
+    fn test_mode() -> bool {
+        cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok()
+    }
+
     fn auth_path() -> PathBuf {
-        if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+        if Self::test_mode() {
             PathBuf::from("/tmp/crabcode_test_data").join("auth.json")
         } else {
             let data_dir = get_data_dir();
@@ -50,7 +52,7 @@ impl AuthDAO {
     }
 
     fn legacy_api_keys_path() -> PathBuf {
-        if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+        if Self::test_mode() {
             PathBuf::from("/tmp/crabcode_test_api_keys.json")
         } else {
             dirs::config_dir()
@@ -58,6 +60,17 @@ impl AuthDAO {
                 .join("crabcode")
                 .join("api_keys.json")
         }
+    }
+
+    fn ensure_auth_parent() -> Result<()> {
+        if Self::test_mode() {
+            if let Some(parent) = Self::auth_path().parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+        } else {
+            ensure_data_dir()?;
+        }
+        Ok(())
     }
 
     fn try_migrate_legacy_api_keys(&self) -> Result<()> {
@@ -104,11 +117,10 @@ impl AuthDAO {
     }
 
     pub fn save(&self, providers: &HashMap<String, AuthConfig>) -> Result<()> {
-        if let Some(parent) = self.auth_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        Self::ensure_auth_parent()?;
         let content = serde_json::to_string_pretty(providers)?;
         std::fs::write(&self.auth_path, content)?;
+        restrict_auth_file_permissions(&self.auth_path)?;
         Ok(())
     }
 
@@ -136,6 +148,19 @@ impl AuthDAO {
         let providers = self.load()?;
         Ok(providers.get(name).cloned())
     }
+}
+
+#[cfg(unix)]
+fn restrict_auth_file_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_auth_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

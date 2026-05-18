@@ -53,11 +53,11 @@
   - [ ] todowrite - better looking, like opencode does.
   - [ ] rendering subagents - just like opencode, clickable to go into their page.. OR I can do `ctrl-x ↓` to go into it if there's a subagent running. I can also switch between subagents with `←` and `→`
 
-- [ ] Fix: Chat content colors. Currently no matter what theme I use, the color of the chat especially the main text colors in markdown, are still the default's crabcode-orange's colors. I want them to be a bit more relevant.
+- [ ] Fix: Chat content colors. Currently no matter what theme I use, the color of the chat especially the main text colors in markdown, are the default theme colors that were set during start time - meaning at config. Whatever I change via `/themes` dialog, it doesn't update the chat colors themes.
 
 - [ ] Bug: I can type a command see autosuggest, but can't press 'enter' to run the command. Pls fix.
 
-- [ ] A single AI response, is considered 1 message. So combine all its parts into a single message record. Not that every message part becomes a separate message in the timeline dialog.
+- [x] A single AI response, is considered 1 message. So combine all its parts into a single message record. Not that every message part becomes a separate message in the timeline dialog.
 
 - [ ] Allow me to paste images i.e. [Image #1] [Image #2] [Image #3]. When I click on them, the image would be opened with my Finder (OS-specific)
 

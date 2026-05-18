@@ -1,15 +1,16 @@
 use crate::session::types::{Message, MessageRole};
 use crate::theme::{contrast_text, ThemeColors};
 use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
+use crate::ui::scrollbar::{render_scrollbar, scrollbar_offset_from_row, ScrollMetrics};
 use crate::ui::selection::Selection;
 use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
 use crate::utils::token_counter::StreamingTokenCounter;
 use ratatui::{
-    crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
+    crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Paragraph, ScrollbarState},
     Frame,
 };
 use serde_json::Value as JsonValue;
@@ -51,6 +52,8 @@ pub struct Chat {
     pub message_line_positions: Vec<usize>,
     /// Text selection state for copy-on-select
     pub selection: Selection,
+    /// Anchor that existed before the current mouse click started.
+    pending_click_anchor: Option<(usize, usize)>,
     /// Index of the message highlighted by timeline navigation (None = no highlight)
     pub highlighted_message_index: Option<usize>,
     /// Render cache — fingerprints content to skip expensive re-formatting
@@ -103,6 +106,7 @@ impl Chat {
             streaming_message_idx: None,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
+            pending_click_anchor: None,
             highlighted_message_index: None,
             cached_lines: Vec::new(),
             cached_positions: Vec::new(),
@@ -136,6 +140,7 @@ impl Chat {
             streaming_message_idx: None,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
+            pending_click_anchor: None,
             highlighted_message_index: None,
             cached_lines: Vec::new(),
             cached_positions: Vec::new(),
@@ -267,7 +272,8 @@ impl Chat {
         self.streaming_pause_started_at = None;
         self.streaming_paused_duration = std::time::Duration::default();
         self.streaming_token_counter = None;
-        self.selection.clear();
+        self.selection.reset();
+        self.pending_click_anchor = None;
         self.cached_lines.clear();
         self.cached_fingerprint = 0;
     }
@@ -648,6 +654,7 @@ impl Chat {
             // If dragging selection outside area, finalize it
             if self.selection.is_dragging {
                 self.selection.finish();
+                self.pending_click_anchor = None;
                 // Copy will be handled by app.rs on mouse up
             }
             return false;
@@ -695,12 +702,22 @@ impl Chat {
                     self.scroll_to_position(event.row, scrollbar_area);
                     true
                 } else if is_in_content {
-                    // Start text selection
                     let content_line = (event.row.saturating_sub(rendered_content_area.y) as usize)
                         .saturating_add(self.scroll_offset);
                     let content_col = event.column.saturating_sub(rendered_content_area.x) as usize;
-                    self.selection.start(content_line, content_col);
-                    true
+                    self.pending_click_anchor = self.selection.anchor;
+
+                    if event.modifiers.contains(KeyModifiers::SHIFT)
+                        && self
+                            .selection
+                            .start_from_anchor_to(content_line, content_col)
+                    {
+                        true
+                    } else {
+                        // Start text selection and record this normal click as the anchor.
+                        self.selection.start(content_line, content_col);
+                        true
+                    }
                 } else {
                     false
                 }
@@ -725,8 +742,28 @@ impl Chat {
                     self.is_dragging_scrollbar = false;
                     true
                 } else if self.selection.is_dragging {
+                    let ((s_line, s_col), (e_line, e_col)) = self.selection.range();
+                    let is_zero_width_click = s_line == e_line && s_col == e_col;
+
+                    if event.modifiers.contains(KeyModifiers::SHIFT)
+                        && self.pending_click_anchor.is_some()
+                        && is_zero_width_click
+                    {
+                        let content_line = (event.row.saturating_sub(rendered_content_area.y)
+                            as usize)
+                            .saturating_add(self.scroll_offset);
+                        let content_col =
+                            event.column.saturating_sub(rendered_content_area.x) as usize;
+                        if let Some(anchor) = self.pending_click_anchor {
+                            self.selection.anchor = Some(anchor);
+                            self.selection
+                                .start_from_anchor_to(content_line, content_col);
+                        }
+                    }
+
                     // Finalize text selection
                     self.selection.finish();
+                    self.pending_click_anchor = None;
                     // If selection is zero-width (click without drag), clear it
                     let ((s_line, s_col), (e_line, e_col)) = self.selection.range();
                     if s_line == e_line && s_col == e_col {
@@ -741,6 +778,7 @@ impl Chat {
                 // Right-click clears selection
                 if self.selection.active {
                     self.selection.clear();
+                    self.pending_click_anchor = None;
                     true
                 } else {
                     false
@@ -755,14 +793,13 @@ impl Chat {
             return;
         }
 
-        let relative_y = row.saturating_sub(scrollbar_area.y) as usize;
         let max_offset = self.content_height.saturating_sub(self.viewport_height);
-
-        let new_offset = if max_offset > 0 && scrollbar_area.height > 0 {
-            (relative_y * max_offset) / scrollbar_area.height as usize
-        } else {
-            0
-        };
+        let metrics = ScrollMetrics::new(
+            self.content_height,
+            self.viewport_height,
+            self.scroll_offset,
+        );
+        let new_offset = scrollbar_offset_from_row(metrics, scrollbar_area, row);
         self.scroll_offset = new_offset.min(max_offset);
         // Track if user scrolled away from bottom
         self.user_scrolled_up = self.scroll_offset < max_offset;
@@ -918,14 +955,12 @@ impl Chat {
             height: area.height,
         };
 
-        f.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some(" "))
-                .thumb_symbol("█")
-                .begin_symbol(Some(" "))
-                .end_symbol(Some(" ")),
+        render_scrollbar(
+            f,
+            ScrollMetrics::new(content_height, viewport, clamped_scroll),
             scrollbar_area,
-            &mut self.scrollbar_state,
+            colors.background_element,
+            colors.text_weak,
         );
     }
 
@@ -1841,6 +1876,8 @@ use ratatui::text::Text;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
     use ratatui::style::Color;
 
     fn test_colors() -> ThemeColors {
@@ -1896,6 +1933,22 @@ mod tests {
         (0..width)
             .map(|x| buffer[(x, y)].symbol())
             .collect::<String>()
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16, modifiers: KeyModifiers) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers,
+        }
+    }
+
+    fn chat_with_content_height(content_height: usize) -> Chat {
+        let mut chat = Chat::new();
+        chat.content_height = content_height;
+        chat.viewport_height = 10;
+        chat
     }
 
     #[test]
@@ -2205,6 +2258,177 @@ mod tests {
         chat.clear();
         assert!(chat.messages.is_empty());
         assert_eq!(chat.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_plain_click_records_shift_selection_anchor() {
+        let mut chat = chat_with_content_height(100);
+        let area = Rect::new(0, 0, 40, 10);
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                3,
+                2,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                3,
+                2,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+
+        assert!(!chat.selection.active);
+        assert!(!chat.selection.is_dragging);
+        assert_eq!(chat.selection.anchor, Some((2, 3)));
+    }
+
+    #[test]
+    fn test_shift_click_selects_from_last_plain_click_anchor() {
+        let mut chat = chat_with_content_height(100);
+        let area = Rect::new(0, 0, 40, 10);
+
+        chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                3,
+                2,
+                KeyModifiers::NONE,
+            ),
+            area,
+        );
+        chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                3,
+                2,
+                KeyModifiers::NONE,
+            ),
+            area,
+        );
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                8,
+                5,
+                KeyModifiers::SHIFT,
+            ),
+            area,
+        ));
+        assert!(chat.selection.active);
+        assert!(chat.selection.is_dragging);
+        assert_eq!(chat.selection.anchor, Some((2, 3)));
+        assert_eq!(chat.selection.range(), ((2, 3), (5, 8)));
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                8,
+                5,
+                KeyModifiers::SHIFT,
+            ),
+            area,
+        ));
+        assert!(chat.selection.active);
+        assert!(!chat.selection.is_dragging);
+        assert_eq!(chat.selection.anchor, Some((2, 3)));
+        assert_eq!(chat.selection.range(), ((2, 3), (5, 8)));
+    }
+
+    #[test]
+    fn test_shift_click_selects_when_shift_is_only_reported_on_mouse_up() {
+        let mut chat = chat_with_content_height(100);
+        let area = Rect::new(0, 0, 40, 10);
+
+        chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                3,
+                2,
+                KeyModifiers::NONE,
+            ),
+            area,
+        );
+        chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                3,
+                2,
+                KeyModifiers::NONE,
+            ),
+            area,
+        );
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                8,
+                5,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+        assert_eq!(chat.pending_click_anchor, Some((2, 3)));
+        assert_eq!(chat.selection.anchor, Some((5, 8)));
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                8,
+                5,
+                KeyModifiers::SHIFT,
+            ),
+            area,
+        ));
+        assert!(chat.selection.active);
+        assert!(!chat.selection.is_dragging);
+        assert_eq!(chat.selection.anchor, Some((2, 3)));
+        assert_eq!(chat.selection.range(), ((2, 3), (5, 8)));
+    }
+
+    #[test]
+    fn test_shift_click_keeps_original_anchor_for_repeated_ranges() {
+        let mut chat = chat_with_content_height(100);
+        let area = Rect::new(0, 0, 40, 10);
+
+        chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                10,
+                6,
+                KeyModifiers::NONE,
+            ),
+            area,
+        );
+        chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                10,
+                6,
+                KeyModifiers::NONE,
+            ),
+            area,
+        );
+
+        chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                2,
+                4,
+                KeyModifiers::SHIFT,
+            ),
+            area,
+        );
+
+        assert_eq!(chat.selection.anchor, Some((6, 10)));
+        assert_eq!(chat.selection.range(), ((4, 2), (6, 10)));
     }
 
     #[test]

@@ -91,9 +91,9 @@ Once you're in crabcode:
 
 ## Where your data lives
 
-| What                     | macOS                                              | Linux                                     |
-| ------------------------ | -------------------------------------------------- | ----------------------------------------- |
-| Credentials              | `~/Library/Application Support/crabcode/auth.json` | `~/.local/share/crabcode/auth.json`       |
-| Preferences and Sessions | `~/Library/Application Support/crabcode/data.db`   | `~/.local/share/crabcode/data.db`         |
-| Model cache              | `~/Library/Caches/crabcode/models_dev_cache.json`  | `~/.cache/crabcode/models_dev_cache.json` |
-| Sounds                   | `~/Library/Application Support/crabcode/sounds`    | `~/.local/share/crabcode/sounds`          |
+| What                     | Default                                           | With `XDG_STATE_HOME`                         |
+| ------------------------ | ------------------------------------------------- | --------------------------------------------- |
+| Credentials              | `~/.local/state/crabcode/auth.json`               | `$XDG_STATE_HOME/crabcode/auth.json`          |
+| Preferences and Sessions | `~/.local/state/crabcode/data.db`                 | `$XDG_STATE_HOME/crabcode/data.db`            |
+| Model cache              | `~/.local/state/crabcode/cache/models_dev_cache.json` | `$XDG_STATE_HOME/crabcode/cache/models_dev_cache.json` |
+| Sounds                   | `~/.local/state/crabcode/sounds`                  | `$XDG_STATE_HOME/crabcode/sounds`             |

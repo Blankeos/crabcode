@@ -1,4 +1,5 @@
 use crate::theme::{contrast_text, ThemeColors};
+use crate::ui::scrollbar::{render_scrollbar, scrollbar_offset_from_row, ScrollMetrics};
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher,
@@ -8,9 +9,9 @@ use ratatui::crossterm::event::{
 };
 use ratatui::{
     prelude::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Clear, Paragraph, ScrollbarState},
     Frame,
 };
 use std::collections::HashMap;
@@ -672,14 +673,9 @@ impl Dialog {
         }
 
         let visible_rows = scrollbar_area.height as usize;
-        let relative_y = row.saturating_sub(scrollbar_area.y) as usize;
         let max_offset = total_lines.saturating_sub(visible_rows);
-
-        let new_offset = if max_offset > 0 {
-            (relative_y * max_offset) / visible_rows
-        } else {
-            0
-        };
+        let metrics = ScrollMetrics::new(total_lines, visible_rows, self.scroll_offset);
+        let new_offset = scrollbar_offset_from_row(metrics, scrollbar_area, row);
         self.scroll_offset = new_offset.min(max_offset);
 
         let flat_items = self.get_flat_items();
@@ -930,14 +926,22 @@ impl Dialog {
             Paragraph::new(content_lines).scroll((self.scroll_offset as u16, 0));
         frame.render_widget(content_paragraph, list_content_area);
 
-        let scrollbar_area = chunks[3];
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some(" "))
-                .begin_symbol(Some(" "))
-                .end_symbol(Some(" ")),
+        let scrollbar_area = Rect {
+            x: chunks[3].x + chunks[3].width.saturating_sub(1),
+            y: chunks[3].y,
+            width: 1,
+            height: chunks[3].height,
+        };
+        render_scrollbar(
+            frame,
+            ScrollMetrics::new(
+                self.get_content_line_count(),
+                self.visible_row_count,
+                self.scroll_offset,
+            ),
             scrollbar_area,
-            &mut self.scrollbar_state,
+            colors.background_element,
+            colors.text_weak,
         );
 
         let mut footer_spans = vec![];

@@ -1245,6 +1245,18 @@ impl App {
     }
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
+            let _ = crate::logging::log(&format!(
+                "Handle mouse: kind={:?} modifiers={:?} col={} row={} base={:?} overlay={:?}",
+                mouse.kind,
+                mouse.modifiers,
+                mouse.column,
+                mouse.row,
+                self.base_focus,
+                self.overlay_focus
+            ));
+        }
+
         // If text is selected and user clicks on an overlay, clear selection instead
         if self.overlay_focus != OverlayFocus::None
             && self.chat_state.chat.has_selection()

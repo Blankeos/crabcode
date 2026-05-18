@@ -16,8 +16,8 @@ Before adding/changing scripts, make sure to check `justfile` for existing recip
 ### SQLite Database
 
 - **Location**:
-  - macOS: `~/Library/Application Support/crabcode/data.db`
-  - Linux: `~/.local/share/crabcode/data.db`
+  - Default: `~/.local/state/crabcode/data.db`
+  - With `XDG_STATE_HOME`: `$XDG_STATE_HOME/crabcode/data.db`
 - **Implementation**: `src/persistence/prefs.rs`
 - **Contents**: Stores user preferences including:
   - Model preferences (recent models, favorites, active model)
@@ -26,8 +26,8 @@ Before adding/changing scripts, make sure to check `justfile` for existing recip
 ### Authentication Credentials
 
 - **Location**:
-  - macOS: `~/Library/Application Support/crabcode/auth.json`
-  - Linux: `~/.local/share/crabcode/auth.json`
+  - Default: `~/.local/state/crabcode/auth.json`
+  - With `XDG_STATE_HOME`: `$XDG_STATE_HOME/crabcode/auth.json`
 - **Implementation**: `src/persistence/auth.rs`
 - **Format**: JSON with provider ID as keys
 - **Contents**: API keys and OAuth tokens for LLM providers
@@ -44,8 +44,8 @@ Before adding/changing scripts, make sure to check `justfile` for existing recip
 ### Models.dev API Cache
 
 - **Location**:
-  - macOS: `~/Library/Caches/crabcode/models_dev_cache.json`
-  - Linux: `~/.cache/crabcode/models_dev_cache.json`
+  - Default: `~/.local/state/crabcode/cache/models_dev_cache.json`
+  - With `XDG_STATE_HOME`: `$XDG_STATE_HOME/crabcode/cache/models_dev_cache.json`
   - Test mode: `/tmp/crabcode_test_cache/models_dev_cache.json`
 - **TTL**: 24 hours (`CACHE_TTL_SECONDS = 86400`)
 - **Source**: `https://models.dev/api.json`
