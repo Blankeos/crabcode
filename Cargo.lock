@@ -34,6 +34,7 @@ name = "aisdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "derive_builder",
  "eventsource-stream",
  "futures",
@@ -442,6 +443,7 @@ dependencies = [
  "clap",
  "copypasta",
  "cuid2",
+ "diff",
  "dirs",
  "futures",
  "glob",

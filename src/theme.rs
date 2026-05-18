@@ -38,6 +38,12 @@ pub struct ThemeColors {
     pub markdown_image: ratatui::style::Color,
     pub markdown_image_text: ratatui::style::Color,
     pub markdown_code_block: ratatui::style::Color,
+    // Diff colors
+    pub diff_add: ratatui::style::Color,
+    pub diff_add_bg: ratatui::style::Color,
+    pub diff_remove: ratatui::style::Color,
+    pub diff_remove_bg: ratatui::style::Color,
+    pub diff_gutter: ratatui::style::Color,
 }
 
 pub fn darken_color(color: ratatui::style::Color, factor: f32) -> ratatui::style::Color {
@@ -119,6 +125,10 @@ struct DesktopThemeSeeds {
     pub error: String,
     pub info: String,
     pub interactive: String,
+    #[serde(rename = "diffAdd", default)]
+    pub diff_add: Option<String>,
+    #[serde(rename = "diffDelete", default)]
+    pub diff_delete: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -217,6 +227,12 @@ struct DesktopThemeOverrides {
     #[serde(rename = "markdown-code-block")]
     #[serde(default)]
     pub markdown_code_block: Option<String>,
+
+    #[serde(rename = "surface-diff-add-base", default)]
+    pub surface_diff_add_base: Option<String>,
+
+    #[serde(rename = "surface-diff-delete-base", default)]
+    pub surface_diff_delete_base: Option<String>,
 }
 
 // OpenCode TUI themes ("https://opencode.ai/theme.json")
@@ -347,6 +363,12 @@ impl Theme {
                 let markdown_code_block =
                     resolve_override(mode.overrides.markdown_code_block.as_deref(), markdown_text);
 
+                let diff_add = mode.seeds.diff_add.as_deref().map(parse_hex).unwrap_or(success);
+                let diff_remove = mode.seeds.diff_delete.as_deref().map(parse_hex).unwrap_or(error);
+                let diff_add_bg = mode.overrides.surface_diff_add_base.as_deref().map(parse_hex).unwrap_or(success);
+                let diff_remove_bg = mode.overrides.surface_diff_delete_base.as_deref().map(parse_hex).unwrap_or(error);
+                let diff_gutter = text_weak;
+
                 ThemeColors {
                     primary,
                     secondary,
@@ -380,6 +402,11 @@ impl Theme {
                     markdown_image,
                     markdown_image_text,
                     markdown_code_block,
+                    diff_add,
+                    diff_add_bg,
+                    diff_remove,
+                    diff_remove_bg,
+                    diff_gutter,
                 }
             }
             ThemeData::Tui(theme) => {
@@ -441,6 +468,14 @@ impl Theme {
                 let markdown_image_text = resolve_or("markdownImageText", markdown_link_text);
                 let markdown_code_block = resolve_or("markdownCodeBlock", markdown_text);
 
+                let success_color = resolve_or("success", primary);
+                let error_color = resolve_or("error", primary);
+                let diff_add = resolve_or("diffAdd", success_color);
+                let diff_remove = resolve_or("diffDelete", error_color);
+                let diff_add_bg = resolve_or("diffAddedBg", success_color);
+                let diff_remove_bg = resolve_or("diffRemovedBg", error_color);
+                let diff_gutter = text_weak;
+
                 ThemeColors {
                     primary,
                     secondary,
@@ -456,9 +491,9 @@ impl Theme {
                     border_weak_focus,
                     border_focus,
                     border_strong_focus: border_focus,
-                    success: resolve_or("success", primary),
+                    success: success_color,
                     warning: resolve_or("warning", primary),
-                    error: resolve_or("error", primary),
+                    error: error_color,
                     info: resolve_or("info", primary),
                     markdown_text,
                     markdown_heading,
@@ -474,6 +509,11 @@ impl Theme {
                     markdown_image,
                     markdown_image_text,
                     markdown_code_block,
+                    diff_add,
+                    diff_add_bg,
+                    diff_remove,
+                    diff_remove_bg,
+                    diff_gutter,
                 }
             }
         }

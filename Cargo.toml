@@ -51,6 +51,7 @@ base64 = "0.22"
 serde_yaml = "0.9"
 sha2 = "0.10"
 rand = "0.8"
+diff = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

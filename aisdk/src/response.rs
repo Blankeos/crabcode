@@ -180,10 +180,6 @@ pub async fn stream_with_tools<P: Provider>(
                 match tool {
                     Some(t) => match t.execute.call(args.clone()).await {
                         Ok(result) => {
-                            let _ = tx_loop.send(ChunkType::Text(format!(
-                                "\n[toolu_bdrk_01{}...] ",
-                                &call_id[..8.min(call_id.len())]
-                            )));
                             current_messages.push(Message::assistant(format!(
                                 "[tool result: {}] {}",
                                 tool_name, result

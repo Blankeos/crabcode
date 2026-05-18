@@ -1026,8 +1026,23 @@ impl Chat {
                     lines.push(Line::from(metadata));
                     lines.push(Line::from(""));
                 } else {
-                    // Keep spacing consistent between segments.
-                    lines.push(Line::from(""));
+                    // Keep spacing consistent between segments, but skip the
+                    // blank line when the next message is a todowrite panel.
+                    let next_is_todowrite = self
+                        .messages
+                        .get(idx + 1)
+                        .map(|m| {
+                            m.role == MessageRole::Tool
+                                && serde_json::from_str::<serde_json::Value>(&m.content)
+                                    .ok()
+                                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                                    .map(|n| n == "todowrite")
+                                    .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if !next_is_todowrite {
+                        lines.push(Line::from(""));
+                    }
                 }
             }
             MessageRole::System => {
@@ -1051,7 +1066,15 @@ impl Chat {
                     colors,
                     attached_to_assistant,
                 ));
-                lines.push(Line::from(""));
+                // Only add trailing blank line for non-todowrite tools.
+                let is_todowrite = serde_json::from_str::<serde_json::Value>(&message.content)
+                    .ok()
+                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                    .map(|n| n == "todowrite")
+                    .unwrap_or(false);
+                if !is_todowrite {
+                    lines.push(Line::from(""));
+                }
             }
         }
 
@@ -1105,7 +1128,7 @@ impl Chat {
         let mut out: Vec<Line<'a>> = Vec::new();
 
         let parsed: Option<JsonValue> = serde_json::from_str(&message.content).ok();
-        let (name, status, args, metadata, output_preview) =
+        let (name, status, args, metadata, output_preview, title) =
             if let Some(JsonValue::Object(obj)) = parsed {
                 let name = obj
                     .get("name")
@@ -1123,7 +1146,11 @@ impl Chat {
                     .get("output_preview")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                (name, status, args, metadata, output_preview)
+                let title = obj
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                (name, status, args, metadata, output_preview, title)
             } else {
                 (
                     "tool".to_string(),
@@ -1131,6 +1158,7 @@ impl Chat {
                     None,
                     None,
                     Some(message.content.clone()),
+                    None,
                 )
             };
 
@@ -1149,6 +1177,7 @@ impl Chat {
             "bash" => "Bash",
             "list" => "List",
             "grep" => "Grep",
+            "todowrite" => "Todos",
             other => other,
         };
 
@@ -1173,6 +1202,15 @@ impl Chat {
                 s.push_str(&format!("in \"{}\"", base));
             }
             s
+        } else if name == "edit" {
+            // For edits, show only the file path in the header; the diff is rendered below.
+            args_obj
+                .and_then(|o| o.get("file_path"))
+                .and_then(|v| v.as_str())
+                .map(|p| format!("\"{}\"", p))
+                .unwrap_or_default()
+        } else if name == "todowrite" {
+            String::new()
         } else {
             args.as_ref().map(args_preview).unwrap_or_default()
         };
@@ -1193,14 +1231,142 @@ impl Chat {
             }
         }
 
-        let wrapped = textwrap::wrap(&header, max_width);
-        for line in wrapped {
-            out.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default()
+        // For todowrite, render everything (header + body) inside a single
+        // solid-background panel. Skip the normal dim header for this tool.
+        if name == "todowrite" && status == "ok" {
+            if let Some(ref preview) = output_preview {
+                let bg = colors.background_element;
+                let pad_style = Style::default().bg(bg);
+                let header_style = Style::default()
                     .fg(colors.text_weak)
-                    .add_modifier(Modifier::DIM),
-            )));
+                    .add_modifier(Modifier::DIM)
+                    .bg(bg);
+                let item_style = Style::default().fg(colors.text).bg(bg);
+
+                let panel_width = max_width.saturating_sub(2).max(10);
+
+                // Panel header: # + label (opencode style)
+                let header_text = format!("# {}", tool_label);
+                let mut panel_lines: Vec<Line<'_>> = Vec::new();
+
+                // Padding top
+                panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
+
+                // Panel header
+                panel_lines.push(Line::from(vec![Span::styled(header_text, header_style)]));
+
+                // Body: each todo item as plain text (no markdown — avoids
+                // brackets being interpreted as links).
+                let preview_trimmed = preview.trim_end();
+                for raw_line in preview_trimmed.lines() {
+                    let trimmed = raw_line.trim_end();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let wrapped = textwrap::wrap(trimmed, panel_width);
+                    for w in wrapped {
+                        panel_lines.push(Line::from(vec![Span::styled(
+                            w.to_string(),
+                            item_style,
+                        )]));
+                    }
+                }
+
+                // Padding bottom
+                panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
+
+                // Pad every line to panel_width and indent by 1 space so the
+                // panel reads as a single solid block.
+                for line in &mut panel_lines {
+                    let text: String = line
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect();
+                    let text_width = unicode_width::UnicodeWidthStr::width(text.as_str());
+                    if text_width < panel_width {
+                        let pad = " ".repeat(panel_width - text_width);
+                        line.spans.push(Span::styled(pad, pad_style));
+                    }
+                    line.spans.insert(0, Span::styled(" ", pad_style));
+                }
+
+                out.extend(panel_lines);
+            }
+        } else {
+            // Default header for all other tools.
+            let wrapped = textwrap::wrap(&header, max_width);
+            for line in wrapped {
+                out.push(Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default()
+                        .fg(colors.text_weak)
+                        .add_modifier(Modifier::DIM),
+                )));
+            }
+
+            // For edit tools, render a unified diff preview of old_string -> new_string
+            if name == "edit" {
+                if let Some(obj) = args_obj {
+                    let old_str = obj
+                        .get("old_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let new_str = obj
+                        .get("new_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !old_str.is_empty() || !new_str.is_empty() {
+                        let diff_lines = crate::ui::diff::format_edit_diff(
+                            old_str,
+                            new_str,
+                            max_width,
+                            colors,
+                        );
+                        out.extend(diff_lines);
+                    }
+                }
+            }
+
+            // For write tools, render the content as an all-additions diff.
+            if name == "write" {
+                if let Some(obj) = args_obj {
+                    let content = obj
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !content.is_empty() {
+                        let diff_lines = crate::ui::diff::format_edit_diff(
+                            "",
+                            content,
+                            max_width,
+                            colors,
+                        );
+                        out.extend(diff_lines);
+                    }
+                }
+            }
+
+            // Render a subtle result line for completed tools.
+            if status == "ok" {
+                if let Some(ref preview) = output_preview {
+                    let mut result_text = preview.clone();
+                    // For edits, prepend the title (e.g. "Edit: file.rs") if available.
+                    if name == "edit" {
+                        if let Some(ref t) = title {
+                            result_text = format!("{} — {}", t, preview);
+                        }
+                    }
+                    let result_line = format!("  → {}", result_text);
+                    let wrapped = textwrap::wrap(&result_line, max_width);
+                    for line in wrapped {
+                        out.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(colors.text_weak),
+                        )));
+                    }
+                }
+            }
         }
 
         if status == "error" {

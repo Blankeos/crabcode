@@ -61,3 +61,7 @@ The cache stores provider and model information from models.dev and expires afte
 - Important: always refer to this when asked to write inside \_docs.
 - Traverse this llms.txt as often as you can if you write docs: https://gittydocs.carlo.tl/llms.txt
 - When writing titles + first text in the body, never use the same 'title' (in mdx data) and '# <title>` (in the body).
+
+### References
+
+Use `devrefs list`, everything is in `.devrefs/references/*`

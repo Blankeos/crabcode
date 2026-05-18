@@ -4,7 +4,6 @@ use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
 use crate::tool::Tool;
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
 use futures::stream;
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -160,15 +159,10 @@ impl Provider for OpenAICompatible {
             return Err(Error::Provider(format!("API error {}: {}", status, text)));
         }
 
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .map(|ev| {
-                match ev {
-                    Ok(event) => process_sse_data(&event.data),
-                    Err(e) => vec![Ok(ChunkType::Failed(format!("SSE error: {}", e)))],
-                }
-            })
+        let byte_stream = response.bytes_stream();
+        let line_stream = bytes_to_lines(byte_stream);
+        let stream = line_stream
+            .map(|line| process_sse_data(&line))
             .flat_map(|v| stream::iter(v))
             .boxed();
 
@@ -176,15 +170,32 @@ impl Provider for OpenAICompatible {
     }
 }
 
+fn debug_log(msg: &str) {
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/crabcode_sse_debug.log")
+        .and_then(|mut f| {
+            use std::io::Write;
+            writeln!(f, "{}", msg)
+        });
+}
+
 fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     // [DONE] is ignored — the HTTP stream end signals completion.
     if data == "[DONE]" || data.is_empty() {
+        debug_log(&format!("[SSE] Ignored: [DONE] or empty"));
         return vec![];
     }
 
+    debug_log(&format!("[SSE] Raw data: {}", data));
+
     let value: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
-        Err(e) => return vec![Ok(ChunkType::Failed(format!("Invalid SSE data: {}", e)))],
+        Err(e) => {
+            debug_log(&format!("[SSE] JSON parse error: {} | data: {}", e, data));
+            return vec![Ok(ChunkType::Failed(format!("Invalid SSE data: {}", e)))];
+        }
     };
 
     if let Some(error) = value["error"].as_object() {
@@ -192,14 +203,17 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown error");
+        debug_log(&format!("[SSE] API error: {}", msg));
         return vec![Ok(ChunkType::Failed(msg.to_string()))];
     }
 
     let Some(choices) = value["choices"].as_array() else {
+        debug_log(&format!("[SSE] No choices array. JSON keys: {:?}", value.as_object().map(|o| o.keys().collect::<Vec<_>>())));
         return vec![];
     };
 
     if choices.is_empty() {
+        debug_log("[SSE] choices array is empty");
         return vec![];
     }
 
@@ -207,18 +221,33 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     let finish_reason = choice["finish_reason"].as_str().unwrap_or("");
     let mut chunks = Vec::new();
 
+    // Log the full choice structure for debugging
+    debug_log(&format!("[SSE] Choice JSON: {}", serde_json::to_string(choice).unwrap_or_default()));
+
     // Emit text delta first (may coexist with finish_reason)
-    if let Some(delta) = choice["delta"]["content"].as_str() {
-        if !delta.is_empty() {
-            chunks.push(Ok(ChunkType::Text(delta.to_string())));
-        }
+    // Try standard delta.content, then fallbacks for non-standard providers
+    let text = choice["delta"]["content"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| choice["delta"]["text"].as_str().filter(|s| !s.is_empty()))
+        .or_else(|| choice["message"]["content"].as_str().filter(|s| !s.is_empty()))
+        .or_else(|| choice["text"].as_str().filter(|s| !s.is_empty()));
+
+    if let Some(delta) = text {
+        debug_log(&format!("[SSE] Text chunk: {}", delta));
+        chunks.push(Ok(ChunkType::Text(delta.to_string())));
     }
 
     // Emit reasoning delta
-    if let Some(reasoning) = choice["delta"]["reasoning_content"].as_str() {
-        if !reasoning.is_empty() {
-            chunks.push(Ok(ChunkType::Reasoning(reasoning.to_string())));
-        }
+    let reasoning = choice["delta"]["reasoning_content"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| choice["delta"]["reasoning"].as_str().filter(|s| !s.is_empty()))
+        .or_else(|| choice["reasoning_content"].as_str().filter(|s| !s.is_empty()));
+
+    if let Some(reasoning) = reasoning {
+        debug_log(&format!("[SSE] Reasoning chunk: {}", reasoning));
+        chunks.push(Ok(ChunkType::Reasoning(reasoning.to_string())));
     }
 
     // Emit tool calls on tool_calls finish_reason. Stream exhausts naturally
@@ -232,7 +261,66 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
         }
     }
 
+    if chunks.is_empty() {
+        debug_log(&format!("[SSE] No chunks produced. finish_reason='{}'", finish_reason));
+    }
+
     chunks
+}
+
+/// Convert a byte stream into a stream of lines, handling both SSE (`data: ...`) and raw NDJSON.
+fn bytes_to_lines<S>(byte_stream: S) -> impl futures::Stream<Item = String>
+where
+    S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    let buffer: Vec<u8> = Vec::new();
+    stream::unfold((byte_stream, buffer), |(mut stream, mut buffer)| async move {
+        loop {
+            if let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
+                let line = String::from_utf8_lossy(&line_bytes);
+                let line = line.trim_end_matches('\n').trim_end_matches('\r');
+                if line.is_empty() {
+                    continue;
+                }
+                let data = if let Some(stripped) = line.strip_prefix("data:") {
+                    stripped.trim_start().to_string()
+                } else {
+                    line.to_string()
+                };
+                if data == "[DONE]" || data.is_empty() {
+                    continue;
+                }
+                debug_log(&format!("[LINE] Extracted: {}", data));
+                return Some((data, (stream, buffer)));
+            }
+            match stream.next().await {
+                Some(Ok(bytes)) => {
+                    debug_log(&format!("[BYTES] Received {} bytes", bytes.len()));
+                    buffer.extend_from_slice(&bytes);
+                }
+                Some(Err(e)) => {
+                    debug_log(&format!("[BYTES] Error: {}", e));
+                    return None;
+                }
+                None => {
+                    let remaining = String::from_utf8_lossy(&buffer).trim().to_string();
+                    buffer.clear();
+                    if remaining.is_empty() || remaining == "[DONE]" {
+                        debug_log("[LINE] Stream ended, no remaining data");
+                        return None;
+                    }
+                    let data = if let Some(stripped) = remaining.strip_prefix("data:") {
+                        stripped.trim_start().to_string()
+                    } else {
+                        remaining
+                    };
+                    debug_log(&format!("[LINE] Remaining at EOF: {}", data));
+                    return Some((data, (stream, buffer)));
+                }
+            }
+        }
+    })
 }
 
 fn has_version_segment(base_url: &str) -> bool {

@@ -535,6 +535,11 @@ impl App {
                 markdown_image: ratatui::style::Color::Rgb(255, 140, 0),
                 markdown_image_text: ratatui::style::Color::Rgb(0, 255, 255),
                 markdown_code_block: ratatui::style::Color::Reset,
+                diff_add: ratatui::style::Color::Rgb(0, 255, 0),
+                diff_add_bg: ratatui::style::Color::Rgb(0, 60, 0),
+                diff_remove: ratatui::style::Color::Rgb(255, 0, 0),
+                diff_remove_bg: ratatui::style::Color::Rgb(60, 0, 0),
+                diff_gutter: ratatui::style::Color::Rgb(140, 140, 140),
             };
         }
 

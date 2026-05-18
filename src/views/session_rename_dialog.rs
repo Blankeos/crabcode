@@ -116,6 +116,11 @@ impl Default for SessionRenameDialogState {
             markdown_image: Color::Rgb(255, 140, 0),
             markdown_image_text: Color::Rgb(0, 255, 255),
             markdown_code_block: Color::Reset,
+            diff_add: Color::Rgb(0, 255, 0),
+            diff_add_bg: Color::Rgb(0, 60, 0),
+            diff_remove: Color::Rgb(255, 0, 0),
+            diff_remove_bg: Color::Rgb(60, 0, 0),
+            diff_gutter: Color::Rgb(140, 140, 140),
         })
     }
 }

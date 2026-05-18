@@ -30,7 +30,7 @@
 
 - [ ] Minor, `chat_only` flag is codesmell... We better come up with strings for deciding "Only show this slash command in this context", just like how we do with 'Shortcuts' (in case shortcuts follow this codesmell as well, come up with a better approach)
 
-- [ ] Chore: Create a /checkparity-opencode (the most important thing is only the agent-loop, nothing else. We do differ a bit in terms of UX anyway, but the agent-loop, tool calling, etc has to be very very close so that the performance is mostly the same) and /checkparity-codex (au) command
+- [x] Chore: Create a /checkparity-opencode (the most important thing is only the agent-loop, nothing else. We do differ a bit in terms of UX anyway, but the agent-loop, tool calling, etc has to be very very close so that the performance is mostly the same) and /checkparity-codex (au) command
 
 - [ ] Feature: Subagents just like opencode.
 
@@ -46,11 +46,15 @@
 
 - [x] Markdown: Proper Table rendering.
 
-- [ ] Rendering: Thinking Rendering always has this massive space below it, even if the agent didn't really think much.
+- [x] Rendering: Thinking Rendering always has this massive space below it, even if the agent didn't really think much.
 
 - [ ] Tool call rendering:
   - [ ] editing files w/ diffs, like opencode does.
   - [ ] todowrite - better looking, like opencode does.
   - [ ] rendering subagents - just like opencode, clickable to go into their page.. OR I can do `ctrl-x ↓` to go into it if there's a subagent running. I can also switch between subagents with `←` and `→`
 
+- [ ] Fix: Chat content colors. Currently no matter what theme I use, the color of the chat especially the main text colors in markdown, are still the default's crabcode-orange's colors. I want them to be a bit more relevant.
+
 - [ ] Bug: I can type a command see autosuggest, but can't press 'enter' to run the command. Pls fix.
+
+- [ ] A single AI response, is considered 1 message. So combine all its parts into a single message record. Not that every message part becomes a separate message in the timeline dialog.

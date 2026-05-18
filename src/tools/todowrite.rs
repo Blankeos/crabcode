@@ -77,37 +77,16 @@ impl ToolHandler for TodowriteTool {
             }
         }
 
-        let in_progress_count = todos
-            .iter()
-            .filter(|t| t.status == "in_progress")
-            .count();
-
-        let mut output = String::from("## Todo List\n\n");
-        let mut stats = std::collections::HashMap::new();
-        stats.insert("total".to_string(), todos.len() as u32);
-        stats.insert(
-            "in_progress".to_string(),
-            in_progress_count as u32,
-        );
+        let mut output = String::new();
 
         for todo in &todos {
-            let icon = match todo.status.as_str() {
-                "pending" => "☐",
-                "in_progress" => "▣",
-                "completed" => "✓",
-                "cancelled" => "✗",
-                _ => "?",
+            let mark = match todo.status.as_str() {
+                "completed" => "[✓]",
+                "in_progress" => "[•]",
+                _ => "[ ]",
             };
-            output.push_str(&format!(
-                "- [{}] ({}) {} — {} priority\n",
-                icon, todo.status, todo.content, todo.priority
-            ));
+            output.push_str(&format!("{} {}\n", mark, todo.content));
         }
-
-        output.push_str(&format!(
-            "\n**Summary**: {} total, {} in progress",
-            stats["total"], stats["in_progress"]
-        ));
 
         Ok(ToolResult::new("Todo list updated", output.clone()).with_metadata(
             "todo_items",

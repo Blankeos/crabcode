@@ -9,3 +9,4 @@ _dev_reference1
 _dev_reference2
 .env
 node_modules
+.devrefs/references
