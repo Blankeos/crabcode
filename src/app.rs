@@ -191,6 +191,7 @@ pub struct App {
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
     pub is_streaming: bool,
+    pending_session_title: Option<String>,
     session_view_states: std::collections::HashMap<String, ClientSessionState>,
     session_spinner_frame: usize,
     last_frame_size: ratatui::layout::Rect,
@@ -391,6 +392,7 @@ impl App {
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
             // Note: skills_dirs is legacy; skill loading is now handled by src/skill/mod.rs
             is_streaming: false,
+            pending_session_title: None,
             session_view_states: std::collections::HashMap::new(),
             session_spinner_frame: 0,
             last_frame_size: ratatui::layout::Rect::default(),
@@ -547,6 +549,7 @@ impl App {
         if !self.session_manager.switch_session(session_id) {
             return false;
         }
+        self.pending_session_title = None;
         self.load_session_view_state(session_id);
         self.base_focus = if self.chat_state.chat.messages.is_empty() && !self.is_streaming {
             BaseFocus::Home
@@ -556,8 +559,28 @@ impl App {
         true
     }
 
+    fn start_blank_session(&mut self, title: Option<String>) {
+        self.save_active_session_view_state();
+        self.pending_session_title = title.and_then(|title| {
+            let title = title.trim().to_string();
+            if title.is_empty() {
+                None
+            } else {
+                Some(title)
+            }
+        });
+        self.session_manager.clear_current_session();
+        self.chat_state.chat.clear();
+        self.input.clear();
+        self.base_focus = BaseFocus::Home;
+        self.sync_active_streaming_flag();
+        self.cached_usage_check = (usize::MAX, usize::MAX);
+        self.refresh_sessions_dialog();
+    }
+
     fn create_new_session(&mut self, title: Option<String>) -> String {
         self.save_active_session_view_state();
+        self.pending_session_title = None;
         let session_id = self.session_manager.create_session(title);
         self.session_view_states.insert(
             session_id.clone(),
@@ -1040,7 +1063,7 @@ impl App {
                         true
                     }
                     SessionsDialogAction::NewSession => {
-                        self.create_new_session(None);
+                        self.start_blank_session(None);
                         self.sessions_dialog_state.dialog.hide();
                         self.overlay_focus = OverlayFocus::None;
                         true
@@ -1079,6 +1102,7 @@ impl App {
                         let _ = self.session_manager.set_session_archived(&id, archived);
                         if was_current && archived {
                             self.save_active_session_view_state();
+                            self.pending_session_title = None;
                             self.session_manager.clear_current_session();
                             self.chat_state.chat.clear();
                             self.input.clear();
@@ -1112,6 +1136,7 @@ impl App {
                         }
                         self.refresh_sessions_dialog();
                         if was_current {
+                            self.pending_session_title = None;
                             self.chat_state.chat.clear();
                             self.base_focus = BaseFocus::Home;
                             self.sessions_dialog_state.dialog.hide();
@@ -1369,10 +1394,6 @@ impl App {
                 self.which_key_state
                     .set_chat_active(self.base_focus == BaseFocus::Chat);
                 self.which_key_state.show();
-                true
-            }
-            KeyCode::Char('n') if key.modifiers == event::KeyModifiers::CONTROL => {
-                self.create_new_session(None);
                 true
             }
             KeyCode::Tab => {
@@ -2038,16 +2059,11 @@ impl App {
                     } else {
                         Some(parsed.args.join(" "))
                     };
-                    self.create_new_session(title);
+                    self.start_blank_session(title);
                     return;
                 }
                 if parsed.name == "home" {
-                    self.save_active_session_view_state();
-                    self.chat_state.chat.clear();
-                    self.input.clear();
-                    self.base_focus = BaseFocus::Home;
-                    self.session_manager.clear_current_session();
-                    self.sync_active_streaming_flag();
+                    self.start_blank_session(None);
                     return;
                 }
                 if parsed.name == "themes" {
@@ -2090,6 +2106,7 @@ impl App {
                         if parsed.name == "new" || parsed.name == "home" {
                             self.chat_state.chat.clear();
                             self.base_focus = BaseFocus::Home;
+                            self.pending_session_title = None;
                             self.session_manager.clear_current_session();
                         } else if self.base_focus == BaseFocus::Home
                             && parsed.name != "refreshmodels"
@@ -2204,16 +2221,11 @@ impl App {
             } else {
                 Some(parsed.args.join(" "))
             };
-            self.create_new_session(title);
+            self.start_blank_session(title);
             return;
         }
         if parsed.name == "home" {
-            self.save_active_session_view_state();
-            self.chat_state.chat.clear();
-            self.input.clear();
-            self.base_focus = BaseFocus::Home;
-            self.session_manager.clear_current_session();
-            self.sync_active_streaming_flag();
+            self.start_blank_session(None);
             return;
         }
         if parsed.name == "themes" {
@@ -2253,6 +2265,7 @@ impl App {
                 if parsed.name == "new" || parsed.name == "home" {
                     self.chat_state.chat.clear();
                     self.base_focus = BaseFocus::Home;
+                    self.pending_session_title = None;
                     self.session_manager.clear_current_session();
                 } else if self.base_focus == BaseFocus::Home && parsed.name != "refreshmodels" {
                     self.base_focus = BaseFocus::Chat;
@@ -2523,7 +2536,7 @@ impl App {
                     })
                     .unwrap_or_default();
 
-                let _ = self.session_manager.create_session(Some(fork_title));
+                let _ = self.create_new_session(Some(fork_title));
                 for msg in &messages_to_fork {
                     let _ = self.session_manager.add_message_to_current_session(msg);
                 }
@@ -3722,7 +3735,10 @@ impl App {
     fn handle_message_input(&mut self, msg: String) {
         if !msg.is_empty() && self.base_focus == BaseFocus::Home {
             if self.session_manager.get_current_session_id().is_none() {
-                let session_title = Self::generate_title_from_message(&msg);
+                let session_title = self
+                    .pending_session_title
+                    .take()
+                    .unwrap_or_else(|| Self::generate_title_from_message(&msg));
                 self.create_new_session(Some(session_title));
             }
             let mut user_message = crate::session::types::Message::user(&msg);
@@ -3990,6 +4006,72 @@ mod tests {
     use super::*;
     use crate::command::parser::parse_input;
 
+    fn test_app() -> App {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+
+        let theme = Theme::load_from_file("src/theme.json")
+            .unwrap_or_else(|_| Theme::load_from_file("src/generated_themes/ayu.json").unwrap());
+        let colors = theme.get_colors(true);
+
+        App {
+            running: true,
+            version: "test".to_string(),
+            input: Input::new(),
+            command_registry: registry,
+            session_manager: SessionManager::new(),
+            home_state: init_home(),
+            chat_state: init_chat(Chat::new(), "Build", &colors),
+            suggestions_popup_state: init_suggestions_popup(Popup::new()),
+            models_dialog_state: init_models_dialog("Models", vec![]),
+            themes_dialog_state: init_themes_dialog("Themes", vec![]),
+            themes_dialog_original_theme_index: 0,
+            themes_dialog_committed: false,
+            connect_dialog_state: init_connect_dialog(),
+            connect_dialog_mode: ConnectDialogMode::ProviderSelection,
+            openai_oauth_flow_state: init_openai_oauth_flow(),
+            sessions_dialog_state: init_sessions_dialog("Sessions", vec![]),
+            session_rename_dialog_state: init_session_rename_dialog(colors),
+            permission_dialog_state: init_permission_dialog(),
+            question_dialog_state: init_question_dialog(),
+            skills_dialog_state: crate::views::skills_dialog::init_skills_dialog("Skills", vec![]),
+            which_key_state: crate::views::which_key::init_which_key(),
+            timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
+            message_actions_index: None,
+            message_actions_dialog: None,
+            api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
+            openai_oauth_receiver: None,
+            openai_oauth_in_progress: false,
+            prefs_dao: None,
+            agent: "Build".to_string(),
+            agent_steps: std::collections::HashMap::new(),
+            provider_timeouts: std::collections::HashMap::new(),
+            model: "test-model".to_string(),
+            provider_name: "test-provider".to_string(),
+            cwd: ".".to_string(),
+            base_focus: BaseFocus::Home,
+            overlay_focus: OverlayFocus::None,
+            ctrl_c_press_count: 0,
+            last_ctrl_c_time: std::time::Instant::now(),
+            themes: vec![theme],
+            current_theme_index: 0,
+            dark_mode: true,
+            sounds: crate::sound::ResolvedSoundsConfig::default(),
+            tool_permissions: crate::tools::ToolPermissions::new(".".to_string()),
+            skills_dirs: Vec::new(),
+            is_streaming: false,
+            pending_session_title: None,
+            session_view_states: std::collections::HashMap::new(),
+            session_spinner_frame: 0,
+            last_frame_size: ratatui::layout::Rect::default(),
+            last_animation_update: std::time::Instant::now(),
+            last_session_spinner_update: std::time::Instant::now(),
+            discovery: None,
+            cached_usage_text: String::new(),
+            cached_usage_check: (0, 0),
+        }
+    }
+
     #[test]
     fn commands_can_submit_while_streaming() {
         let input_type = parse_input("/models");
@@ -4003,5 +4085,42 @@ mod tests {
 
         assert!(!App::can_submit_input(&input_type, true));
         assert!(App::can_submit_input(&input_type, false));
+    }
+
+    #[test]
+    fn start_blank_session_does_not_create_session_record() {
+        let mut app = test_app();
+        app.create_new_session(Some("Existing".to_string()));
+
+        app.start_blank_session(None);
+
+        assert!(app.session_manager.get_current_session_id().is_none());
+        assert_eq!(app.session_manager.list_sessions().len(), 1);
+        assert_eq!(app.base_focus, BaseFocus::Home);
+    }
+
+    #[test]
+    fn start_blank_session_keeps_optional_title_for_next_real_session() {
+        let mut app = test_app();
+
+        app.start_blank_session(Some("  Named draft  ".to_string()));
+
+        assert!(app.session_manager.list_sessions().is_empty());
+        assert_eq!(app.pending_session_title.as_deref(), Some("Named draft"));
+    }
+
+    #[test]
+    fn ctrl_n_is_not_a_global_new_session_shortcut() {
+        let mut app = test_app();
+        app.create_new_session(Some("Existing".to_string()));
+
+        let handled = app.handle_base_keys(KeyEvent::new(
+            KeyCode::Char('n'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(!handled);
+        assert!(app.session_manager.get_current_session_id().is_some());
+        assert_eq!(app.session_manager.list_sessions().len(), 1);
     }
 }

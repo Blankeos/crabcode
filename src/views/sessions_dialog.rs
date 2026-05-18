@@ -336,6 +336,20 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_n_requests_new_session_when_sessions_dialog_is_focused() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(action, SessionsDialogAction::NewSession);
+    }
+
+    #[test]
     fn mouse_click_on_item_selects_session() {
         let mut state = init_sessions_dialog(
             "Sessions",
