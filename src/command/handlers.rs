@@ -3,7 +3,6 @@ use crate::command::registry::{Command, CommandResult, Registry};
 use crate::push_toast;
 use crate::session::manager::SessionManager;
 use crate::toast::{Toast, ToastLevel};
-use chrono::{DateTime, Local, Utc};
 use std::pin::Pin;
 
 pub fn handle_exit<'a>(
@@ -18,22 +17,36 @@ pub fn handle_sessions<'a>(
     sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
+        let current_workspace_id = sm.current_workspace_id();
         let mut sessions = sm.list_sessions();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.retain(|session| {
+            session.archived_at.is_none()
+                && (session.workspace_id == current_workspace_id || session.status.is_active())
+        });
+        sessions.sort_by(|a, b| {
+            a.workspace_id
+                .cmp(&b.workspace_id)
+                .then_with(|| b.pinned_at.is_some().cmp(&a.pinned_at.is_some()))
+                .then_with(|| b.status.is_active().cmp(&a.status.is_active()))
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
 
         let items: Vec<crate::command::registry::DialogItem> = sessions
             .into_iter()
             .map(|session| {
-                let date_group = format_date_group(session.updated_at);
-                let time = format_time(session.updated_at);
+                let name = if session.pinned_at.is_some() {
+                    format!("★ {}", session.title)
+                } else {
+                    session.title.clone()
+                };
 
                 crate::command::registry::DialogItem {
                     id: session.id.clone(),
-                    name: session.title.clone(),
-                    group: date_group,
+                    name,
+                    group: session.workspace_name.clone(),
                     description: String::new(),
-                    tip: Some(time),
-                    provider_id: String::new(),
+                    tip: None,
+                    provider_id: session.title.clone(),
                 }
             })
             .collect();
@@ -43,26 +56,6 @@ pub fn handle_sessions<'a>(
             items,
         }
     })
-}
-
-fn format_date_group(created_at: std::time::SystemTime) -> String {
-    let datetime: DateTime<Local> = created_at.into();
-    let now: DateTime<Local> = Utc::now().into();
-    let duration = now.signed_duration_since(datetime);
-
-    if duration.num_days() == 0 {
-        "Today".to_string()
-    } else {
-        datetime.format("%a %b %d %Y").to_string()
-    }
-}
-
-fn format_time(created_at: std::time::SystemTime) -> String {
-    use chrono::Timelike;
-    let datetime: DateTime<Local> = created_at.into();
-    let hour = datetime.time().hour12();
-    let am_pm = if hour.0 { "PM" } else { "AM" };
-    format!("{}:{:02} {}", hour.1, datetime.time().minute(), am_pm)
 }
 
 pub fn handle_new<'a>(
@@ -579,7 +572,7 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "new".to_string(),
-        description: "Switch to home screen".to_string(),
+        description: "Create a new session".to_string(),
         handler: handle_new,
         hidden_tokens: vec![],
         chat_only: false,

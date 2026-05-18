@@ -1,5 +1,40 @@
 use std::time::SystemTime;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStatus {
+    Idle,
+    Streaming,
+    Waiting,
+    Failed,
+    Interrupted,
+}
+
+impl SessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Streaming => "streaming",
+            Self::Waiting => "waiting",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "streaming" => Self::Streaming,
+            "waiting" => Self::Waiting,
+            "failed" => Self::Failed,
+            "interrupted" => Self::Interrupted,
+            _ => Self::Idle,
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Streaming | Self::Waiting)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageRole {
     User,
@@ -106,6 +141,12 @@ pub struct Session {
     pub title: String,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
+    pub workspace_id: i64,
+    pub workspace_path: String,
+    pub workspace_name: String,
+    pub status: SessionStatus,
+    pub pinned_at: Option<SystemTime>,
+    pub archived_at: Option<SystemTime>,
     pub messages: Vec<Message>,
 }
 
@@ -123,6 +164,12 @@ impl Session {
             title: "New Session".to_string(),
             created_at: now,
             updated_at: now,
+            workspace_id: 0,
+            workspace_path: String::new(),
+            workspace_name: "Workspace".to_string(),
+            status: SessionStatus::Idle,
+            pinned_at: None,
+            archived_at: None,
             messages: Vec::new(),
         }
     }
@@ -134,6 +181,12 @@ impl Session {
             title: title.into(),
             created_at: now,
             updated_at: now,
+            workspace_id: 0,
+            workspace_path: String::new(),
+            workspace_name: "Workspace".to_string(),
+            status: SessionStatus::Idle,
+            pinned_at: None,
+            archived_at: None,
             messages: Vec::new(),
         }
     }

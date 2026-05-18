@@ -16,9 +16,9 @@ use ratatui::{
     widgets::{Clear, Paragraph, ScrollbarState},
     Frame,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tui_textarea::{Input as TuiInput, TextArea};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DialogPosition {
@@ -77,6 +77,8 @@ pub struct Dialog {
     pub actions: Vec<DialogAction>,
     pub position: DialogPosition,
     pub pending_delete_id: Option<String>,
+    collapsible_groups: bool,
+    collapsed_groups: HashSet<String>,
     matcher: Matcher,
 }
 
@@ -109,12 +111,22 @@ impl Dialog {
             actions: Vec::new(),
             position: DialogPosition::Center,
             pending_delete_id: None,
+            collapsible_groups: false,
+            collapsed_groups: HashSet::new(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
 
     pub fn with_position(mut self, position: DialogPosition) -> Self {
         self.position = position;
+        self
+    }
+
+    pub fn with_collapsible_groups(mut self, enabled: bool) -> Self {
+        self.collapsible_groups = enabled;
+        if !enabled {
+            self.collapsed_groups.clear();
+        }
         self
     }
 
@@ -175,6 +187,10 @@ impl Dialog {
         });
 
         self.groups = special.into_iter().chain(regular.into_iter()).collect();
+
+        let valid_groups: HashSet<String> = self.groups.iter().cloned().collect();
+        self.collapsed_groups
+            .retain(|group| valid_groups.contains(group));
     }
 
     pub fn show(&mut self) {
@@ -201,12 +217,61 @@ impl Dialog {
 
     pub fn set_search_query(&mut self, query: impl Into<String>) {
         self.search_query = query.into();
+        self.search_textarea = TextArea::default();
+        self.search_textarea.set_placeholder_text("Search");
+        if !self.search_query.is_empty() {
+            self.search_textarea.insert_str(&self.search_query);
+        }
         self.apply_filter();
     }
 
     pub fn clear_search(&mut self) {
         self.search_query.clear();
+        self.search_textarea = TextArea::default();
+        self.search_textarea.set_placeholder_text("Search");
         self.apply_filter();
+    }
+
+    pub fn is_group_collapsed(&self, group: &str) -> bool {
+        self.collapsible_groups && self.collapsed_groups.contains(group)
+    }
+
+    pub fn toggle_group_collapsed(&mut self, group: &str) {
+        if !self.collapsible_groups {
+            return;
+        }
+
+        if self.collapsed_groups.contains(group) {
+            self.collapsed_groups.remove(group);
+        } else {
+            self.collapsed_groups.insert(group.to_string());
+        }
+
+        self.reconcile_selection_after_filter(None);
+        self.update_scrollbar();
+    }
+
+    pub fn collapsed_groups(&self) -> HashSet<String> {
+        self.collapsed_groups.clone()
+    }
+
+    pub fn set_collapsed_groups(&mut self, groups: HashSet<String>) {
+        self.collapsed_groups = if self.collapsible_groups {
+            groups
+        } else {
+            HashSet::new()
+        };
+
+        let valid_groups: HashSet<String> = self.groups.iter().cloned().collect();
+        self.collapsed_groups
+            .retain(|group| valid_groups.contains(group));
+        self.reconcile_selection_after_filter(None);
+        self.update_scrollbar();
+    }
+
+    pub fn preserve_scrollbar_drag_state_from(&mut self, previous: &Self) {
+        self.is_dragging_scrollbar = previous.is_dragging_scrollbar;
+        self.scrollbar_drag_offset = previous.scrollbar_drag_offset;
     }
 
     fn apply_filter(&mut self) {
@@ -387,7 +452,10 @@ impl Dialog {
 
     fn get_flat_items(&self) -> Vec<&DialogItem> {
         let mut items = Vec::new();
-        for (_, group_items) in &self.filtered_items {
+        for (group, group_items) in &self.filtered_items {
+            if self.is_group_collapsed(group) {
+                continue;
+            }
             for item in group_items {
                 items.push(item);
             }
@@ -396,16 +464,20 @@ impl Dialog {
     }
 
     fn get_content_line_count(&self) -> usize {
-        let flat_items = self.get_flat_items();
-        if flat_items.is_empty() {
+        if self.filtered_items.is_empty() {
             return 1;
         }
         let mut count = 0;
         for (group, items) in &self.filtered_items {
             let header = if Self::group_has_header(group) { 1 } else { 0 };
-            count += items.len() + header;
+            let visible_items = if self.is_group_collapsed(group) {
+                0
+            } else {
+                items.len()
+            };
+            count += visible_items + header;
         }
-        count
+        count.max(1)
     }
 
     fn get_line_index_of_item(&self, item_index: usize) -> usize {
@@ -419,6 +491,10 @@ impl Dialog {
 
             if Self::group_has_header(group) {
                 line_index += 1;
+            }
+
+            if self.is_group_collapsed(group) {
+                continue;
             }
 
             for _item in items {
@@ -457,13 +533,15 @@ impl Dialog {
         if self.visible_row_count > 0 {
             self.visible_row_count
         } else {
-            const DIALOG_WIDTH_CENTER: u16 = 70;
             const DIALOG_HEIGHT_CENTER: u16 = 25;
-            const DIALOG_WIDTH_SIDE: u16 = 40;
-            const PADDING: u16 = 3;
 
-            let total_fixed_height = 1 + 1 + 3 + 1 + 1;
-            let padding_total = PADDING * 2;
+            let footer_height = self.footer_height();
+            let total_fixed_height = 1 + 1 + 3 + 1 + footer_height;
+            let padding = match self.position {
+                DialogPosition::Center => 3u16,
+                DialogPosition::Left | DialogPosition::Right => 1u16,
+            };
+            let padding_total = padding * 2;
 
             match self.position {
                 DialogPosition::Center => {
@@ -496,6 +574,175 @@ impl Dialog {
             return true;
         }
         false
+    }
+
+    pub fn select_item_by_id(&mut self, id: &str) -> bool {
+        let flat_items = self.get_flat_items();
+        if let Some(pos) = flat_items.iter().position(|item| item.id == id) {
+            self.selected_index = pos;
+            self.adjust_scroll();
+            return true;
+        }
+        false
+    }
+
+    pub fn select_index_clamped(&mut self, index: usize) -> bool {
+        let item_count = self.get_flat_items().len();
+        if item_count == 0 {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.update_scrollbar();
+            return false;
+        }
+
+        self.selected_index = index.min(item_count.saturating_sub(1));
+        self.adjust_scroll();
+        true
+    }
+
+    fn footer_height(&self) -> u16 {
+        if self.actions.len() > 4 {
+            3
+        } else if self.actions.len() > 2 {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn layout_constraints(&self) -> [ratatui::layout::Constraint; 6] {
+        [
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(3),
+            ratatui::layout::Constraint::Min(0),
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(self.footer_height()),
+        ]
+    }
+
+    fn truncate_to_width(text: &str, max_width: usize) -> String {
+        if max_width == 0 {
+            return String::new();
+        }
+
+        if text.width() <= max_width {
+            return text.to_string();
+        }
+
+        const ELLIPSIS: &str = "...";
+        let ellipsis_width = ELLIPSIS.width();
+        if max_width <= ellipsis_width {
+            return ".".repeat(max_width);
+        }
+
+        let content_width = max_width - ellipsis_width;
+        let mut result = String::new();
+        let mut width = 0usize;
+
+        for ch in text.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width + ch_width > content_width {
+                break;
+            }
+            result.push(ch);
+            width += ch_width;
+        }
+
+        result.push_str(ELLIPSIS);
+        result
+    }
+
+    fn left_item_spans_for_width(
+        item: &DialogItem,
+        width: usize,
+        colors: ThemeColors,
+    ) -> (Vec<Span<'static>>, usize) {
+        if width == 0 {
+            return (Vec::new(), 0);
+        }
+
+        let indent_width = width.min(2);
+        let indent = " ".repeat(indent_width);
+        let has_description = !item.description.is_empty();
+
+        if !has_description {
+            let name = Self::truncate_to_width(&item.name, width.saturating_sub(indent_width));
+            let text = format!("{indent}{name}");
+            let text_width = text.width();
+            return (vec![Span::raw(text)], text_width);
+        }
+
+        let separator_width = 2usize;
+        let full_name_width = item.name.width();
+        if indent_width + full_name_width + separator_width >= width {
+            let name = Self::truncate_to_width(&item.name, width.saturating_sub(indent_width));
+            let text = format!("{indent}{name}");
+            let text_width = text.width();
+            return (vec![Span::raw(text)], text_width);
+        }
+
+        let desc_budget = width.saturating_sub(indent_width + full_name_width + separator_width);
+        let description = Self::truncate_to_width(&item.description, desc_budget);
+        let prefix = format!("{indent}{}  ", item.name);
+        let text_width = prefix.width() + description.width();
+
+        (
+            vec![
+                Span::raw(prefix),
+                Span::styled(
+                    description,
+                    Style::default()
+                        .fg(colors.text_weak)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ],
+            text_width,
+        )
+    }
+
+    fn item_spans_for_width(
+        item: &DialogItem,
+        width: usize,
+        colors: ThemeColors,
+    ) -> Vec<Span<'static>> {
+        if width == 0 {
+            return Vec::new();
+        }
+
+        let has_description = !item.description.is_empty();
+        let tip = item
+            .tip
+            .as_ref()
+            .map(|tip| Self::truncate_to_width(tip, width));
+        let tip_width = tip.as_ref().map(|tip| tip.width()).unwrap_or(0);
+        let minimum_gap = if tip_width > 0 && width > tip_width {
+            1
+        } else {
+            0
+        };
+        let left_budget = width.saturating_sub(tip_width + minimum_gap);
+        let (mut spans, left_width) = Self::left_item_spans_for_width(item, left_budget, colors);
+
+        if let Some(tip) = tip {
+            let padding_len = width.saturating_sub(left_width + tip_width);
+            spans.push(Span::raw(" ".repeat(padding_len)));
+
+            let tip_style = if has_description {
+                Style::default()
+                    .fg(colors.text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM)
+            };
+            spans.push(Span::styled(tip, tip_style));
+        } else {
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(left_width))));
+        }
+
+        spans
     }
 
     pub fn is_visible(&self) -> bool {
@@ -554,14 +801,7 @@ impl Dialog {
 
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(3),
-                ratatui::layout::Constraint::Min(0),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-            ])
+            .constraints(self.layout_constraints())
             .split(content_area);
 
         let list_area = chunks[3];
@@ -591,6 +831,19 @@ impl Dialog {
             && !self.dialog_area.contains(point)
         {
             self.hide();
+            return true;
+        }
+
+        if matches!(
+            event.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        ) && self.dialog_area.contains(point)
+        {
+            match event.kind {
+                MouseEventKind::ScrollDown => self.scroll_down(),
+                MouseEventKind::ScrollUp => self.scroll_up(),
+                _ => {}
+            }
             return true;
         }
 
@@ -694,14 +947,7 @@ impl Dialog {
 
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(3),
-                ratatui::layout::Constraint::Min(0),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-            ])
+            .constraints(self.layout_constraints())
             .split(content_area);
 
         let list_area = chunks[3];
@@ -719,10 +965,90 @@ impl Dialog {
         self.get_item_index_from_y(row, list_area)
     }
 
+    pub fn group_at_position(&self, column: u16, row: u16) -> Option<String> {
+        if !self.visible || !self.collapsible_groups {
+            return None;
+        }
+
+        use ratatui::layout::Position;
+        let point = Position::new(column, row);
+
+        if !self.dialog_area.contains(point) {
+            return None;
+        }
+
+        let padding = match self.position {
+            DialogPosition::Center => 3u16,
+            DialogPosition::Left | DialogPosition::Right => 1u16,
+        };
+        let content_area = Rect {
+            x: self.dialog_area.x + padding,
+            y: self.dialog_area.y + padding,
+            width: self.dialog_area.width.saturating_sub(padding * 2),
+            height: self.dialog_area.height.saturating_sub(padding * 2),
+        };
+
+        if !content_area.contains(point) {
+            return None;
+        }
+
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints(self.layout_constraints())
+            .split(content_area);
+
+        let list_area = chunks[3];
+        let list_content_area = Rect {
+            x: list_area.x,
+            y: list_area.y,
+            width: list_area.width.saturating_sub(2),
+            height: list_area.height,
+        };
+
+        if !list_content_area.contains(point) {
+            return None;
+        }
+
+        let relative_y = row.saturating_sub(list_area.y) as usize;
+        let content_line = self.scroll_offset + relative_y;
+        self.get_group_from_line(content_line)
+    }
+
     fn get_item_index_from_y(&self, row: u16, list_area: Rect) -> Option<usize> {
         let relative_y = row.saturating_sub(list_area.y) as usize;
         let content_line = self.scroll_offset + relative_y;
         self.get_item_index_from_line(content_line)
+    }
+
+    fn get_group_from_line(&self, line: usize) -> Option<String> {
+        let mut current_line = 0;
+
+        for (group, items) in &self.filtered_items {
+            if items.is_empty() {
+                continue;
+            }
+
+            if Self::group_has_header(group) {
+                if line == current_line {
+                    return Some(group.clone());
+                }
+                current_line += 1;
+            }
+
+            let visible_items = if self.is_group_collapsed(group) {
+                0
+            } else {
+                items.len()
+            };
+
+            if line < current_line + visible_items {
+                return None;
+            }
+
+            current_line += visible_items;
+        }
+
+        None
     }
 
     fn get_item_index_from_line(&self, line: usize) -> Option<usize> {
@@ -739,14 +1065,19 @@ impl Dialog {
             } else {
                 current_line
             };
-            let items_end_line = items_start_line + items.len();
+            let visible_items = if self.is_group_collapsed(group) {
+                0
+            } else {
+                items.len()
+            };
+            let items_end_line = items_start_line + visible_items;
 
             if line >= items_start_line && line < items_end_line {
                 return Some(item_index + (line - items_start_line));
             }
 
             current_line = items_end_line;
-            item_index += items.len();
+            item_index += visible_items;
         }
 
         None
@@ -844,14 +1175,7 @@ impl Dialog {
 
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(3),
-                ratatui::layout::Constraint::Min(0),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-            ])
+            .constraints(self.layout_constraints())
             .split(self.content_area);
 
         let esc_text = "esc";
@@ -885,11 +1209,10 @@ impl Dialog {
         frame.render_widget(&self.search_textarea, chunks[2]);
 
         let mut content_lines = Vec::new();
-        let flat_items = self.get_flat_items();
         let list_area_width = chunks[3].width.saturating_sub(2); // Subtract scrollbar width
         let filtered_items = self.filtered_items.clone();
 
-        if flat_items.is_empty() {
+        if self.filtered_items.is_empty() {
             content_lines.push(Line::from(vec![Span::styled(
                 "No results found",
                 Style::default().fg(colors.text_weak),
@@ -903,83 +1226,55 @@ impl Dialog {
                 }
 
                 if Self::group_has_header(group) {
-                    content_lines.push(Line::from(vec![Span::styled(
-                        group.clone(),
-                        Style::default()
-                            .fg(colors.primary)
-                            .add_modifier(Modifier::BOLD),
-                    )]));
+                    let header_spans = if self.collapsible_groups {
+                        let chevron = if self.is_group_collapsed(group) {
+                            "⏷"
+                        } else {
+                            "⏶"
+                        };
+                        let chevron_width = chevron.width();
+                        let group = Self::truncate_to_width(
+                            group,
+                            (list_area_width as usize).saturating_sub(chevron_width),
+                        );
+                        let padding_len = (list_area_width as usize)
+                            .saturating_sub(group.width() + chevron_width);
+                        vec![
+                            Span::styled(
+                                group,
+                                Style::default()
+                                    .fg(colors.primary)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(" ".repeat(padding_len)),
+                            Span::styled(
+                                chevron,
+                                Style::default()
+                                    .fg(colors.primary)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]
+                    } else {
+                        vec![Span::styled(
+                            Self::truncate_to_width(group, list_area_width as usize),
+                            Style::default()
+                                .fg(colors.primary)
+                                .add_modifier(Modifier::BOLD),
+                        )]
+                    };
+
+                    content_lines.push(Line::from(header_spans));
+                }
+
+                if self.is_group_collapsed(group) {
+                    continue;
                 }
 
                 for item in items {
                     let is_selected = item_index == self.selected_index;
                     let is_pending_delete = self.pending_delete_id.as_ref() == Some(&item.id);
-                    let has_description = !item.description.is_empty();
-
-                    let mut spans: Vec<Span> = if let Some(tip) = &item.tip {
-                        let base_len = if has_description {
-                            item.name.width() + item.description.width() + 4
-                        } else {
-                            item.name.width() + 2
-                        };
-                        let tip_width = tip.width();
-                        let padding_len =
-                            (list_area_width as usize).saturating_sub(base_len + tip_width);
-                        let padding_after_tip = (list_area_width as usize)
-                            .saturating_sub(base_len + tip_width + 2 + padding_len);
-
-                        if has_description {
-                            vec![
-                                Span::raw(format!("  {}  ", item.name)),
-                                Span::styled(
-                                    item.description.clone(),
-                                    Style::default()
-                                        .fg(colors.text_weak)
-                                        .add_modifier(Modifier::DIM),
-                                ),
-                                Span::raw(" ".repeat(padding_len)),
-                                Span::styled(
-                                    tip,
-                                    Style::default()
-                                        .fg(colors.text)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(" ".repeat(padding_after_tip)),
-                            ]
-                        } else {
-                            vec![
-                                Span::raw(format!("  {}", item.name)),
-                                Span::raw(" ".repeat(padding_len)),
-                                Span::styled(
-                                    tip,
-                                    Style::default()
-                                        .fg(colors.text_weak)
-                                        .add_modifier(Modifier::DIM),
-                                ),
-                                Span::raw(" ".repeat(padding_after_tip)),
-                            ]
-                        }
-                    } else if has_description {
-                        let text_len = item.name.width() + item.description.width() + 4;
-                        let padding_len = (list_area_width as usize).saturating_sub(text_len);
-                        vec![
-                            Span::raw(format!("  {}  ", item.name)),
-                            Span::styled(
-                                item.description.clone(),
-                                Style::default()
-                                    .fg(colors.text_weak)
-                                    .add_modifier(Modifier::DIM),
-                            ),
-                            Span::raw(" ".repeat(padding_len)),
-                        ]
-                    } else {
-                        let text_len = item.name.width() + 2;
-                        let padding_len = (list_area_width as usize).saturating_sub(text_len);
-                        vec![
-                            Span::raw(format!("  {}", item.name)),
-                            Span::raw(" ".repeat(padding_len)),
-                        ]
-                    };
+                    let mut spans =
+                        Self::item_spans_for_width(item, list_area_width as usize, colors);
 
                     if is_selected {
                         let fg = contrast_text(colors.primary);
@@ -1035,35 +1330,62 @@ impl Dialog {
             colors.text_weak,
         );
 
-        let mut footer_spans = vec![];
-        for (i, action) in self.actions.iter().enumerate() {
-            if i > 0 {
-                footer_spans.push(Span::raw("  "));
+        let footer_paragraph = Paragraph::new(self.footer_lines(chunks[5].width, colors))
+            .alignment(ratatui::layout::Alignment::Left);
+        frame.render_widget(footer_paragraph, chunks[5]);
+    }
+
+    fn footer_lines(&self, width: u16, colors: ThemeColors) -> Vec<Line<'static>> {
+        if self.actions.is_empty() {
+            return vec![Line::from(vec![])];
+        }
+
+        let max_lines = self.footer_height() as usize;
+        let max_width = width.max(1) as usize;
+        let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+        let mut current: Vec<Span<'static>> = Vec::new();
+        let mut current_width = 0usize;
+
+        for action in &self.actions {
+            let action_width = action.label.width() + action.key.width() + 2;
+            let spacer_width = if current.is_empty() { 0 } else { 2 };
+
+            if !current.is_empty()
+                && current_width + spacer_width + action_width > max_width
+                && lines.len() + 1 < max_lines
+            {
+                lines.push(current);
+                current = Vec::new();
+                current_width = 0;
             }
-            footer_spans.push(Span::styled(
-                &action.label,
+
+            if !current.is_empty() {
+                current.push(Span::raw("  "));
+                current_width += 2;
+            }
+
+            current.push(Span::styled(
+                action.label.clone(),
                 Style::default()
                     .fg(colors.primary)
                     .add_modifier(Modifier::BOLD),
             ));
-            footer_spans.push(Span::raw("  "));
-            footer_spans.push(Span::styled(
-                &action.key,
+            current.push(Span::raw("  "));
+            current.push(Span::styled(
+                action.key.clone(),
                 Style::default()
                     .fg(colors.text_weak)
                     .add_modifier(Modifier::DIM),
             ));
+            current_width += action_width;
         }
 
-        let footer_line = if footer_spans.is_empty() {
-            Line::from(vec![])
-        } else {
-            Line::from(footer_spans)
-        };
+        lines.push(current);
+        while lines.len() < max_lines {
+            lines.push(Vec::new());
+        }
 
-        let footer_paragraph =
-            Paragraph::new(footer_line).alignment(ratatui::layout::Alignment::Left);
-        frame.render_widget(footer_paragraph, chunks[5]);
+        lines.into_iter().map(Line::from).collect()
     }
 }
 
@@ -1095,6 +1417,8 @@ impl Clone for Dialog {
             actions: self.actions.clone(),
             position: self.position,
             pending_delete_id: self.pending_delete_id.clone(),
+            collapsible_groups: self.collapsible_groups,
+            collapsed_groups: self.collapsed_groups.clone(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -1416,6 +1740,16 @@ mod tests {
         let selected = dialog.get_selected();
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().name, "Model A");
+    }
+
+    #[test]
+    fn test_dialog_select_index_clamped_uses_last_available_item() {
+        let mut dialog = Dialog::with_items("Models", create_test_items());
+
+        assert!(dialog.select_index_clamped(99));
+
+        assert_eq!(dialog.selected_index, 2);
+        assert_eq!(dialog.get_selected().unwrap().name, "Model C");
     }
 
     #[test]

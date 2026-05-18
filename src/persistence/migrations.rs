@@ -8,6 +8,10 @@ pub fn run_migrations(db: &mut Connection) -> Result<()> {
         migrate_to_v1(db)?;
     }
 
+    if current_version < 2 {
+        migrate_to_v2(db)?;
+    }
+
     Ok(())
 }
 
@@ -93,6 +97,56 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
 
     tx.execute(
         "INSERT INTO migrations (version, applied_at) VALUES (1, strftime('%s', 'now'))",
+        params![],
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_v2(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction()?;
+
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS workspaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_path TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            archived_at INTEGER,
+            last_opened_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workspaces_sort ON workspaces(sort_order ASC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_workspaces_path ON workspaces(root_path);
+        "#,
+    )?;
+
+    let _ = tx.execute("ALTER TABLE sessions ADD COLUMN workspace_id INTEGER", []);
+    let _ = tx.execute(
+        "ALTER TABLE sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'idle'",
+        [],
+    );
+    let _ = tx.execute(
+        "ALTER TABLE sessions ADD COLUMN active_generation_id TEXT",
+        [],
+    );
+    let _ = tx.execute("ALTER TABLE sessions ADD COLUMN last_error TEXT", []);
+    let _ = tx.execute("ALTER TABLE sessions ADD COLUMN pinned_at INTEGER", []);
+    let _ = tx.execute("ALTER TABLE sessions ADD COLUMN archived_at INTEGER", []);
+
+    tx.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions(workspace_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+        CREATE INDEX IF NOT EXISTS idx_sessions_pinned ON sessions(pinned_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);
+        "#,
+    )?;
+
+    tx.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at) VALUES (2, strftime('%s', 'now'))",
         params![],
     )?;
 

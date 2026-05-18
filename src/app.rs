@@ -42,7 +42,7 @@ use crate::views::session_rename_dialog::{
 };
 use crate::views::sessions_dialog::{
     handle_sessions_dialog_key_event, handle_sessions_dialog_mouse_event, init_sessions_dialog,
-    render_sessions_dialog, SessionsDialogAction,
+    render_sessions_dialog, SessionsDialogAction, SessionsDialogFilter,
 };
 use crate::views::suggestions_popup::{
     clear_suggestions, get_selected_suggestion, handle_suggestions_popup_key_event,
@@ -115,6 +115,36 @@ enum OpenAIOAuthTaskMessage {
     Failed(String),
 }
 
+#[derive(Debug)]
+struct SessionStreamState {
+    chunk_receiver: crate::llm::ChunkReceiver,
+    cancel_token: tokio_util::sync::CancellationToken,
+    streaming_model: Option<String>,
+    streaming_provider: Option<String>,
+    chat_len_before_assistant: usize,
+    tool_call_message_indices: std::collections::HashMap<String, usize>,
+    tool_call_order: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ClientSessionState {
+    chat: Chat,
+    input_draft: String,
+    stream: Option<SessionStreamState>,
+    unread_completed: bool,
+}
+
+impl ClientSessionState {
+    fn with_messages(messages: Vec<crate::session::types::Message>) -> Self {
+        Self {
+            chat: Chat::with_messages(messages),
+            input_draft: String::new(),
+            stream: None,
+            unread_completed: false,
+        }
+    }
+}
+
 pub struct App {
     pub running: bool,
     pub version: String,
@@ -161,16 +191,11 @@ pub struct App {
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
     pub is_streaming: bool,
-    chunk_sender: Option<crate::llm::ChunkSender>,
-    chunk_receiver: Option<crate::llm::ChunkReceiver>,
-    streaming_cancel_token: Option<tokio_util::sync::CancellationToken>,
+    session_view_states: std::collections::HashMap<String, ClientSessionState>,
+    session_spinner_frame: usize,
     last_frame_size: ratatui::layout::Rect,
-    streaming_model: Option<String>,
-    streaming_provider: Option<String>,
     last_animation_update: std::time::Instant,
-    streaming_chat_len_before_assistant: usize,
-    tool_call_message_indices: std::collections::HashMap<String, usize>,
-    tool_call_order: Vec<String>,
+    last_session_spinner_update: std::time::Instant,
     discovery: Option<crate::model::discovery::Discovery>,
     cached_usage_text: String,
     cached_usage_check: (usize, usize),
@@ -366,16 +391,11 @@ impl App {
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
             // Note: skills_dirs is legacy; skill loading is now handled by src/skill/mod.rs
             is_streaming: false,
-            chunk_sender: None,
-            chunk_receiver: None,
-            streaming_cancel_token: None,
+            session_view_states: std::collections::HashMap::new(),
+            session_spinner_frame: 0,
             last_frame_size: ratatui::layout::Rect::default(),
-            streaming_model: None,
-            streaming_provider: None,
             last_animation_update: std::time::Instant::now(),
-            streaming_chat_len_before_assistant: 0,
-            tool_call_message_indices: std::collections::HashMap::new(),
-            tool_call_order: Vec::new(),
+            last_session_spinner_update: std::time::Instant::now(),
             discovery,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0),
@@ -432,6 +452,149 @@ impl App {
         }
 
         None
+    }
+
+    fn completion_notification_stats_for_chat(chat: &Chat) -> Option<String> {
+        let message = chat.messages.iter().rev().find(|msg| {
+            msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
+        })?;
+
+        if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
+            let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
+            let total_ms = tn.saturating_sub(t0);
+            let decode_ms = tn.saturating_sub(t1);
+
+            let total_sec = total_ms as f64 / 1000.0;
+            let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
+                (output_tokens as f64) / (decode_ms as f64 / 1000.0)
+            } else {
+                0.0
+            };
+
+            return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
+        }
+
+        if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
+            let duration_sec = duration_ms as f64 / 1000.0;
+            let tokens_per_sec = if duration_ms > 0 {
+                (token_count as f64) / (duration_ms as f64 / 1000.0)
+            } else {
+                0.0
+            };
+
+            return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
+        }
+
+        None
+    }
+
+    fn is_active_session(&self, session_id: &str) -> bool {
+        self.session_manager
+            .get_current_session_id()
+            .is_some_and(|current| current == session_id)
+    }
+
+    fn ensure_session_view_state(&mut self, session_id: &str) {
+        if self.session_view_states.contains_key(session_id) {
+            return;
+        }
+
+        let messages = self
+            .session_manager
+            .get_session(session_id)
+            .map(|session| session.messages.clone())
+            .unwrap_or_default();
+
+        self.session_view_states.insert(
+            session_id.to_string(),
+            ClientSessionState::with_messages(messages),
+        );
+    }
+
+    fn save_active_session_view_state(&mut self) {
+        let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
+            return;
+        };
+
+        self.ensure_session_view_state(&session_id);
+
+        if let Some(state) = self.session_view_states.get_mut(&session_id) {
+            state.chat = self.chat_state.chat.clone();
+            state.input_draft = self.input.get_text();
+        }
+    }
+
+    fn load_session_view_state(&mut self, session_id: &str) {
+        self.ensure_session_view_state(session_id);
+
+        if let Some(state) = self.session_view_states.get_mut(session_id) {
+            self.chat_state.chat = state.chat.clone();
+            self.chat_state.chat.scroll_to_bottom_on_next_render();
+            self.input.set_text(&state.input_draft);
+            state.unread_completed = false;
+            self.is_streaming = state.stream.is_some();
+        } else {
+            self.chat_state.chat.clear();
+            self.input.clear();
+            self.is_streaming = false;
+        }
+
+        self.cached_usage_check = (usize::MAX, usize::MAX);
+    }
+
+    fn switch_to_session(&mut self, session_id: &str) -> bool {
+        self.save_active_session_view_state();
+        if !self.session_manager.switch_session(session_id) {
+            return false;
+        }
+        self.load_session_view_state(session_id);
+        self.base_focus = if self.chat_state.chat.messages.is_empty() && !self.is_streaming {
+            BaseFocus::Home
+        } else {
+            BaseFocus::Chat
+        };
+        true
+    }
+
+    fn create_new_session(&mut self, title: Option<String>) -> String {
+        self.save_active_session_view_state();
+        let session_id = self.session_manager.create_session(title);
+        self.session_view_states.insert(
+            session_id.clone(),
+            ClientSessionState::with_messages(Vec::new()),
+        );
+        self.chat_state.chat.clear();
+        self.input.clear();
+        self.base_focus = BaseFocus::Home;
+        self.is_streaming = false;
+        self.cached_usage_check = (usize::MAX, usize::MAX);
+        self.refresh_sessions_dialog();
+        session_id
+    }
+
+    fn chat_for_session_mut(&mut self, session_id: &str) -> Option<&mut Chat> {
+        if self.is_active_session(session_id) {
+            Some(&mut self.chat_state.chat)
+        } else {
+            self.ensure_session_view_state(session_id);
+            self.session_view_states
+                .get_mut(session_id)
+                .map(|state| &mut state.chat)
+        }
+    }
+
+    fn stream_for_session_mut(&mut self, session_id: &str) -> Option<&mut SessionStreamState> {
+        self.session_view_states
+            .get_mut(session_id)
+            .and_then(|state| state.stream.as_mut())
+    }
+
+    fn sync_active_streaming_flag(&mut self) {
+        self.is_streaming = self
+            .session_manager
+            .get_current_session_id()
+            .and_then(|id| self.session_view_states.get(id))
+            .is_some_and(|state| state.stream.is_some());
     }
 
     fn get_random_placeholder() -> String {
@@ -871,16 +1034,62 @@ impl App {
                         true
                     }
                     SessionsDialogAction::Select(id) => {
-                        self.session_manager.switch_session(&id);
-                        if let Some(session) = self.session_manager.get_session(&id) {
-                            self.chat_state.chat.clear();
-                            for message in &session.messages {
-                                self.chat_state.chat.add_message(message.clone());
-                            }
-                        }
-                        self.base_focus = BaseFocus::Chat;
+                        self.switch_to_session(&id);
                         self.sessions_dialog_state.dialog.hide();
                         self.overlay_focus = OverlayFocus::None;
+                        true
+                    }
+                    SessionsDialogAction::NewSession => {
+                        self.create_new_session(None);
+                        self.sessions_dialog_state.dialog.hide();
+                        self.overlay_focus = OverlayFocus::None;
+                        true
+                    }
+                    SessionsDialogAction::ChangeFilter(_) => {
+                        self.refresh_sessions_dialog();
+                        true
+                    }
+                    SessionsDialogAction::TogglePin(id) => {
+                        match self.session_manager.toggle_session_pin(&id) {
+                            Ok(true) => {
+                                push_toast(Toast::new("Pinned session", ToastLevel::Info, None))
+                            }
+                            Ok(false) => {
+                                push_toast(Toast::new("Unpinned session", ToastLevel::Info, None))
+                            }
+                            Err(err) => push_toast(Toast::new(
+                                format!("Failed to pin session: {:?}", err),
+                                ToastLevel::Error,
+                                None,
+                            )),
+                        }
+                        self.refresh_sessions_dialog();
+                        self.sessions_dialog_state.dialog.select_item_by_id(&id);
+                        true
+                    }
+                    SessionsDialogAction::Archive(id) => {
+                        let previous_selected_index =
+                            self.sessions_dialog_state.dialog.selected_index;
+                        let archived =
+                            self.sessions_dialog_state.filter != SessionsDialogFilter::Archived;
+                        let was_current = self
+                            .session_manager
+                            .get_current_session_id()
+                            .map_or(false, |current| *current == id);
+                        let _ = self.session_manager.set_session_archived(&id, archived);
+                        if was_current && archived {
+                            self.save_active_session_view_state();
+                            self.session_manager.clear_current_session();
+                            self.chat_state.chat.clear();
+                            self.input.clear();
+                            self.base_focus = BaseFocus::Home;
+                            self.sync_active_streaming_flag();
+                        }
+                        self.refresh_sessions_dialog();
+                        let _ = self
+                            .sessions_dialog_state
+                            .dialog
+                            .select_index_clamped(previous_selected_index);
                         true
                     }
                     SessionsDialogAction::Delete(id) => {
@@ -889,10 +1098,12 @@ impl App {
                             .get_current_session_id()
                             .map_or(false, |current| *current == id);
                         self.session_manager.delete_session(&id);
+                        self.session_view_states.remove(&id);
                         if let Some(pending) = crate::views::sessions_dialog::get_pending_delete(
                             &mut self.sessions_dialog_state,
                         ) {
                             self.session_manager.delete_session(&pending);
+                            self.session_view_states.remove(&pending);
                         }
                         let remaining = self.session_manager.list_sessions();
                         if remaining.is_empty() {
@@ -934,6 +1145,7 @@ impl App {
                     RenameAction::Submit(id, new_title) => {
                         let _ = self.session_manager.rename_session(&id, new_title);
                         self.refresh_sessions_dialog();
+                        let _ = self.sessions_dialog_state.dialog.select_item_by_id(&id);
                         self.sessions_dialog_state.dialog.show();
                         self.overlay_focus = OverlayFocus::SessionsDialog;
                         true
@@ -950,6 +1162,15 @@ impl App {
                             self.overlay_focus = OverlayFocus::PermissionDialog;
                         } else {
                             self.chat_state.chat.resume_streaming_tps_timer();
+                            if let Some(session_id) =
+                                self.session_manager.get_current_session_id().cloned()
+                            {
+                                let _ = self.session_manager.set_session_status(
+                                    &session_id,
+                                    crate::session::types::SessionStatus::Streaming,
+                                    None,
+                                );
+                            }
                             self.overlay_focus = OverlayFocus::None;
                         }
                         true
@@ -967,6 +1188,15 @@ impl App {
                             self.overlay_focus = OverlayFocus::QuestionDialog;
                         } else {
                             self.chat_state.chat.resume_streaming_tps_timer();
+                            if let Some(session_id) =
+                                self.session_manager.get_current_session_id().cloned()
+                            {
+                                let _ = self.session_manager.set_session_status(
+                                    &session_id,
+                                    crate::session::types::SessionStatus::Streaming,
+                                    None,
+                                );
+                            }
                             self.overlay_focus = OverlayFocus::None;
                         }
                         true
@@ -1139,6 +1369,10 @@ impl App {
                 self.which_key_state
                     .set_chat_active(self.base_focus == BaseFocus::Chat);
                 self.which_key_state.show();
+                true
+            }
+            KeyCode::Char('n') if key.modifiers == event::KeyModifiers::CONTROL => {
+                self.create_new_session(None);
                 true
             }
             KeyCode::Tab => {
@@ -1408,14 +1642,7 @@ impl App {
             let action = handle_sessions_dialog_mouse_event(&mut self.sessions_dialog_state, mouse);
             match action {
                 SessionsDialogAction::Select(id) => {
-                    self.session_manager.switch_session(&id);
-                    if let Some(session) = self.session_manager.get_session(&id) {
-                        self.chat_state.chat.clear();
-                        for message in &session.messages {
-                            self.chat_state.chat.add_message(message.clone());
-                        }
-                    }
-                    self.base_focus = BaseFocus::Chat;
+                    self.switch_to_session(&id);
                     self.sessions_dialog_state.dialog.hide();
                     self.overlay_focus = OverlayFocus::None;
                 }
@@ -1801,6 +2028,28 @@ impl App {
                     self.copy_session_transcript();
                     return;
                 }
+                if parsed.name == "sessions" {
+                    self.open_sessions_dialog();
+                    return;
+                }
+                if parsed.name == "new" {
+                    let title = if parsed.args.is_empty() {
+                        None
+                    } else {
+                        Some(parsed.args.join(" "))
+                    };
+                    self.create_new_session(title);
+                    return;
+                }
+                if parsed.name == "home" {
+                    self.save_active_session_view_state();
+                    self.chat_state.chat.clear();
+                    self.input.clear();
+                    self.base_focus = BaseFocus::Home;
+                    self.session_manager.clear_current_session();
+                    self.sync_active_streaming_flag();
+                    return;
+                }
                 if parsed.name == "themes" {
                     self.show_themes_dialog();
                     return;
@@ -1813,10 +2062,11 @@ impl App {
                     && parsed.args.is_empty()
                     && self.base_focus == BaseFocus::Chat
                 {
-                    if let Some(session) = self.session_manager.get_current_session() {
-                        let id = session.id.clone();
-                        let title = session.title.clone();
-                        drop(session);
+                    let session_info = self
+                        .session_manager
+                        .get_current_session()
+                        .map(|session| (session.id.clone(), session.title.clone()));
+                    if let Some((id, title)) = session_info {
                         self.session_rename_dialog_state
                             .set_colors(self.get_current_theme_colors());
                         self.session_rename_dialog_state.show(id, title);
@@ -1944,6 +2194,28 @@ impl App {
             self.copy_session_transcript();
             return;
         }
+        if parsed.name == "sessions" {
+            self.open_sessions_dialog();
+            return;
+        }
+        if parsed.name == "new" {
+            let title = if parsed.args.is_empty() {
+                None
+            } else {
+                Some(parsed.args.join(" "))
+            };
+            self.create_new_session(title);
+            return;
+        }
+        if parsed.name == "home" {
+            self.save_active_session_view_state();
+            self.chat_state.chat.clear();
+            self.input.clear();
+            self.base_focus = BaseFocus::Home;
+            self.session_manager.clear_current_session();
+            self.sync_active_streaming_flag();
+            return;
+        }
         if parsed.name == "themes" {
             self.show_themes_dialog();
             return;
@@ -1953,10 +2225,11 @@ impl App {
             return;
         }
         if parsed.name == "rename" && parsed.args.is_empty() && self.base_focus == BaseFocus::Chat {
-            if let Some(session) = self.session_manager.get_current_session() {
-                let id = session.id.clone();
-                let title = session.title.clone();
-                drop(session);
+            let session_info = self
+                .session_manager
+                .get_current_session()
+                .map(|session| (session.id.clone(), session.title.clone()));
+            if let Some((id, title)) = session_info {
                 self.session_rename_dialog_state
                     .set_colors(self.get_current_theme_colors());
                 self.session_rename_dialog_state.show(id, title);
@@ -2075,45 +2348,80 @@ impl App {
     }
 
     fn refresh_sessions_dialog(&mut self) {
-        use chrono::{DateTime, Local, Timelike, Utc};
-
         let mut sessions = self.session_manager.list_sessions();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let current_workspace_id = self.session_manager.current_workspace_id();
+        let filter = self.sessions_dialog_state.filter;
+
+        sessions.retain(|session| {
+            let is_archived = session.archived_at.is_some();
+            let is_running = session.status.is_active()
+                || self
+                    .session_view_states
+                    .get(&session.id)
+                    .is_some_and(|state| state.stream.is_some());
+
+            match filter {
+                SessionsDialogFilter::Active => {
+                    !is_archived && (session.workspace_id == current_workspace_id || is_running)
+                }
+                SessionsDialogFilter::All => !is_archived,
+                SessionsDialogFilter::Archived => is_archived,
+            }
+        });
+
+        sessions.sort_by(|a, b| {
+            a.workspace_id
+                .cmp(&b.workspace_id)
+                .then_with(|| b.pinned_at.is_some().cmp(&a.pinned_at.is_some()))
+                .then_with(|| b.status.is_active().cmp(&a.status.is_active()))
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
 
         let items: Vec<crate::ui::components::dialog::DialogItem> = sessions
             .into_iter()
             .map(|session| {
-                let date_group = {
-                    let datetime: DateTime<Local> = session.updated_at.into();
-                    let now: DateTime<Local> = Utc::now().into();
-                    let duration = now.signed_duration_since(datetime);
-
-                    if duration.num_days() == 0 {
-                        "Today".to_string()
-                    } else {
-                        datetime.format("%a %b %d %Y").to_string()
-                    }
+                let view_state = self.session_view_states.get(&session.id);
+                let is_streaming = view_state.is_some_and(|state| state.stream.is_some())
+                    || session.status.is_active();
+                let unread_completed = view_state.is_some_and(|state| state.unread_completed);
+                let marker = if is_streaming {
+                    format!("{} ", self.session_loading_glyph())
+                } else if unread_completed {
+                    "● ".to_string()
+                } else {
+                    String::new()
                 };
-
-                let time = {
-                    let datetime: DateTime<Local> = session.updated_at.into();
-                    let hour = datetime.time().hour12();
-                    let am_pm = if hour.0 { "PM" } else { "AM" };
-                    format!("{}:{:02} {}", hour.1, datetime.time().minute(), am_pm)
+                let pin = if session.pinned_at.is_some() {
+                    "★ "
+                } else {
+                    ""
+                };
+                let name = format!("{}{}{}", marker, pin, session.title);
+                let group = if session.workspace_name.trim().is_empty() {
+                    session.workspace_path.clone()
+                } else {
+                    session.workspace_name.clone()
                 };
 
                 crate::ui::components::dialog::DialogItem {
                     id: session.id.clone(),
-                    name: session.title.clone(),
-                    group: date_group,
+                    name,
+                    group,
                     description: String::new(),
-                    tip: Some(time),
-                    provider_id: String::new(),
+                    tip: Some(crate::utils::time::relative_readable_time_from_now(
+                        session.updated_at,
+                    )),
+                    provider_id: session.title.clone(),
                 }
             })
             .collect();
 
         self.sessions_dialog_state.refresh_items(items);
+    }
+
+    fn session_loading_glyph(&self) -> &'static str {
+        const SPINNER_CHARS: &[&str] = &["·", "✻", "✽", "✶", "✳", "✢"];
+        SPINNER_CHARS[self.session_spinner_frame % SPINNER_CHARS.len()]
     }
 
     fn open_timeline_dialog(&mut self) {
@@ -2488,7 +2796,21 @@ impl App {
             let _ = self
                 .sessions_dialog_state
                 .dialog
-                .select_item_by_key(&session_id, "");
+                .select_item_by_id(&session_id);
+        }
+
+        self.sessions_dialog_state.dialog.show();
+        self.overlay_focus = OverlayFocus::SessionsDialog;
+    }
+
+    fn open_sessions_dialog(&mut self) {
+        self.refresh_sessions_dialog();
+
+        if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
+            let _ = self
+                .sessions_dialog_state
+                .dialog
+                .select_item_by_id(&session_id);
         }
 
         self.sessions_dialog_state.dialog.show();
@@ -2862,259 +3184,405 @@ impl App {
     }
 
     fn cleanup_streaming(&mut self) {
-        self.chat_state.chat.resume_streaming_tps_timer();
-        self.permission_dialog_state.clear_with_deny();
-        self.question_dialog_state.clear_with_empty();
-        if self.overlay_focus == OverlayFocus::PermissionDialog {
-            self.overlay_focus = OverlayFocus::None;
+        if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
+            self.cleanup_streaming_for_session(&session_id);
         }
-        if self.overlay_focus == OverlayFocus::QuestionDialog {
-            self.overlay_focus = OverlayFocus::None;
+    }
+
+    fn cleanup_streaming_for_session(&mut self, session_id: &str) {
+        let was_active = self.is_active_session(session_id);
+
+        if let Some(state) = self.session_view_states.get_mut(session_id) {
+            state.stream = None;
         }
-        self.chunk_sender = None;
-        self.chunk_receiver = None;
-        self.streaming_cancel_token = None;
+
+        if was_active {
+            self.chat_state.chat.resume_streaming_tps_timer();
+            if self.overlay_focus == OverlayFocus::PermissionDialog {
+                self.permission_dialog_state.clear_with_deny();
+                self.overlay_focus = OverlayFocus::None;
+            }
+            if self.overlay_focus == OverlayFocus::QuestionDialog {
+                self.question_dialog_state.clear_with_empty();
+                self.overlay_focus = OverlayFocus::None;
+            }
+        }
+
+        self.sync_active_streaming_flag();
     }
 
     fn cancel_streaming(&mut self) {
-        if let Some(token) = &self.streaming_cancel_token {
-            token.cancel();
+        let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
+            return;
+        };
+
+        if let Some(stream) = self.stream_for_session_mut(&session_id) {
+            stream.cancel_token.cancel();
         }
     }
 
     pub fn update_animations(&mut self) {
         // Only update animations at 20fps (50ms intervals) regardless of render rate
         const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        const SESSION_SPINNER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(160);
 
         if self.last_animation_update.elapsed() >= ANIMATION_INTERVAL {
             self.chat_state.wave_spinner.update();
             self.home_state.tick();
             self.last_animation_update = std::time::Instant::now();
         }
+
+        if self.last_session_spinner_update.elapsed() >= SESSION_SPINNER_INTERVAL {
+            self.session_spinner_frame = (self.session_spinner_frame + 1) % 6;
+            self.last_session_spinner_update = std::time::Instant::now();
+        }
     }
 
     pub fn is_animation_running(&self) -> bool {
-        self.base_focus == BaseFocus::Home || self.is_streaming
+        self.base_focus == BaseFocus::Home
+            || self.is_streaming
+            || self
+                .session_view_states
+                .values()
+                .any(|state| state.stream.is_some())
+            || (self.overlay_focus == OverlayFocus::SessionsDialog
+                && self.sessions_dialog_state.dialog.is_visible())
     }
 
     pub fn process_streaming_chunks(&mut self) {
         self.process_openai_oauth_events();
 
-        let mut chunks = Vec::new();
+        let streaming_ids: Vec<String> = self
+            .session_view_states
+            .iter()
+            .filter_map(|(id, state)| state.stream.as_ref().map(|_| id.clone()))
+            .collect();
 
-        if let Some(receiver) = &mut self.chunk_receiver {
-            while let Ok(chunk) = receiver.try_recv() {
-                chunks.push(chunk);
+        for session_id in streaming_ids {
+            let mut chunks = Vec::new();
+
+            if let Some(stream) = self.stream_for_session_mut(&session_id) {
+                while let Ok(chunk) = stream.chunk_receiver.try_recv() {
+                    chunks.push(chunk);
+                }
+            }
+
+            for chunk in chunks {
+                self.process_streaming_chunk_for_session(&session_id, chunk);
             }
         }
 
-        for chunk in chunks {
-            match chunk {
-                crate::llm::ChunkMessage::Text(text) => {
-                    self.chat_state.chat.append_to_last_assistant(&text);
-                }
-                crate::llm::ChunkMessage::Reasoning(reasoning) => {
-                    self.chat_state
-                        .chat
-                        .append_reasoning_to_last_assistant(&reasoning);
-                }
-                crate::llm::ChunkMessage::Warning(msg) => {
-                    push_toast(Toast::new(msg, ToastLevel::Warning, None));
-                }
-                crate::llm::ChunkMessage::End => {
-                    // Capture end timestamp for TTFT/TPS/latency calculations.
-                    self.chat_state.chat.mark_streaming_end();
+        self.sync_active_streaming_flag();
 
-                    // Finalize streaming metrics from the chat's tracked values
-                    self.chat_state.chat.finalize_streaming_metrics();
+        if self.overlay_focus == OverlayFocus::SessionsDialog
+            && self.sessions_dialog_state.dialog.is_visible()
+            && !self.sessions_dialog_state.dialog.is_dragging_scrollbar
+        {
+            self.refresh_sessions_dialog();
+        }
+    }
 
-                    // Persist all new assistant/tool messages for this streaming turn.
-                    let start = self.streaming_chat_len_before_assistant;
-                    for msg in self.chat_state.chat.messages.iter_mut().skip(start) {
-                        match msg.role {
-                            crate::session::types::MessageRole::Assistant => {
-                                if !msg.is_complete {
-                                    msg.mark_complete();
-                                }
-                                msg.model = self.streaming_model.clone();
-                                msg.provider = self.streaming_provider.clone();
-                                let _ = self.session_manager.add_message_to_current_session(msg);
-                            }
-                            crate::session::types::MessageRole::Tool => {
-                                let _ = self.session_manager.add_message_to_current_session(msg);
-                            }
-                            _ => {}
-                        }
-                    }
-                    self.is_streaming = false;
-                    self.streaming_model = None;
-                    self.streaming_provider = None;
-                    self.cleanup_streaming();
-
-                    let completion_stats = self.completion_notification_stats();
-                    self.play_sound_event_with_notification_detail(
-                        crate::sound::SoundEvent::Complete,
-                        completion_stats.as_deref(),
-                    );
-                }
-                crate::llm::ChunkMessage::Failed(error) => {
-                    self.is_streaming = false;
-                    self.chat_state.chat.mark_streaming_end();
-                    self.chat_state.chat.finalize_streaming_metrics();
-                    self.play_sound_event(crate::sound::SoundEvent::Error);
-                    push_toast(Toast::new(
-                        format!("LLM error: {}", error),
-                        ToastLevel::Error,
-                        None,
-                    ));
-                    self.chat_state
-                        .chat
-                        .messages
-                        .truncate(self.streaming_chat_len_before_assistant);
-                    self.cleanup_streaming();
-                }
-                crate::llm::ChunkMessage::Cancelled => {
-                    self.is_streaming = false;
-                    self.chat_state.chat.mark_streaming_end();
-                    self.chat_state.chat.finalize_streaming_metrics();
-                    push_toast(Toast::new("Streaming cancelled", ToastLevel::Info, None));
-                    self.chat_state
-                        .chat
-                        .messages
-                        .truncate(self.streaming_chat_len_before_assistant);
-                    self.cleanup_streaming();
-                }
-                crate::llm::ChunkMessage::Metrics { .. } => {
-                    // Metrics are now calculated locally from streaming data
-                    // This arm is kept for backward compatibility but ignored
-                }
-                crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
-                    // Seal the current assistant segment so subsequent model text can appear
-                    // after tool rows (interleaved timeline).
-                    if let Some(idx) = self
-                        .chat_state
-                        .chat
-                        .messages
-                        .iter()
-                        .rposition(|m| m.role == crate::session::types::MessageRole::Assistant)
-                    {
-                        if let Some(msg) = self.chat_state.chat.messages.get_mut(idx) {
-                            if !msg.is_complete {
-                                msg.mark_complete();
-                            }
-                        }
-                    }
-
-                    for call in tool_calls {
-                        let args_value: serde_json::Value =
-                            serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| {
-                                serde_json::Value::String(call.function.arguments.clone())
-                            });
-
-                        let content = serde_json::json!({
-                            "id": call.id,
-                            "name": call.function.name,
-                            "status": "running",
-                            "args": args_value,
-                        })
-                        .to_string();
-
-                        self.chat_state
-                            .chat
-                            .add_message(crate::session::types::Message::tool(content));
-
-                        let idx = self.chat_state.chat.messages.len().saturating_sub(1);
-                        self.tool_call_message_indices.insert(call.id.clone(), idx);
-                        self.tool_call_order.push(call.id);
-                    }
-                }
-                crate::llm::ChunkMessage::ToolResult(result) => {
-                    if let Some(idx) = self
-                        .tool_call_message_indices
-                        .get(&result.tool_call_id)
-                        .copied()
-                    {
-                        if let Some(msg) = self.chat_state.chat.messages.get_mut(idx) {
-                            let mut v: serde_json::Value = serde_json::from_str(&msg.content)
-                                .unwrap_or_else(|_| serde_json::json!({}));
-                            v["id"] = serde_json::Value::String(result.tool_call_id.clone());
-                            v["name"] = serde_json::Value::String(result.name.clone());
-
-                            // Merge structured payloads from the AISDK bridge if present.
-                            if let Ok(payload) =
-                                serde_json::from_str::<serde_json::Value>(&result.content)
-                            {
-                                if payload.is_object() {
-                                    if v.get("status").is_none() {
-                                        v["status"] =
-                                            payload.get("status").cloned().unwrap_or_else(|| {
-                                                serde_json::Value::String("ok".to_string())
-                                            });
-                                    } else {
-                                        v["status"] = payload
-                                            .get("status")
-                                            .cloned()
-                                            .unwrap_or_else(|| v["status"].clone());
-                                    }
-                                    if let Some(title) = payload.get("title") {
-                                        v["title"] = title.clone();
-                                    }
-                                    if let Some(meta) = payload.get("metadata") {
-                                        v["metadata"] = meta.clone();
-                                    }
-                                    if let Some(line_count) = payload.get("line_count") {
-                                        v["line_count"] = line_count.clone();
-                                    }
-                                    if let Some(out) = payload.get("output_preview") {
-                                        v["output_preview"] = out.clone();
-                                    }
-                                } else {
-                                    v["status"] = serde_json::Value::String("ok".to_string());
-                                    v["output_preview"] =
-                                        serde_json::Value::String(result.content.clone());
-                                }
-                            } else {
-                                let status = if result.content.trim_start().starts_with("Error:") {
-                                    "error"
-                                } else {
-                                    "ok"
-                                };
-                                v["status"] = serde_json::Value::String(status.to_string());
-                                v["output_preview"] =
-                                    serde_json::Value::String(result.content.clone());
-                            }
-
-                            msg.content = v.to_string();
-                        }
-                    } else {
-                        let content = serde_json::json!({
-                            "id": result.tool_call_id,
-                            "name": result.name,
-                            "status": "ok",
-                            "output_preview": result.content,
-                        })
-                        .to_string();
-                        self.chat_state
-                            .chat
-                            .add_message(crate::session::types::Message::tool(content));
-                    }
-                }
-                crate::llm::ChunkMessage::PermissionRequest(prompt) => {
-                    self.play_sound_event(crate::sound::SoundEvent::Permission);
-                    self.chat_state.chat.pause_streaming_tps_timer();
-                    self.permission_dialog_state.enqueue(prompt);
-                    self.overlay_focus = OverlayFocus::PermissionDialog;
-                }
-                crate::llm::ChunkMessage::QuestionRequest {
-                    questions,
-                    response_tx,
-                } => {
-                    self.play_sound_event(crate::sound::SoundEvent::Question);
-                    self.chat_state.chat.pause_streaming_tps_timer();
-                    self.question_dialog_state.enqueue(questions, response_tx);
-                    self.overlay_focus = OverlayFocus::QuestionDialog;
+    fn process_streaming_chunk_for_session(
+        &mut self,
+        session_id: &str,
+        chunk: crate::llm::ChunkMessage,
+    ) {
+        match chunk {
+            crate::llm::ChunkMessage::Text(text) => {
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.append_to_last_assistant(&text);
                 }
             }
+            crate::llm::ChunkMessage::Reasoning(reasoning) => {
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.append_reasoning_to_last_assistant(&reasoning);
+                }
+            }
+            crate::llm::ChunkMessage::Warning(msg) => {
+                push_toast(Toast::new(msg, ToastLevel::Warning, None));
+            }
+            crate::llm::ChunkMessage::End => {
+                self.finish_streaming_session(session_id);
+            }
+            crate::llm::ChunkMessage::Failed(error) => {
+                self.fail_streaming_session(session_id, error);
+            }
+            crate::llm::ChunkMessage::Cancelled => {
+                self.cancelled_streaming_session(session_id);
+            }
+            crate::llm::ChunkMessage::Metrics { .. } => {}
+            crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
+                self.add_tool_calls_to_session(session_id, tool_calls);
+            }
+            crate::llm::ChunkMessage::ToolResult(result) => {
+                self.add_tool_result_to_session(session_id, result);
+            }
+            crate::llm::ChunkMessage::PermissionRequest(prompt) => {
+                let _ = self.session_manager.set_session_status(
+                    session_id,
+                    crate::session::types::SessionStatus::Waiting,
+                    None,
+                );
+                if !self.is_active_session(session_id) {
+                    let _ = self.switch_to_session(session_id);
+                }
+                self.play_sound_event(crate::sound::SoundEvent::Permission);
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.pause_streaming_tps_timer();
+                }
+                self.permission_dialog_state.enqueue(prompt);
+                self.overlay_focus = OverlayFocus::PermissionDialog;
+            }
+            crate::llm::ChunkMessage::QuestionRequest {
+                questions,
+                response_tx,
+            } => {
+                let _ = self.session_manager.set_session_status(
+                    session_id,
+                    crate::session::types::SessionStatus::Waiting,
+                    None,
+                );
+                if !self.is_active_session(session_id) {
+                    let _ = self.switch_to_session(session_id);
+                }
+                self.play_sound_event(crate::sound::SoundEvent::Question);
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.pause_streaming_tps_timer();
+                }
+                self.question_dialog_state.enqueue(questions, response_tx);
+                self.overlay_focus = OverlayFocus::QuestionDialog;
+            }
+        }
+    }
+
+    fn finish_streaming_session(&mut self, session_id: &str) {
+        let (start, model, provider) = match self.stream_for_session_mut(session_id) {
+            Some(stream) => (
+                stream.chat_len_before_assistant,
+                stream.streaming_model.clone(),
+                stream.streaming_provider.clone(),
+            ),
+            None => return,
+        };
+
+        let mut messages_to_persist = Vec::new();
+        let completion_stats = if let Some(chat) = self.chat_for_session_mut(session_id) {
+            chat.mark_streaming_end();
+            chat.finalize_streaming_metrics();
+
+            for msg in chat.messages.iter_mut().skip(start) {
+                match msg.role {
+                    crate::session::types::MessageRole::Assistant => {
+                        if !msg.is_complete {
+                            msg.mark_complete();
+                        }
+                        msg.model = model.clone();
+                        msg.provider = provider.clone();
+                        messages_to_persist.push(msg.clone());
+                    }
+                    crate::session::types::MessageRole::Tool => {
+                        messages_to_persist.push(msg.clone());
+                    }
+                    _ => {}
+                }
+            }
+
+            Self::completion_notification_stats_for_chat(chat)
+        } else {
+            None
+        };
+
+        for msg in &messages_to_persist {
+            let _ = self.session_manager.add_message_to_session(session_id, msg);
+        }
+
+        let _ = self.session_manager.set_session_status(
+            session_id,
+            crate::session::types::SessionStatus::Idle,
+            None,
+        );
+
+        if !self.is_active_session(session_id) {
+            if let Some(state) = self.session_view_states.get_mut(session_id) {
+                state.unread_completed = true;
+            }
+        }
+
+        self.cleanup_streaming_for_session(session_id);
+        self.play_sound_event_with_notification_detail(
+            crate::sound::SoundEvent::Complete,
+            completion_stats.as_deref(),
+        );
+    }
+
+    fn fail_streaming_session(&mut self, session_id: &str, error: String) {
+        let start = self
+            .stream_for_session_mut(session_id)
+            .map(|stream| stream.chat_len_before_assistant)
+            .unwrap_or(0);
+
+        if let Some(chat) = self.chat_for_session_mut(session_id) {
+            chat.mark_streaming_end();
+            chat.finalize_streaming_metrics();
+            chat.messages.truncate(start);
+        }
+
+        let _ = self.session_manager.set_session_status(
+            session_id,
+            crate::session::types::SessionStatus::Failed,
+            Some(&error),
+        );
+
+        self.play_sound_event(crate::sound::SoundEvent::Error);
+        push_toast(Toast::new(
+            format!("LLM error: {}", error),
+            ToastLevel::Error,
+            None,
+        ));
+        self.cleanup_streaming_for_session(session_id);
+    }
+
+    fn cancelled_streaming_session(&mut self, session_id: &str) {
+        let start = self
+            .stream_for_session_mut(session_id)
+            .map(|stream| stream.chat_len_before_assistant)
+            .unwrap_or(0);
+
+        if let Some(chat) = self.chat_for_session_mut(session_id) {
+            chat.mark_streaming_end();
+            chat.finalize_streaming_metrics();
+            chat.messages.truncate(start);
+        }
+
+        let _ = self.session_manager.set_session_status(
+            session_id,
+            crate::session::types::SessionStatus::Interrupted,
+            None,
+        );
+
+        push_toast(Toast::new("Streaming cancelled", ToastLevel::Info, None));
+        self.cleanup_streaming_for_session(session_id);
+    }
+
+    fn add_tool_calls_to_session(
+        &mut self,
+        session_id: &str,
+        tool_calls: Vec<crate::llm::ToolCall>,
+    ) {
+        let mut inserted = Vec::new();
+
+        if let Some(chat) = self.chat_for_session_mut(session_id) {
+            if let Some(idx) = chat
+                .messages
+                .iter()
+                .rposition(|m| m.role == crate::session::types::MessageRole::Assistant)
+            {
+                if let Some(msg) = chat.messages.get_mut(idx) {
+                    if !msg.is_complete {
+                        msg.mark_complete();
+                    }
+                }
+            }
+
+            for call in tool_calls {
+                let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()));
+
+                let call_id = call.id.clone();
+                let content = serde_json::json!({
+                    "id": call.id,
+                    "name": call.function.name,
+                    "status": "running",
+                    "args": args_value,
+                })
+                .to_string();
+
+                chat.add_message(crate::session::types::Message::tool(content));
+
+                let idx = chat.messages.len().saturating_sub(1);
+                inserted.push((call_id, idx));
+            }
+        }
+
+        if let Some(stream) = self.stream_for_session_mut(session_id) {
+            for (call_id, idx) in inserted {
+                stream
+                    .tool_call_message_indices
+                    .insert(call_id.clone(), idx);
+                stream.tool_call_order.push(call_id);
+            }
+        }
+    }
+
+    fn add_tool_result_to_session(&mut self, session_id: &str, result: crate::llm::ToolCallResult) {
+        let target_idx = self.stream_for_session_mut(session_id).and_then(|stream| {
+            stream
+                .tool_call_message_indices
+                .get(&result.tool_call_id)
+                .copied()
+        });
+
+        if let Some(chat) = self.chat_for_session_mut(session_id) {
+            if let Some(idx) = target_idx {
+                if let Some(msg) = chat.messages.get_mut(idx) {
+                    let mut v: serde_json::Value = serde_json::from_str(&msg.content)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    v["id"] = serde_json::Value::String(result.tool_call_id.clone());
+                    v["name"] = serde_json::Value::String(result.name.clone());
+
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&result.content)
+                    {
+                        if payload.is_object() {
+                            if v.get("status").is_none() {
+                                v["status"] = payload
+                                    .get("status")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::Value::String("ok".to_string()));
+                            } else {
+                                v["status"] = payload
+                                    .get("status")
+                                    .cloned()
+                                    .unwrap_or_else(|| v["status"].clone());
+                            }
+                            if let Some(title) = payload.get("title") {
+                                v["title"] = title.clone();
+                            }
+                            if let Some(meta) = payload.get("metadata") {
+                                v["metadata"] = meta.clone();
+                            }
+                            if let Some(line_count) = payload.get("line_count") {
+                                v["line_count"] = line_count.clone();
+                            }
+                            if let Some(out) = payload.get("output_preview") {
+                                v["output_preview"] = out.clone();
+                            }
+                        } else {
+                            v["status"] = serde_json::Value::String("ok".to_string());
+                            v["output_preview"] = serde_json::Value::String(result.content.clone());
+                        }
+                    } else {
+                        let status = if result.content.trim_start().starts_with("Error:") {
+                            "error"
+                        } else {
+                            "ok"
+                        };
+                        v["status"] = serde_json::Value::String(status.to_string());
+                        v["output_preview"] = serde_json::Value::String(result.content.clone());
+                    }
+
+                    msg.content = v.to_string();
+                    return;
+                }
+            }
+
+            let content = serde_json::json!({
+                "id": result.tool_call_id,
+                "name": result.name,
+                "status": "ok",
+                "output_preview": result.content,
+            })
+            .to_string();
+            chat.add_message(crate::session::types::Message::tool(content));
         }
     }
 
@@ -3124,26 +3592,28 @@ impl App {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use tokio::sync::mpsc;
 
+        let session_id = self
+            .session_manager
+            .get_current_session_id()
+            .cloned()
+            .ok_or_else(|| "No active session".to_string())?;
+        self.ensure_session_view_state(&session_id);
+
         let (sender, receiver) = mpsc::unbounded_channel();
         let sender_clone = sender.clone();
-        self.chunk_sender = Some(sender);
-        self.chunk_receiver = Some(receiver);
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        self.streaming_cancel_token = Some(cancel_token.clone());
 
         self.is_streaming = true;
 
         // Track the message boundary for this streaming turn so we can cleanly
         // roll back assistant/tool messages on failure or cancellation.
-        self.streaming_chat_len_before_assistant = self.chat_state.chat.messages.len();
-        self.tool_call_message_indices.clear();
-        self.tool_call_order.clear();
+        let chat_len_before_assistant = self.chat_state.chat.messages.len();
 
         // Capture the current model and provider at the start of streaming
         // so they don't change if the user switches models during streaming
-        self.streaming_model = Some(self.model.clone());
-        self.streaming_provider = Some(self.provider_name.clone());
+        let streaming_model = Some(self.model.clone());
+        let streaming_provider = Some(self.provider_name.clone());
         self.chat_state
             .chat
             .prepare_streaming_token_counter(&self.model);
@@ -3155,6 +3625,24 @@ impl App {
 
         // Initialize per-turn streaming timing primitives (T0).
         self.chat_state.chat.begin_streaming_turn();
+
+        if let Some(state) = self.session_view_states.get_mut(&session_id) {
+            state.stream = Some(SessionStreamState {
+                chunk_receiver: receiver,
+                cancel_token: cancel_token.clone(),
+                streaming_model: streaming_model.clone(),
+                streaming_provider: streaming_provider.clone(),
+                chat_len_before_assistant,
+                tool_call_message_indices: std::collections::HashMap::new(),
+                tool_call_order: Vec::new(),
+            });
+            state.unread_completed = false;
+        }
+        let _ = self.session_manager.set_session_status(
+            &session_id,
+            crate::session::types::SessionStatus::Streaming,
+            None,
+        );
 
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();
@@ -3235,7 +3723,7 @@ impl App {
         if !msg.is_empty() && self.base_focus == BaseFocus::Home {
             if self.session_manager.get_current_session_id().is_none() {
                 let session_title = Self::generate_title_from_message(&msg);
-                self.session_manager.create_session(Some(session_title));
+                self.create_new_session(Some(session_title));
             }
             let mut user_message = crate::session::types::Message::user(&msg);
             user_message.agent_mode = Some(self.agent.clone());
@@ -3257,6 +3745,9 @@ impl App {
                 ));
             }
         } else if !msg.is_empty() && self.base_focus == BaseFocus::Chat {
+            if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
+                self.ensure_session_view_state(&session_id);
+            }
             let mut user_message = crate::session::types::Message::user(&msg);
             user_message.agent_mode = Some(self.agent.clone());
             user_message.model = Some(self.model.clone());

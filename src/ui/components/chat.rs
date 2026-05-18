@@ -560,6 +560,12 @@ impl Chat {
         self.update_scrollbar();
     }
 
+    pub fn scroll_to_bottom_on_next_render(&mut self) {
+        self.scroll_offset = usize::MAX;
+        self.user_scrolled_up = false;
+        self.update_scrollbar();
+    }
+
     pub fn get_message_line_positions(
         &self,
         max_width: usize,

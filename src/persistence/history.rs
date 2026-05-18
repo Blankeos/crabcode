@@ -1,8 +1,19 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use super::{ensure_data_dir, get_data_dir, migrations::run_migrations};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Workspace {
+    pub id: i64,
+    pub root_path: String,
+    pub display_name: String,
+    pub sort_order: i64,
+    pub archived_at: Option<i64>,
+    pub last_opened_at: i64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -15,6 +26,12 @@ pub struct Session {
     pub total_cost: f64,
     pub total_time_sec: f64,
     pub avg_tokens_per_sec: f64,
+    pub workspace_id: i64,
+    pub workspace_path: String,
+    pub workspace_name: String,
+    pub status: String,
+    pub pinned_at: Option<i64>,
+    pub archived_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +62,9 @@ pub struct Message {
 
 pub struct HistoryDAO {
     conn: Connection,
+    current_workspace_id: i64,
+    current_workspace_path: String,
+    current_workspace_name: String,
 }
 
 impl HistoryDAO {
@@ -62,36 +82,119 @@ impl HistoryDAO {
             [],
         );
 
-        Ok(Self { conn })
+        let current_workspace_path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .to_string_lossy()
+            .to_string();
+        let current_workspace_name = workspace_display_name(&current_workspace_path);
+        let current_workspace_id =
+            ensure_workspace(&conn, &current_workspace_path, &current_workspace_name)?;
+
+        conn.execute(
+            "UPDATE sessions
+             SET workspace_id = ?1
+             WHERE workspace_id IS NULL",
+            params![current_workspace_id],
+        )?;
+        conn.execute(
+            "UPDATE workspaces
+             SET last_opened_at = strftime('%s', 'now')
+             WHERE id = ?1",
+            params![current_workspace_id],
+        )?;
+
+        Ok(Self {
+            conn,
+            current_workspace_id,
+            current_workspace_path,
+            current_workspace_name,
+        })
     }
 
     pub fn create_session(&self, identifier: &str, name: String) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO sessions (session_identifier, name) VALUES (?1, ?2)",
-            params![identifier, name],
+            "INSERT INTO sessions (session_identifier, name, workspace_id, status)
+             VALUES (?1, ?2, ?3, 'idle')",
+            params![identifier, name, self.current_workspace_id],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn list_sessions(&self) -> Result<Vec<Session>> {
+    pub fn current_workspace_id(&self) -> i64 {
+        self.current_workspace_id
+    }
+
+    pub fn current_workspace_path(&self) -> &str {
+        &self.current_workspace_path
+    }
+
+    pub fn current_workspace_name(&self) -> &str {
+        &self.current_workspace_name
+    }
+
+    pub fn list_workspaces(&self) -> Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_identifier, name, created_at, updated_at, total_tokens, total_cost, total_time_sec, avg_tokens_per_sec
-             FROM sessions ORDER BY updated_at DESC"
+            "SELECT id, root_path, display_name, sort_order, archived_at, last_opened_at
+             FROM workspaces
+             ORDER BY sort_order ASC, id ASC",
         )?;
 
-        let session_iter = stmt.query_map([], |row| {
-            Ok(Session {
+        let iter = stmt.query_map([], |row| {
+            Ok(Workspace {
                 id: row.get(0)?,
-                session_identifier: row.get(1)?,
-                name: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                total_tokens: row.get(5)?,
-                total_cost: row.get(6)?,
-                total_time_sec: row.get(7)?,
-                avg_tokens_per_sec: row.get(8)?,
+                root_path: row.get(1)?,
+                display_name: row.get(2)?,
+                sort_order: row.get(3)?,
+                archived_at: row.get(4)?,
+                last_opened_at: row.get(5)?,
             })
         })?;
+
+        let result: Result<Vec<_>, _> = iter.collect();
+        result.map_err(Into::into)
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.session_identifier, s.name, s.created_at, s.updated_at,
+                    s.total_tokens, s.total_cost, s.total_time_sec, s.avg_tokens_per_sec,
+                    COALESCE(s.workspace_id, ?1) AS workspace_id,
+                    COALESCE(w.root_path, ?2) AS workspace_path,
+                    COALESCE(w.display_name, ?3) AS workspace_name,
+                    COALESCE(s.status, 'idle') AS status,
+                    s.pinned_at,
+                    s.archived_at
+             FROM sessions s
+             LEFT JOIN workspaces w ON w.id = s.workspace_id
+             ORDER BY s.updated_at DESC",
+        )?;
+
+        let session_iter = stmt.query_map(
+            params![
+                self.current_workspace_id,
+                self.current_workspace_path.as_str(),
+                self.current_workspace_name.as_str()
+            ],
+            |row| {
+                Ok(Session {
+                    id: row.get(0)?,
+                    session_identifier: row.get(1)?,
+                    name: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    total_tokens: row.get(5)?,
+                    total_cost: row.get(6)?,
+                    total_time_sec: row.get(7)?,
+                    avg_tokens_per_sec: row.get(8)?,
+                    workspace_id: row.get(9)?,
+                    workspace_path: row.get(10)?,
+                    workspace_name: row.get(11)?,
+                    status: row.get(12)?,
+                    pinned_at: row.get(13)?,
+                    archived_at: row.get(14)?,
+                })
+            },
+        )?;
 
         let result: Result<Vec<_>, _> = session_iter.collect();
         result.map_err(Into::into)
@@ -99,11 +202,25 @@ impl HistoryDAO {
 
     pub fn get_session(&self, id: i64) -> Result<Option<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_identifier, name, created_at, updated_at, total_tokens, total_cost, total_time_sec, avg_tokens_per_sec
-             FROM sessions WHERE id = ?1"
+            "SELECT s.id, s.session_identifier, s.name, s.created_at, s.updated_at,
+                    s.total_tokens, s.total_cost, s.total_time_sec, s.avg_tokens_per_sec,
+                    COALESCE(s.workspace_id, ?2) AS workspace_id,
+                    COALESCE(w.root_path, ?3) AS workspace_path,
+                    COALESCE(w.display_name, ?4) AS workspace_name,
+                    COALESCE(s.status, 'idle') AS status,
+                    s.pinned_at,
+                    s.archived_at
+             FROM sessions s
+             LEFT JOIN workspaces w ON w.id = s.workspace_id
+             WHERE s.id = ?1",
         )?;
 
-        let mut rows = stmt.query(params![id])?;
+        let mut rows = stmt.query(params![
+            id,
+            self.current_workspace_id,
+            self.current_workspace_path.as_str(),
+            self.current_workspace_name.as_str()
+        ])?;
         if let Some(row) = rows.next()? {
             Ok(Some(Session {
                 id: row.get(0)?,
@@ -115,6 +232,12 @@ impl HistoryDAO {
                 total_cost: row.get(6)?,
                 total_time_sec: row.get(7)?,
                 avg_tokens_per_sec: row.get(8)?,
+                workspace_id: row.get(9)?,
+                workspace_path: row.get(10)?,
+                workspace_name: row.get(11)?,
+                status: row.get(12)?,
+                pinned_at: row.get(13)?,
+                archived_at: row.get(14)?,
             }))
         } else {
             Ok(None)
@@ -240,6 +363,77 @@ impl HistoryDAO {
         Ok(())
     }
 
+    pub fn set_session_status(
+        &self,
+        id: i64,
+        status: &str,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions
+             SET status = ?1,
+                 last_error = ?2,
+                 updated_at = strftime('%s', 'now')
+             WHERE id = ?3",
+            params![status, last_error, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_session_pinned(&self, id: i64, pinned: bool) -> Result<Option<i64>> {
+        if pinned {
+            self.conn.execute(
+                "UPDATE sessions
+                 SET pinned_at = strftime('%s', 'now'),
+                     updated_at = strftime('%s', 'now')
+                 WHERE id = ?1",
+                params![id],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE sessions
+                 SET pinned_at = NULL,
+                     updated_at = strftime('%s', 'now')
+                 WHERE id = ?1",
+                params![id],
+            )?;
+        }
+
+        let pinned_at = self.conn.query_row(
+            "SELECT pinned_at FROM sessions WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        Ok(pinned_at)
+    }
+
+    pub fn set_session_archived(&self, id: i64, archived: bool) -> Result<Option<i64>> {
+        if archived {
+            self.conn.execute(
+                "UPDATE sessions
+                 SET archived_at = strftime('%s', 'now'),
+                     updated_at = strftime('%s', 'now')
+                 WHERE id = ?1",
+                params![id],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE sessions
+                 SET archived_at = NULL,
+                     updated_at = strftime('%s', 'now')
+                 WHERE id = ?1",
+                params![id],
+            )?;
+        }
+
+        let archived_at = self.conn.query_row(
+            "SELECT archived_at FROM sessions WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        Ok(archived_at)
+    }
+
     pub fn get_full_session(&self, id: i64) -> Result<Option<(Session, Vec<Message>)>> {
         let session = self.get_session(id)?;
         if let Some(session) = session {
@@ -249,4 +443,38 @@ impl HistoryDAO {
             Ok(None)
         }
     }
+}
+
+fn workspace_display_name(root_path: &str) -> String {
+    Path::new(root_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(root_path)
+        .to_string()
+}
+
+fn ensure_workspace(conn: &Connection, root_path: &str, display_name: &str) -> Result<i64> {
+    if let Ok(id) = conn.query_row(
+        "SELECT id FROM workspaces WHERE root_path = ?1",
+        params![root_path],
+        |row| row.get::<_, i64>(0),
+    ) {
+        return Ok(id);
+    }
+
+    let next_sort_order = conn
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspaces",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+
+    conn.execute(
+        "INSERT INTO workspaces (root_path, display_name, sort_order)
+         VALUES (?1, ?2, ?3)",
+        params![root_path, display_name, next_sort_order],
+    )?;
+    Ok(conn.last_insert_rowid())
 }
