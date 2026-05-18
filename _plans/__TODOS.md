@@ -68,3 +68,5 @@
 - [x] Scroll like herdr. Stuff I like: as thin, as tall (no arrows - currently ours also has no arrows but it was a hack, we just remove the arrows with "" chars so they still take a height. The one from herdr looks like it's a pure scrollbar thumb without arrows and thin enough that I like)
 
 - [x] Highlight enhancements, if I click 1 place, then shift+click another. Treat it like the highlight in the browser that doesn't need a drag. Whatever I last clicked (without shift+click), treat it as the anchor for the "select start", and then whatever I shift+click after, treat it as a "select end" and autohighlight that part. (not supported)
+
+- [ ] Remote usage.
