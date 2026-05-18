@@ -69,6 +69,23 @@ pub struct Chat {
 const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
 const TOOL_RESULT_MAX_SCREEN_LINES: usize = 8;
 
+#[derive(Debug, Clone)]
+struct ParsedToolMessage {
+    name: String,
+    status: String,
+    args: Option<JsonValue>,
+    metadata: Option<JsonValue>,
+    output_preview: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExplorationToolItem {
+    label: &'static str,
+    target: String,
+    active: bool,
+}
+
 fn now_epoch_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -80,6 +97,150 @@ fn now_epoch_ms() -> u64 {
 fn estimate_tokens(text: &str) -> usize {
     let chars = text.chars().count();
     (chars.saturating_add(3)) / 4
+}
+
+fn parse_tool_message(content: &str) -> Option<ParsedToolMessage> {
+    let JsonValue::Object(obj) = serde_json::from_str::<JsonValue>(content).ok()? else {
+        return None;
+    };
+
+    Some(ParsedToolMessage {
+        name: obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tool")
+            .to_string(),
+        status: obj
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ok")
+            .to_string(),
+        args: obj.get("args").cloned(),
+        metadata: obj.get("metadata").cloned(),
+        output_preview: obj
+            .get("output_preview")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        title: obj
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
+fn arg_string<'a>(
+    obj: Option<&'a serde_json::Map<String, JsonValue>>,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| obj.and_then(|o| o.get(*key)).and_then(|v| v.as_str()))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn strip_tool_title<'a>(title: Option<&'a str>, label: &str) -> Option<&'a str> {
+    let prefix = format!("{}:", label);
+    title
+        .and_then(|value| value.strip_prefix(&prefix))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn display_path(raw: &str, basename_only: bool) -> String {
+    let trimmed = raw.trim();
+    let path = std::path::Path::new(trimmed);
+
+    if basename_only {
+        return path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(trimmed)
+            .to_string();
+    }
+
+    if path.is_absolute() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(rel) = path.strip_prefix(cwd) {
+                let rendered = rel.to_string_lossy();
+                return if rendered.is_empty() {
+                    ".".to_string()
+                } else {
+                    rendered.into_owned()
+                };
+            }
+        }
+    }
+
+    trimmed.to_string()
+}
+
+fn search_target(
+    args_obj: Option<&serde_json::Map<String, JsonValue>>,
+    title: Option<&str>,
+    title_label: &str,
+) -> Option<String> {
+    let query = arg_string(args_obj, &["pattern", "query"])
+        .or_else(|| strip_tool_title(title, title_label))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let path = arg_string(args_obj, &["path"]);
+    let include = arg_string(args_obj, &["include"]);
+
+    let mut target = query.to_string();
+    if let Some(path) = path.filter(|path| *path != ".") {
+        target.push_str(" in ");
+        target.push_str(&display_path(path, false));
+    }
+    if let Some(include) = include {
+        target.push_str(" include=");
+        target.push_str(include);
+    }
+
+    Some(target)
+}
+
+fn exploration_tool_item(info: &ParsedToolMessage) -> Option<ExplorationToolItem> {
+    if info.status == "error" {
+        return None;
+    }
+
+    let args_obj = info.args.as_ref().and_then(|v| v.as_object());
+    let title = info.title.as_deref();
+    let active = matches!(info.status.as_str(), "running" | "pending");
+
+    let (label, target) = match info.name.as_str() {
+        "read" => {
+            let target = arg_string(args_obj, &["file_path", "filePath", "path"])
+                .or_else(|| strip_tool_title(title, "Read"))
+                .map(|path| display_path(path, true))?;
+            ("Read", target)
+        }
+        "list" => {
+            let target = arg_string(args_obj, &["path"])
+                .or_else(|| strip_tool_title(title, "List"))
+                .map(|path| display_path(path, false))?;
+            ("List", target)
+        }
+        "glob" => ("Search", search_target(args_obj, title, "Glob")?),
+        "grep" => ("Search", search_target(args_obj, title, "Grep")?),
+        _ => return None,
+    };
+
+    Some(ExplorationToolItem {
+        label,
+        target,
+        active,
+    })
+}
+
+fn exploration_tool_item_for_message(message: &Message) -> Option<ExplorationToolItem> {
+    if message.role != MessageRole::Tool {
+        return None;
+    }
+
+    parse_tool_message(&message.content)
+        .as_ref()
+        .and_then(exploration_tool_item)
 }
 
 impl Chat {
@@ -293,7 +454,7 @@ impl Chat {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Bump this whenever rendering logic changes (tables, markdown, etc.)
-        const RENDER_VERSION: u64 = 3;
+        const RENDER_VERSION: u64 = 4;
         RENDER_VERSION.hash(&mut h);
         colors.hash(&mut h);
         self.messages.len().hash(&mut h);
@@ -572,31 +733,8 @@ impl Chat {
         model: &str,
         colors: &ThemeColors,
     ) -> Vec<usize> {
-        let mut positions = Vec::with_capacity(self.messages.len());
-        let mut line = 0;
-        let message_count = self.messages.len();
-        let streaming_idx = self.streaming_assistant_idx();
-        let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
-
-        for (idx, message) in self.messages.iter().enumerate() {
-            positions.push(line);
-            let attached_to_assistant =
-                idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
-            let message_lines = self.format_message(
-                message,
-                max_width,
-                idx,
-                message_count,
-                streaming_content,
-                streaming_idx,
-                model,
-                colors,
-                attached_to_assistant,
-            );
-            line += message_lines.len();
-        }
-
-        positions
+        self.build_all_lines_with_positions(max_width, model, colors)
+            .1
     }
 
     pub fn scroll_to_message_index(&mut self, idx: usize) {
@@ -875,36 +1013,17 @@ impl Chat {
         let fingerprint = self.compute_fingerprint(max_width, colors);
         let cache_valid = !self.cached_lines.is_empty() && fingerprint == self.cached_fingerprint;
 
-        let mut positions: Vec<usize>;
+        let positions: Vec<usize>;
         let mut all_lines: Vec<Line<'static>>;
 
         if cache_valid {
             positions = self.cached_positions.clone();
             all_lines = self.cached_lines.clone();
         } else {
-            let message_count = self.messages.len();
-            let streaming_idx = self.streaming_assistant_idx();
-            let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
-
-            positions = Vec::with_capacity(message_count);
-            all_lines = Vec::new();
-
-            for (idx, message) in self.messages.iter().enumerate() {
-                positions.push(all_lines.len());
-                let attached = idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
-                let message_lines = self.format_message(
-                    message,
-                    max_width,
-                    idx,
-                    message_count,
-                    streaming_content,
-                    streaming_idx,
-                    model,
-                    colors,
-                    attached,
-                );
-                all_lines.extend(message_lines.into_iter().map(line_to_static));
-            }
+            let (message_lines, message_positions) =
+                self.build_all_lines_with_positions(max_width, model, colors);
+            positions = message_positions;
+            all_lines = message_lines.into_iter().map(line_to_static).collect();
 
             self.cached_lines = all_lines.clone();
             self.cached_positions = positions.clone();
@@ -1013,12 +1132,36 @@ impl Chat {
         model: &'a str,
         colors: &'a ThemeColors,
     ) -> Vec<Line<'a>> {
+        self.build_all_lines_with_positions(max_width, model, colors)
+            .0
+    }
+
+    fn build_all_lines_with_positions<'a>(
+        &'a self,
+        max_width: usize,
+        model: &'a str,
+        colors: &'a ThemeColors,
+    ) -> (Vec<Line<'a>>, Vec<usize>) {
         let mut all_lines: Vec<Line<'a>> = Vec::new();
         let message_count = self.messages.len();
         let streaming_idx = self.streaming_assistant_idx();
         let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
+        let mut positions = Vec::with_capacity(message_count);
+        let mut idx = 0usize;
 
-        for (idx, message) in self.messages.iter().enumerate() {
+        while idx < self.messages.len() {
+            positions.push(all_lines.len());
+            if let Some(items) = self.exploration_group_at(idx) {
+                let group_start = all_lines.len();
+                let group_len = items.len();
+                all_lines.extend(self.format_exploration_group(&items, max_width, colors));
+                all_lines.push(Line::from(""));
+                positions.extend(std::iter::repeat(group_start).take(group_len.saturating_sub(1)));
+                idx += group_len;
+                continue;
+            }
+
+            let message = &self.messages[idx];
             let attached_to_assistant =
                 idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
             let message_lines = self.format_message(
@@ -1033,9 +1176,107 @@ impl Chat {
                 attached_to_assistant,
             );
             all_lines.extend(message_lines);
+            idx += 1;
         }
 
-        all_lines
+        (all_lines, positions)
+    }
+
+    fn exploration_group_at(&self, start: usize) -> Option<Vec<ExplorationToolItem>> {
+        let first = exploration_tool_item_for_message(self.messages.get(start)?)?;
+        let mut items = vec![first];
+
+        for message in self.messages.iter().skip(start + 1) {
+            let Some(item) = exploration_tool_item_for_message(message) else {
+                break;
+            };
+            items.push(item);
+        }
+
+        Some(items)
+    }
+
+    fn format_exploration_group<'a>(
+        &'a self,
+        items: &[ExplorationToolItem],
+        max_width: usize,
+        colors: &'a ThemeColors,
+    ) -> Vec<Line<'a>> {
+        fn push_wrapped<'a>(
+            out: &mut Vec<Line<'a>>,
+            line: Line<'static>,
+            max_width: usize,
+            subsequent_indent: Line<'static>,
+        ) {
+            out.extend(wrap_styled_line(
+                &line,
+                WrapOptions::new(max_width.max(1)).subsequent_indent(subsequent_indent),
+            ));
+        }
+
+        let mut out = Vec::new();
+        if items.is_empty() {
+            return out;
+        }
+
+        let active = items.iter().any(|item| item.active);
+        let display_items = if items.iter().all(|item| item.label == "Read") {
+            let mut targets: Vec<String> = Vec::new();
+            for item in items {
+                if !targets.iter().any(|target| target == &item.target) {
+                    targets.push(item.target.clone());
+                }
+            }
+            vec![ExplorationToolItem {
+                label: "Read",
+                target: targets.join(", "),
+                active,
+            }]
+        } else {
+            items.to_vec()
+        };
+        let marker = if active { "~" } else { "•" };
+        let heading = if active { "Exploring" } else { "Explored" };
+
+        let gutter_style = Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM);
+        let title_style = Style::default()
+            .fg(colors.text)
+            .add_modifier(Modifier::BOLD);
+        let action_style = Style::default()
+            .fg(colors.accent)
+            .add_modifier(Modifier::BOLD);
+        let target_style = Style::default().fg(colors.text);
+
+        out.push(Line::from(vec![
+            Span::styled(marker, gutter_style),
+            Span::raw(" "),
+            Span::styled(heading, title_style),
+        ]));
+
+        for (idx, item) in display_items.iter().enumerate() {
+            let branch = if idx == 0 { "  └ " } else { "    " };
+            let indent_width =
+                UnicodeWidthStr::width(branch) + UnicodeWidthStr::width(item.label) + 1;
+            let mut spans = vec![
+                Span::styled(branch.to_string(), gutter_style),
+                Span::styled(item.label.to_string(), action_style),
+            ];
+            if !item.target.is_empty() {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(item.target.clone(), target_style));
+            }
+
+            push_wrapped(
+                &mut out,
+                Line::from(spans),
+                max_width,
+                Line::from(Span::styled(" ".repeat(indent_width), gutter_style)),
+            );
+        }
+
+        out
     }
 
     fn format_message<'a>(
@@ -1272,68 +1513,6 @@ impl Chat {
             }
         }
 
-        fn arg_string<'v>(
-            obj: Option<&'v serde_json::Map<String, JsonValue>>,
-            keys: &[&str],
-        ) -> Option<&'v str> {
-            keys.iter()
-                .find_map(|key| obj.and_then(|o| o.get(*key)).and_then(|v| v.as_str()))
-                .filter(|value| !value.trim().is_empty())
-        }
-
-        fn strip_tool_title<'v>(title: Option<&'v str>, label: &str) -> Option<&'v str> {
-            let prefix = format!("{}:", label);
-            title
-                .and_then(|value| value.strip_prefix(&prefix))
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        }
-
-        fn display_path(raw: &str, basename_only: bool) -> String {
-            let trimmed = raw.trim();
-            let path = std::path::Path::new(trimmed);
-
-            if basename_only {
-                return path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(trimmed)
-                    .to_string();
-            }
-
-            if path.is_absolute() {
-                if let Ok(cwd) = std::env::current_dir() {
-                    if let Ok(rel) = path.strip_prefix(cwd) {
-                        let rendered = rel.to_string_lossy();
-                        return if rendered.is_empty() {
-                            ".".to_string()
-                        } else {
-                            rendered.into_owned()
-                        };
-                    }
-                }
-            }
-
-            trimmed.to_string()
-        }
-
-        fn explored_tool_target(
-            name: &str,
-            args_obj: Option<&serde_json::Map<String, JsonValue>>,
-            title: Option<&str>,
-        ) -> Option<String> {
-            match name {
-                "read" => arg_string(args_obj, &["file_path", "filePath", "path"])
-                    .or_else(|| strip_tool_title(title, "Read"))
-                    .map(|path| display_path(path, true)),
-                "list" => arg_string(args_obj, &["path"])
-                    .or_else(|| strip_tool_title(title, "List"))
-                    .map(|path| display_path(path, false)),
-                _ => None,
-            }
-        }
-
         fn question_values(
             args: &Option<JsonValue>,
             metadata: &Option<JsonValue>,
@@ -1490,30 +1669,17 @@ impl Chat {
         let indent = "";
         let mut out: Vec<Line<'a>> = Vec::new();
 
-        let parsed: Option<JsonValue> = serde_json::from_str(&message.content).ok();
+        let parsed = parse_tool_message(&message.content);
         let (name, status, args, metadata, output_preview, title) =
-            if let Some(JsonValue::Object(obj)) = parsed {
-                let name = obj
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("tool")
-                    .to_string();
-                let status = obj
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("ok")
-                    .to_string();
-                let args = obj.get("args").cloned();
-                let metadata = obj.get("metadata").cloned();
-                let output_preview = obj
-                    .get("output_preview")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let title = obj
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                (name, status, args, metadata, output_preview, title)
+            if let Some(info) = parsed.as_ref() {
+                (
+                    info.name.clone(),
+                    info.status.clone(),
+                    info.args.clone(),
+                    info.metadata.clone(),
+                    info.output_preview.clone(),
+                    info.title.clone(),
+                )
             } else {
                 (
                     "tool".to_string(),
@@ -1547,46 +1713,8 @@ impl Chat {
         };
 
         let args_obj = args.as_ref().and_then(|v| v.as_object());
-        if status != "error" {
-            if let Some(target) = explored_tool_target(&name, args_obj, title.as_deref()) {
-                let action_label = if name == "read" { "Read" } else { "List" };
-                let gutter_style = Style::default()
-                    .fg(colors.text_weak)
-                    .add_modifier(Modifier::DIM);
-                let title_style = Style::default()
-                    .fg(colors.text)
-                    .add_modifier(Modifier::BOLD);
-                let action_style = Style::default()
-                    .fg(colors.accent)
-                    .add_modifier(Modifier::BOLD);
-                let target_style = Style::default().fg(colors.text);
-                let marker = if status == "running" { "~" } else { "•" };
-                let heading = if status == "running" {
-                    "Exploring"
-                } else {
-                    "Explored"
-                };
-
-                out.push(Line::from(vec![
-                    Span::styled(marker, gutter_style),
-                    Span::raw(" "),
-                    Span::styled(heading, title_style),
-                ]));
-
-                push_wrapped(
-                    &mut out,
-                    Line::from(vec![
-                        Span::styled("  └ ", gutter_style),
-                        Span::styled(action_label, action_style),
-                        Span::raw(" "),
-                        Span::styled(target, target_style),
-                    ]),
-                    max_width,
-                    Line::from(Span::styled("    ", gutter_style)),
-                );
-
-                return out;
-            }
+        if let Some(item) = parsed.as_ref().and_then(exploration_tool_item) {
+            return self.format_exploration_group(&[item], max_width, colors);
         }
 
         let args_str = if name == "glob" {
@@ -2370,6 +2498,78 @@ mod tests {
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
         assert_eq!(rendered, vec!["• Explored", "  └ List src/ui"]);
+    }
+
+    #[test]
+    fn test_adjacent_context_tools_render_as_one_explored_group() {
+        let mut chat = Chat::new();
+        chat.add_message(Message::tool(
+            serde_json::json!({
+                "name": "list",
+                "status": "ok",
+                "args": { "path": ". " },
+                "output_preview": "README.md\nsrc/",
+            })
+            .to_string(),
+        ));
+        chat.add_message(Message::tool(
+            serde_json::json!({
+                "name": "read",
+                "status": "ok",
+                "args": { "file_path": "/Users/carlo/Desktop/Projects/crabcode/README.md" },
+                "output_preview": "00001| # CrabCode",
+            })
+            .to_string(),
+        ));
+        chat.add_message(Message::tool(
+            serde_json::json!({
+                "name": "grep",
+                "status": "ok",
+                "args": { "pattern": "opencode|codex", "path": "references" },
+                "output_preview": "references/codex",
+            })
+            .to_string(),
+        ));
+        let colors = test_colors();
+
+        let lines = chat.build_all_lines(100, "model", &colors);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "• Explored",
+                "  └ List .",
+                "    Read README.md",
+                "    Search opencode|codex in references",
+                ""
+            ]
+        );
+    }
+
+    #[test]
+    fn test_read_only_context_group_collapses_targets() {
+        let mut chat = Chat::new();
+        for file in ["README.md", "AGENTS.md"] {
+            chat.add_message(Message::tool(
+                serde_json::json!({
+                    "name": "read",
+                    "status": "ok",
+                    "args": { "file_path": format!("/repo/{file}") },
+                    "output_preview": "content",
+                })
+                .to_string(),
+            ));
+        }
+        let colors = test_colors();
+
+        let lines = chat.build_all_lines(100, "model", &colors);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec!["• Explored", "  └ Read README.md, AGENTS.md", ""]
+        );
     }
 
     #[test]
