@@ -82,7 +82,7 @@
 
 - [x] compaction
 
-- [ ] More mouse-friendly chat input box floating popovers i.e. `@` for files. `/` for commands. Requirements:
+- [x] More mouse-friendly chat input box floating popovers i.e. `@` for files. `/` for commands. Requirements:
   - scroll w/ my mouse (no thumbs, just scroll)
   - click the item with my mouse
 

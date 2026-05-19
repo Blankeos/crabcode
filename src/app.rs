@@ -46,7 +46,8 @@ use crate::views::sessions_dialog::{
 };
 use crate::views::suggestions_popup::{
     clear_suggestions, get_selected_suggestion, handle_suggestions_popup_key_event,
-    init_suggestions_popup, is_suggestions_visible, render_suggestions_popup, set_suggestions,
+    handle_suggestions_popup_mouse_event, init_suggestions_popup, is_suggestions_visible,
+    render_suggestions_popup, set_suggestions,
 };
 use crate::views::themes_dialog::{
     handle_themes_dialog_key_event, handle_themes_dialog_mouse_event, init_themes_dialog,
@@ -1718,6 +1719,47 @@ impl App {
         }
     }
 
+    fn suggestions_popup_anchor_area(&self) -> ratatui::layout::Rect {
+        let main_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
+            .split(self.last_frame_size);
+        let input_height = self.input.get_height();
+        let input_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints(
+                [
+                    ratatui::layout::Constraint::Min(0),
+                    ratatui::layout::Constraint::Length(input_height),
+                ]
+                .as_ref(),
+            )
+            .split(main_chunks[0]);
+
+        input_chunks[1]
+    }
+
+    fn handle_input_mouse_event(&mut self, mouse: MouseEvent) -> bool {
+        if !self.input.handle_mouse_event(mouse) {
+            return false;
+        }
+
+        if matches!(
+            mouse.kind,
+            ratatui::crossterm::event::MouseEventKind::Up(
+                ratatui::crossterm::event::MouseButton::Left
+            )
+        ) {
+            let text = self.input.get_selected_text();
+            if !text.is_empty() {
+                let _ = crate::utils::clipboard::copy_text(&text);
+                push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
+            }
+        }
+        self.update_suggestions();
+        true
+    }
+
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
             let _ = crate::logging::log(&format!(
@@ -1948,6 +1990,32 @@ impl App {
             {
                 self.close_message_actions();
             }
+        } else if self.overlay_focus == OverlayFocus::SuggestionsPopup {
+            let anchor_area = self.suggestions_popup_anchor_area();
+            let action = handle_suggestions_popup_mouse_event(
+                &mut self.suggestions_popup_state,
+                mouse,
+                anchor_area,
+            );
+            match action {
+                crate::ui::components::popup::PopupAction::Handled => {}
+                crate::ui::components::popup::PopupAction::Autocomplete => {
+                    self.autocomplete_and_submit();
+                }
+                crate::ui::components::popup::PopupAction::NotHandled => {
+                    if self.handle_input_mouse_event(mouse) {
+                        return;
+                    }
+                    if matches!(
+                        mouse.kind,
+                        ratatui::crossterm::event::MouseEventKind::Down(
+                            ratatui::crossterm::event::MouseButton::Left
+                        )
+                    ) {
+                        self.clear_suggestions_and_blur();
+                    }
+                }
+            }
         } else if self.overlay_focus == OverlayFocus::None {
             // If chat has a selection and user clicks outside chat area, clear it
             if self.chat_state.chat.has_selection() && self.base_focus == BaseFocus::Chat {
@@ -2033,22 +2101,7 @@ impl App {
             }
 
             // Handle mouse events for the main input when no overlay is focused
-            if self.input.handle_mouse_event(mouse) {
-                // Auto-copy input selection on mouse up (after drag select)
-                if matches!(
-                    mouse.kind,
-                    ratatui::crossterm::event::MouseEventKind::Up(
-                        ratatui::crossterm::event::MouseButton::Left
-                    )
-                ) {
-                    let text = self.input.get_selected_text();
-                    if !text.is_empty() {
-                        let _ = crate::utils::clipboard::copy_text(&text);
-                        push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
-                    }
-                }
-                self.update_suggestions();
-            }
+            self.handle_input_mouse_event(mouse);
         }
     }
 
@@ -4488,25 +4541,11 @@ impl App {
                     && self.overlay_focus != OverlayFocus::ModelsDialog
                     && self.overlay_focus != OverlayFocus::ThemesDialog
                 {
-                    let main_chunks = ratatui::layout::Layout::default()
-                        .direction(ratatui::layout::Direction::Vertical)
-                        .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
-                        .split(size);
-                    let input_height = self.input.get_height();
-                    let home_chunks = ratatui::layout::Layout::default()
-                        .direction(ratatui::layout::Direction::Vertical)
-                        .constraints(
-                            [
-                                ratatui::layout::Constraint::Min(0),
-                                ratatui::layout::Constraint::Length(input_height),
-                            ]
-                            .as_ref(),
-                        )
-                        .split(main_chunks[0]);
+                    let anchor_area = self.suggestions_popup_anchor_area();
                     render_suggestions_popup(
                         f,
                         &self.suggestions_popup_state,
-                        home_chunks[1],
+                        anchor_area,
                         self.overlay_focus == OverlayFocus::SuggestionsPopup,
                         colors,
                     );
@@ -4535,25 +4574,11 @@ impl App {
                     && self.overlay_focus != OverlayFocus::ModelsDialog
                     && self.overlay_focus != OverlayFocus::ThemesDialog
                 {
-                    let input_height = self.input.get_height();
-                    let main_chunks = ratatui::layout::Layout::default()
-                        .direction(ratatui::layout::Direction::Vertical)
-                        .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
-                        .split(size);
-                    let chat_chunks = ratatui::layout::Layout::default()
-                        .direction(ratatui::layout::Direction::Vertical)
-                        .constraints(
-                            [
-                                ratatui::layout::Constraint::Min(0),
-                                ratatui::layout::Constraint::Length(input_height),
-                            ]
-                            .as_ref(),
-                        )
-                        .split(main_chunks[0]);
+                    let anchor_area = self.suggestions_popup_anchor_area();
                     render_suggestions_popup(
                         f,
                         &self.suggestions_popup_state,
-                        chat_chunks[1],
+                        anchor_area,
                         self.overlay_focus == OverlayFocus::SuggestionsPopup,
                         colors,
                     );

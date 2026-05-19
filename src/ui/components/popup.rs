@@ -1,8 +1,8 @@
 use crate::autocomplete::{Suggestion, SuggestionKind};
 use crate::theme::{contrast_text, ThemeColors};
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
-    prelude::Rect,
+    prelude::{Position, Rect},
     style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Clear, List, ListItem},
@@ -23,6 +23,7 @@ pub struct Popup {
     pub suggestions: Vec<Suggestion>,
     pub selected_index: usize,
     pub visible: bool,
+    scroll_offset: usize,
 }
 
 impl Popup {
@@ -31,24 +32,28 @@ impl Popup {
             suggestions: Vec::new(),
             selected_index: 0,
             visible: false,
+            scroll_offset: 0,
         }
     }
 
     pub fn set_suggestions(&mut self, suggestions: Vec<Suggestion>) {
         self.suggestions = suggestions;
         self.selected_index = 0;
+        self.scroll_offset = 0;
         self.visible = !self.suggestions.is_empty();
     }
 
     pub fn clear(&mut self) {
         self.suggestions.clear();
         self.selected_index = 0;
+        self.scroll_offset = 0;
         self.visible = false;
     }
 
     pub fn next(&mut self) {
         if !self.suggestions.is_empty() {
             self.selected_index = (self.selected_index + 1) % self.suggestions.len();
+            self.keep_selected_visible();
         }
     }
 
@@ -59,11 +64,27 @@ impl Popup {
             } else {
                 self.selected_index - 1
             };
+            self.keep_selected_visible();
         }
     }
 
     pub fn get_selected(&self) -> Option<&Suggestion> {
         self.suggestions.get(self.selected_index)
+    }
+
+    fn popup_area(&self, area: Rect) -> Option<Rect> {
+        if !self.visible || self.suggestions.is_empty() {
+            return None;
+        }
+
+        let popup_height = (self.visible_range().len() as u16) + 2;
+
+        Some(Rect {
+            x: area.x,
+            y: area.y.saturating_sub(popup_height).saturating_sub(3),
+            width: area.width,
+            height: popup_height,
+        })
     }
 
     fn visible_range(&self) -> Range<usize> {
@@ -73,12 +94,61 @@ impl Popup {
         }
 
         let visible_count = item_count.min(MAX_VISIBLE_ITEMS);
-        let selected_index = self.selected_index.min(item_count.saturating_sub(1));
-        let start = selected_index
-            .saturating_add(1)
-            .saturating_sub(visible_count);
+        let max_start = item_count.saturating_sub(visible_count);
+        let start = self.scroll_offset.min(max_start);
 
         start..start + visible_count
+    }
+
+    fn keep_selected_visible(&mut self) {
+        if self.suggestions.is_empty() {
+            self.scroll_offset = 0;
+            return;
+        }
+
+        let visible_count = self.suggestions.len().min(MAX_VISIBLE_ITEMS);
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + visible_count {
+            self.scroll_offset = self.selected_index + 1 - visible_count;
+        }
+    }
+
+    fn scroll_down(&mut self) {
+        let visible_count = self.suggestions.len().min(MAX_VISIBLE_ITEMS);
+        let max_start = self.suggestions.len().saturating_sub(visible_count);
+        self.scroll_offset = self.scroll_offset.saturating_add(1).min(max_start);
+    }
+
+    fn scroll_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    }
+
+    fn item_index_at(&self, area: Rect, position: Position) -> Option<usize> {
+        let popup_area = self.popup_area(area)?;
+        if !popup_area.contains(position)
+            || position.x <= popup_area.x
+            || position.x
+                >= popup_area
+                    .x
+                    .saturating_add(popup_area.width)
+                    .saturating_sub(1)
+        {
+            return None;
+        }
+
+        let relative_y = position.y.saturating_sub(popup_area.y);
+        if relative_y == 0 || relative_y >= popup_area.height.saturating_sub(1) {
+            return None;
+        }
+
+        let visible_range = self.visible_range();
+        let item_offset = (relative_y - 1) as usize;
+        if item_offset >= visible_range.len() {
+            return None;
+        }
+
+        Some(visible_range.start + item_offset)
     }
 
     pub fn handle_key_event(&mut self, event: KeyEvent) -> PopupAction {
@@ -111,6 +181,47 @@ impl Popup {
         }
     }
 
+    pub fn handle_mouse_event(&mut self, event: MouseEvent, area: Rect) -> PopupAction {
+        if !self.visible || self.suggestions.is_empty() {
+            return PopupAction::NotHandled;
+        }
+
+        let position = Position::new(event.column, event.row);
+        let Some(popup_area) = self.popup_area(area) else {
+            return PopupAction::NotHandled;
+        };
+
+        match event.kind {
+            MouseEventKind::ScrollDown if popup_area.contains(position) => {
+                self.scroll_down();
+                PopupAction::Handled
+            }
+            MouseEventKind::ScrollUp if popup_area.contains(position) => {
+                self.scroll_up();
+                PopupAction::Handled
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = self.item_index_at(area, position) {
+                    self.selected_index = index;
+                    PopupAction::Autocomplete
+                } else if popup_area.contains(position) {
+                    PopupAction::Handled
+                } else {
+                    PopupAction::NotHandled
+                }
+            }
+            MouseEventKind::Moved => {
+                if let Some(index) = self.item_index_at(area, position) {
+                    self.selected_index = index;
+                    PopupAction::Handled
+                } else {
+                    PopupAction::NotHandled
+                }
+            }
+            _ => PopupAction::NotHandled,
+        }
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, has_focus: bool, colors: ThemeColors) {
         if !self.visible || self.suggestions.is_empty() {
             return;
@@ -119,13 +230,8 @@ impl Popup {
         let popup_width = area.width;
         let item_width = popup_width.saturating_sub(2) as usize;
         let visible_range = self.visible_range();
-        let popup_height = (visible_range.len() as u16) + 2;
-
-        let popup_area = Rect {
-            x: area.x,
-            y: area.y.saturating_sub(popup_height).saturating_sub(3),
-            width: popup_width,
-            height: popup_height,
+        let Some(popup_area) = self.popup_area(area) else {
+            return;
         };
 
         frame.render_widget(Clear, popup_area);
@@ -245,6 +351,15 @@ mod tests {
         Suggestion::command(name, description)
     }
 
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
+        }
+    }
+
     #[test]
     fn test_popup_creation() {
         let popup = Popup::new();
@@ -270,6 +385,7 @@ mod tests {
         assert!(popup.has_suggestions());
         assert_eq!(popup.suggestions.len(), 2);
         assert_eq!(popup.selected_index, 0);
+        assert_eq!(popup.scroll_offset, 0);
     }
 
     #[test]
@@ -280,6 +396,7 @@ mod tests {
         assert!(!popup.is_visible());
         assert!(!popup.has_suggestions());
         assert_eq!(popup.suggestions.len(), 0);
+        assert_eq!(popup.scroll_offset, 0);
     }
 
     #[test]
@@ -335,10 +452,12 @@ mod tests {
 
         assert_eq!(popup.visible_range(), 0..8);
 
-        popup.selected_index = 8;
+        for _ in 0..8 {
+            popup.next();
+        }
         assert_eq!(popup.visible_range(), 1..9);
 
-        popup.selected_index = 9;
+        popup.next();
         assert_eq!(popup.visible_range(), 2..10);
     }
 
@@ -445,5 +564,93 @@ mod tests {
         };
         let action = popup.handle_key_event(key);
         assert!(matches!(action, PopupAction::NotHandled));
+    }
+
+    #[test]
+    fn test_handle_mouse_scroll_down_moves_visible_range_without_changing_selection() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(
+            (0..10)
+                .map(|i| Suggestion::command(format!("item{}", i), ""))
+                .collect(),
+        );
+        let anchor = Rect::new(0, 20, 40, 4);
+        let popup_area = popup.popup_area(anchor).expect("popup area");
+        popup.selected_index = 5;
+
+        let action = popup.handle_mouse_event(
+            mouse(
+                MouseEventKind::ScrollDown,
+                popup_area.x + 1,
+                popup_area.y + 1,
+            ),
+            anchor,
+        );
+
+        assert!(matches!(action, PopupAction::Handled));
+        assert_eq!(popup.selected_index, 5);
+        assert_eq!(popup.visible_range(), 1..9);
+    }
+
+    #[test]
+    fn test_handle_mouse_scroll_up_moves_visible_range_without_changing_selection() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(
+            (0..10)
+                .map(|i| Suggestion::command(format!("item{}", i), ""))
+                .collect(),
+        );
+        popup.scroll_offset = 2;
+        popup.selected_index = 5;
+        let anchor = Rect::new(0, 20, 40, 4);
+        let popup_area = popup.popup_area(anchor).expect("popup area");
+
+        let action = popup.handle_mouse_event(
+            mouse(MouseEventKind::ScrollUp, popup_area.x + 1, popup_area.y + 1),
+            anchor,
+        );
+
+        assert!(matches!(action, PopupAction::Handled));
+        assert_eq!(popup.selected_index, 5);
+        assert_eq!(popup.visible_range(), 1..9);
+    }
+
+    #[test]
+    fn test_handle_mouse_click_autocompletes_clicked_item() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(vec![
+            suggestion("item1", "desc1"),
+            suggestion("item2", "desc2"),
+            suggestion("item3", "desc3"),
+        ]);
+        let anchor = Rect::new(0, 20, 40, 4);
+        let popup_area = popup.popup_area(anchor).expect("popup area");
+
+        let action = popup.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                popup_area.x + 1,
+                popup_area.y + 3,
+            ),
+            anchor,
+        );
+
+        assert!(matches!(action, PopupAction::Autocomplete));
+        assert_eq!(popup.selected_index, 2);
+    }
+
+    #[test]
+    fn test_handle_mouse_click_outside_popup_not_handled() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(vec![suggestion("item1", "desc1")]);
+        let anchor = Rect::new(0, 20, 40, 4);
+
+        let action = popup.handle_mouse_event(
+            mouse(MouseEventKind::Down(MouseButton::Left), 50, 20),
+            anchor,
+        );
+
+        assert!(matches!(action, PopupAction::NotHandled));
+        assert_eq!(popup.selected_index, 0);
     }
 }
