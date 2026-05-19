@@ -3,7 +3,6 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::Span,
 };
-use unicode_width::UnicodeWidthStr;
 
 /// Represents a text selection range in the chat content.
 /// Coordinates are in rendered-content space (line index, column within line).
@@ -181,6 +180,17 @@ pub fn apply_selection_to_lines<'a>(
     selection: &Selection,
     accent: Color,
 ) -> Vec<ratatui::text::Line<'a>> {
+    apply_selection_to_lines_with_offset(lines, selection, accent, 0)
+}
+
+/// Apply selection styling to visible lines whose first line starts at
+/// `line_offset` in the full rendered transcript.
+pub fn apply_selection_to_lines_with_offset<'a>(
+    lines: Vec<ratatui::text::Line<'a>>,
+    selection: &Selection,
+    accent: Color,
+    line_offset: usize,
+) -> Vec<ratatui::text::Line<'a>> {
     if !selection.active {
         return lines;
     }
@@ -189,7 +199,8 @@ pub fn apply_selection_to_lines<'a>(
     lines
         .into_iter()
         .enumerate()
-        .map(|(line_idx, line)| {
+        .map(|(visible_idx, line)| {
+            let line_idx = line_offset + visible_idx;
             if line_idx < s_line || line_idx > e_line {
                 return line;
             }

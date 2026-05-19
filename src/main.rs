@@ -342,6 +342,8 @@ async fn run_event_loop(
     const FAST_POLL: Duration = Duration::from_millis(16); // ~60fps for animations
     const SLOW_POLL: Duration = Duration::from_millis(250); // ~4fps idle
 
+    let mut needs_redraw = true;
+
     while app.running {
         let loop_start = std::time::Instant::now();
 
@@ -350,7 +352,10 @@ async fn run_event_loop(
         app.process_streaming_chunks();
         app.update_animations();
         remove_expired_toasts();
-        terminal.draw(|f| app.render(f))?;
+        if needs_redraw || animation_needed {
+            terminal.draw(|f| app.render(f))?;
+            needs_redraw = false;
+        }
 
         let poll_duration = if animation_needed {
             FAST_POLL
@@ -429,12 +434,15 @@ async fn run_event_loop(
                     } else {
                         app.handle_mouse_event(mouse);
                     }
+                    needs_redraw = true;
                 }
                 event::Event::Key(key) => {
                     app.handle_keys(key);
+                    needs_redraw = true;
                 }
                 event::Event::Paste(text) => {
                     app.handle_paste(text);
+                    needs_redraw = true;
                 }
                 _ => {}
             }

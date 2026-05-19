@@ -236,9 +236,11 @@ pub struct App {
     last_frame_size: ratatui::layout::Rect,
     last_animation_update: std::time::Instant,
     last_session_spinner_update: std::time::Instant,
+    cached_git_branch: Option<String>,
+    last_git_branch_check: std::time::Instant,
     discovery: Option<crate::model::discovery::Discovery>,
     cached_usage_text: String,
-    cached_usage_check: (usize, usize),
+    cached_usage_check: (usize, u64),
 }
 
 impl App {
@@ -383,6 +385,8 @@ impl App {
             .with_agent_policies(agent_policies);
 
         let discovery = crate::model::discovery::Discovery::new().ok();
+        let cached_git_branch = git::get_current_branch();
+        let now = std::time::Instant::now();
 
         Ok(Self {
             running: true,
@@ -437,8 +441,10 @@ impl App {
             session_view_states: std::collections::HashMap::new(),
             session_spinner_frame: 0,
             last_frame_size: ratatui::layout::Rect::default(),
-            last_animation_update: std::time::Instant::now(),
-            last_session_spinner_update: std::time::Instant::now(),
+            last_animation_update: now,
+            last_session_spinner_update: now,
+            cached_git_branch,
+            last_git_branch_check: now,
             discovery,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0),
@@ -563,7 +569,7 @@ impl App {
         self.ensure_session_view_state(&session_id);
 
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
-            state.chat = self.chat_state.chat.clone();
+            state.chat = std::mem::take(&mut self.chat_state.chat);
             state.input_draft = if is_child_session {
                 String::new()
             } else {
@@ -577,7 +583,7 @@ impl App {
         let is_child_session = self.session_manager.parent_id_of(session_id).is_some();
 
         if let Some(state) = self.session_view_states.get_mut(session_id) {
-            self.chat_state.chat = state.chat.clone();
+            self.chat_state.chat = std::mem::take(&mut state.chat);
             self.chat_state.chat.scroll_to_bottom_on_next_render();
             if is_child_session {
                 self.input.clear();
@@ -592,14 +598,15 @@ impl App {
         }
 
         self.sync_active_streaming_flag();
-        self.cached_usage_check = (usize::MAX, usize::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX);
     }
 
     fn switch_to_session(&mut self, session_id: &str) -> bool {
-        self.save_active_session_view_state();
-        if !self.session_manager.switch_session(session_id) {
+        if self.session_manager.get_session_ref(session_id).is_none() {
             return false;
         }
+        self.save_active_session_view_state();
+        self.session_manager.switch_session(session_id);
         self.pending_session_title = None;
         self.load_session_view_state(session_id);
         let is_child_session = self.session_manager.parent_id_of(session_id).is_some();
@@ -744,7 +751,7 @@ impl App {
         self.input.clear();
         self.base_focus = BaseFocus::Home;
         self.sync_active_streaming_flag();
-        self.cached_usage_check = (usize::MAX, usize::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX);
         self.refresh_sessions_dialog();
     }
 
@@ -760,7 +767,7 @@ impl App {
         self.input.clear();
         self.base_focus = BaseFocus::Home;
         self.sync_active_streaming_flag();
-        self.cached_usage_check = (usize::MAX, usize::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX);
         self.refresh_sessions_dialog();
         session_id
     }
@@ -941,6 +948,17 @@ impl App {
         theme.get_colors(self.dark_mode)
     }
 
+    fn current_git_branch(&mut self) -> Option<String> {
+        const GIT_BRANCH_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
+        if self.last_git_branch_check.elapsed() >= GIT_BRANCH_REFRESH {
+            self.cached_git_branch = git::get_current_branch();
+            self.last_git_branch_check = std::time::Instant::now();
+        }
+
+        self.cached_git_branch.clone()
+    }
+
     pub fn cycle_theme(&mut self) {
         if !self.themes.is_empty() {
             self.current_theme_index = (self.current_theme_index + 1) % self.themes.len();
@@ -1098,6 +1116,7 @@ impl App {
                         let provider_id_clone = provider_id.clone();
                         self.model = model_id_clone.clone();
                         self.provider_name = provider_id_clone.clone();
+                        self.cached_usage_check = (usize::MAX, u64::MAX);
 
                         if let Some(ref dao) = self.prefs_dao {
                             if let Err(e) =
@@ -1325,7 +1344,7 @@ impl App {
                             self.input.clear();
                             self.base_focus = BaseFocus::Home;
                             self.sync_active_streaming_flag();
-                            self.cached_usage_check = (usize::MAX, usize::MAX);
+                            self.cached_usage_check = (usize::MAX, u64::MAX);
                         }
                         self.refresh_sessions_dialog();
                         let _ = self
@@ -1360,7 +1379,7 @@ impl App {
                             self.input.clear();
                             self.base_focus = BaseFocus::Home;
                             self.sync_active_streaming_flag();
-                            self.cached_usage_check = (usize::MAX, usize::MAX);
+                            self.cached_usage_check = (usize::MAX, u64::MAX);
                         }
                         true
                     }
@@ -1847,6 +1866,7 @@ impl App {
                     let provider_id_clone = provider_id.clone();
                     self.model = model_id_clone.clone();
                     self.provider_name = provider_id_clone;
+                    self.cached_usage_check = (usize::MAX, u64::MAX);
 
                     if let Some(ref dao) = self.prefs_dao {
                         if let Err(e) =
@@ -2542,7 +2562,7 @@ impl App {
             before_tokens,
         });
         self.is_streaming = true;
-        self.cached_usage_check = (usize::MAX, usize::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX);
         let _ = self.session_manager.set_session_status(
             &session_id,
             crate::session::types::SessionStatus::Waiting,
@@ -3143,7 +3163,7 @@ impl App {
                 }
 
                 self.chat_state.chat.clear();
-                self.chat_state.chat.messages = messages_to_fork;
+                self.chat_state.chat.replace_messages(messages_to_fork);
                 self.chat_state.chat.scroll_offset = usize::MAX;
                 self.chat_state.chat.clear_highlighted_message();
                 self.base_focus = BaseFocus::Chat;
@@ -3177,10 +3197,7 @@ impl App {
                     }
                 };
 
-                self.chat_state.chat.clear();
-                for msg in &remaining {
-                    self.chat_state.chat.add_message(msg.clone());
-                }
+                self.chat_state.chat.replace_messages(remaining);
                 self.chat_state.chat.scroll_offset = usize::MAX;
                 self.chat_state.chat.clear_highlighted_message();
 
@@ -3817,7 +3834,7 @@ impl App {
         if disconnected || !events.is_empty() {
             self.compaction_receiver = None;
             self.compaction_pending = None;
-            self.cached_usage_check = (usize::MAX, usize::MAX);
+            self.cached_usage_check = (usize::MAX, u64::MAX);
         }
 
         for event in events {
@@ -3841,7 +3858,11 @@ impl App {
 
                             self.ensure_session_view_state(&session_id);
                             if let Some(state) = self.session_view_states.get_mut(&session_id) {
-                                state.chat = Chat::with_messages(messages);
+                                state.chat = if is_active {
+                                    Chat::new()
+                                } else {
+                                    Chat::with_messages(messages)
+                                };
                                 state.tool_calls = ToolCallViewState::default();
                                 state.unread_completed = !is_active;
                             }
@@ -3851,7 +3872,7 @@ impl App {
                                 crate::session::types::SessionStatus::Idle,
                                 None,
                             );
-                            self.cached_usage_check = (usize::MAX, usize::MAX);
+                            self.cached_usage_check = (usize::MAX, u64::MAX);
                             self.refresh_sessions_dialog();
                             push_toast(Toast::new(
                                 format!(
@@ -4128,6 +4149,7 @@ impl App {
                 last_msg.is_complete = false;
                 last_msg.agent_mode = Some(subagent_type);
             }
+            state.chat.mark_render_dirty();
             state.chat.begin_streaming_turn();
             state.external_stream = Some(ExternalStreamState {
                 streaming_model: Some(self.model.clone()),
@@ -4180,6 +4202,7 @@ impl App {
                     _ => {}
                 }
             }
+            chat.mark_render_dirty();
 
             Self::completion_notification_stats_for_chat(chat)
         } else {
@@ -4218,7 +4241,7 @@ impl App {
         if let Some(chat) = self.chat_for_session_mut(session_id) {
             chat.mark_streaming_end();
             chat.finalize_streaming_metrics();
-            chat.messages.truncate(start);
+            chat.truncate_messages(start);
         }
 
         let _ = self.session_manager.set_session_status(
@@ -4245,7 +4268,7 @@ impl App {
         if let Some(chat) = self.chat_for_session_mut(session_id) {
             chat.mark_streaming_end();
             chat.finalize_streaming_metrics();
-            chat.messages.truncate(start);
+            chat.truncate_messages(start);
         }
 
         let _ = self.session_manager.set_session_status(
@@ -4274,6 +4297,7 @@ impl App {
                 if let Some(msg) = chat.messages.get_mut(idx) {
                     if !msg.is_complete {
                         msg.mark_complete();
+                        chat.mark_render_dirty();
                     }
                 }
             }
@@ -4367,6 +4391,7 @@ impl App {
                     }
 
                     msg.content = v.to_string();
+                    chat.mark_render_dirty();
                     return;
                 }
             }
@@ -4418,6 +4443,7 @@ impl App {
         if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
             last_msg.is_complete = false;
         }
+        self.chat_state.chat.mark_render_dirty();
 
         // Initialize per-turn streaming timing primitives (T0).
         self.chat_state.chat.begin_streaming_turn();
@@ -4586,14 +4612,15 @@ impl App {
         self.last_frame_size = size;
         let colors = self.get_current_theme_colors();
 
-        let fingerprint: (usize, usize) = (
+        let fingerprint = (
             self.chat_state.chat.messages.len(),
-            crate::session::compaction::total_context_tokens(&self.chat_state.chat.messages),
+            self.chat_state.chat.render_revision(),
         );
         if self.cached_usage_check != fingerprint {
             self.cached_usage_check = fingerprint;
             self.cached_usage_text = self.session_usage_text();
         }
+        let branch = self.current_git_branch();
         let usage_text = &self.cached_usage_text;
 
         match self.base_focus {
@@ -4604,7 +4631,7 @@ impl App {
                     &self.home_state,
                     self.version.clone(),
                     self.cwd.clone(),
-                    git::get_current_branch(),
+                    branch.clone(),
                     self.agent.clone(),
                     self.model.clone(),
                     self.provider_name.clone(),
@@ -4634,7 +4661,7 @@ impl App {
                     &mut self.input,
                     self.version.clone(),
                     self.cwd.clone(),
-                    git::get_current_branch(),
+                    branch,
                     self.agent.clone(),
                     self.model.clone(),
                     self.provider_name.clone(),
@@ -4860,6 +4887,8 @@ mod tests {
             last_frame_size: ratatui::layout::Rect::default(),
             last_animation_update: std::time::Instant::now(),
             last_session_spinner_update: std::time::Instant::now(),
+            cached_git_branch: None,
+            last_git_branch_check: std::time::Instant::now(),
             discovery: None,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0),
@@ -4948,7 +4977,7 @@ mod tests {
         let mut summary = crate::session::types::Message::user("summary");
         summary.token_count = Some(stats.after_tokens);
         summary.compaction_stats = Some(stats);
-        app.chat_state.chat.messages.push(summary);
+        app.chat_state.chat.add_message(summary);
 
         assert_eq!(app.session_usage_text(), "360 \u{00b7} last compact 97%");
     }

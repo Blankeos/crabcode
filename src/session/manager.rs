@@ -33,6 +33,7 @@ pub struct SessionInfo {
 
 pub struct SessionManager {
     pub sessions: HashMap<String, Session>,
+    children_by_parent: HashMap<String, Vec<String>>,
     current_session_id: Option<String>,
     session_counter: usize,
     history_dao: Option<HistoryDAO>,
@@ -53,6 +54,7 @@ impl SessionManager {
 
         Self {
             sessions: HashMap::new(),
+            children_by_parent: HashMap::new(),
             current_session_id: None,
             session_counter: 0,
             history_dao: None,
@@ -115,14 +117,84 @@ impl SessionManager {
                 .map(|ts| std::time::UNIX_EPOCH + std::time::Duration::from_secs(ts as u64));
 
             let session_id = session.id.clone();
+            let parent_id = session.parent_id.clone();
             self.sessions.insert(session_id.clone(), session);
+            if let Some(parent_id) = parent_id {
+                self.index_child_session(&parent_id, &session_id);
+            }
             self.id_mapping.insert(session_id.clone(), db_session.id);
             self.db_id_to_id.insert(db_session.id, session_id);
 
             self.session_counter += 1;
         }
 
+        self.sort_child_session_indexes();
+
         Ok(())
+    }
+
+    fn index_child_session(&mut self, parent_id: &str, child_id: &str) {
+        let children = self
+            .children_by_parent
+            .entry(parent_id.to_string())
+            .or_default();
+        if !children.iter().any(|id| id == child_id) {
+            children.push(child_id.to_string());
+        }
+    }
+
+    fn unindex_child_session(&mut self, parent_id: &str, child_id: &str) {
+        let should_remove = if let Some(children) = self.children_by_parent.get_mut(parent_id) {
+            children.retain(|id| id != child_id);
+            children.is_empty()
+        } else {
+            false
+        };
+
+        if should_remove {
+            self.children_by_parent.remove(parent_id);
+        }
+    }
+
+    fn sort_child_session_indexes(&mut self) {
+        let sessions = &self.sessions;
+        for children in self.children_by_parent.values_mut() {
+            children.sort_by(|a, b| {
+                let a_session = sessions.get(a);
+                let b_session = sessions.get(b);
+                match (a_session, b_session) {
+                    (Some(a_session), Some(b_session)) => a_session
+                        .created_at
+                        .cmp(&b_session.created_at)
+                        .then_with(|| a.cmp(b)),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.cmp(b),
+                }
+            });
+        }
+    }
+
+    fn insert_child_session_index_sorted(&mut self, parent_id: &str, child_id: &str) {
+        self.index_child_session(parent_id, child_id);
+        self.sort_child_session_indexes();
+    }
+
+    fn session_info_from_session(id: &str, session: &Session) -> SessionInfo {
+        SessionInfo {
+            id: id.to_string(),
+            parent_id: session.parent_id.clone(),
+            title: session.title.clone(),
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+            message_count: session.messages.len(),
+            workspace_id: session.workspace_id,
+            workspace_path: session.workspace_path.clone(),
+            workspace_name: session.workspace_name.clone(),
+            status: session.status,
+            pinned_at: session.pinned_at,
+            archived_at: session.archived_at,
+        }
     }
 
     pub fn create_session(&mut self, name: Option<String>) -> String {
@@ -160,6 +232,9 @@ impl SessionManager {
         session.workspace_name = self.current_workspace_name.clone();
 
         self.sessions.insert(session_id.clone(), session);
+        if let Some(ref parent_id) = parent_id {
+            self.insert_child_session_index_sorted(parent_id, &session_id);
+        }
         if make_current {
             self.current_session_id = Some(session_id.clone());
         }
@@ -178,20 +253,7 @@ impl SessionManager {
     pub fn list_sessions(&self) -> Vec<SessionInfo> {
         self.sessions
             .iter()
-            .map(|(id, session)| SessionInfo {
-                id: id.clone(),
-                parent_id: session.parent_id.clone(),
-                title: session.title.clone(),
-                created_at: session.created_at,
-                updated_at: session.updated_at,
-                message_count: session.messages.len(),
-                workspace_id: session.workspace_id,
-                workspace_path: session.workspace_path.clone(),
-                workspace_name: session.workspace_name.clone(),
-                status: session.status,
-                pinned_at: session.pinned_at,
-                archived_at: session.archived_at,
-            })
+            .map(|(id, session)| Self::session_info_from_session(id, session))
             .collect()
     }
 
@@ -221,32 +283,16 @@ impl SessionManager {
     }
 
     pub fn child_sessions(&self, parent_id: &str) -> Vec<SessionInfo> {
-        let mut children: Vec<SessionInfo> = self
-            .sessions
-            .iter()
-            .filter(|(_, session)| session.parent_id.as_deref() == Some(parent_id))
-            .map(|(id, session)| SessionInfo {
-                id: id.clone(),
-                parent_id: session.parent_id.clone(),
-                title: session.title.clone(),
-                created_at: session.created_at,
-                updated_at: session.updated_at,
-                message_count: session.messages.len(),
-                workspace_id: session.workspace_id,
-                workspace_path: session.workspace_path.clone(),
-                workspace_name: session.workspace_name.clone(),
-                status: session.status,
-                pinned_at: session.pinned_at,
-                archived_at: session.archived_at,
+        self.children_by_parent
+            .get(parent_id)
+            .into_iter()
+            .flat_map(|children| children.iter())
+            .filter_map(|id| {
+                self.sessions
+                    .get(id)
+                    .map(|session| Self::session_info_from_session(id, session))
             })
-            .collect();
-
-        children.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        children
+            .collect()
     }
 
     pub fn switch_session(&mut self, id: &str) -> bool {
@@ -445,7 +491,16 @@ impl SessionManager {
             }
         }
 
+        let parent_id = self
+            .sessions
+            .get(id)
+            .and_then(|session| session.parent_id.clone());
+
         if self.sessions.remove(id).is_some() {
+            if let Some(parent_id) = parent_id {
+                self.unindex_child_session(&parent_id, id);
+            }
+            self.children_by_parent.remove(id);
             if let Some(db_id) = self.id_mapping.remove(id) {
                 self.db_id_to_id.remove(&db_id);
             }

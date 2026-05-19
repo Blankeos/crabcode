@@ -59,9 +59,14 @@ pub struct Chat {
     pending_click_anchor: Option<(usize, usize)>,
     /// Index of the message highlighted by timeline navigation (None = no highlight)
     pub highlighted_message_index: Option<usize>,
-    /// Render cache — fingerprints content to skip expensive re-formatting
+    /// Monotonic marker for render-affecting message changes.
+    render_revision: u64,
+    /// Render cache keyed by revision, width, and theme to skip expensive re-formatting.
     cached_lines: Vec<Line<'static>>,
     cached_positions: Vec<usize>,
+    cached_revision: u64,
+    cached_width: usize,
+    cached_colors_hash: u64,
     cached_fingerprint: u64,
 }
 
@@ -294,8 +299,12 @@ impl Chat {
             selection: Selection::new(),
             pending_click_anchor: None,
             highlighted_message_index: None,
+            render_revision: 1,
             cached_lines: Vec::new(),
             cached_positions: Vec::new(),
+            cached_revision: 0,
+            cached_width: 0,
+            cached_colors_hash: 0,
             cached_fingerprint: 0,
         }
     }
@@ -329,8 +338,12 @@ impl Chat {
             selection: Selection::new(),
             pending_click_anchor: None,
             highlighted_message_index: None,
+            render_revision: 1,
             cached_lines: Vec::new(),
             cached_positions: Vec::new(),
+            cached_revision: 0,
+            cached_width: 0,
+            cached_colors_hash: 0,
             cached_fingerprint: 0,
         }
     }
@@ -344,6 +357,24 @@ impl Chat {
             self.scroll_offset = usize::MAX;
             self.user_scrolled_up = false;
         }
+    }
+
+    pub fn replace_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+        self.invalidate_cache();
+    }
+
+    pub fn truncate_messages(&mut self, len: usize) {
+        self.messages.truncate(len);
+        self.invalidate_cache();
+    }
+
+    pub fn mark_render_dirty(&mut self) {
+        self.invalidate_cache();
+    }
+
+    pub fn render_revision(&self) -> u64 {
+        self.render_revision
     }
 
     fn should_autoscroll(&self) -> bool {
@@ -390,6 +421,8 @@ impl Chat {
             // Start a new assistant segment (e.g. after tool rows).
             self.add_message(Message::incomplete(chunk_str));
         }
+
+        self.invalidate_cache();
 
         let now = std::time::Instant::now();
         if self.streaming_start_time.is_none() {
@@ -464,11 +497,24 @@ impl Chat {
         self.selection.reset();
         self.pending_click_anchor = None;
         self.cached_lines.clear();
+        self.cached_positions.clear();
+        self.cached_revision = 0;
+        self.cached_width = 0;
+        self.cached_colors_hash = 0;
         self.cached_fingerprint = 0;
+        self.invalidate_cache();
     }
 
     fn invalidate_cache(&mut self) {
+        self.render_revision = self.render_revision.wrapping_add(1).max(1);
         self.cached_fingerprint = 0;
+    }
+
+    fn cache_colors_hash(colors: &ThemeColors) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        colors.hash(&mut h);
+        h.finish()
     }
 
     fn compute_fingerprint(&self, max_width: usize, colors: &ThemeColors) -> u64 {
@@ -625,6 +671,7 @@ impl Chat {
         self.streaming_renderer = None;
         self.streaming_message_idx = None;
         self.streaming_token_counter = None;
+        self.invalidate_cache();
     }
 
     pub fn prepare_streaming_token_counter(&mut self, model: &str) {
@@ -1032,31 +1079,59 @@ impl Chat {
 
         let max_width = content_area.width as usize;
 
-        let fingerprint = self.compute_fingerprint(max_width, colors);
-        let cache_valid = !self.cached_lines.is_empty() && fingerprint == self.cached_fingerprint;
+        let colors_hash = Self::cache_colors_hash(colors);
+        let cache_valid = self.cached_revision == self.render_revision
+            && self.cached_width == max_width
+            && self.cached_colors_hash == colors_hash;
 
-        let positions: Vec<usize>;
-        let mut all_lines: Vec<Line<'static>>;
-
-        if cache_valid {
-            positions = self.cached_positions.clone();
-            all_lines = self.cached_lines.clone();
-        } else {
+        if !cache_valid {
             let (message_lines, message_positions) =
                 self.build_all_lines_with_positions(max_width, model, colors);
-            positions = message_positions;
-            all_lines = message_lines.into_iter().map(line_to_static).collect();
-
-            self.cached_lines = all_lines.clone();
-            self.cached_positions = positions.clone();
-            self.cached_fingerprint = fingerprint;
+            self.cached_lines = message_lines.into_iter().map(line_to_static).collect();
+            self.cached_positions = message_positions;
+            self.cached_revision = self.render_revision;
+            self.cached_width = max_width;
+            self.cached_colors_hash = colors_hash;
         }
 
-        let content_height = all_lines.len();
+        let all_lines = &self.cached_lines;
+        let positions = &self.cached_positions;
 
+        let content_height = all_lines.len();
         let viewport = self.viewport_height;
         let max_offset = content_height.saturating_sub(viewport);
         let clamped_scroll = self.scroll_offset.min(max_offset);
+        let visible_start = clamped_scroll.min(content_height);
+        let visible_end = content_height.min(clamped_scroll.saturating_add(viewport));
+
+        let highlight_range = self.highlighted_message_index.and_then(|hl| {
+            if hl < positions.len() {
+                let start = positions[hl];
+                let end = if hl + 1 < positions.len() {
+                    positions[hl + 1]
+                } else {
+                    content_height
+                };
+                (end > start).then_some((start, end))
+            } else {
+                None
+            }
+        });
+
+        let mut content_lines: Vec<Line<'static>> = all_lines[visible_start..visible_end].to_vec();
+
+        if let Some((start, end)) = highlight_range {
+            let hl_fg = contrast_text(colors.interactive);
+            for (line_idx, line) in content_lines.iter_mut().enumerate() {
+                let global_idx = visible_start + line_idx;
+                if global_idx >= start && global_idx < end {
+                    for span in line.spans.iter_mut() {
+                        span.style = span.style.fg(hl_fg);
+                    }
+                }
+            }
+        }
+
         let render_area = Rect {
             x: content_area.x,
             y: content_area.y,
@@ -1065,44 +1140,24 @@ impl Chat {
         };
 
         // Render timeline highlight as a full-width background overlay
-        if let Some(hl) = self.highlighted_message_index {
-            if hl < positions.len() {
-                let start = positions[hl];
-                let end = if hl + 1 < positions.len() {
-                    positions[hl + 1]
-                } else {
-                    content_height
-                };
+        if let Some((start, end)) = highlight_range {
+            let vis_start = start.max(clamped_scroll);
+            let vis_end = end.min(clamped_scroll.saturating_add(viewport));
 
-                if end > start {
-                    let hl_color = colors.interactive;
-                    let hl_fg = contrast_text(hl_color);
-
-                    for line in all_lines.iter_mut().take(end).skip(start) {
-                        for span in line.spans.iter_mut() {
-                            span.style = span.style.fg(hl_fg);
-                        }
-                    }
-
-                    let vis_start = start.max(clamped_scroll);
-                    let vis_end = end.min(clamped_scroll.saturating_add(viewport));
-
-                    if vis_end > vis_start {
-                        let y = content_area
-                            .y
-                            .saturating_add((vis_start - clamped_scroll) as u16);
-                        let height = (vis_end - vis_start).saturating_sub(1) as u16;
-                        if height > 0 {
-                            let hl_area = Rect {
-                                x: content_area.x,
-                                y,
-                                width: content_area.width,
-                                height,
-                            };
-                            let hl_block = Block::new().style(Style::default().bg(hl_color));
-                            f.render_widget(hl_block, hl_area);
-                        }
-                    }
+            if vis_end > vis_start {
+                let y = content_area
+                    .y
+                    .saturating_add((vis_start - clamped_scroll) as u16);
+                let height = (vis_end - vis_start).saturating_sub(1) as u16;
+                if height > 0 {
+                    let hl_area = Rect {
+                        x: content_area.x,
+                        y,
+                        width: content_area.width,
+                        height,
+                    };
+                    let hl_block = Block::new().style(Style::default().bg(colors.interactive));
+                    f.render_widget(hl_block, hl_area);
                 }
             }
         }
@@ -1110,25 +1165,25 @@ impl Chat {
         render_line_backgrounds(
             f,
             render_area,
-            &all_lines,
+            all_lines,
             clamped_scroll,
             render_area.height as usize,
             colors.background_element,
         );
 
-        let content_lines = crate::ui::selection::apply_selection_to_lines(
-            all_lines,
+        let content_lines = crate::ui::selection::apply_selection_to_lines_with_offset(
+            content_lines,
             &self.selection,
             colors.accent,
+            visible_start,
         );
 
-        let paragraph =
-            Paragraph::new(Text::from(content_lines)).scroll((clamped_scroll as u16, 0));
+        let paragraph = Paragraph::new(Text::from(content_lines));
 
         f.render_widget(paragraph, render_area);
 
         self.content_height = content_height;
-        self.message_line_positions = positions;
+        self.message_line_positions = positions.to_vec();
         self.scroll_offset = clamped_scroll;
         self.update_scrollbar();
 
