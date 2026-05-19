@@ -71,4 +71,6 @@
 
 - [ ] Remote usage.
 
-- [ ] File referencing with @
+- [x] File referencing with @
+
+- [ ] compaction

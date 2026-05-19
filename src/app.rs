@@ -1253,6 +1253,7 @@ impl App {
                             self.input.clear();
                             self.base_focus = BaseFocus::Home;
                             self.sync_active_streaming_flag();
+                            self.cached_usage_check = (usize::MAX, usize::MAX);
                         }
                         self.refresh_sessions_dialog();
                         let _ = self
@@ -1262,6 +1263,8 @@ impl App {
                         true
                     }
                     SessionsDialogAction::Delete(id) => {
+                        let previous_selected_index =
+                            self.sessions_dialog_state.dialog.selected_index;
                         let was_current = self
                             .session_manager
                             .get_current_session_id()
@@ -1274,18 +1277,18 @@ impl App {
                             self.session_manager.delete_session(&pending);
                             self.session_view_states.remove(&pending);
                         }
-                        let remaining = self.session_manager.list_sessions();
-                        if remaining.is_empty() {
-                            self.sessions_dialog_state.dialog.hide();
-                            self.overlay_focus = OverlayFocus::None;
-                        }
                         self.refresh_sessions_dialog();
+                        let _ = self
+                            .sessions_dialog_state
+                            .dialog
+                            .select_index_clamped(previous_selected_index);
                         if was_current {
                             self.pending_session_title = None;
                             self.chat_state.chat.clear();
+                            self.input.clear();
                             self.base_focus = BaseFocus::Home;
-                            self.sessions_dialog_state.dialog.hide();
-                            self.overlay_focus = OverlayFocus::None;
+                            self.sync_active_streaming_flag();
+                            self.cached_usage_check = (usize::MAX, usize::MAX);
                         }
                         true
                     }
@@ -4495,6 +4498,112 @@ mod tests {
         assert!(!handled);
         assert!(app.session_manager.get_current_session_id().is_some());
         assert_eq!(app.session_manager.list_sessions().len(), 1);
+    }
+
+    #[test]
+    fn deleting_current_session_keeps_sessions_dialog_focused() {
+        let mut app = test_app();
+        app.create_new_session(Some("First".to_string()));
+        app.create_new_session(Some("Second".to_string()));
+        app.open_sessions_dialog();
+
+        assert!(app
+            .sessions_dialog_state
+            .dialog
+            .select_index_clamped(usize::MAX));
+        let deleted_id = app
+            .sessions_dialog_state
+            .dialog
+            .get_selected()
+            .map(|item| item.id.clone())
+            .expect("selected session");
+        assert!(app.switch_to_session(&deleted_id));
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
+        assert!(app.sessions_dialog_state.dialog.is_visible());
+        assert!(app.session_manager.get_current_session_id().is_none());
+        assert!(app.session_manager.get_session_ref(&deleted_id).is_none());
+        assert_eq!(app.sessions_dialog_state.dialog.selected_index, 0);
+        assert_ne!(
+            app.sessions_dialog_state
+                .dialog
+                .get_selected()
+                .map(|item| item.id.as_str()),
+            Some(deleted_id.as_str())
+        );
+    }
+
+    #[test]
+    fn deleting_only_current_session_keeps_empty_sessions_dialog_open() {
+        let mut app = test_app();
+        app.create_new_session(Some("Only".to_string()));
+        app.open_sessions_dialog();
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
+        assert!(app.sessions_dialog_state.dialog.is_visible());
+        assert!(app.session_manager.list_sessions().is_empty());
+        assert!(app.session_manager.get_current_session_id().is_none());
+        assert!(app.sessions_dialog_state.dialog.get_selected().is_none());
+    }
+
+    #[test]
+    fn archiving_last_visible_current_session_focuses_previous_session() {
+        let mut app = test_app();
+        app.create_new_session(Some("First".to_string()));
+        app.create_new_session(Some("Second".to_string()));
+        app.open_sessions_dialog();
+
+        assert!(app
+            .sessions_dialog_state
+            .dialog
+            .select_index_clamped(usize::MAX));
+        let archived_id = app
+            .sessions_dialog_state
+            .dialog
+            .get_selected()
+            .map(|item| item.id.clone())
+            .expect("selected session");
+        assert!(app.switch_to_session(&archived_id));
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('a'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
+        assert!(app.sessions_dialog_state.dialog.is_visible());
+        assert!(app.session_manager.get_current_session_id().is_none());
+        assert!(app
+            .session_manager
+            .get_session_ref(&archived_id)
+            .and_then(|session| session.archived_at)
+            .is_some());
+        assert_eq!(app.sessions_dialog_state.dialog.selected_index, 0);
+        assert_ne!(
+            app.sessions_dialog_state
+                .dialog
+                .get_selected()
+                .map(|item| item.id.as_str()),
+            Some(archived_id.as_str())
+        );
     }
 
     #[test]

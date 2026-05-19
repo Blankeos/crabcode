@@ -239,10 +239,7 @@ fn render_subagent_tabs(
             Style::default().fg(colors.text_weak)
         };
         let suffix = if tab.running { " ~" } else { "" };
-        spans.push(Span::styled(
-            format!(" {}{} ", tab.label, suffix),
-            style,
-        ));
+        spans.push(Span::styled(format!(" {}{} ", tab.label, suffix), style));
         spans.push(Span::raw(" "));
     }
 

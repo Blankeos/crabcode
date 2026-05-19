@@ -209,9 +209,11 @@ fn debug_log(msg: &str) {
 }
 
 fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
+    let data = data.trim();
+
     // [DONE] is ignored — the HTTP stream end signals completion.
-    if data == "[DONE]" || data.is_empty() {
-        debug_log(&format!("[SSE] Ignored: [DONE] or empty"));
+    if data == "[DONE]" || data.is_empty() || is_sse_metadata_line(data) {
+        debug_log("[SSE] Ignored: [DONE], empty, or metadata/comment");
         return vec![];
     }
 
@@ -349,6 +351,37 @@ mod tests {
 
         assert!(chunks.is_empty());
     }
+
+    #[test]
+    fn ignores_sse_comments_and_metadata() {
+        for data in [
+            ": OPENROUTER PROCESSING",
+            "event: ping",
+            "id: chatcmpl-123",
+            "retry: 1000",
+        ] {
+            assert!(process_sse_data(data).is_empty());
+        }
+    }
+
+    #[test]
+    fn bytes_to_lines_skips_sse_comments_and_metadata() {
+        let byte_stream = stream::iter(vec![
+            Ok::<_, reqwest::Error>(bytes::Bytes::from_static(b": OPENROUTER PROCESSING\n")),
+            Ok::<_, reqwest::Error>(bytes::Bytes::from_static(b"event: ping\n")),
+            Ok::<_, reqwest::Error>(bytes::Bytes::from_static(
+                br#"data: {"choices":[{"delta":{"content":"hello"}}]}
+"#,
+            )),
+        ]);
+
+        let lines = futures::executor::block_on(bytes_to_lines(byte_stream).collect::<Vec<_>>());
+
+        assert_eq!(
+            lines,
+            vec![r#"{"choices":[{"delta":{"content":"hello"}}]}"#.to_string()]
+        );
+    }
 }
 
 /// Convert a byte stream into a stream of lines, handling both SSE (`data: ...`) and raw NDJSON.
@@ -365,7 +398,7 @@ where
                     let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
                     let line = String::from_utf8_lossy(&line_bytes);
                     let line = line.trim_end_matches('\n').trim_end_matches('\r');
-                    if line.is_empty() {
+                    if line.is_empty() || is_sse_metadata_line(line.trim()) {
                         continue;
                     }
                     let data = if let Some(stripped) = line.strip_prefix("data:") {
@@ -391,7 +424,10 @@ where
                     None => {
                         let remaining = String::from_utf8_lossy(&buffer).trim().to_string();
                         buffer.clear();
-                        if remaining.is_empty() || remaining == "[DONE]" {
+                        if remaining.is_empty()
+                            || remaining == "[DONE]"
+                            || is_sse_metadata_line(&remaining)
+                        {
                             debug_log("[LINE] Stream ended, no remaining data");
                             return None;
                         }
@@ -407,6 +443,13 @@ where
             }
         },
     )
+}
+
+fn is_sse_metadata_line(line: &str) -> bool {
+    line.starts_with(':')
+        || line.starts_with("event:")
+        || line.starts_with("id:")
+        || line.starts_with("retry:")
 }
 
 fn has_version_segment(base_url: &str) -> bool {
