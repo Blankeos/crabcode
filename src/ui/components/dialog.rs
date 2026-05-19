@@ -20,6 +20,8 @@ use std::collections::{HashMap, HashSet};
 use tui_textarea::{Input as TuiInput, TextArea};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+const SEARCH_AREA_HEIGHT: u16 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DialogPosition {
     Left,
@@ -536,7 +538,7 @@ impl Dialog {
             const DIALOG_HEIGHT_CENTER: u16 = 25;
 
             let footer_height = self.footer_height();
-            let total_fixed_height = 1 + 1 + 3 + 1 + footer_height;
+            let total_fixed_height = 1 + 1 + SEARCH_AREA_HEIGHT + 1 + footer_height;
             let padding = match self.position {
                 DialogPosition::Center => 3u16,
                 DialogPosition::Left | DialogPosition::Right => 1u16,
@@ -614,7 +616,7 @@ impl Dialog {
         [
             ratatui::layout::Constraint::Length(1),
             ratatui::layout::Constraint::Length(1),
-            ratatui::layout::Constraint::Length(3),
+            ratatui::layout::Constraint::Length(SEARCH_AREA_HEIGHT),
             ratatui::layout::Constraint::Min(0),
             ratatui::layout::Constraint::Length(1),
             ratatui::layout::Constraint::Length(self.footer_height()),
@@ -1598,7 +1600,7 @@ mod tests {
             width: 40,
             height: 20,
         };
-        dialog.visible_row_count = 7;
+        dialog.visible_row_count = 8;
 
         let handled = dialog.handle_mouse_event(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),

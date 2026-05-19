@@ -327,7 +327,7 @@ mod tests {
             height: 30,
         };
 
-        let action = handle_timeline_dialog_mouse_event(&mut state, left_click(2, 6));
+        let action = handle_timeline_dialog_mouse_event(&mut state, left_click(2, 5));
 
         assert_eq!(action, TimelineDialogAction::Select(0));
     }

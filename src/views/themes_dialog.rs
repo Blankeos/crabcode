@@ -179,7 +179,7 @@ mod tests {
 
         let action = handle_themes_dialog_mouse_event(
             &mut state,
-            mouse(MouseEventKind::Down(MouseButton::Left), 4, 10),
+            mouse(MouseEventKind::Down(MouseButton::Left), 4, 9),
         );
 
         assert_eq!(
@@ -209,7 +209,7 @@ mod tests {
         };
 
         let action =
-            handle_themes_dialog_mouse_event(&mut state, mouse(MouseEventKind::Moved, 4, 10));
+            handle_themes_dialog_mouse_event(&mut state, mouse(MouseEventKind::Moved, 4, 9));
 
         assert_eq!(
             action,

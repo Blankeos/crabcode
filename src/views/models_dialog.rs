@@ -192,7 +192,7 @@ mod tests {
             height: 30,
         };
 
-        let action = handle_models_dialog_mouse_event(&mut state, left_click(4, 10));
+        let action = handle_models_dialog_mouse_event(&mut state, left_click(4, 9));
 
         assert_eq!(
             action,
@@ -215,7 +215,7 @@ mod tests {
             height: 30,
         };
 
-        let action = handle_models_dialog_mouse_event(&mut state, left_click(4, 8));
+        let action = handle_models_dialog_mouse_event(&mut state, left_click(4, 7));
 
         assert_eq!(action, ModelsDialogAction::None);
         assert!(state.dialog.is_visible());

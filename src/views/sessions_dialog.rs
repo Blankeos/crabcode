@@ -366,7 +366,7 @@ mod tests {
             height: 30,
         };
 
-        let action = handle_sessions_dialog_mouse_event(&mut state, left_click(4, 8));
+        let action = handle_sessions_dialog_mouse_event(&mut state, left_click(4, 7));
 
         assert_eq!(
             action,
@@ -387,13 +387,13 @@ mod tests {
             height: 30,
         };
 
-        let action = handle_sessions_dialog_mouse_event(&mut state, left_click(4, 6));
+        let action = handle_sessions_dialog_mouse_event(&mut state, left_click(4, 5));
 
         assert_eq!(action, SessionsDialogAction::Handled);
         assert!(state.dialog.is_group_collapsed("Today"));
         assert_eq!(state.dialog.selected_index, 0);
 
-        let action = handle_sessions_dialog_mouse_event(&mut state, left_click(4, 6));
+        let action = handle_sessions_dialog_mouse_event(&mut state, left_click(4, 5));
 
         assert_eq!(action, SessionsDialogAction::Handled);
         assert!(!state.dialog.is_group_collapsed("Today"));
