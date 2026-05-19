@@ -1,161 +1,142 @@
-# Crabcode vs OpenCode — Core Harness Feature Parity Audit
+# Crabcode Harness Parity Audit
 
-> Generated: 2026-05-11 | Updated: 2026-05-19 | Scope: agent loop, system prompt, subagents, tool calling, skill loading, agent config, commands, permissions.
+Checked: 2026-05-19.
 
-## Feature Table
+Scope: core harness behavior only: agent loop, system prompt, subagents, tool calling, skill loading, agent config, commands, and permissions. This compares crabcode source against the local opencode reference in `.devrefs/references/anomalyco/opencode` plus the requested opencode behavior.
+
+## Feature Matrix
 
 | # | Feature | OpenCode | Crabcode | Gap |
 |---|---------|----------|----------|-----|
-| **1.1** | Multi-step agentic iteration (LLM streaming + tool calling) | `stream_text()` with `step_count_is(N)` hook, tool execution loop | `stream_llm_with_cancellation()` at `src/llm/client.rs:82`, `stop_when(step_count_is(max_steps))` at `:377` | **OK** |
-| **1.2** | Cancellation token for user interruption | `CancellationToken`, checked in relay loop | `CancellationToken` at `src/llm/client.rs:83`, emits `ChunkMessage::Cancelled` at `:474` | **OK** |
-| **1.3** | Step limit enforcement with text-only summary fallback | `stop_when(step_count_is(N))` + follow-up request with `MAX_STEPS_REACHED` prompt, tools stripped | `MAX_STEPS_REACHED_PROMPT` at `src/llm/client.rs:18`, `reached_step_limit()` at `:514`, follow-up stream at `:161-173` with empty tools vec | **OK** |
-| **1.4** | Chunk relay: text, reasoning, tool_calls, tool_results, errors, metrics, cancelled | `ChunkType` dispatched per-kind to UI | `ChunkMessage` at `src/llm/mod.rs:9` — Text, Reasoning, ToolCalls, ToolResult, PermissionRequest, QuestionRequest, End, Failed, Cancelled, Metrics, Warning | **OK** |
-| **1.5** | Plan/Build mode toggle | User-toggleable mode; plan = read-only tools | `AgentToolPolicies` at `src/tools/permission.rs:71` — plan blocks write/edit/bash, build allows all. No user-facing toggle; mode set at stream start | **Partial**: Mode exists but not user-toggleable mid-conversation |
-| **1.6** | Permission preflight during tool execution | `preflight()` checks before each tool call, mid-stream permission dialogs | `permissions.preflight()` in `aisdk_bridge.rs:90-98`, sends `PermissionRequest` chunk, awaits UI response via oneshot | **OK** |
-| **1.7** | Configurable max steps per agent | Per-agent `max_steps` in config; "max steps reached" prompt injected | `agent_max_steps: Option<usize>` at `src/llm/client.rs:87` | **OK** |
-| **1.8** | Model-visible replayable history across turns | `MessageV2` persists text, reasoning, tool calls/results, attachments, and reconstructs provider messages | `convert_messages()` now replays `MessageRole::Tool` as model-visible observations via `tool_message_observation()` | **Partial**: tool results are visible across turns, but not canonical typed tool-call/result parts with attachments |
-| **2.1** | Provider-specific header (Beast for OpenAI) | Detailed "beast" prompt for OpenAI, concise for Anthropic | `get_beast_prompt()` at `src/prompt/mod.rs:100`, `get_anthropic_prompt()` at `:135`, `get_codex_prompt()` at `:187` | **OK** |
-| **2.2** | Provider-specific behavior instructions | Anthropic-specific, Gemini-specific, Codex-specific | `get_gemini_prompt()` at `src/prompt/mod.rs:160`, `get_codex_prompt()` at `:187` | **OK** |
-| **2.3** | Environment context block (workdir, git, platform, date) | `<env>` XML block | `get_environment_context()` at `src/prompt/mod.rs:224` | **OK** |
-| **2.4** | Tool schemas block (all registered tools as JSON) | All tools rendered as JSON schemas | `get_tools_context()` at `src/prompt/mod.rs:239` — `registry.list_schemas()` serialized as pretty JSON | **OK** |
-| **2.5** | Custom instructions from AGENTS.md/CLAUDE.md (walk-up + global) | Walk-up directory discovery + global fallback at `~/.config/opencode/AGENTS.md` and `~/.claude/CLAUDE.md` | `src/prompt/rules.rs` — `resolve_local_rules()` walks up from workdir for AGENTS.md then CLAUDE.md; `resolve_global_rules()` checks `~/.config/crabcode/AGENTS.md` and `~/.claude/CLAUDE.md` | **OK** |
-| **2.6** | Available skills as `<available_skills>` XML | Lists skill name, description, location | `src/prompt/mod.rs:267-295` — iterates `SkillStore::all()`, emits `<available_skills>` XML | **OK** |
-| **2.7** | Available subagents listing in system prompt | Lists subagent names and descriptions so primary agent knows when to use Task tool | `src/prompt/mod.rs:298-320` — iterates `SubAgentDef::all()`, emits `<available_subagents>` XML | **OK** |
-| **3.1** | Task tool (primary agent spawns subagents) | `task` tool with subagent_type, description, prompt params | `src/tools/task.rs` — full TaskTool with explore/general enum validation | **OK** |
-| **3.2** | Explore subagent | Read-only: glob, grep, read, list. Fast codebase exploration | `src/agent/subagent.rs:4` — ExploreAgent with EXPLORE_SYSTEM_PROMPT, scoped to glob/grep/read/list | **OK** |
-| **3.3** | General subagent | Full tool access (minus todowrite). Complex multi-step tasks | `src/agent/subagent.rs:23` — GeneralAgent with GENERAL_SYSTEM_PROMPT, scoped to bash/edit/write/read/grep/glob/list/skill/webfetch | **OK** |
-| **3.4** | Scout subagent | Read-only, can clone repos for external docs/deps research | **Not implemented** | **GAP** |
-| **3.5** | VLM-agent subagent | For image analysis (delegates to vision models) | **Not implemented** | **GAP** |
-| **3.6** | Compaction/Title/Summary hidden agents | System agents that run automatically for session compaction, title generation, summarization | **Not implemented** | **GAP** |
-| **3.7** | Subagent multi-step iteration (tool-calling loop within subagent) | Subagents run full agentic loops (stream + tool execution + recursion) | `run_subagent()` uses `stream_with_tools()` with a scoped registry and relays text/reasoning/tool rows into the child stream | **OK** |
-| **3.8** | Child sessions / session tree (parent/child navigation) | Subagents create child sessions, navigable in UI | Task calls create persisted child sessions with `parent_id`, stream transcript rows into them, and expose OpenCode-style `ctrl+x` down / left-right / up navigation | **Partial**: no background resume/task_status integration yet |
-| **3.9** | Agent mode system (primary vs subagent vs all) | Each agent has a `mode` that controls visibility and invocation | No mode field. Plan/build handled separately via policies | **GAP** |
-| **3.10** | Hidden agents (hidden from autocomplete, invokable via Task) | Agents can be marked `hidden: true` | No hidden agent concept | **GAP** |
-| **3.11** | Task permissions (which agents can invoke which subagents) | Per-agent `task_permissions` control | No task permission system. Primary agent can always invoke explore/general | **GAP** |
-| **3.12** | @mention subagent invocation from user input | `@explore` / `@general` in user input routes to subagent | Not implemented | **GAP** |
-| **4.1** | bash | ✓ | `src/tools/bash.rs` | **OK** |
-| **4.2** | edit | ✓ | `src/tools/edit.rs` (exact string replacement, fuzzy fallback) | **OK** |
-| **4.3** | write | ✓ | `src/tools/fs/write.rs` (atomic write via temp+rename) | **OK** |
-| **4.4** | read | ✓ | `src/tools/fs/read.rs` (offset/limit pagination, also reads dirs) | **OK** |
-| **4.5** | grep | ✓ | `src/tools/fs/grep.rs` (regex + include filters) | **OK** |
-| **4.6** | glob | ✓ | `src/tools/fs/glob.rs` (pattern matching) | **OK** |
-| **4.7** | list | ✓ | `src/tools/fs/list.rs` (tree-style directory listing) | **OK** |
-| **4.8** | skill | ✓ | `src/tools/skill.rs` (loads SKILL.md by name, injects content) | **OK** |
-| **4.9** | task | ✓ | `src/tools/task.rs` (spawns explore/general subagents) | **OK** |
-| **4.10** | todowrite | ✓ | `src/tools/todowrite.rs` (JSON-validated structured task list) | **OK** |
-| **4.11** | webfetch | ✓ | `src/tools/webfetch.rs` (fetch + handcrafted HTML-to-markdown) | **OK** |
-| **4.12** | question | ✓ | `src/tools/question.rs` (oneshot-based UI question prompts) | **OK** |
-| **4.13** | websearch | Exa/Parallel web search | **Not implemented** | **GAP** |
-| **4.14** | Tool/media attachments | Tool outputs can carry attachments; images/resources are normalized and replayed to the model | **Not implemented** | **GAP** |
-| **4.15** | apply_patch | Apply diffs/patch files | **Not implemented** | **GAP** |
-| **4.16** | lsp | LSP code intelligence (experimental) | **Not implemented** | **GAP** |
-| **4.17** | task_status | Poll/wait for background subagent tasks | **Not implemented** | **GAP** |
-| **4.18** | repo_clone | Clone external repositories into managed cache for scout/reference workflows | **Not implemented** | **GAP** |
-| **4.19** | repo_overview | Summarize cached/local repository structure and dependency files | **Not implemented** | **GAP** |
-| **4.20** | plan_exit | Model-callable plan approval / build-agent handoff | **Not implemented** | **GAP** |
-| **4.21** | invalid | Fallback tool for unknown/invalid tool calls | **Not implemented** | **GAP** |
-| **5.1** | Discovery: `.opencode/skills/<name>/SKILL.md` | OpenCode native layout | Scanned via `{skill,skills}/**/SKILL.md` in `.opencode/`, `.crabcode/`, config dirs at `src/skill/mod.rs:67-77` | **OK** |
-| **5.2** | Discovery: `~/.config/opencode/skills/<name>/SKILL.md` | Global config skills | `global_opencode` at `src/skill/mod.rs:39` | **OK** |
-| **5.3** | Discovery: `.claude/skills/` (project + home) | Claude Code compat | Walk-up `.claude/skills/**/SKILL.md` + `~/.claude/skills/**/SKILL.md` at `src/skill/mod.rs:46-64` | **OK** |
-| **5.4** | Discovery: `.agents/skills/` (project + home) | OpenCode compat | Walk-up `.agents/skills/**/SKILL.md` + `~/.agents/skills/**/SKILL.md` at `src/skill/mod.rs:46-64` | **OK** |
-| **5.5** | Walk-up bounded to git worktree | Walks up only to git root | Walks up to filesystem root (no git boundary) at `src/skill/mod.rs:50-64` | **Partial**: No git worktree boundary for walk-up |
-| **5.6** | YAML frontmatter with `name` and `description` | Required in SKILL.md | Parsed at `src/skill/mod.rs:184-233`, with fallback YAML sanitization for Claude Code compat | **OK** |
-| **5.7** | Pattern-based skill permissions | `"internal-*": "deny"` style glob patterns | **Not implemented** | **GAP** |
-| **5.8** | Skill tool lists available skills in description | Skill names embedded in tool definition description | `build_description()` at `src/tools/skill.rs:15-48` appends `<available_skills>` XML to tool description | **OK** |
-| **6.1** | Agent config via `opencode.json` | `agent` field in JSON config | Crabcode reads opencode.json, but only applies limited `agent.*.tools` and `agent.*.steps` fields in `src/config/configuration.rs` | **Partial** |
-| **6.2** | Agent config via `~/.config/opencode/agents/<name>.md` | Markdown frontmatter with agent definitions | **Not implemented** | **GAP** |
-| **6.3** | Per-agent: description, model, temperature, max_steps | Full per-agent override of all params | Only has global `LlmSessionConfig` at `src/agent/config.rs:4` (provider, model, api_key). No per-agent overrides | **GAP** |
-| **6.4** | Per-agent: mode (primary/subagent/all) | Controls where agent is visible/usable | Not implemented (only plan/build context) | **GAP** |
-| **6.5** | Per-agent: hidden, color, top_p, permissions, task_permissions | Agent metadata fields | Not implemented | **GAP** |
-| **6.6** | Agent creation wizard (`opencode agent create`) | Interactive agent creation | Not implemented | **GAP** |
-| **6.7** | Config `instructions` array | Additional instruction files/patterns beyond AGENTS/CLAUDE discovery | Key is allowed but marked unimplemented by `collect_unimplemented_keys()` | **GAP** |
-| **6.8** | Config `reference` aliases | Named local/git references that can be mentioned as `@alias` or `@alias/path` | Not implemented; key is not accepted by `opencode_allowed_keys()` | **GAP** |
-| **6.9** | Config `small_model`, `username` | Small model for title/summary agents and display username override | Not implemented | **GAP** |
-| **6.10** | Provider config merge and enable/disable filters | Custom provider/model overrides plus `enabled_providers` / `disabled_providers` | Only `provider.*.options.timeout` is parsed; provider/model merge and filters are not applied | **GAP** |
-| **6.11** | Formatter, LSP, attachment, tool_output config | Runtime config for formatters, LSP servers, image limits, and truncation thresholds | Keys are mostly absent or marked unimplemented; no corresponding runtime services | **GAP** |
-| **7.1** | User-defined commands via `.opencode/commands/<name>.md` | Markdown files define custom slash commands | Not implemented. Only Rust function handlers for built-in commands | **MAJOR GAP** |
-| **7.2** | Command frontmatter: description, agent, model, subtask | YAML frontmatter in custom command files | Not implemented | **GAP** |
-| **7.3** | Template variables ($ARGUMENTS, $INPUT, $CWD, etc.) | Template substitution in custom commands | Not implemented | **GAP** |
-| **7.4** | Shell output injection (`$(command)`) | Inline shell execution in commands | Not implemented | **GAP** |
-| **7.5** | File references (`@path/to/file`) | File content insertion in command text | Not implemented | **GAP** |
-| **8.1** | Per-tool: allow, deny, ask | Global permission rules per tool | `AgentToolPolicies` at `src/tools/permission.rs:71` — per-mode tool allowlists only (not global per-tool deny/ask rules) | **Partial** |
-| **8.2** | Wildcard pattern permissions | `"mymcp_*": "deny"` | Not implemented. Only exact tool name matching | **GAP** |
-| **8.3** | Pattern-specific bash permissions | `"git push": "ask"`, `"git *": "allow"` | Not implemented. Bash only gets a generic "bash requires permission" check | **GAP** |
-| **8.4** | Per-agent override of global permissions | Agent-level permission config overrides global | Not implemented. Only mode-based (plan/build) | **GAP** |
-| **8.5** | External directory gating | Blocks/prompts for paths outside workdir | `is_outside_workdir()` at `src/tools/permission.rs:377` | **OK** |
-| **8.6** | Doom loop recovery prompts | Persistent tool failures trigger recovery | Not implemented | **GAP** |
-| **9.1** | MCP runtime | Stdio/SSE/Streamable HTTP clients, OAuth, tools, prompts, resources | Config key is accepted, but there is no MCP runtime or tool/resource integration | **MAJOR GAP** |
-| **9.2** | Plugin runtime and hooks | Built-in/external plugins plus hooks like `tool.execute.before`, `tool.execute.after`, system transforms | OpenCode `plugin` key is ignored by Crabcode; no plugin loader or hook pipeline | **MAJOR GAP** |
-| **9.3** | Local custom JS/TS tools | Loads `{tool,tools}/*.{js,ts}` from config directories and exposes exports as tools | Not implemented | **GAP** |
-| **9.4** | Plugin auth/provider integrations | Internal plugins add provider/auth behavior for Codex, Copilot, GitLab, Poe, Cloudflare, Azure, DigitalOcean | Not implemented | **GAP** |
-| **10.1** | Snapshots and patch parts | Tracks filesystem snapshots before/after steps and persists patch parts on messages | Not implemented | **GAP** |
-| **10.2** | File-state revert/unrevert | Reverts file changes and can undo/redo snapshot state for a message range | Crabcode message action "Undo" only truncates messages; it does not revert file changes | **GAP** |
-| **10.3** | Session sharing | `share: manual/auto/disabled` and shared session URLs | Not implemented; OpenCode `share` key is ignored | **GAP** |
-| **10.4** | Background/resumable subagents | `task(background=true)`, `task_id` resume, `task_status`, and parent continuation | Not implemented | **GAP** |
-| **10.5** | Durable tool-output truncation | Large output saved to data dir with preview and `tool_output` limits | Crabcode truncates some tool output inline; no durable output file/index | **GAP** |
-| **10.6** | User and tool attachments | File/image/PDF prompt parts, image normalization, media extraction from tool results | Not implemented | **GAP** |
-| **10.7** | Post-edit formatting and diagnostics | Edit/write/patch run configured formatters and surface LSP diagnostics | Not implemented | **GAP** |
+| 1.1 | Multi-step agentic iteration | Streams model responses, accumulates tool calls, executes tools, appends observations, and continues until stop or step limit. | Present. `src/llm/client.rs` calls `stream_with_tools`; `aisdk/src/response.rs` loops over steps, tool calls, and observations. | No major parity gap for the core loop. |
+| 1.2 | Cancellation token support | User interruption cancels active generation and agent work. | Present for model streaming. `src/llm/client.rs` relays cancellation and emits `ChunkMessage::Cancelled`; tools get abort channels through the AI SDK bridge. | Tool cancellation is weaker: `src/tools/aisdk_bridge.rs` creates a fresh abort channel instead of wiring the top-level cancellation token through every long-running tool. |
+| 1.3 | Step limit and fallback | Enforces configured max steps, then injects a max-steps prompt and performs a text-only completion. | Mostly present. `MAX_STEPS_REACHED_PROMPT` is injected and `src/llm/client.rs` calls the provider again with no tools when the loop reaches the limit. | `maxSteps` alias is explicitly unsupported; behavior is tied to the current `steps` config path. |
+| 1.4 | Chunk-based streaming | Emits text, reasoning, tool calls, tool results, errors, metrics, and cancellation chunks. | Present. `src/llm/mod.rs` defines `Text`, `Reasoning`, `ToolCalls`, `ToolResult`, `Failed`, `Metrics`, `Cancelled`, plus permission, question, and subagent chunks. | No major parity gap for the listed chunk types. |
+| 1.5 | Plan/Build mode toggle | Plan mode is read-only; build mode can execute write-capable tools. | Present. `src/app.rs` toggles Plan/Build; `src/tools/permission.rs` denies `write`, `edit`, and `bash` in Plan. | This is mode-based policy only, not the full opencode agent-mode registry. |
+| 1.6 | Permission preflight during tool execution | Tool calls are preflighted and can surface permission dialogs mid-run. | Present but limited. `src/tools/aisdk_bridge.rs` preflights before execution; `src/tools/permission.rs` emits permission requests; `src/app.rs` handles the dialog. | Policy inputs are hardcoded/in-memory rather than driven by opencode-style config rules. |
+| 1.7 | Configurable max steps per agent | Each agent can define max steps; limit injects the max-steps prompt. | Partially present. `src/config/configuration.rs` parses `agent.<name>.steps`; app and print paths pass agent-specific step counts into the LLM call. | Only `steps` is supported; broader per-agent config and deprecated `maxSteps` compatibility are missing. |
+| 2.1 | Provider-specific prompt header and behavior | Chooses provider/model-specific prompts such as Beast/OpenAI, Anthropic, Gemini, Codex, and other provider variants. | Partial. `src/prompt/mod.rs` has Beast, Anthropic, Gemini, and Codex prompt branches. | Prompt set is simpler than opencode, with fewer provider/model variants and less complete behavioral parity. |
+| 2.2 | Environment context block | Includes workdir, git status/repo, platform, and date in the system prompt. | Present. `src/prompt/mod.rs` emits workdir, git repo status, platform, and current date. | Minor wording/content differences only. |
+| 2.3 | Tool schemas block | Lists all registered tools as JSON in the system prompt. | Partial. `SystemPromptComposer` can emit tool schemas if built with a tool registry, but runtime app and print composition do not call `.with_tool_registry(...)`. | Actual runtime system prompts do not include the tool schemas block even though provider requests still receive tool schemas through the AI SDK. |
+| 2.4 | Custom instructions discovery | Walks up for project instructions and supports global fallback. | Partial. `src/prompt/rules.rs` finds local `AGENTS.md`/`CLAUDE.md` and global crabcode/Claude files. | Does not stop at git worktree boundary, does not include opencode global paths, and does not support config-driven instruction entries. |
+| 2.5 | Available skills block | Emits `<available_skills>` with names and descriptions. | Present in interactive mode. `src/prompt/mod.rs` renders skills when `SkillStore` is attached; `src/app.rs` initializes the store. | Print mode does not initialize/attach the skill store, so the block can be absent outside the app path. |
+| 2.6 | Available subagents block | Lists subagent names and descriptions so the primary agent can pick a Task target. | Present. `src/prompt/mod.rs` emits `<available_subagents>`; `src/agent/subagent.rs` supplies definitions. | Only the currently implemented subagents are listed; missing scout, VLM, and hidden/system agents. |
+| 2.7 | Prompt-level subagent selection guidance | Primary agent sees when to use the Task tool and which subagent to choose. | Partial. The prompt lists subagent descriptions and the Task tool schema constrains allowed types. | No task-permission matrix or hidden-agent metadata in the prompt. |
+| 3.1 | Task tool | Primary agents spawn subagents through a Task tool. | Present. `src/tools/task.rs` implements Task; `src/tools/init.rs` registers it dynamically. | Missing opencode parameters such as background execution, task IDs, command routing, and task status. |
+| 3.2 | `explore` subagent | Fast read-only subagent with glob, grep, read, and list. | Present. `src/agent/subagent.rs` defines `Explore` with those read-only tools. | No major parity gap for the basic explore profile. |
+| 3.3 | `general` subagent | Full multi-step subagent, excluding `todowrite`. | Present. `src/agent/subagent.rs` defines `General` with broad tools and excludes `todowrite`. | Permission behavior is still governed by crabcode's simpler policy engine. |
+| 3.4 | `scout` subagent | Read-only external research agent that can clone repositories. | Missing. `SubAgentType` only has `Explore` and `General`. | Need scout definition, repo clone/overview tools, and external research permissions. |
+| 3.5 | `vlm-agent` | Image-analysis subagent. | Missing. | Need image input plumbing, VLM model selection, and a VLM-capable subagent definition. |
+| 3.6 | Hidden/system agents | Compaction, title, and summary agents run automatically and are hidden from user autocomplete. | Missing as an agent system. | Need hidden agent definitions and automatic invocation hooks for compaction, title, and summary flows. |
+| 3.7 | Child sessions | Subagent work is represented as child sessions with parent/child navigation. | Partial. `src/session/manager.rs` supports child sessions; `src/tools/task.rs` creates subagent sessions; `src/app.rs` renders subagent events. | Lacks opencode-style background tasks, task status tracking, and richer child-session lifecycle controls. |
+| 3.8 | `@mention` subagent invocation | User input can invoke subagents by mention. | Missing. Slash command parsing exists in `src/command/parser.rs`; autocomplete focuses on files/commands, not subagents. | Need parser, autocomplete, and dispatch path for `@subagent` invocation. |
+| 3.9 | Agent mode: primary, subagent, all | Agent definitions declare where they are available. | Missing. | Need agent registry fields and enforcement for primary-only, subagent-only, and all-mode agents. |
+| 3.10 | Hidden agents from autocomplete | Agents can be invokable but hidden from autocomplete. | Missing. | Requires hidden metadata in agent definitions and autocomplete filtering. |
+| 3.11 | Task permissions | Controls which agents can invoke which subagents. | Missing. Task validates only the hardcoded subagent enum. | Need per-agent task permission rules and enforcement before spawning a child agent. |
+| 4.1 | `bash` tool | Executes shell commands. | Present. `src/tools/bash.rs`; registered in `src/tools/init.rs`. | Policy granularity differs from opencode. |
+| 4.2 | `edit` tool | Exact string replacement in files. | Present. `src/tools/edit.rs`; registered in `src/tools/init.rs`. | No major parity gap for the basic tool. |
+| 4.3 | `write` tool | Creates or overwrites files. | Present. `src/tools/fs/write.rs`; registered in `src/tools/init.rs`. | No major parity gap for the basic tool. |
+| 4.4 | `read` tool | Reads files with offset/limit pagination and can inspect directories. | Present. `src/tools/fs/read.rs`; registered in `src/tools/init.rs`. | Confirm directory behavior stays aligned with opencode's separate `list` semantics during future changes. |
+| 4.5 | `grep` tool | Regex search with include filters. | Present. `src/tools/fs/grep.rs`; registered in `src/tools/init.rs`. | No major parity gap for the basic tool. |
+| 4.6 | `glob` tool | File pattern matching. | Present. `src/tools/fs/glob.rs`; registered in `src/tools/init.rs`. | No major parity gap for the basic tool. |
+| 4.7 | `list` tool | Deliberate tree-style directory listing, separate from read-directory behavior. | Partial. `src/tools/fs/list.rs` lists direct entries. | Needs recursive/tree-style output parity with opencode's `list`. |
+| 4.8 | `skill` tool | Loads `SKILL.md` by name and lists available skills in its description. | Present. `src/tools/skill.rs`; registered in `src/tools/init.rs`. | Availability filtering does not honor skill permission patterns. |
+| 4.9 | `task` tool | Spawns subagents. | Present. `src/tools/task.rs`; dynamically registered in `src/tools/init.rs`. | Missing background/status/command/task-permission behavior. |
+| 4.10 | `todowrite` tool | Manages structured task lists. | Present. `src/tools/todowrite.rs`; registered in `src/tools/init.rs`. | No major parity gap for registration; behavior should be checked separately if exact todo schema parity is required. |
+| 4.11 | `webfetch` tool | Fetches web content and converts it to readable text/markdown. | Present. `src/tools/webfetch.rs`; registered in `src/tools/init.rs`. | Network and markdown-conversion fidelity may differ, but the core tool exists. |
+| 4.12 | `websearch` tool | Searches the web through Exa AI. | Missing. | Need search provider integration, schema, permissions, and registration. |
+| 4.13 | `question` tool | Asks the user questions during execution. | Present. `src/tools/question.rs`; dynamically registered in `src/tools/init.rs`. | No major parity gap for basic interactive questions. |
+| 4.14 | `extract-images` tool | Saves session images to disk. | Missing. | Need session attachment/image storage model and tool registration. |
+| 4.15 | `apply_patch` tool | Applies diffs/patches. | Missing. | Need patch application tool, schema, permissions, and safe failure handling. |
+| 4.16 | `lsp` tool | Experimental LSP code intelligence. | Missing. | Need LSP client/session management and tool schema. |
+| 5.1 | Skill discovery locations | Searches project/global opencode, Claude, and agents skill locations. | Partial. `src/skill/mod.rs` scans crabcode/opencode globals plus project/global `.claude` and `.agents`. | Missing config `skills.paths` and URL-based skills; project `.opencode`/`.crabcode` discovery is rooted, not fully walk-up like `.claude`/`.agents`. |
+| 5.2 | Walk-up to git worktree | Walks up project directories until the git worktree boundary. | Partial. `src/skill/mod.rs` walks up for `.claude` and `.agents`. | Walk-up does not stop at the git worktree boundary and is not consistently applied to all project skill roots. |
+| 5.3 | Skill frontmatter | Requires YAML frontmatter with `name` and `description`. | Partial. `name` is required, but `description` is optional in `src/skill/mod.rs`. | Enforce required descriptions for opencode compatibility. |
+| 5.4 | Pattern-based skill permissions | Supports allow/deny rules such as `internal-* = deny`. | Missing. | Need skill permission parsing, glob matching, and filtering before prompt/tool exposure. |
+| 5.5 | Skill tool list in description | Skill tool description lists available skills. | Present. `src/tools/skill.rs` builds a description from `SkillStore::list()`. | Should be filtered by skill permissions once those exist. |
+| 6.1 | JSON agent config | Supports agent config in `opencode.json`. | Partial. Crabcode config parses agent tool allowlists and `steps` from JSON/JSONC. | Missing most opencode agent fields and full `opencode.json` agent compatibility. |
+| 6.2 | Markdown agent config | Supports `~/.config/opencode/agents/<name>.md` frontmatter. | Missing as runtime config. `src/config/configuration.rs` inventories agent markdown files but does not parse/apply them. | Need markdown frontmatter parser and merge logic. |
+| 6.3 | Per-agent execution fields | Supports description, temperature, model, max steps, mode, hidden, color, top_p, permissions, and task permissions. | Mostly missing. `src/agent/config.rs` is global LLM session state; config currently supports only tool policies and `steps`. | Need a first-class agent definition model and enforcement path. |
+| 6.4 | Agent creation wizard | `opencode agent create` scaffolds new agent config. | Missing. | Add command/CLI flow to create agent markdown or JSON config entries. |
+| 7.1 | User-defined command files | Loads `.opencode/commands/<name>.md`. | Missing. `src/command` only implements built-in slash commands and skill-backed commands. | Need command file discovery, parsing, and registration. |
+| 7.2 | Command frontmatter | Supports description, agent, model, and subtask. | Missing. | Need command frontmatter schema and dispatch behavior. |
+| 7.3 | Template variables | Expands `$ARGUMENTS`, `$1`, `$2`, and similar variables. | Missing. | Add command template expansion before sending prompts. |
+| 7.4 | Shell output injection | Expands command-substitution snippets inside command prompts. | Missing. | Add shell execution path with permission checks and output injection. |
+| 7.5 | File references | Expands `@path/to/file` references inside command prompts. | Missing. | Reuse file reference parsing/attachment code or add command-specific resolver. |
+| 7.6 | Subtask command routing | Commands can run as subtasks through the Task tool. | Missing. | Add `subtask` handling that routes through Task with the requested agent. |
+| 8.1 | Per-tool permissions | Per-tool rules support allow, deny, and ask. | Partial. `src/tools/permission.rs` has Plan/Build defaults and in-memory allow/deny/ask outcomes. | No config-level per-tool allow/deny/ask matrix. |
+| 8.2 | Wildcard permission patterns | Supports patterns such as `mymcp_* = deny`. | Missing. | Add wildcard matcher and config schema. |
+| 8.3 | Bash command patterns | Supports command-specific bash permissions such as `git push = ask` and `git * = allow`. | Missing. | Replace hardcoded bash ask behavior with ordered pattern-specific rules. |
+| 8.4 | Per-agent permission override | Agent config can override global permissions. | Missing. | Requires first-class agent config plus permission merge order. |
+| 8.5 | External directory gating | Writes/commands outside workspace are gated. | Present. `src/tools/permission.rs` checks external paths and sensitive paths. | No major parity gap for the basic safety gate, but rule configurability is missing. |
+| 8.6 | Doom loop recovery prompts | Detects repeated permission/operation loops and prompts for recovery. | Missing. | Need loop detection in agent execution and recovery prompt injection. |
 
-## Priority-Ranked Actionable Gaps
+## Priority Gaps
 
 ### CRITICAL
 
-| # | Gap | Location | Notes |
-|---|-----|----------|-------|
-| **C1** | **No custom user-defined commands** | `src/command/` | OpenCode's `.opencode/commands/<name>.md` system is entirely absent. Crabcode only has hardcoded Rust function handlers. Need: (a) `.opencode/commands/` + `~/.config/opencode/commands/` directory discovery, (b) Markdown file parser with YAML frontmatter, (c) template engine for `$ARGUMENTS`, `$INPUT`, `$CWD`, (d) shell injection `$(...)`, (e) `@file` references. Entirely new module needed. |
+1. Runtime system prompt omits the tool schemas block.
+   - Files: `src/prompt/mod.rs`, `src/app.rs`, `src/main.rs`, `src/tools/init.rs`.
+   - `SystemPromptComposer` can render tool schemas, but the app and print paths do not pass a registry with `.with_tool_registry(...)`. Build the static and dynamic tool registries before composing the system prompt, then include `question` and `task` as dynamic schemas.
 
-Recently addressed from the previous critical list:
-- Subagents now run through the multi-step `stream_with_tools()` loop and stream into child sessions.
-- Tool-result messages are now replayed into later model requests as observations. Remaining work is canonical MessageV2-style typed history with attachments/full outputs.
+2. OpenCode-compatible custom commands are absent.
+   - Files: `src/command/parser.rs`, `src/command/registry.rs`, `src/command/handlers.rs`.
+   - Add discovery for `.opencode/commands/<name>.md`, frontmatter parsing for `description`, `agent`, `model`, and `subtask`, template expansion for `$ARGUMENTS` and positional args, command-substitution injection with permission checks, file-reference expansion, and Task routing for subtask commands.
+
+3. Permission system is not OpenCode-compatible.
+   - Files: `src/tools/permission.rs`, `src/config/configuration.rs`, `crabcode.schema.json`, `_docs/config.mdx`.
+   - Add config-driven `allow`, `deny`, and `ask` rules; wildcard tool matching; ordered bash command patterns; per-agent override merging; task permissions; skill permissions; and durable approvals where appropriate.
+
+4. First-class agent registry/config is missing.
+   - Files: `src/agent/config.rs`, `src/agent/subagent.rs`, `src/config/configuration.rs`.
+   - Introduce an agent definition model covering description, model, temperature, top_p, steps/max_steps aliases, mode, hidden, color, permissions, and task permissions. Parse both JSON config and markdown frontmatter agent files.
 
 ### HIGH
 
-| # | Gap | Location | Notes |
-|---|-----|----------|-------|
-| **H1** | **No multi-agent config (per-agent model, temp, max_steps, mode)** | `src/agent/config.rs`, `src/agent/manager.rs` | `LlmSessionConfig` is a global singleton (`OnceLock`). Need a `config/agents/<name>.md` parser + per-agent struct with: description, temperature, model, max_steps, mode (primary/subagent/all), hidden, color, top_p, permissions, task_permissions. The `AgentManager::new()` at `manager.rs:42` hardcodes `name: "default"` and uses a global provider config. |
-| **H2** | **No agent modes (primary/subagent/all/hidden)** | `src/agent/types.rs`, `src/agent/manager.rs` | `Agent` struct at `manager.rs:10` has no `mode` field. Need: enum `AgentMode::Primary | Subagent | All`, hidden flag, integration with tool permission filtering and system prompt visibility. |
-| **H3** | **Child session tree still lacks background/task_status semantics** | `src/agent/subagent.rs`, `src/session/`, `src/app.rs` | Task-created child sessions now exist and are navigable in the TUI. Remaining OpenCode parity: background task resume, task_status polling, and richer child-session lifecycle metadata. |
-| **H4** | **Wildcard and pattern-based permission system** | `src/tools/permission.rs` | `AgentToolPolicies` only supports exact tool name matching per mode. Need: glob/wildcard matching (`"mymcp_*": "deny"`), pattern-specific bash permissions (`"git push": "ask"`, `"git *": "allow"`), per-agent permission overrides. |
-| **H5** | **Scout subagent** | New: `src/agent/subagent.rs` | Read-only subagent that can clone repos for researching external docs/dependencies. Similar to Explore but with git clone capability and web search. |
-| **H6** | **VLM-agent subagent** | New: `src/agent/subagent.rs` | Subagent for image analysis. Needs attachment/media support, vision-capable model routing, and image/PDF prompt-part handling. |
-| **H7** | **Hidden/auto agents (compaction, title, summary)** | New: `src/agent/` | System agents that run automatically: compaction (truncates conversation context), title (generates session title), summary (summarizes long contexts). These are hidden from user but invokable via Task tool. |
-| **H8** | **No MCP runtime** | New: `src/mcp/`, `src/tools/registry.rs` | OpenCode supports stdio/SSE/Streamable HTTP MCP servers, OAuth, tools, prompts, and resources. Crabcode only accepts the `mcp` config key and does not expose MCP tools/resources to the model. |
-| **H9** | **No plugin runtime, hooks, or dynamic custom tools** | New: `src/plugin/`, `src/tools/registry.rs` | OpenCode loads internal/external plugins, fires hooks around system/tool execution, and loads local `{tool,tools}/*.{js,ts}` exports as tools. Crabcode ignores OpenCode `plugin` config and has no plugin hook pipeline. |
-| **H10** | **No snapshot-backed file revert** | New: `src/snapshot/`, `src/session/revert.rs` | OpenCode captures snapshots around steps, persists patch parts, and can revert/unrevert file changes. Crabcode's message action "Undo" only truncates messages and does not restore the filesystem. |
-| **H11** | **No background/resumable task jobs** | `src/tools/task.rs`, `src/agent/subagent.rs` | OpenCode `task` supports `background`, `task_id` resume, `task_status`, background result injection, and automatic parent continuation. Crabcode task returns a single string from a fresh subagent call. |
-| **H12** | **No attachment/media pipeline** | `src/session/`, `src/llm/`, `src/tools/` | OpenCode supports file/image/PDF prompt parts, image normalization, tool-result attachments, and provider-specific media replay. Crabcode has no corresponding session or provider message shape. |
-| **H13** | **OpenCode config schema is only partially implemented** | `src/config/configuration.rs` | Additional OpenCode config fields such as `instructions`, `reference`, `small_model`, `username`, `enabled_providers`, `disabled_providers`, `formatter`, `lsp`, `attachment`, `tool_output`, `snapshot`, `share`, `plugin`, and `experimental` are absent, ignored, or reported as unimplemented. |
+1. Missing subagent set beyond `explore` and `general`.
+   - Files: `src/agent/subagent.rs`, `src/tools/task.rs`, `src/tools/init.rs`.
+   - Add `scout`, `vlm-agent`, and hidden `compaction`, `title`, and `summary` agents. Scout also needs repo clone/overview tools and external research permissions; VLM needs image input/model routing.
+
+2. Task tool lacks background/status/command parity.
+   - Files: `src/tools/task.rs`, `src/session/manager.rs`, `src/app.rs`.
+   - Add `task_id`, `background`, `command`, and task-status support. Enforce task permissions before child session creation and expose background task lifecycle events.
+
+3. Missing or partial built-in tools.
+   - Files: `src/tools/init.rs`, `src/tools/fs/list.rs`, new tool modules.
+   - Add `websearch`, `extract-images`, `apply_patch`, and `lsp`. Update `list` to produce opencode-style tree output rather than only direct directory entries.
+
+4. Instruction discovery is incomplete.
+   - Files: `src/prompt/rules.rs`, `src/config/configuration.rs`, `src/main.rs`.
+   - Stop walk-up at the git worktree boundary, include opencode global instruction paths, support config-provided instruction entries, and attach `SkillStore` in print mode so available skills appear consistently.
 
 ### MEDIUM
 
-| # | Gap | Location | Notes |
-|---|-----|----------|-------|
-| **M1** | **No @mention subagent invocation** | `src/command/parser.rs` | User typing `@explore find all tests` should route directly to the explore subagent. Need: extend `parse_input()` to detect `@subagent_name` prefix. |
-| **M2** | **No websearch tool** | New: `src/tools/websearch.rs` | OpenCode supports Exa/Parallel web search. Crabcode has no equivalent. |
-| **M3** | **No tool/media attachments** | `src/tools/types.rs`, `src/session/types.rs` | Tool results cannot carry attachments or media content, so current OpenCode behavior for MCP image/resource results, webfetch image output, and vision workflows has no place to land. |
-| **M4** | **No apply_patch tool** | New: `src/tools/apply_patch.rs` | Apply unified diffs to files. Needed for patch-based editing workflows. |
-| **M5** | **No LSP tool** | New: `src/tools/lsp.rs` | LSP code intelligence (go-to-def, find-references, diagnostics). |
-| **M6** | **No doom loop recovery** | `src/tools/permission.rs`, `src/llm/client.rs` | When tools persistently fail, inject recovery prompts to break the loop. |
-| **M7** | **Skill walk-up not bounded by git root** | `src/skill/mod.rs:50-64` | Walk-up for `.claude/` and `.agents/` skill dirs goes all the way to filesystem root. Should stop at git worktree boundary (like OpenCode). |
-| **M8** | **No pattern-based skill permissions** | `src/skill/mod.rs`, `src/tools/skill.rs` | OpenCode supports `"internal-*": "deny"` style skill access control. Crabcode loads all skills unconditionally. |
-| **M9** | **Plan/Build mode not user-toggleable mid-conversation** | `src/app.rs` (streaming setup) | Agent mode is set once at stream start. User should be able to toggle plan/build during conversations. |
-| **M10** | **No task_status tool** | New: `src/tools/task_status.rs` | Needed once background subagents exist; lets the model poll or wait for asynchronous child-session work. |
-| **M11** | **No repo_clone / repo_overview tools or reference aliases** | New: `src/tools/repo_clone.rs`, `src/tools/repo_overview.rs`, `src/reference/` | Required for OpenCode's scout/reference workflow: clone external repositories into a managed cache and inspect their structure without touching the user workspace. |
-| **M12** | **No plan_exit handoff tool** | `src/agent/plan.rs`, `src/tools/` | OpenCode uses a model-callable plan exit flow to ask for plan approval and switch to build agent. Crabcode has plan/build policies but no equivalent tool-mediated handoff. |
-| **M13** | **No formatter service or post-edit diagnostics** | New: `src/format/`, `src/lsp/` | OpenCode runs configured formatters after write/edit/patch and reports LSP diagnostics after patch. Crabcode edits files without that post-processing loop. |
-| **M14** | **No durable tool-output truncation files** | New: `src/tools/truncate.rs` | OpenCode writes large outputs to a data-dir file and returns a preview plus path. Crabcode has per-tool inline truncation only, which prevents later grep/read over the full captured output. |
-| **M15** | **No `instructions` config ingestion** | `src/config/configuration.rs`, `src/prompt/` | OpenCode supports extra instruction files/patterns from config. Crabcode allows the key but marks it unimplemented and only uses AGENTS/CLAUDE-style rule discovery. |
-| **M16** | **No session sharing/autoshare** | `src/session/`, `src/config/configuration.rs` | OpenCode's `share` / `autoshare` config and shared session URLs are not represented. Crabcode ignores the OpenCode `share` key. |
-| **M17** | **No invalid-tool fallback** | `src/tools/registry.rs` | OpenCode has an `invalid` tool to handle unknown/invalid tool calls cleanly. Crabcode has no equivalent fallback. |
+1. Skill loader needs compatibility hardening.
+   - Files: `src/skill/mod.rs`, `src/tools/skill.rs`, `src/config/configuration.rs`.
+   - Add config `skills.paths` and URL skills, enforce required descriptions, apply permission-pattern filtering, and bound walk-up discovery by the git worktree.
+
+2. `@mention` subagent invocation is missing.
+   - Files: `src/command/parser.rs`, `src/autocomplete`, `src/app.rs`.
+   - Add parser/autocomplete support for subagent mentions and route mentioned subagents into the Task flow with the rest of the message as the prompt.
+
+3. Tool-call cancellation should propagate into tools.
+   - Files: `src/llm/client.rs`, `src/tools/aisdk_bridge.rs`, tool implementations that can block.
+   - Wire the top-level cancellation token into the per-tool abort channel so bash, webfetch, and subagent execution stop promptly on user interruption.
+
+4. Max-step compatibility should accept OpenCode aliases.
+   - Files: `src/config/configuration.rs`, `crabcode.schema.json`, `_docs/config.mdx`.
+   - Accept `max_steps` and deprecated `maxSteps` as aliases for `steps`, with a warning only if necessary.
 
 ### LOW
 
-| # | Gap | Location | Notes |
-|---|-----|----------|-------|
-| **L1** | **No task permission controls** | `src/tools/task.rs` | Primary agent can always invoke any subagent. OpenCode has per-agent `task_permissions` to restrict which subagents an agent can spawn. |
-| **L2** | **No agent color theming** | `src/agent/config.rs` | Per-agent color for UI differentiation of which agent is speaking. |
-| **L3** | **No agent creation wizard** | New: command handler | `opencode agent create` interactive wizard missing. UX feature but tied to multi-agent config. |
-| **L4** | **No per-agent top_p** | `src/agent/config.rs` | Per-agent LLM sampling parameter. |
-| **L5** | **No `small_model` selection** | `src/config/configuration.rs`, `src/agent/` | OpenCode uses small-model config for title/summary/utility agents. Crabcode has no utility-model selection. |
-| **L6** | **No username display override** | `src/config/configuration.rs`, `src/ui/` | OpenCode config can override the displayed username in conversations. |
-| **L7** | **No provider enable/disable filters** | `src/config/configuration.rs`, `src/model/discovery.rs` | OpenCode can restrict loaded providers with `enabled_providers` and `disabled_providers`; Crabcode allows but does not apply these keys. |
+1. Agent creation wizard is missing.
+   - Files: `src/command/handlers.rs`, `src/main.rs`.
+   - Add `crabcode agent create` or a slash-command equivalent after the agent definition format is implemented.
+
+2. Provider prompt set is simplified.
+   - Files: `src/prompt/mod.rs`.
+   - Add remaining opencode provider/model prompt variants only after the core config, command, permission, and tool gaps are closed.
+
+3. Per-agent visual metadata can wait.
+   - Files: `src/agent/config.rs`, UI consumers later.
+   - `color` is part of opencode agent config, but it does not affect harness execution and should be implemented after execution semantics are compatible.

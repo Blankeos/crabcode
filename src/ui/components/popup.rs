@@ -1,4 +1,4 @@
-use crate::autocomplete::Suggestion;
+use crate::autocomplete::{Suggestion, SuggestionKind};
 use crate::theme::{contrast_text, ThemeColors};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -133,9 +133,19 @@ impl Popup {
         let max_name_len = self
             .suggestions
             .iter()
-            .map(|s| s.name.len())
+            .map(|s| s.display_prefix().len() + s.name.len())
             .max()
             .unwrap_or(0);
+        let title = if self
+            .suggestions
+            .first()
+            .map(|s| s.kind == SuggestionKind::File)
+            .unwrap_or(false)
+        {
+            "Files"
+        } else {
+            "Commands"
+        };
 
         use ratatui::text::Span;
 
@@ -162,32 +172,32 @@ impl Popup {
                 let left_padding = " ".repeat(ITEM_HORIZONTAL_PADDING);
                 let right_padding = " ".repeat(ITEM_HORIZONTAL_PADDING);
 
+                let display_name = format!("{}{}", suggestion.display_prefix(), suggestion.name);
+                let display_name_len = display_name.len();
+
                 let line = if !suggestion.description.is_empty() {
-                    let mid_padding = " ".repeat(max_name_len + 3 - suggestion.name.len());
-                    let content_len = suggestion.name.len()
+                    let mid_padding = " ".repeat(max_name_len + 3 - display_name_len);
+                    let content_len = display_name_len
                         + suggestion.description.len()
                         + mid_padding.len()
-                        + 1
                         + ITEM_HORIZONTAL_PADDING
                         + ITEM_HORIZONTAL_PADDING;
                     let end_padding = " ".repeat(item_width.saturating_sub(content_len));
                     Line::from(vec![
                         Span::styled(left_padding, padding_style),
-                        Span::styled(format!("/{}", suggestion.name), name_style),
+                        Span::styled(display_name, name_style),
                         Span::styled(mid_padding, padding_style),
                         Span::styled(suggestion.description.clone(), desc_style),
                         Span::styled(end_padding, padding_style),
                         Span::styled(right_padding, padding_style),
                     ])
                 } else {
-                    let content_len = suggestion.name.len()
-                        + 1
-                        + ITEM_HORIZONTAL_PADDING
-                        + ITEM_HORIZONTAL_PADDING;
+                    let content_len =
+                        display_name_len + ITEM_HORIZONTAL_PADDING + ITEM_HORIZONTAL_PADDING;
                     let end_padding = " ".repeat(item_width.saturating_sub(content_len));
                     Line::from(vec![
                         Span::styled(left_padding, padding_style),
-                        Span::styled(format!("/{}", suggestion.name), name_style),
+                        Span::styled(display_name, name_style),
                         Span::styled(end_padding, padding_style),
                         Span::styled(right_padding, padding_style),
                     ])
@@ -206,7 +216,7 @@ impl Popup {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(border_style)
-                .title("Commands"),
+                .title(title),
         );
 
         frame.render_widget(list, popup_area);
@@ -231,6 +241,10 @@ impl Default for Popup {
 mod tests {
     use super::*;
 
+    fn suggestion(name: &str, description: &str) -> Suggestion {
+        Suggestion::command(name, description)
+    }
+
     #[test]
     fn test_popup_creation() {
         let popup = Popup::new();
@@ -249,14 +263,8 @@ mod tests {
     fn test_set_suggestions() {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![
-            Suggestion {
-                name: "item1".to_string(),
-                description: "desc1".to_string(),
-            },
-            Suggestion {
-                name: "item2".to_string(),
-                description: "desc2".to_string(),
-            },
+            suggestion("item1", "desc1"),
+            suggestion("item2", "desc2"),
         ]);
         assert!(popup.is_visible());
         assert!(popup.has_suggestions());
@@ -267,10 +275,7 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut popup = Popup::new();
-        popup.set_suggestions(vec![Suggestion {
-            name: "item1".to_string(),
-            description: "desc1".to_string(),
-        }]);
+        popup.set_suggestions(vec![suggestion("item1", "desc1")]);
         popup.clear();
         assert!(!popup.is_visible());
         assert!(!popup.has_suggestions());
@@ -281,18 +286,9 @@ mod tests {
     fn test_next() {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![
-            Suggestion {
-                name: "item1".to_string(),
-                description: "desc1".to_string(),
-            },
-            Suggestion {
-                name: "item2".to_string(),
-                description: "desc2".to_string(),
-            },
-            Suggestion {
-                name: "item3".to_string(),
-                description: "desc3".to_string(),
-            },
+            suggestion("item1", "desc1"),
+            suggestion("item2", "desc2"),
+            suggestion("item3", "desc3"),
         ]);
         popup.next();
         assert_eq!(popup.selected_index, 1);
@@ -306,18 +302,9 @@ mod tests {
     fn test_previous() {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![
-            Suggestion {
-                name: "item1".to_string(),
-                description: "desc1".to_string(),
-            },
-            Suggestion {
-                name: "item2".to_string(),
-                description: "desc2".to_string(),
-            },
-            Suggestion {
-                name: "item3".to_string(),
-                description: "desc3".to_string(),
-            },
+            suggestion("item1", "desc1"),
+            suggestion("item2", "desc2"),
+            suggestion("item3", "desc3"),
         ]);
         popup.previous();
         assert_eq!(popup.selected_index, 2);
@@ -329,14 +316,8 @@ mod tests {
     fn test_get_selected() {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![
-            Suggestion {
-                name: "item1".to_string(),
-                description: "desc1".to_string(),
-            },
-            Suggestion {
-                name: "item2".to_string(),
-                description: "desc2".to_string(),
-            },
+            suggestion("item1", "desc1"),
+            suggestion("item2", "desc2"),
         ]);
         assert_eq!(popup.get_selected().map(|s| s.name.as_str()), Some("item1"));
         popup.next();
@@ -348,10 +329,7 @@ mod tests {
         let mut popup = Popup::new();
         popup.set_suggestions(
             (0..10)
-                .map(|i| Suggestion {
-                    name: format!("item{}", i),
-                    description: String::new(),
-                })
+                .map(|i| Suggestion::command(format!("item{}", i), ""))
                 .collect(),
         );
 
@@ -394,14 +372,8 @@ mod tests {
     fn test_handle_key_event_down() {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![
-            Suggestion {
-                name: "item1".to_string(),
-                description: "desc1".to_string(),
-            },
-            Suggestion {
-                name: "item2".to_string(),
-                description: "desc2".to_string(),
-            },
+            suggestion("item1", "desc1"),
+            suggestion("item2", "desc2"),
         ]);
         let key = KeyEvent {
             code: KeyCode::Down,
@@ -418,14 +390,8 @@ mod tests {
     fn test_handle_key_event_up() {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![
-            Suggestion {
-                name: "item1".to_string(),
-                description: "desc1".to_string(),
-            },
-            Suggestion {
-                name: "item2".to_string(),
-                description: "desc2".to_string(),
-            },
+            suggestion("item1", "desc1"),
+            suggestion("item2", "desc2"),
         ]);
         let key = KeyEvent {
             code: KeyCode::Up,
@@ -441,10 +407,7 @@ mod tests {
     #[test]
     fn test_handle_key_event_tab() {
         let mut popup = Popup::new();
-        popup.set_suggestions(vec![Suggestion {
-            name: "item1".to_string(),
-            description: "desc1".to_string(),
-        }]);
+        popup.set_suggestions(vec![suggestion("item1", "desc1")]);
         let key = KeyEvent {
             code: KeyCode::Tab,
             modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
@@ -458,10 +421,7 @@ mod tests {
     #[test]
     fn test_handle_key_event_esc() {
         let mut popup = Popup::new();
-        popup.set_suggestions(vec![Suggestion {
-            name: "item1".to_string(),
-            description: "desc1".to_string(),
-        }]);
+        popup.set_suggestions(vec![suggestion("item1", "desc1")]);
         let key = KeyEvent {
             code: KeyCode::Esc,
             modifiers: ratatui::crossterm::event::KeyModifiers::empty(),
@@ -476,10 +436,7 @@ mod tests {
     #[test]
     fn test_handle_key_event_char() {
         let mut popup = Popup::new();
-        popup.set_suggestions(vec![Suggestion {
-            name: "item1".to_string(),
-            description: "desc1".to_string(),
-        }]);
+        popup.set_suggestions(vec![suggestion("item1", "desc1")]);
         let key = KeyEvent {
             code: KeyCode::Char('a'),
             modifiers: ratatui::crossterm::event::KeyModifiers::empty(),

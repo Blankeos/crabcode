@@ -21,6 +21,14 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self::User(UserMessage {
             content: content.into(),
+            images: Vec::new(),
+        })
+    }
+
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImageContent>) -> Self {
+        Self::User(UserMessage {
+            content: content.into(),
+            images,
         })
     }
 
@@ -39,6 +47,14 @@ pub struct SystemMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserMessage {
     pub content: String,
+    #[serde(default)]
+    pub images: Vec<ImageContent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageContent {
+    pub data_url: String,
+    pub media_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +78,10 @@ impl From<&str> for SystemMessage {
 
 impl From<String> for UserMessage {
     fn from(content: String) -> Self {
-        Self { content }
+        Self {
+            content,
+            images: Vec::new(),
+        }
     }
 }
 
@@ -70,6 +89,7 @@ impl From<&str> for UserMessage {
     fn from(content: &str) -> Self {
         Self {
             content: content.to_string(),
+            images: Vec::new(),
         }
     }
 }

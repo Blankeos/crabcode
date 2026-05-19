@@ -4,6 +4,7 @@ use aisdk::core::{
     stop::{step_count_is, StopReason},
     Message as AisdkMessage, Tool,
 };
+use aisdk::message::ImageContent;
 use aisdk::{Anthropic, OpenAI, OpenAICompatible};
 use futures::StreamExt;
 use std::{collections::HashMap, time::Instant};
@@ -517,7 +518,37 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
                 aisdk_messages.push(AisdkMessage::system(msg.content.clone()));
             }
             crate::session::types::MessageRole::User => {
-                aisdk_messages.push(AisdkMessage::user(msg.content.clone()));
+                let images = msg
+                    .local_image_paths
+                    .iter()
+                    .filter_map(|path| {
+                        let path = std::path::Path::new(path);
+                        match crate::utils::image_attachment::data_url_for_path(path) {
+                            Ok(data_url) => Some(ImageContent {
+                                data_url,
+                                media_type: crate::utils::image_attachment::mime_type_for_path(
+                                    path,
+                                )
+                                .to_string(),
+                            }),
+                            Err(err) => {
+                                let _ = log(&format!(
+                                    "failed to attach image {}: {}",
+                                    path.display(),
+                                    err
+                                ));
+                                None
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                if images.is_empty() {
+                    aisdk_messages.push(AisdkMessage::user(msg.content.clone()));
+                } else {
+                    aisdk_messages
+                        .push(AisdkMessage::user_with_images(msg.content.clone(), images));
+                }
             }
             crate::session::types::MessageRole::Assistant => {
                 aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));

@@ -1,12 +1,17 @@
-use crate::autocomplete::{AutoComplete, Suggestion};
+use crate::autocomplete::{AutoComplete, Suggestion, SuggestionKind};
 use crate::persistence::PromptHistoryCache;
+use crate::push_toast;
 use crate::theme::{agent_color, ThemeColors};
+use crate::toast::{Toast, ToastLevel};
+use crate::utils::image_attachment;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::prelude::{Rect, Style};
 use ratatui::symbols::border;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use std::ops::Range;
+use std::path::PathBuf;
 use tui_textarea::{CursorMove, Input as TuiInput, TextArea};
 use unicode_width::UnicodeWidthChar;
 
@@ -54,6 +59,19 @@ pub struct Input {
     viewport_top: usize,
     prompt_history: Option<PromptHistoryCache>,
     draft_text: Option<String>,
+    local_images: Vec<LocalImageAttachment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalImageAttachment {
+    pub placeholder: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompletionToken {
+    query: String,
+    range: Range<usize>,
 }
 
 impl Input {
@@ -74,6 +92,7 @@ impl Input {
             viewport_top: 0,
             prompt_history,
             draft_text: None,
+            local_images: Vec::new(),
         }
     }
 
@@ -200,12 +219,14 @@ impl Input {
         // Check for Shift+Enter (works in most terminals)
         if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::SHIFT) {
             self.textarea.insert_newline();
+            self.sync_image_placeholders();
             return true;
         }
 
         // Fallback: Alt+Enter for terminals where Shift+Enter doesn't work
         if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::ALT) {
             self.textarea.insert_newline();
+            self.sync_image_placeholders();
             return true;
         }
 
@@ -280,6 +301,7 @@ impl Input {
         match event.code {
             KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => {
                 self.textarea.insert_newline();
+                self.sync_image_placeholders();
                 true
             }
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
@@ -293,18 +315,23 @@ impl Input {
                         self.textarea.delete_char();
                     }
                 }
+                self.sync_image_placeholders();
                 true
             }
             KeyCode::Tab => false,
             KeyCode::Esc => false,
+            KeyCode::Backspace if self.remove_placeholder_at_cursor(false) => true,
+            KeyCode::Delete if self.remove_placeholder_at_cursor(true) => true,
             KeyCode::Backspace if event.modifiers.contains(KeyModifiers::ALT) => {
                 // Handle Alt+Backspace (word-delete) ourselves to avoid
                 // tui-textarea's buggy word boundary with multi-byte emoji
                 self.delete_word_backward();
+                self.sync_image_placeholders();
                 true
             }
             _ => {
                 self.textarea.input(input);
+                self.sync_image_placeholders();
                 true
             }
         }
@@ -371,6 +398,22 @@ impl Input {
                 if target_row < lines.len() {
                     let line = &lines[target_row];
                     let target_col = display_col_to_byte_offset(line, relative_x as usize);
+                    let offset = self.flat_offset_for_position(target_row, target_col);
+                    if let Some(image) = self.image_at_offset(offset) {
+                        match image_attachment::open_path(&image.path) {
+                            Ok(()) => push_toast(Toast::new(
+                                format!("Opened {}", image.placeholder),
+                                ToastLevel::Info,
+                                None,
+                            )),
+                            Err(err) => push_toast(Toast::new(
+                                format!("Failed to open image: {}", err),
+                                ToastLevel::Error,
+                                None,
+                            )),
+                        }
+                        return true;
+                    }
                     // Position cursor and start selection for potential drag
                     self.textarea
                         .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
@@ -515,9 +558,244 @@ impl Input {
         }
     }
 
-    pub fn should_show_suggestions(&self) -> bool {
+    fn current_at_token(&self, allow_empty: bool) -> Option<CompletionToken> {
         let text = self.get_text();
-        !text.is_empty() && text.starts_with('/')
+        let cursor = self.flat_cursor_offset().min(text.len());
+        if !text.is_char_boundary(cursor) {
+            return None;
+        }
+        let before_cursor = &text[..cursor];
+        let at_index = before_cursor.rfind('@')?;
+
+        if at_index > 0 {
+            let before_at = &text[..at_index];
+            if !before_at
+                .chars()
+                .last()
+                .map(char::is_whitespace)
+                .unwrap_or(true)
+            {
+                return None;
+            }
+        }
+
+        let query = &text[at_index + 1..cursor];
+        if (!allow_empty && query.is_empty()) || query.chars().any(char::is_whitespace) {
+            return None;
+        }
+
+        let end = cursor
+            + text[cursor..]
+                .find(char::is_whitespace)
+                .unwrap_or_else(|| text.len().saturating_sub(cursor));
+
+        Some(CompletionToken {
+            query: query.to_string(),
+            range: at_index..end,
+        })
+    }
+
+    fn command_query(&self) -> Option<String> {
+        let text = self.get_text();
+        if !text.starts_with('/') || text.contains('\n') {
+            return None;
+        }
+        Some(text.trim_start_matches('/').to_string())
+    }
+
+    fn flat_cursor_offset(&self) -> usize {
+        let (row, col) = self.textarea.cursor();
+        let lines = self.textarea.lines();
+        let mut offset = 0;
+        for line in lines.iter().take(row) {
+            offset += line.len() + 1;
+        }
+        offset + col.min(lines.get(row).map(|line| line.len()).unwrap_or(0))
+    }
+
+    fn flat_offset_for_position(&self, row: usize, col: usize) -> usize {
+        let lines = self.textarea.lines();
+        let mut offset = 0;
+        for line in lines.iter().take(row) {
+            offset += line.len() + 1;
+        }
+        offset + col.min(lines.get(row).map(|line| line.len()).unwrap_or(0))
+    }
+
+    fn cursor_for_flat_offset(text: &str, mut offset: usize) -> (usize, usize) {
+        offset = char_boundary_before(text, offset);
+        let mut consumed = 0;
+        for (row, line) in text.split('\n').enumerate() {
+            let line_end = consumed + line.len();
+            if offset <= line_end {
+                return (row, offset - consumed);
+            }
+            consumed = line_end + 1;
+        }
+        let last_line = text.rsplit('\n').next().unwrap_or("");
+        (text.lines().count().saturating_sub(1), last_line.len())
+    }
+
+    fn reset_textarea(&mut self) {
+        self.textarea = TextArea::default();
+        self.textarea.set_cursor_line_style(Style::default());
+        self.textarea.set_selection_style(
+            Style::default()
+                .bg(ratatui::style::Color::Rgb(255, 140, 0))
+                .fg(ratatui::style::Color::Reset),
+        );
+    }
+
+    fn set_text_preserving_images(&mut self, text: &str, cursor_offset: usize) {
+        self.reset_textarea();
+        self.textarea.insert_str(text);
+        let cursor_offset = char_boundary_before(text, cursor_offset.min(text.len()));
+        let (row, col) = Self::cursor_for_flat_offset(text, cursor_offset);
+        self.textarea
+            .move_cursor(CursorMove::Jump(row as u16, col as u16));
+        self.viewport_top = 0;
+    }
+
+    fn image_placeholder(number: usize) -> String {
+        format!("[Image #{}]", number)
+    }
+
+    fn replace_range(&mut self, range: Range<usize>, replacement: &str) {
+        let text = self.get_text();
+        if range.start > range.end || range.end > text.len() {
+            return;
+        }
+        let mut new_text = String::new();
+        new_text.push_str(&text[..range.start]);
+        new_text.push_str(replacement);
+        new_text.push_str(&text[range.end..]);
+        let cursor_offset = range.start + replacement.len();
+        self.set_text_preserving_images(&new_text, cursor_offset);
+        self.sync_image_placeholders();
+    }
+
+    fn quote_completion_path(path: &str) -> String {
+        if path.chars().any(char::is_whitespace) {
+            format!("\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
+        } else {
+            path.to_string()
+        }
+    }
+
+    fn remove_placeholder_at_cursor(&mut self, forward: bool) -> bool {
+        let text = self.get_text();
+        let cursor = self.flat_cursor_offset().min(text.len());
+        let target = self.local_images.iter().find_map(|image| {
+            text.match_indices(&image.placeholder)
+                .find_map(|(start, _)| {
+                    let end = start + image.placeholder.len();
+                    let should_remove = if forward {
+                        cursor >= start && cursor < end
+                    } else {
+                        cursor > start && cursor <= end
+                    };
+                    should_remove.then_some(start..end)
+                })
+        });
+
+        if let Some(range) = target {
+            self.replace_range(range, "");
+            true
+        } else {
+            false
+        }
+    }
+
+    fn image_at_offset(&self, offset: usize) -> Option<LocalImageAttachment> {
+        let text = self.get_text();
+        self.local_images.iter().find_map(|image| {
+            text.match_indices(&image.placeholder)
+                .any(|(start, _)| offset >= start && offset < start + image.placeholder.len())
+                .then(|| image.clone())
+        })
+    }
+
+    pub fn attach_image(&mut self, path: PathBuf) {
+        let placeholder = Self::image_placeholder(self.local_images.len() + 1);
+        self.textarea.insert_str(&placeholder);
+        self.local_images
+            .push(LocalImageAttachment { placeholder, path });
+        self.sync_image_placeholders();
+    }
+
+    pub fn local_image_paths_for_submission(&mut self) -> Vec<PathBuf> {
+        self.sync_image_placeholders();
+        self.local_images
+            .iter()
+            .map(|image| image.path.clone())
+            .collect()
+    }
+
+    fn sync_image_placeholders(&mut self) {
+        if self.local_images.is_empty() {
+            return;
+        }
+
+        let mut text = self.get_text();
+        let mut kept = self
+            .local_images
+            .iter()
+            .filter(|image| text.contains(&image.placeholder))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if kept.len() == self.local_images.len()
+            && kept
+                .iter()
+                .enumerate()
+                .all(|(idx, image)| image.placeholder == Self::image_placeholder(idx + 1))
+        {
+            return;
+        }
+
+        let cursor = self.flat_cursor_offset().min(text.len());
+        for (idx, image) in kept.iter_mut().enumerate() {
+            let next_placeholder = Self::image_placeholder(idx + 1);
+            if image.placeholder != next_placeholder {
+                text = text.replacen(&image.placeholder, &next_placeholder, 1);
+                image.placeholder = next_placeholder;
+            }
+        }
+
+        self.local_images = kept;
+        self.set_text_preserving_images(&text, cursor);
+    }
+
+    pub fn apply_suggestion(&mut self, suggestion: &Suggestion) {
+        match suggestion.kind {
+            SuggestionKind::Command => {
+                let replacement = format!("/{}", suggestion.replacement);
+                let text = self.get_text();
+                self.replace_range(0..text.len(), &replacement);
+            }
+            SuggestionKind::File => {
+                let Some(token) = self.current_at_token(true) else {
+                    return;
+                };
+                let path = PathBuf::from(&suggestion.replacement);
+                if !suggestion.is_directory && image_attachment::is_supported_image_path(&path) {
+                    let placeholder = Self::image_placeholder(self.local_images.len() + 1);
+                    let replacement = format!("{placeholder} ");
+                    self.replace_range(token.range, &replacement);
+                    self.local_images
+                        .push(LocalImageAttachment { placeholder, path });
+                    self.sync_image_placeholders();
+                } else {
+                    let replacement =
+                        format!("{} ", Self::quote_completion_path(&suggestion.replacement));
+                    self.replace_range(token.range, &replacement);
+                }
+            }
+        }
+    }
+
+    pub fn should_show_suggestions(&self) -> bool {
+        self.command_query().is_some() || self.current_at_token(true).is_some()
     }
 
     pub fn is_slash_at_end(&self) -> bool {
@@ -526,28 +804,21 @@ impl Input {
     }
 
     pub fn complete_selection(&mut self, is_chat: bool) {
-        if let Some(selected) = self.get_autocomplete_selection(is_chat) {
-            let current_text = self.get_text();
-            let start_index = current_text.rfind('/').map_or(0, |i| i + 1);
-
-            let new_text = if start_index == 0 {
-                selected.clone()
-            } else {
-                format!("{}{}", &current_text[..start_index], selected)
-            };
-
-            self.set_text(&new_text);
+        if self.autocomplete.is_some() {
+            if let Some(selected) = self.get_autocomplete_suggestions(is_chat).first().cloned() {
+                self.apply_suggestion(&selected);
+            }
         }
     }
 
     pub fn get_autocomplete_selection(&self, is_chat: bool) -> Option<String> {
         if let Some(autocomplete) = &self.autocomplete {
-            let text = self.get_text();
-            let suggestions = if text.starts_with('/') {
-                let filter = text.trim_start_matches('/');
-                autocomplete.get_suggestions(filter, is_chat)
+            let suggestions = if let Some(filter) = self.command_query() {
+                autocomplete.command_auto.get_suggestions(&filter, is_chat)
+            } else if let Some(token) = self.current_at_token(true) {
+                autocomplete.file_auto.get_suggestions(&token.query)
             } else {
-                autocomplete.get_suggestions(&text, is_chat)
+                Vec::new()
             };
             if !suggestions.is_empty() {
                 return Some(suggestions[0].name.clone());
@@ -565,15 +836,10 @@ impl Input {
     }
 
     pub fn clear(&mut self) {
-        self.textarea = TextArea::default();
-        self.textarea.set_cursor_line_style(Style::default());
-        self.textarea.set_selection_style(
-            Style::default()
-                .bg(ratatui::style::Color::Rgb(255, 140, 0))
-                .fg(ratatui::style::Color::Reset),
-        );
+        self.reset_textarea();
         self.viewport_top = 0;
         self.draft_text = None;
+        self.local_images.clear();
         if let Some(ref mut history) = self.prompt_history {
             history.reset_navigation();
         }
@@ -597,33 +863,29 @@ impl Input {
     }
 
     pub fn set_text(&mut self, text: &str) {
-        self.textarea = TextArea::default();
-        self.textarea.set_cursor_line_style(Style::default());
-        self.textarea.set_selection_style(
-            Style::default()
-                .bg(ratatui::style::Color::Rgb(255, 140, 0))
-                .fg(ratatui::style::Color::Reset),
-        );
+        self.reset_textarea();
         self.textarea.insert_str(text);
         self.viewport_top = 0;
+        self.local_images.clear();
     }
 
     pub fn insert_char(&mut self, c: char) {
         self.textarea.insert_str(c.to_string().as_str());
+        self.sync_image_placeholders();
     }
 
     pub fn insert_str(&mut self, text: &str) {
         self.textarea.insert_str(text);
+        self.sync_image_placeholders();
     }
 
     pub fn get_autocomplete_suggestions(&self, is_chat: bool) -> Vec<Suggestion> {
         if let Some(autocomplete) = &self.autocomplete {
-            let text = self.get_text();
-            if text.starts_with('/') {
-                let filter = text.trim_start_matches('/');
-                return autocomplete.get_suggestions(filter, is_chat);
-            } else {
-                return autocomplete.get_suggestions(&text, is_chat);
+            if let Some(filter) = self.command_query() {
+                return autocomplete.command_auto.get_suggestions(&filter, is_chat);
+            }
+            if let Some(token) = self.current_at_token(true) {
+                return autocomplete.file_auto.get_suggestions(&token.query);
             }
         }
         Vec::new()
@@ -704,5 +966,34 @@ mod tests {
         };
         let handled = input.handle_event(event);
         assert!(!handled);
+    }
+
+    #[test]
+    fn test_attach_image_inserts_placeholder() {
+        let mut input = Input::new();
+        let path = PathBuf::from("/tmp/example.png");
+
+        input.attach_image(path.clone());
+
+        assert_eq!(input.get_text(), "[Image #1]");
+        assert_eq!(input.local_image_paths_for_submission(), vec![path]);
+    }
+
+    #[test]
+    fn test_backspace_removes_image_placeholder() {
+        let mut input = Input::new();
+        input.attach_image(PathBuf::from("/tmp/example.png"));
+        let event = KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+
+        let handled = input.handle_event(event);
+
+        assert!(handled);
+        assert_eq!(input.get_text(), "");
+        assert!(input.local_image_paths_for_submission().is_empty());
     }
 }

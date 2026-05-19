@@ -960,6 +960,10 @@ impl App {
 
     pub fn handle_keys(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('v') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                self.handle_clipboard_image_paste();
+                return;
+            }
             KeyCode::Char('c') if key.modifiers == event::KeyModifiers::CONTROL => {
                 // If text is selected (chat or input), copy to clipboard first
                 if self.try_copy_selection() {
@@ -1621,7 +1625,8 @@ impl App {
         match key.code {
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
                 let input_text = self.input.get_text();
-                if !input_text.is_empty() {
+                let image_paths = self.input.local_image_paths_for_submission();
+                if !input_text.is_empty() || !image_paths.is_empty() {
                     use crate::command::parser::parse_input;
 
                     let input_type = parse_input(&input_text);
@@ -1639,8 +1644,10 @@ impl App {
                         }
                         crate::command::parser::InputType::Message(msg) => {
                             // Only save messages (not commands) to prompt history
-                            self.input.save_current_to_history();
-                            self.handle_message_input(msg);
+                            if image_paths.is_empty() {
+                                self.input.save_current_to_history();
+                            }
+                            self.handle_message_input_with_images(msg, image_paths);
                         }
                     }
 
@@ -2011,6 +2018,75 @@ impl App {
         }
     }
 
+    fn handle_clipboard_image_paste(&mut self) {
+        if !matches!(
+            (self.base_focus, self.overlay_focus),
+            (BaseFocus::Home, OverlayFocus::None)
+                | (BaseFocus::Chat, OverlayFocus::None)
+                | (_, OverlayFocus::SuggestionsPopup)
+        ) {
+            return;
+        }
+
+        match crate::utils::image_attachment::paste_image_to_temp_png() {
+            Ok(path) => {
+                self.input.attach_image(path);
+                self.input.insert_str(" ");
+                self.update_suggestions();
+                push_toast(Toast::new(
+                    "Attached image from clipboard",
+                    ToastLevel::Info,
+                    None,
+                ));
+            }
+            Err(err) => push_toast(Toast::new(
+                format!("Clipboard image paste failed: {}", err),
+                ToastLevel::Warning,
+                None,
+            )),
+        }
+    }
+
+    fn try_attach_pasted_image_paths(&mut self, text: &str) -> bool {
+        let image_paths = crate::utils::image_attachment::image_paths_from_paste(text);
+        if image_paths.is_empty() {
+            return false;
+        }
+
+        let exact_single_image = crate::utils::image_attachment::normalize_pasted_path(text)
+            .map(|path| crate::utils::image_attachment::is_supported_image_path(&path))
+            .unwrap_or(false);
+        let token_count = shlex::split(text)
+            .map(|parts| {
+                parts
+                    .into_iter()
+                    .filter(|part| !part.trim().is_empty())
+                    .count()
+            })
+            .unwrap_or_else(|| text.lines().filter(|line| !line.trim().is_empty()).count());
+
+        if !exact_single_image && token_count != image_paths.len() {
+            return false;
+        }
+
+        let count = image_paths.len();
+        for path in image_paths {
+            self.input.attach_image(path);
+            self.input.insert_str(" ");
+        }
+        self.update_suggestions();
+        push_toast(Toast::new(
+            if count == 1 {
+                "Attached image".to_string()
+            } else {
+                format!("Attached {} images", count)
+            },
+            ToastLevel::Info,
+            None,
+        ));
+        true
+    }
+
     pub fn handle_paste(&mut self, text: String) {
         const MAX_PASTE_SIZE: usize = 20 * 1024 * 1024;
 
@@ -2028,6 +2104,9 @@ impl App {
 
         match (self.base_focus, self.overlay_focus) {
             (BaseFocus::Home, OverlayFocus::None) | (BaseFocus::Chat, OverlayFocus::None) => {
+                if self.try_attach_pasted_image_paths(&text) {
+                    return;
+                }
                 self.input.insert_str(&text);
             }
             (_, OverlayFocus::ModelsDialog) => {
@@ -2125,6 +2204,9 @@ impl App {
                 self.api_key_input.text_area.insert_str(&text);
             }
             (_, OverlayFocus::SuggestionsPopup) => {
+                if self.try_attach_pasted_image_paths(&text) {
+                    return;
+                }
                 self.input.insert_str(&text);
                 self.update_suggestions();
             }
@@ -2136,15 +2218,23 @@ impl App {
     }
 
     fn autocomplete_and_submit(&mut self) {
-        if let Some(selected) = get_selected_suggestion(&self.suggestions_popup_state) {
-            let command = format!("/{}", selected.name);
+        if let Some(selected) = get_selected_suggestion(&self.suggestions_popup_state).cloned() {
+            match selected.kind {
+                crate::autocomplete::SuggestionKind::Command => {
+                    let command = format!("/{}", selected.name);
 
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(self.process_input(&command));
-            });
+                    tokio::task::block_in_place(|| {
+                        let rt = tokio::runtime::Handle::current();
+                        rt.block_on(self.process_input(&command));
+                    });
 
-            self.input.clear();
+                    self.input.clear();
+                }
+                crate::autocomplete::SuggestionKind::File => {
+                    self.input.apply_suggestion(&selected);
+                    self.update_suggestions();
+                }
+            }
         }
         self.clear_suggestions_and_blur();
     }
@@ -4001,7 +4091,15 @@ impl App {
     }
 
     fn handle_message_input(&mut self, msg: String) {
-        if !msg.is_empty() && self.base_focus == BaseFocus::Home {
+        self.handle_message_input_with_images(msg, Vec::new());
+    }
+
+    fn handle_message_input_with_images(
+        &mut self,
+        msg: String,
+        image_paths: Vec<std::path::PathBuf>,
+    ) {
+        if (!msg.is_empty() || !image_paths.is_empty()) && self.base_focus == BaseFocus::Home {
             if self.session_manager.get_current_session_id().is_none() {
                 let session_title = self
                     .pending_session_title
@@ -4010,15 +4108,17 @@ impl App {
                 self.create_new_session(Some(session_title));
             }
             let mut user_message = crate::session::types::Message::user(&msg);
+            user_message.local_image_paths = image_paths
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect();
             user_message.agent_mode = Some(self.agent.clone());
             user_message.model = Some(self.model.clone());
             user_message.provider = Some(self.provider_name.clone());
             let _ = self
                 .session_manager
                 .add_message_to_current_session(&user_message);
-            self.chat_state
-                .chat
-                .add_user_message_with_agent_mode(&msg, self.agent.clone());
+            self.chat_state.chat.add_message(user_message.clone());
             self.base_focus = BaseFocus::Chat;
 
             if let Err(e) = self.start_llm_streaming(&msg) {
@@ -4028,20 +4128,23 @@ impl App {
                     None,
                 ));
             }
-        } else if !msg.is_empty() && self.base_focus == BaseFocus::Chat {
+        } else if (!msg.is_empty() || !image_paths.is_empty()) && self.base_focus == BaseFocus::Chat
+        {
             if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
                 self.ensure_session_view_state(&session_id);
             }
             let mut user_message = crate::session::types::Message::user(&msg);
+            user_message.local_image_paths = image_paths
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect();
             user_message.agent_mode = Some(self.agent.clone());
             user_message.model = Some(self.model.clone());
             user_message.provider = Some(self.provider_name.clone());
             let _ = self
                 .session_manager
                 .add_message_to_current_session(&user_message);
-            self.chat_state
-                .chat
-                .add_user_message_with_agent_mode(&msg, self.agent.clone());
+            self.chat_state.chat.add_message(user_message.clone());
 
             if let Err(e) = self.start_llm_streaming(&msg) {
                 push_toast(Toast::new(
@@ -4423,32 +4526,29 @@ mod tests {
         );
         assert!(app.switch_to_first_child_session());
         assert_eq!(
-            app.session_manager.get_current_session_id().map(String::as_str),
+            app.session_manager
+                .get_current_session_id()
+                .map(String::as_str),
             Some("child-a")
         );
 
-        assert!(app.handle_base_keys(KeyEvent::new(
-            KeyCode::Right,
-            event::KeyModifiers::NONE,
-        )));
+        assert!(app.handle_base_keys(KeyEvent::new(KeyCode::Right, event::KeyModifiers::NONE,)));
         assert_eq!(
-            app.session_manager.get_current_session_id().map(String::as_str),
+            app.session_manager
+                .get_current_session_id()
+                .map(String::as_str),
             Some("child-b")
         );
 
-        assert!(app.handle_base_keys(KeyEvent::new(
-            KeyCode::Left,
-            event::KeyModifiers::NONE,
-        )));
+        assert!(app.handle_base_keys(KeyEvent::new(KeyCode::Left, event::KeyModifiers::NONE,)));
         assert_eq!(
-            app.session_manager.get_current_session_id().map(String::as_str),
+            app.session_manager
+                .get_current_session_id()
+                .map(String::as_str),
             Some("child-a")
         );
 
-        assert!(app.handle_base_keys(KeyEvent::new(
-            KeyCode::Up,
-            event::KeyModifiers::NONE,
-        )));
+        assert!(app.handle_base_keys(KeyEvent::new(KeyCode::Up, event::KeyModifiers::NONE,)));
         assert_eq!(
             app.session_manager.get_current_session_id(),
             Some(&parent_id)

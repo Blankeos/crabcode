@@ -61,6 +61,7 @@ pub struct Message {
     pub output_tokens: Option<usize>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    pub local_image_paths: Vec<String>,
 }
 
 impl Message {
@@ -80,6 +81,7 @@ impl Message {
             output_tokens: None,
             model: None,
             provider: None,
+            local_image_paths: Vec::new(),
         }
     }
 
@@ -115,6 +117,7 @@ impl Message {
             output_tokens: None,
             model: None,
             provider: None,
+            local_image_paths: Vec::new(),
         }
     }
 

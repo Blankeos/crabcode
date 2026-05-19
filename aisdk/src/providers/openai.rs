@@ -339,7 +339,7 @@ fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_
                 })),
                 Message::User(u) => Some(serde_json::json!({
                     "role": "user",
-                    "content": u.content,
+                    "content": openai_responses_user_content(u),
                 })),
                 Message::Assistant(a) => Some(serde_json::json!({
                     "role": "assistant",
@@ -348,4 +348,25 @@ fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_
             }
         })
         .collect()
+}
+
+fn openai_responses_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
+    if user.images.is_empty() {
+        return serde_json::json!(user.content);
+    }
+
+    let mut parts = Vec::new();
+    if !user.content.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "input_text",
+            "text": user.content,
+        }));
+    }
+    parts.extend(user.images.iter().map(|image| {
+        serde_json::json!({
+            "type": "input_image",
+            "image_url": image.data_url,
+        })
+    }));
+    serde_json::Value::Array(parts)
 }

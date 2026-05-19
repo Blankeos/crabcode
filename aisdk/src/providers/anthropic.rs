@@ -101,7 +101,7 @@ impl Provider for Anthropic {
             .filter_map(|m| match m {
                 Message::User(u) => Some(serde_json::json!({
                     "role": "user",
-                    "content": u.content,
+                    "content": anthropic_user_content(u),
                 })),
                 Message::Assistant(a) => Some(serde_json::json!({
                     "role": "assistant",
@@ -232,4 +232,36 @@ impl Provider for Anthropic {
 
         Ok(stream)
     }
+}
+
+fn anthropic_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
+    if user.images.is_empty() {
+        return serde_json::json!(user.content);
+    }
+
+    let mut parts = Vec::new();
+    if !user.content.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": user.content,
+        }));
+    }
+
+    parts.extend(user.images.iter().map(|image| {
+        let data = image
+            .data_url
+            .split_once(',')
+            .map(|(_, data)| data)
+            .unwrap_or(image.data_url.as_str());
+        serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.media_type,
+                "data": data,
+            },
+        })
+    }));
+
+    serde_json::Value::Array(parts)
 }

@@ -1,10 +1,54 @@
 use crate::command::registry::Registry;
 use std::collections::HashSet;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SuggestionKind {
+    Command,
+    File,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Suggestion {
     pub name: String,
     pub description: String,
+    pub replacement: String,
+    pub kind: SuggestionKind,
+    pub is_directory: bool,
+}
+
+impl Suggestion {
+    pub fn command(name: impl Into<String>, description: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            replacement: name.clone(),
+            name,
+            description: description.into(),
+            kind: SuggestionKind::Command,
+            is_directory: false,
+        }
+    }
+
+    pub fn file(path: impl Into<String>, is_directory: bool) -> Self {
+        let path = path.into();
+        Self {
+            name: path.clone(),
+            replacement: path,
+            description: if is_directory {
+                "directory".to_string()
+            } else {
+                String::new()
+            },
+            kind: SuggestionKind::File,
+            is_directory,
+        }
+    }
+
+    pub fn display_prefix(&self) -> &'static str {
+        match self.kind {
+            SuggestionKind::Command => "/",
+            SuggestionKind::File => "",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -19,10 +63,7 @@ impl CommandAuto {
         let commands: Vec<Suggestion> = registry
             .list_commands()
             .iter()
-            .map(|cmd| Suggestion {
-                name: cmd.name.clone(),
-                description: cmd.description.clone(),
-            })
+            .map(|cmd| Suggestion::command(cmd.name.clone(), cmd.description.clone()))
             .collect();
 
         let hidden_token_map: Vec<(String, String)> = registry

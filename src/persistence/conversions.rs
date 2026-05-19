@@ -18,6 +18,13 @@ impl From<SessionMessage> for Message {
             }
         }
 
+        for path in &msg.local_image_paths {
+            parts.push(MessagePart {
+                part_type: "local_image".to_string(),
+                data: serde_json::json!({ "path": path }),
+            });
+        }
+
         Message {
             id: cuid2::create_id(),
             session_id: 0,
@@ -72,6 +79,19 @@ impl TryFrom<Message> for SessionMessage {
             .and_then(|p| p.data.get("text").and_then(|v| v.as_str()))
             .map(|s| s.to_string());
 
+        let local_image_paths = msg
+            .parts
+            .iter()
+            .filter_map(|p| {
+                if p.part_type == "local_image" {
+                    p.data.get("path").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+            .map(|path| path.to_string())
+            .collect();
+
         let role = match msg.role.as_str() {
             "user" => MessageRole::User,
             "assistant" => MessageRole::Assistant,
@@ -111,6 +131,7 @@ impl TryFrom<Message> for SessionMessage {
                 .and_then(|v| if v > 0 { Some(v as usize) } else { None }),
             model: msg.model.clone(),
             provider: msg.provider.clone(),
+            local_image_paths,
         })
     }
 }

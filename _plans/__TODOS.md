@@ -48,10 +48,10 @@
 
 - [x] Rendering: Thinking Rendering always has this massive space below it, even if the agent didn't really think much.
 
-- [ ] Tool call rendering:
-  - [ ] editing files w/ diffs, like opencode does.
-  - [ ] todowrite - better looking, like opencode does.
-  - [ ] rendering subagents - just like opencode, clickable to go into their page.. OR I can do `ctrl-x ↓` to go into it if there's a subagent running. I can also switch between subagents with `←` and `→`
+- [x] Tool call rendering:
+  - [x] editing files w/ diffs, like opencode does.
+  - [x] todowrite - better looking, like opencode does.
+  - [x] rendering subagents - just like opencode, clickable to go into their page.. OR I can do `ctrl-x ↓` to go into it if there's a subagent running. I can also switch between subagents with `←` and `→`
 
 - [x] Fix: Chat content colors. Currently no matter what theme I use, the color of the chat especially the main text colors in markdown, are the default theme colors that were set during start time - meaning at config. Whatever I change via `/themes` dialog, it doesn't update the chat colors themes.
 
@@ -59,7 +59,7 @@
 
 - [x] A single AI response, is considered 1 message. So combine all its parts into a single message record. Not that every message part becomes a separate message in the timeline dialog.
 
-- [ ] Allow me to paste images i.e. [Image #1] [Image #2] [Image #3]. When I click on them, the image would be opened with my Finder (OS-specific)
+- [x] Allow me to paste images i.e. [Image #1] [Image #2] [Image #3]. When I click on them, the image would be opened with my Finder (OS-specific)
 
 - [x] Let's make the 'questions' a bit more mouse-driven.
 
@@ -70,3 +70,5 @@
 - [x] Highlight enhancements, if I click 1 place, then shift+click another. Treat it like the highlight in the browser that doesn't need a drag. Whatever I last clicked (without shift+click), treat it as the anchor for the "select start", and then whatever I shift+click after, treat it as a "select end" and autohighlight that part. (not supported)
 
 - [ ] Remote usage.
+
+- [ ] File referencing with @

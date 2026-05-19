@@ -99,7 +99,7 @@ impl Provider for OpenAICompatible {
                 }),
                 Message::User(u) => serde_json::json!({
                     "role": "user",
-                    "content": u.content,
+                    "content": openai_compatible_user_content(u),
                 }),
                 Message::Assistant(a) => serde_json::json!({
                     "role": "assistant",
@@ -172,6 +172,29 @@ impl Provider for OpenAICompatible {
 
         Ok(stream)
     }
+}
+
+fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
+    if user.images.is_empty() {
+        return serde_json::json!(user.content);
+    }
+
+    let mut parts = Vec::new();
+    if !user.content.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": user.content,
+        }));
+    }
+    parts.extend(user.images.iter().map(|image| {
+        serde_json::json!({
+            "type": "image_url",
+            "image_url": {
+                "url": image.data_url,
+            },
+        })
+    }));
+    serde_json::Value::Array(parts)
 }
 
 fn debug_log(msg: &str) {

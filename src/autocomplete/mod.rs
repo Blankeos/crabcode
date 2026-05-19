@@ -1,7 +1,7 @@
 pub mod command;
 pub mod file;
 
-pub use command::{CommandAuto, Suggestion};
+pub use command::{CommandAuto, Suggestion, SuggestionKind};
 pub use file::FileAuto;
 
 pub enum AutoCompleteMode {
@@ -27,15 +27,7 @@ impl AutoComplete {
     pub fn get_suggestions(&self, input: &str, is_chat: bool) -> Vec<Suggestion> {
         match &self.mode {
             AutoCompleteMode::Command => self.command_auto.get_suggestions(input, is_chat),
-            AutoCompleteMode::File => self
-                .file_auto
-                .get_suggestions(input)
-                .into_iter()
-                .map(|name| Suggestion {
-                    name,
-                    description: String::new(),
-                })
-                .collect(),
+            AutoCompleteMode::File => self.file_auto.get_suggestions(input),
         }
     }
 }
