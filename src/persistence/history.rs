@@ -87,8 +87,7 @@ impl HistoryDAO {
             [],
         );
 
-        let current_workspace_path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        let current_workspace_path = crate::utils::cwd::current_dir_or_dot()
             .to_string_lossy()
             .to_string();
         let current_workspace_name = workspace_display_name(&current_workspace_path);

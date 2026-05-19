@@ -4,6 +4,67 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+const BUNDLED_THEMES: &[(&str, &str)] = &[
+    ("crabcode-orange", include_str!("theme.json")),
+    ("aura", include_str!("generated_themes/aura.json")),
+    ("ayu", include_str!("generated_themes/ayu.json")),
+    ("carbonfox", include_str!("generated_themes/carbonfox.json")),
+    (
+        "catppuccin",
+        include_str!("generated_themes/catppuccin.json"),
+    ),
+    (
+        "catppuccin-frappe",
+        include_str!("generated_themes/catppuccin-frappe.json"),
+    ),
+    (
+        "catppuccin-macchiato",
+        include_str!("generated_themes/catppuccin-macchiato.json"),
+    ),
+    ("cobalt2", include_str!("generated_themes/cobalt2.json")),
+    ("cursor", include_str!("generated_themes/cursor.json")),
+    ("dracula", include_str!("generated_themes/dracula.json")),
+    (
+        "everforest",
+        include_str!("generated_themes/everforest.json"),
+    ),
+    ("flexoki", include_str!("generated_themes/flexoki.json")),
+    ("github", include_str!("generated_themes/github.json")),
+    ("gruvbox", include_str!("generated_themes/gruvbox.json")),
+    ("kanagawa", include_str!("generated_themes/kanagawa.json")),
+    (
+        "lucent-orng",
+        include_str!("generated_themes/lucent-orng.json"),
+    ),
+    ("material", include_str!("generated_themes/material.json")),
+    ("matrix", include_str!("generated_themes/matrix.json")),
+    ("mercury", include_str!("generated_themes/mercury.json")),
+    ("monokai", include_str!("generated_themes/monokai.json")),
+    ("nightowl", include_str!("generated_themes/nightowl.json")),
+    ("nord", include_str!("generated_themes/nord.json")),
+    ("one-dark", include_str!("generated_themes/one-dark.json")),
+    ("opencode", include_str!("generated_themes/opencode.json")),
+    ("orng", include_str!("generated_themes/orng.json")),
+    (
+        "osaka-jade",
+        include_str!("generated_themes/osaka-jade.json"),
+    ),
+    ("palenight", include_str!("generated_themes/palenight.json")),
+    ("rosepine", include_str!("generated_themes/rosepine.json")),
+    ("solarized", include_str!("generated_themes/solarized.json")),
+    (
+        "synthwave84",
+        include_str!("generated_themes/synthwave84.json"),
+    ),
+    (
+        "tokyonight",
+        include_str!("generated_themes/tokyonight.json"),
+    ),
+    ("vercel", include_str!("generated_themes/vercel.json")),
+    ("vesper", include_str!("generated_themes/vesper.json")),
+    ("zenburn", include_str!("generated_themes/zenburn.json")),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ThemeColors {
     pub primary: ratatui::style::Color,
@@ -256,7 +317,6 @@ impl Theme {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let path = path.as_ref();
         let content = fs::read_to_string(path)?;
-        let v: Value = serde_json::from_str(&content)?;
 
         // Some OpenCode theme JSONs don't include name/id; derive from filename.
         let derived_id = path
@@ -264,6 +324,24 @@ impl Theme {
             .and_then(|s| s.to_str())
             .unwrap_or("theme")
             .to_string();
+        Self::load_from_str(&content, &derived_id)
+    }
+
+    pub fn load_builtin_default() -> Self {
+        Self::load_from_str(include_str!("theme.json"), "crabcode-orange")
+            .expect("embedded default theme must be valid")
+    }
+
+    pub fn bundled_themes() -> Vec<Self> {
+        BUNDLED_THEMES
+            .iter()
+            .filter_map(|(id, content)| Self::load_from_str(content, id).ok())
+            .collect()
+    }
+
+    fn load_from_str(content: &str, derived_id: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let v: Value = serde_json::from_str(content)?;
+        let derived_id = derived_id.to_string();
         let id = v
             .get("id")
             .and_then(|x| x.as_str())
@@ -293,7 +371,7 @@ impl Theme {
             });
         }
 
-        Err(format!("Unsupported theme schema in {}", path.display()).into())
+        Err(format!("Unsupported theme schema for {}", derived_id).into())
     }
 
     pub fn get_colors(&self, dark: bool) -> ThemeColors {
@@ -588,7 +666,7 @@ fn parse_hex(hex: &str) -> ratatui::style::Color {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hex;
+    use super::{parse_hex, Theme};
 
     #[test]
     fn parse_hex_supports_short_rgb() {
@@ -600,5 +678,12 @@ mod tests {
     fn parse_hex_supports_rrggbbaa() {
         let color = parse_hex("#112233ff");
         assert_eq!(color, ratatui::style::Color::Rgb(17, 34, 51));
+    }
+
+    #[test]
+    fn bundled_themes_include_default_theme() {
+        let themes = Theme::bundled_themes();
+        assert!(themes.iter().any(|theme| theme.id == "crabcode-orange"));
+        assert!(themes.iter().any(|theme| theme.id == "ayu"));
     }
 }

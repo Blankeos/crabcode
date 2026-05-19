@@ -254,7 +254,7 @@ impl App {
         let mut input = Input::new().with_autocomplete(autocomplete);
         input.set_placeholder(placeholder_static);
 
-        let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd_path = crate::utils::cwd::current_dir()?;
         let cwd = cwd_path
             .to_str()
             .map(|s| s.to_string())
@@ -368,11 +368,7 @@ impl App {
             .get(current_theme_index)
             .or_else(|| themes.first())
             .cloned()
-            .unwrap_or_else(|| {
-                theme::Theme::load_from_file("src/theme.json").unwrap_or_else(|_| {
-                    theme::Theme::load_from_file("src/generated_themes/ayu.json").unwrap()
-                })
-            });
+            .unwrap_or_else(theme::Theme::load_builtin_default);
         let colors = theme_for_colors.get_colors(true);
 
         let chat_state = init_chat(chat, &agent, &colors);
@@ -4830,8 +4826,7 @@ mod tests {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
-        let theme = Theme::load_from_file("src/theme.json")
-            .unwrap_or_else(|_| Theme::load_from_file("src/generated_themes/ayu.json").unwrap());
+        let theme = Theme::load_builtin_default();
         let colors = theme.get_colors(true);
 
         App {

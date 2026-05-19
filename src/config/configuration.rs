@@ -14,6 +14,10 @@ pub fn discover_themes(
     let mut theme_by_id: HashMap<String, usize> = HashMap::new();
     let mut themes: Vec<crate::theme::Theme> = Vec::new();
 
+    for theme in crate::theme::Theme::bundled_themes() {
+        upsert_theme(&mut themes, &mut theme_by_id, theme);
+    }
+
     let mut layers: Vec<Vec<PathBuf>> = Vec::new();
 
     let mut built_in = Vec::new();
@@ -45,21 +49,12 @@ pub fn discover_themes(
             let Ok(theme) = crate::theme::Theme::load_from_file(&path) else {
                 continue;
             };
-            if let Some(idx) = theme_by_id.get(&theme.id).copied() {
-                themes[idx] = theme;
-            } else {
-                let idx = themes.len();
-                theme_by_id.insert(theme.id.clone(), idx);
-                themes.push(theme);
-            }
+            upsert_theme(&mut themes, &mut theme_by_id, theme);
         }
     }
 
     if themes.is_empty() {
-        let fallback = crate::theme::Theme::load_from_file("src/theme.json").unwrap_or_else(|_| {
-            crate::theme::Theme::load_from_file("src/generated_themes/ayu.json").unwrap()
-        });
-        themes.push(fallback);
+        themes.push(crate::theme::Theme::load_builtin_default());
     }
 
     let mut selected_idx = 0usize;
@@ -70,6 +65,20 @@ pub fn discover_themes(
     }
 
     (themes, selected_idx)
+}
+
+fn upsert_theme(
+    themes: &mut Vec<crate::theme::Theme>,
+    theme_by_id: &mut HashMap<String, usize>,
+    theme: crate::theme::Theme,
+) {
+    if let Some(idx) = theme_by_id.get(&theme.id).copied() {
+        themes[idx] = theme;
+    } else {
+        let idx = themes.len();
+        theme_by_id.insert(theme.id.clone(), idx);
+        themes.push(theme);
+    }
 }
 
 fn list_json_files(dir: &Path) -> Vec<PathBuf> {
@@ -192,7 +201,7 @@ pub struct ConfigLoader;
 
 impl ConfigLoader {
     pub fn load() -> Result<LoadedConfig> {
-        let cwd = std::env::current_dir().context("Failed to determine current directory")?;
+        let cwd = crate::utils::cwd::current_dir()?;
         let xdg_config_home = xdg_config_home();
         let project_root = discover_project_root(&cwd);
 

@@ -144,7 +144,7 @@ pub async fn run_subagent(
     use std::collections::HashMap;
 
     let session = get_llm_session().ok_or("LLM session not configured")?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd = crate::utils::cwd::current_dir_or_dot();
 
     let scoped_registry = build_scoped_registry(full_registry, &subagent_type).await;
     let permissions = crate::tools::ToolPermissions::new(cwd.clone());

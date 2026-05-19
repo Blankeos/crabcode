@@ -121,10 +121,7 @@ async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()
         .clone()
         .unwrap_or_else(|| "Build".to_string());
 
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .to_string_lossy()
-        .to_string();
+    let cwd = loaded_config.cwd.to_string_lossy().to_string();
 
     let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -150,10 +147,11 @@ async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()
 
     let provider_name_clone = provider_name.clone();
     let model_clone = model_id.clone();
+    let completion_sender = sender.clone();
 
     tokio::spawn(async move {
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let _ = stream_llm_with_cancellation(
+        if let Err(err) = stream_llm_with_cancellation(
             cancel_token,
             cuid2::create_id(),
             provider_name_clone,
@@ -164,7 +162,12 @@ async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()
             messages,
             sender,
         )
-        .await;
+        .await
+        {
+            let _ = completion_sender.send(crate::llm::ChunkMessage::Failed(err.to_string()));
+        }
+
+        let _ = completion_sender.send(crate::llm::ChunkMessage::End);
     });
 
     while let Some(chunk) = receiver.recv().await {
