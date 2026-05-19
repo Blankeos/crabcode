@@ -113,7 +113,7 @@ pub async fn stream_with_tools<P: Provider>(
             };
 
             let mut has_tool_call = false;
-            let mut tool_calls_to_execute: Vec<(String, String, serde_json::Value)> = Vec::new();
+            let mut tool_call_accumulator = ToolCallAccumulator::default();
             let mut accumulated_text = String::new();
 
             while let Some(chunk) = stream.next().await {
@@ -128,10 +128,10 @@ pub async fn stream_with_tools<P: Provider>(
                     Ok(ChunkType::ToolCall(json_str)) => {
                         has_tool_call = true;
                         let _ = tx_loop.send(ChunkType::ToolCall(json_str.clone()));
-                        if let Ok(parsed) = parse_tool_calls(&json_str) {
-                            for (id, name, args) in parsed {
-                                tool_calls_to_execute.push((id, name, args));
-                            }
+                        if let Err(err) = tool_call_accumulator.ingest(&json_str) {
+                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                            *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                            return;
                         }
                     }
                     Ok(ChunkType::End(_content)) => {
@@ -176,6 +176,21 @@ pub async fn stream_with_tools<P: Provider>(
                 break;
             }
 
+            let tool_calls_to_execute = match tool_call_accumulator.finish() {
+                Ok(tool_calls) if !tool_calls.is_empty() => tool_calls,
+                Ok(_) => {
+                    let err = "Tool call stream did not contain executable tool calls".to_string();
+                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                    return;
+                }
+                Err(err) => {
+                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                    return;
+                }
+            };
+
             for (_call_id, tool_name, args) in &tool_calls_to_execute {
                 let tool = tools.iter().find(|t| &t.name == tool_name);
                 match tool {
@@ -206,32 +221,223 @@ pub async fn stream_with_tools<P: Provider>(
     Ok(response)
 }
 
-fn parse_tool_calls(
-    json_str: &str,
-) -> std::result::Result<Vec<(String, String, serde_json::Value)>, serde_json::Error> {
-    let parsed: serde_json::Value = serde_json::from_str(json_str)?;
-    let mut results = Vec::new();
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    calls: Vec<PendingToolCall>,
+}
 
-    if let Some(arr) = parsed.as_array() {
-        for item in arr {
-            if let (Some(id), Some(function)) = (
-                item.get("id").and_then(|v| v.as_str()),
-                item.get("function"),
-            ) {
-                let name = function
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args = function
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
-                results.push((id.to_string(), name, args));
-            }
+#[derive(Debug)]
+struct PendingToolCall {
+    key: String,
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+    saw_arguments: bool,
+}
+
+impl ToolCallAccumulator {
+    fn ingest(&mut self, json_str: &str) -> std::result::Result<(), String> {
+        let parsed: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| format!("Invalid tool call delta: {}", e))?;
+
+        let items = parsed
+            .as_array()
+            .ok_or_else(|| "Unsupported tool call delta shape".to_string())?;
+
+        for (array_index, item) in items.iter().enumerate() {
+            self.ingest_openai_delta(item, array_index)?;
         }
+
+        Ok(())
     }
 
-    Ok(results)
+    fn finish(self) -> std::result::Result<Vec<(String, String, serde_json::Value)>, String> {
+        let mut results = Vec::new();
+
+        for call in self.calls {
+            let name = call
+                .name
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| format!("Tool call '{}' missing function name", call.key))?;
+
+            let id = call.id.unwrap_or(call.key);
+            let args = if !call.saw_arguments || call.arguments.trim().is_empty() {
+                serde_json::Value::Object(Default::default())
+            } else {
+                serde_json::from_str(&call.arguments).map_err(|e| {
+                    format!(
+                        "Tool call '{}' arguments are incomplete or invalid JSON: {}",
+                        id, e
+                    )
+                })?
+            };
+
+            results.push((id, name, args));
+        }
+
+        Ok(results)
+    }
+
+    fn ingest_openai_delta(
+        &mut self,
+        item: &serde_json::Value,
+        array_index: usize,
+    ) -> std::result::Result<(), String> {
+        let key = tool_call_key(item, array_index);
+        let pending = self.pending_for_key(key, item);
+
+        if pending.id.is_none() {
+            pending.id = item
+                .get("id")
+                .and_then(|value| value.as_str())
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string);
+        }
+
+        if let Some(function) = item.get("function") {
+            if pending.name.is_none() {
+                pending.name = function
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .filter(|name| !name.is_empty())
+                    .map(ToString::to_string);
+            }
+
+            if let Some(arguments) = function.get("arguments") {
+                pending.saw_arguments = true;
+                match arguments {
+                    serde_json::Value::String(delta) => pending.arguments.push_str(delta),
+                    serde_json::Value::Null => {}
+                    value => pending.arguments.push_str(&value.to_string()),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn pending_for_key(&mut self, key: String, item: &serde_json::Value) -> &mut PendingToolCall {
+        if let Some(index) = self.calls.iter().position(|call| call.key == key) {
+            return &mut self.calls[index];
+        }
+
+        if let Some(id) = item
+            .get("id")
+            .and_then(|value| value.as_str())
+            .filter(|id| !id.is_empty())
+        {
+            if let Some(index) = self
+                .calls
+                .iter()
+                .position(|call| call.id.as_deref() == Some(id))
+            {
+                return &mut self.calls[index];
+            }
+        }
+
+        self.calls.push(PendingToolCall {
+            key,
+            id: None,
+            name: None,
+            arguments: String::new(),
+            saw_arguments: false,
+        });
+        self.calls.last_mut().expect("pending tool call exists")
+    }
+}
+
+fn tool_call_key(item: &serde_json::Value, array_index: usize) -> String {
+    if let Some(index) = item.get("index").and_then(|value| value.as_u64()) {
+        return format!("index:{}", index);
+    }
+
+    if let Some(id) = item
+        .get("id")
+        .and_then(|value| value.as_str())
+        .filter(|id| !id.is_empty())
+    {
+        return format!("id:{}", id);
+    }
+
+    format!("position:{}", array_index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolCallAccumulator;
+
+    #[test]
+    fn accumulates_streamed_openai_tool_call_arguments() {
+        let mut accumulator = ToolCallAccumulator::default();
+
+        accumulator
+            .ingest(
+                r#"[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\""}}]"#,
+            )
+            .unwrap();
+        accumulator
+            .ingest(r#"[{"index":0,"function":{"arguments":":\"ls -la\"}"}}]"#)
+            .unwrap();
+
+        let calls = accumulator.finish().unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "call_1");
+        assert_eq!(calls[0].1, "bash");
+        assert_eq!(calls[0].2["command"], "ls -la");
+    }
+
+    #[test]
+    fn rejects_incomplete_tool_call_arguments() {
+        let mut accumulator = ToolCallAccumulator::default();
+
+        accumulator
+            .ingest(
+                r#"[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\""}}]"#,
+            )
+            .unwrap();
+
+        let error = accumulator.finish().unwrap_err();
+
+        assert!(error.contains("arguments are incomplete or invalid JSON"));
+    }
+
+    #[test]
+    fn supports_multiple_tool_calls_by_index() {
+        let mut accumulator = ToolCallAccumulator::default();
+
+        accumulator
+            .ingest(
+                r#"[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"file_path\""}},{"index":1,"id":"call_2","type":"function","function":{"name":"bash","arguments":"{\"command\""}}]"#,
+            )
+            .unwrap();
+        accumulator
+            .ingest(
+                r#"[{"index":0,"function":{"arguments":":\"Cargo.toml\"}"}},{"index":1,"function":{"arguments":":\"cargo test\"}"}}]"#,
+            )
+            .unwrap();
+
+        let calls = accumulator.finish().unwrap();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1, "read");
+        assert_eq!(calls[0].2["file_path"], "Cargo.toml");
+        assert_eq!(calls[1].1, "bash");
+        assert_eq!(calls[1].2["command"], "cargo test");
+    }
+
+    #[test]
+    fn empty_arguments_become_empty_object() {
+        let mut accumulator = ToolCallAccumulator::default();
+
+        accumulator
+            .ingest(
+                r#"[{"index":0,"id":"call_1","type":"function","function":{"name":"list","arguments":""}}]"#,
+            )
+            .unwrap();
+
+        let calls = accumulator.finish().unwrap();
+
+        assert_eq!(calls[0].2, serde_json::json!({}));
+    }
 }
