@@ -1,8 +1,9 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
+    symbols::border,
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -11,6 +12,8 @@ use crate::ui::components::chat::Chat;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
 use crate::ui::components::wave_spinner::WaveSpinner;
+
+pub const SUBAGENT_FOOTER_HEIGHT: u16 = 3;
 
 #[derive(Debug)]
 pub struct ChatState {
@@ -23,6 +26,7 @@ pub struct SubagentTab {
     pub label: String,
     pub active: bool,
     pub running: bool,
+    pub color: ratatui::style::Color,
 }
 
 #[derive(Debug, Clone)]
@@ -46,14 +50,16 @@ pub fn init_chat(chat: Chat, agent: &str, colors: &ThemeColors) -> ChatState {
 }
 
 pub fn agent_color_for_tab(agent_index: usize, colors: &ThemeColors) -> ratatui::style::Color {
-    // Matches OpenCode's rotation: primary/secondary/accent/success/warning/error
-    match agent_index % 6 {
-        0 => colors.primary,
-        1 => colors.secondary,
-        2 => colors.accent,
-        3 => colors.success,
-        4 => colors.warning,
-        _ => colors.error,
+    // Matches OpenCode's visible agent rotation:
+    // secondary/accent/success/warning/primary/error/info.
+    match agent_index % 7 {
+        0 => colors.secondary,
+        1 => colors.accent,
+        2 => colors.success,
+        3 => colors.warning,
+        4 => colors.primary,
+        5 => colors.error,
+        _ => colors.info,
     }
 }
 
@@ -74,43 +80,72 @@ pub fn render_chat(
     subagent_tabs: Option<SubagentTabs>,
 ) {
     let size = f.area();
+    let is_subagent_view = subagent_tabs
+        .as_ref()
+        .is_some_and(|tabs| tabs.is_child_session);
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
         .split(size);
 
-    let input_height = input.get_height();
+    let input_height = if is_subagent_view {
+        SUBAGENT_FOOTER_HEIGHT
+    } else {
+        input.get_height()
+    };
+    let help_height = if is_subagent_view { 0 } else { 1 };
     let above_status_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Length(1), // Top padding
+                Constraint::Length(0), // Reserved subagent header removed
                 Constraint::Min(0),    // Chat content
                 Constraint::Length(0), // Bottom padding
                 Constraint::Length(input_height),
-                Constraint::Length(1),
+                Constraint::Length(help_height),
                 Constraint::Length(1),
             ]
             .as_ref(),
         )
         .split(main_chunks[0]);
 
-    if let Some(tabs) = subagent_tabs.as_ref() {
-        render_subagent_tabs(f, above_status_chunks[0], tabs, colors);
-    }
-
     chat_state
         .chat
         .render(f, above_status_chunks[1], &agent, &model, colors);
-    input.render(
-        f,
-        above_status_chunks[3],
-        &agent,
-        &model,
-        &provider_name,
-        colors,
-    );
+
+    if is_subagent_view {
+        if let Some(tabs) = subagent_tabs.as_ref() {
+            render_subagent_footer(
+                f,
+                above_status_chunks[3],
+                tabs,
+                usage_text,
+                colors,
+                is_streaming,
+                is_compacting,
+                &mut chat_state.wave_spinner,
+            );
+        }
+    } else {
+        input.render(
+            f,
+            above_status_chunks[3],
+            &agent,
+            &model,
+            &provider_name,
+            colors,
+        );
+    }
+
+    if is_subagent_view {
+        let blank = Block::default();
+        f.render_widget(blank, above_status_chunks[5]);
+
+        let status_bar = StatusBar::new(version, cwd, branch, agent, model);
+        status_bar.render(f, main_chunks[1], colors);
+        return;
+    }
 
     let help_text = vec![
         Span::styled("/", Style::default().fg(colors.info)),
@@ -132,12 +167,6 @@ pub fn render_chat(
     } else {
         0
     };
-    let middle_width = if usage_width > 0 {
-        available_width.saturating_sub(help_width + usage_width)
-    } else {
-        available_width.saturating_sub(help_width)
-    };
-
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -214,46 +243,148 @@ pub fn render_chat(
     status_bar.render(f, main_chunks[1], colors);
 }
 
-fn render_subagent_tabs(
+fn render_subagent_footer(
     f: &mut Frame,
     area: ratatui::layout::Rect,
     tabs: &SubagentTabs,
+    usage_text: &str,
     colors: &ThemeColors,
+    is_streaming: bool,
+    is_compacting: bool,
+    wave_spinner: &mut WaveSpinner,
 ) {
-    if tabs.tabs.is_empty() || area.width == 0 {
+    if tabs.tabs.is_empty() || area.width == 0 || area.height == 0 {
         return;
     }
 
-    let mut spans = Vec::new();
-    let hint = if tabs.is_child_session {
-        "up parent  left/right siblings"
-    } else {
-        "ctrl+x down subagents"
+    let child_tabs = tabs.tabs.iter().skip(1).collect::<Vec<_>>();
+    let total = child_tabs.len().max(1);
+    let active_index = child_tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    let active_tab = child_tabs
+        .get(active_index)
+        .copied()
+        .or_else(|| child_tabs.first().copied());
+    let label = active_tab
+        .map(|tab| tab.label.as_str())
+        .unwrap_or("Subagent");
+    let running = active_tab.is_some_and(|tab| tab.running);
+    let active_color = active_tab.map(|tab| tab.color).unwrap_or(colors.primary);
+
+    let border_set = border::Set {
+        vertical_left: "┃",
+        ..border::PLAIN
     };
+    let border = Block::new()
+        .borders(Borders::LEFT)
+        .border_set(border_set)
+        .border_style(Style::default().fg(active_color));
+    let inner_area = border.inner(area);
 
-    spans.push(Span::styled(
-        hint,
-        Style::default()
-            .fg(colors.text_weak)
-            .add_modifier(Modifier::DIM),
-    ));
-    spans.push(Span::raw("  "));
+    let bg = Block::default().style(Style::default().bg(colors.background_element));
+    f.render_widget(bg, area);
+    f.render_widget(border, area);
 
-    for tab in &tabs.tabs {
-        let style = if tab.active {
-            Style::default()
-                .fg(colors.background)
-                .bg(colors.primary)
-                .add_modifier(Modifier::BOLD)
-        } else if tab.running {
-            Style::default().fg(colors.info)
-        } else {
-            Style::default().fg(colors.text_weak)
-        };
-        let suffix = if tab.running { " ~" } else { "" };
-        spans.push(Span::styled(format!(" {}{} ", tab.label, suffix), style));
-        spans.push(Span::raw(" "));
+    let content_area = centered_subagent_footer_content(inner_area);
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
     }
 
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    let mut left_spans = vec![
+        Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" ({} of {})", active_index + 1, total)),
+    ];
+
+    if running {
+        left_spans.push(Span::raw(" "));
+        left_spans.push(Span::styled("~", Style::default().fg(active_color)));
+    }
+
+    if !usage_text.is_empty() {
+        left_spans.push(Span::raw("  "));
+        left_spans.push(Span::styled(
+            usage_text.to_string(),
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+
+    if is_streaming {
+        wave_spinner.set_color(active_color);
+        left_spans.push(Span::raw("  "));
+        if is_compacting {
+            left_spans.push(Span::styled(
+                "compacting context",
+                Style::default().fg(colors.info),
+            ));
+        } else {
+            left_spans.extend(wave_spinner.spans());
+            left_spans.push(Span::raw(" "));
+            left_spans.push(Span::styled(
+                "esc to stop",
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+    }
+
+    let nav_line = Line::from(vec![
+        Span::styled(
+            "Parent ",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("up", Style::default().fg(colors.text)),
+        Span::raw("  "),
+        Span::styled(
+            "Prev ",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("left", Style::default().fg(colors.text)),
+        Span::raw("  "),
+        Span::styled(
+            "Next ",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled("right", Style::default().fg(colors.text)),
+    ]);
+
+    let nav_width = nav_line.width() as u16;
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(nav_width.min(content_area.width)),
+        ])
+        .split(content_area);
+
+    f.render_widget(Paragraph::new(Line::from(left_spans)), chunks[0]);
+    f.render_widget(
+        Paragraph::new(nav_line).alignment(Alignment::Right),
+        chunks[1],
+    );
+}
+
+fn centered_subagent_footer_content(area: Rect) -> Rect {
+    if area.width <= 3 || area.height == 0 {
+        return Rect::new(area.x, area.y, area.width, area.height.min(1));
+    }
+
+    Rect {
+        x: area.x + 2,
+        y: area.y + area.height / 2,
+        width: area.width.saturating_sub(3),
+        height: 1,
+    }
 }

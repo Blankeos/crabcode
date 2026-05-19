@@ -14,7 +14,9 @@ use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
 use crate::utils::git;
 
-use crate::views::chat::{init_chat, render_chat, SubagentTab, SubagentTabs};
+use crate::views::chat::{
+    agent_color_for_tab, init_chat, render_chat, SubagentTab, SubagentTabs, SUBAGENT_FOOTER_HEIGHT,
+};
 use crate::views::connect_dialog::{
     get_pending_selection, handle_connect_dialog_key_event, handle_connect_dialog_mouse_event,
     init_connect_dialog, render_connect_dialog,
@@ -556,22 +558,33 @@ impl App {
         let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
             return;
         };
+        let is_child_session = self.session_manager.parent_id_of(&session_id).is_some();
 
         self.ensure_session_view_state(&session_id);
 
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
             state.chat = self.chat_state.chat.clone();
-            state.input_draft = self.input.get_text();
+            state.input_draft = if is_child_session {
+                String::new()
+            } else {
+                self.input.get_text()
+            };
         }
     }
 
     fn load_session_view_state(&mut self, session_id: &str) {
         self.ensure_session_view_state(session_id);
+        let is_child_session = self.session_manager.parent_id_of(session_id).is_some();
 
         if let Some(state) = self.session_view_states.get_mut(session_id) {
             self.chat_state.chat = state.chat.clone();
             self.chat_state.chat.scroll_to_bottom_on_next_render();
-            self.input.set_text(&state.input_draft);
+            if is_child_session {
+                self.input.clear();
+                state.input_draft.clear();
+            } else {
+                self.input.set_text(&state.input_draft);
+            }
             state.unread_completed = false;
         } else {
             self.chat_state.chat.clear();
@@ -589,7 +602,11 @@ impl App {
         }
         self.pending_session_title = None;
         self.load_session_view_state(session_id);
-        self.base_focus = if self.chat_state.chat.messages.is_empty() && !self.is_streaming {
+        let is_child_session = self.session_manager.parent_id_of(session_id).is_some();
+        self.base_focus = if !is_child_session
+            && self.chat_state.chat.messages.is_empty()
+            && !self.is_streaming
+        {
             BaseFocus::Home
         } else {
             BaseFocus::Chat
@@ -597,8 +614,14 @@ impl App {
         true
     }
 
+    fn is_subagent_session_active(&self) -> bool {
+        self.session_manager
+            .get_current_session_id()
+            .is_some_and(|id| self.session_manager.parent_id_of(id).is_some())
+    }
+
     fn should_handle_child_session_arrow(&self) -> bool {
-        if self.base_focus != BaseFocus::Chat || !self.input.get_text().is_empty() {
+        if self.base_focus != BaseFocus::Chat {
             return false;
         }
 
@@ -614,7 +637,11 @@ impl App {
         let Some(root_id) = self.session_manager.root_session_id_for(&current_id) else {
             return false;
         };
-        let Some(first_child) = self.session_manager.child_sessions(&root_id).first().cloned()
+        let Some(first_child) = self
+            .session_manager
+            .child_sessions(&root_id)
+            .first()
+            .cloned()
         else {
             return false;
         };
@@ -626,7 +653,10 @@ impl App {
         let Some(current_id) = self.session_manager.get_current_session_id().cloned() else {
             return false;
         };
-        let Some(parent_id) = self.session_manager.parent_id_of(&current_id).map(str::to_string)
+        let Some(parent_id) = self
+            .session_manager
+            .parent_id_of(&current_id)
+            .map(str::to_string)
         else {
             return false;
         };
@@ -674,24 +704,22 @@ impl App {
                     .session_view_states
                     .get(&root_id)
                     .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some()),
+            color: crate::theme::agent_color(&self.agent, &self.get_current_theme_colors()),
         });
 
-        for child in children {
-            let label = child
-                .title
-                .split_whitespace()
-                .take(4)
-                .collect::<Vec<_>>()
-                .join(" ");
+        let colors = self.get_current_theme_colors();
+        for (idx, child) in children.into_iter().enumerate() {
+            let label = subagent_tab_label(&child.title, &child.id);
             let running = child.status.is_active()
                 || self
                     .session_view_states
                     .get(&child.id)
                     .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some());
             tabs.push(SubagentTab {
-                label: if label.is_empty() { child.id.clone() } else { label },
+                label,
                 active: current_id == child.id,
                 running,
+                color: agent_color_for_tab(idx, &colors),
             });
         }
 
@@ -993,6 +1021,14 @@ impl App {
     pub fn handle_keys(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('v') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                if self.is_subagent_session_active()
+                    && matches!(
+                        self.overlay_focus,
+                        OverlayFocus::None | OverlayFocus::SuggestionsPopup
+                    )
+                {
+                    return;
+                }
                 self.handle_clipboard_image_paste();
                 return;
             }
@@ -1027,6 +1063,10 @@ impl App {
                 // processed again by the base input handler, resulting in duplicated characters.
                 let popup_handled = self.handle_suggestions_popup_keys(key);
                 if popup_handled {
+                    true
+                } else if self.is_subagent_session_active() {
+                    clear_suggestions(&mut self.suggestions_popup_state);
+                    self.overlay_focus = OverlayFocus::None;
                     true
                 } else {
                     let input_handled = self.input.handle_event(key);
@@ -1657,6 +1697,12 @@ impl App {
         // (unless it's Ctrl+C or Escape which are handled earlier)
         self.chat_state.chat.selection.clear();
 
+        if self.is_subagent_session_active() {
+            clear_suggestions(&mut self.suggestions_popup_state);
+            self.overlay_focus = OverlayFocus::None;
+            return;
+        }
+
         match key.code {
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
                 let input_text = self.input.get_text();
@@ -1740,6 +1786,10 @@ impl App {
     }
 
     fn handle_input_mouse_event(&mut self, mouse: MouseEvent) -> bool {
+        if self.is_subagent_session_active() {
+            return false;
+        }
+
         if !self.input.handle_mouse_event(mouse) {
             return false;
         }
@@ -2031,16 +2081,26 @@ impl App {
                     )
                     .split(size);
                 let input_height = self.input.get_height() as u16;
+                let input_height = if self.is_subagent_session_active() {
+                    SUBAGENT_FOOTER_HEIGHT
+                } else {
+                    input_height
+                };
+                let help_height = if self.is_subagent_session_active() {
+                    0
+                } else {
+                    1
+                };
                 let above_status_chunks = ratatui::layout::Layout::default()
                     .direction(ratatui::layout::Direction::Vertical)
                     .constraints(
                         [
-                            ratatui::layout::Constraint::Length(1), // Top padding
+                            ratatui::layout::Constraint::Length(0), // Reserved subagent header removed
                             ratatui::layout::Constraint::Min(0),    // Chat content
                             ratatui::layout::Constraint::Length(0), // Bottom padding
                             ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(1), // Help bar
-                            ratatui::layout::Constraint::Length(1), // Blank
+                            ratatui::layout::Constraint::Length(help_height), // Help bar
+                            ratatui::layout::Constraint::Length(1),           // Blank
                         ]
                         .as_ref(),
                     )
@@ -2069,16 +2129,26 @@ impl App {
                     )
                     .split(size);
                 let input_height = self.input.get_height() as u16;
+                let input_height = if self.is_subagent_session_active() {
+                    SUBAGENT_FOOTER_HEIGHT
+                } else {
+                    input_height
+                };
+                let help_height = if self.is_subagent_session_active() {
+                    0
+                } else {
+                    1
+                };
                 let above_status_chunks = ratatui::layout::Layout::default()
                     .direction(ratatui::layout::Direction::Vertical)
                     .constraints(
                         [
-                            ratatui::layout::Constraint::Length(1), // Top padding
+                            ratatui::layout::Constraint::Length(0), // Reserved subagent header removed
                             ratatui::layout::Constraint::Min(0),    // Chat content
                             ratatui::layout::Constraint::Length(0), // Bottom padding
                             ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(1), // Help bar
-                            ratatui::layout::Constraint::Length(1), // Blank
+                            ratatui::layout::Constraint::Length(help_height), // Help bar
+                            ratatui::layout::Constraint::Length(1),           // Blank
                         ]
                         .as_ref(),
                     )
@@ -2106,6 +2176,10 @@ impl App {
     }
 
     fn handle_clipboard_image_paste(&mut self) {
+        if self.is_subagent_session_active() {
+            return;
+        }
+
         if !matches!(
             (self.base_focus, self.overlay_focus),
             (BaseFocus::Home, OverlayFocus::None)
@@ -2191,6 +2265,9 @@ impl App {
 
         match (self.base_focus, self.overlay_focus) {
             (BaseFocus::Home, OverlayFocus::None) | (BaseFocus::Chat, OverlayFocus::None) => {
+                if self.is_subagent_session_active() {
+                    return;
+                }
                 if self.try_attach_pasted_image_paths(&text) {
                     return;
                 }
@@ -2291,6 +2368,11 @@ impl App {
                 self.api_key_input.text_area.insert_str(&text);
             }
             (_, OverlayFocus::SuggestionsPopup) => {
+                if self.is_subagent_session_active() {
+                    clear_suggestions(&mut self.suggestions_popup_state);
+                    self.overlay_focus = OverlayFocus::None;
+                    return;
+                }
                 if self.try_attach_pasted_image_paths(&text) {
                     return;
                 }
@@ -3968,10 +4050,7 @@ impl App {
                     prompt,
                 );
             }
-            crate::llm::ChunkMessage::SubagentChunk {
-                session_id,
-                chunk,
-            } => {
+            crate::llm::ChunkMessage::SubagentChunk { session_id, chunk } => {
                 self.process_streaming_chunk_for_session(&session_id, *chunk);
             }
             crate::llm::ChunkMessage::PermissionRequest(prompt) => {
@@ -4021,11 +4100,7 @@ impl App {
         description: String,
         prompt: String,
     ) {
-        if self
-            .session_manager
-            .get_session_ref(&session_id)
-            .is_none()
-        {
+        if self.session_manager.get_session_ref(&session_id).is_none() {
             self.session_manager.create_child_session(
                 parent_session_id,
                 session_id.clone(),
@@ -4684,6 +4759,34 @@ fn append_usage_suffix(mut text: String, suffix: String) -> String {
     }
 }
 
+fn subagent_tab_label(title: &str, fallback: &str) -> String {
+    if let Some(start) = title.find("(@") {
+        let after_marker = &title[start + 2..];
+        if let Some(agent) = after_marker.strip_suffix(" subagent)") {
+            return titlecase_ascii(agent);
+        }
+    }
+
+    let label = title
+        .split_whitespace()
+        .take(4)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if label.is_empty() {
+        fallback.to_string()
+    } else {
+        label
+    }
+}
+
+fn titlecase_ascii(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 impl Default for App {
     fn default() -> Self {
         Self::new().expect("Failed to initialize App")
@@ -5049,5 +5152,36 @@ mod tests {
             app.session_manager.get_current_session_id(),
             Some(&parent_id)
         );
+    }
+
+    #[test]
+    fn subagent_session_ignores_text_input() {
+        let mut app = test_app();
+        let parent_id = app.create_new_session(Some("Parent".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        app.start_subagent_session(
+            parent_id,
+            "child-a".to_string(),
+            "General task (@general subagent)".to_string(),
+            "general".to_string(),
+            "General task".to_string(),
+            "Check implementation".to_string(),
+        );
+
+        assert!(app.switch_to_first_child_session());
+        app.handle_keys(KeyEvent::new(KeyCode::Char('h'), event::KeyModifiers::NONE));
+        app.handle_paste(" pasted".to_string());
+
+        assert_eq!(app.input.get_text(), "");
+    }
+
+    #[test]
+    fn subagent_tab_label_prefers_agent_type_marker() {
+        assert_eq!(
+            subagent_tab_label("Find files (@explore subagent)", "fallback"),
+            "Explore"
+        );
+        assert_eq!(subagent_tab_label("", "fallback"), "fallback");
     }
 }
