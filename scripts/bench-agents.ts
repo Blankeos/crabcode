@@ -401,9 +401,9 @@ function modelForAgent(agent: AgentName, modelRef: string) {
 function defaultCrabcodeCommand() {
   const binary = join(REPO_ROOT, 'target', 'debug', 'crabcode')
   if (existsSync(binary)) {
-    return `${shellQuote(binary)} -p --no-session-persistence {prompt}`
+    return `${shellQuote(binary)} -p --no-session-persistence --dangerously-skip-permissions {prompt}`
   }
-  return `cargo run --quiet --manifest-path ${shellQuote(join(REPO_ROOT, 'Cargo.toml'))} -- -p --no-session-persistence {prompt}`
+  return `cargo run --quiet --manifest-path ${shellQuote(join(REPO_ROOT, 'Cargo.toml'))} -- -p --no-session-persistence --dangerously-skip-permissions {prompt}`
 }
 
 function writeFixture(workspace: string, task: Task) {
@@ -573,7 +573,7 @@ function printPaths() {
   console.log('')
   console.log('Notes')
   console.log('  Permission-gated actions are auto-approved for opencode and codex in isolated workspaces.')
-  console.log('  Crabcode print mode can still deny its own permission-gated tool calls.')
+  console.log('  Crabcode print mode is run with --dangerously-skip-permissions in isolated workspaces.')
   if (!keep) {
     console.log('  Workspaces are removed at exit. Pass --keep to preserve them.')
   }
@@ -677,7 +677,7 @@ function writeMarkdownReport(
   lines.push(`Workspaces kept after run: ${report.keep ? 'yes' : 'no'}`)
   lines.push(`Stopped early: ${report.stopped ? 'yes' : 'no'}`)
   lines.push('')
-  lines.push(`Permission prompts are not answered by this non-interactive benchmark. Approval-gated actions may fail or time out.`)
+  lines.push(`Permission-gated actions are auto-approved for benchmark agent commands in isolated workspaces.`)
   lines.push(`Cost is a rough estimate from prompt/output text tokens only; provider dashboards are the source of truth.`)
   lines.push('')
 
@@ -880,7 +880,7 @@ Stop behavior:
   Ctrl+C stops the active agent process tree and removes temporary workspaces unless --keep is set.
 
 Command overrides:
-  BENCH_CRABCODE_CMD='crabcode -p --no-session-persistence {prompt}'
+  BENCH_CRABCODE_CMD='crabcode -p --no-session-persistence --dangerously-skip-permissions {prompt}'
   BENCH_OPENCODE_CMD='opencode run --dangerously-skip-permissions -m {model} {prompt}'
   BENCH_CODEX_CMD='codex exec --ephemeral --skip-git-repo-check --sandbox workspace-write -c approval_policy="never" -m {model} {prompt}'
 
