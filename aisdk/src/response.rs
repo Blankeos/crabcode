@@ -278,6 +278,7 @@ struct PendingToolCall {
     id: Option<String>,
     name: Option<String>,
     arguments: String,
+    final_arguments: Option<String>,
     saw_arguments: bool,
 }
 
@@ -372,16 +373,7 @@ impl ToolCallAccumulator {
                 .ok_or_else(|| format!("Tool call '{}' missing function name", call.key))?;
 
             let id = call.id.unwrap_or(call.key);
-            let args = if !call.saw_arguments || call.arguments.trim().is_empty() {
-                serde_json::Value::Object(Default::default())
-            } else {
-                serde_json::from_str(&call.arguments).map_err(|e| {
-                    format!(
-                        "Tool call '{}' arguments are incomplete or invalid JSON: {}",
-                        id, e
-                    )
-                })?
-            };
+            let args = parse_tool_arguments(&id, &call.arguments, call.final_arguments.as_deref())?;
 
             results.push((id, name, args));
         }
@@ -422,6 +414,16 @@ impl ToolCallAccumulator {
                     value => pending.arguments.push_str(&value.to_string()),
                 }
             }
+
+            if let Some(arguments) = function.get("arguments_done") {
+                match arguments {
+                    serde_json::Value::String(done) => {
+                        pending.final_arguments = Some(done.clone());
+                    }
+                    serde_json::Value::Null => {}
+                    value => pending.final_arguments = Some(value.to_string()),
+                }
+            }
         }
 
         Ok(())
@@ -451,10 +453,59 @@ impl ToolCallAccumulator {
             id: None,
             name: None,
             arguments: String::new(),
+            final_arguments: None,
             saw_arguments: false,
         });
         self.calls.last_mut().expect("pending tool call exists")
     }
+}
+
+fn parse_tool_arguments(
+    id: &str,
+    streamed_arguments: &str,
+    final_arguments: Option<&str>,
+) -> std::result::Result<serde_json::Value, String> {
+    let streamed = streamed_arguments.trim();
+
+    if !streamed.is_empty() {
+        match serde_json::from_str(streamed_arguments) {
+            Ok(value) => return Ok(value),
+            Err(streamed_err) => {
+                if let Some(final_arguments) = final_arguments {
+                    let final_trimmed = final_arguments.trim();
+                    if !final_trimmed.is_empty() {
+                        return serde_json::from_str(final_arguments).map_err(|final_err| {
+                            format!(
+                                "Tool call '{}' arguments are incomplete or invalid JSON: {}; final arguments were also invalid: {}",
+                                id, streamed_err, final_err
+                            )
+                        });
+                    }
+                }
+
+                return Err(format!(
+                    "Tool call '{}' arguments are incomplete or invalid JSON: {}",
+                    id, streamed_err
+                ));
+            }
+        }
+    }
+
+    let Some(final_arguments) = final_arguments else {
+        return Ok(serde_json::Value::Object(Default::default()));
+    };
+
+    let final_trimmed = final_arguments.trim();
+    if final_trimmed.is_empty() {
+        return Ok(serde_json::Value::Object(Default::default()));
+    }
+
+    serde_json::from_str(final_arguments).map_err(|e| {
+        format!(
+            "Tool call '{}' arguments are incomplete or invalid JSON: {}",
+            id, e
+        )
+    })
 }
 
 fn tool_call_key(item: &serde_json::Value, array_index: usize) -> String {
@@ -770,5 +821,25 @@ mod tests {
         let calls = accumulator.finish().unwrap();
 
         assert_eq!(calls[0].2, serde_json::json!({}));
+    }
+
+    #[test]
+    fn uses_final_arguments_when_delta_arguments_are_absent() {
+        let mut accumulator = ToolCallAccumulator::default();
+
+        accumulator
+            .ingest(r#"[{"index":0,"id":"call_1","type":"function","function":{"name":"read"}}]"#)
+            .unwrap();
+        accumulator
+            .ingest(
+                r#"[{"index":0,"function":{"arguments_done":"{\"file_path\":\"Cargo.toml\"}"}}]"#,
+            )
+            .unwrap();
+
+        let calls = accumulator.finish().unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "read");
+        assert_eq!(calls[0].2["file_path"], "Cargo.toml");
     }
 }

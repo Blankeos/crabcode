@@ -92,7 +92,11 @@ fn format_post_close_message(info: Option<&PostCloseInfo>) -> String {
     msg
 }
 
-async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()> {
+async fn run_print_mode(
+    prompt: &str,
+    no_session_persistence: bool,
+    dangerously_skip_permissions: bool,
+) -> Result<()> {
     use crate::llm::client::stream_llm_with_cancellation;
     use crate::session::types::Message;
     use tokio::sync::mpsc;
@@ -137,7 +141,8 @@ async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()
 
     let (sender, mut receiver) = mpsc::unbounded_channel();
 
-    let tool_permissions = crate::tools::ToolPermissions::new(std::path::PathBuf::from(&cwd));
+    let tool_permissions = crate::tools::ToolPermissions::new(std::path::PathBuf::from(&cwd))
+        .dangerously_skip_permissions(dangerously_skip_permissions);
 
     let agent_max_steps = loaded_config
         .merged_config
@@ -197,6 +202,15 @@ async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()
             crate::llm::ChunkMessage::Warning(warning) => {
                 eprintln!("Warning: {}", warning);
             }
+            crate::llm::ChunkMessage::PermissionRequest(prompt) => {
+                eprintln!(
+                    "Permission required: {}. Re-run with --dangerously-skip-permissions to allow non-interactive tool execution.",
+                    prompt.reason
+                );
+                let _ = prompt
+                    .response_tx
+                    .send(crate::tools::PermissionResponse::Deny);
+            }
             _ => {}
         }
     }
@@ -237,6 +251,10 @@ struct Args {
     #[arg(long = "no-session-persistence")]
     no_session_persistence: bool,
 
+    /// Skip permission prompts in print mode. Intended for isolated benchmark/CI workspaces.
+    #[arg(long = "dangerously-skip-permissions")]
+    dangerously_skip_permissions: bool,
+
     /// The prompt to run (positional, used in print mode)
     prompt: Vec<String>,
 }
@@ -253,7 +271,12 @@ async fn main() -> Result<()> {
             eprintln!("Usage: crabcode -p \"<PROMPT>\"");
             std::process::exit(1);
         }
-        return run_print_mode(&prompt, args.no_session_persistence).await;
+        return run_print_mode(
+            &prompt,
+            args.no_session_persistence,
+            args.dangerously_skip_permissions,
+        )
+        .await;
     }
 
     let mut app = App::new()?;

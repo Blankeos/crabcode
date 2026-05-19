@@ -295,7 +295,13 @@ impl Provider for OpenAI {
                                         ChunkType::Failed("Response failed".to_string()),
                                     ))),
                                     _ => {
-                                        if event_type.contains("tool_call") {
+                                        if let Some(tool_call) =
+                                            responses_function_call_chunk(&value)
+                                        {
+                                            futures::future::ready(Some(Ok(ChunkType::ToolCall(
+                                                tool_call,
+                                            ))))
+                                        } else if event_type.contains("tool_call") {
                                             futures::future::ready(Some(Ok(ChunkType::ToolCall(
                                                 data.clone(),
                                             ))))
@@ -321,6 +327,127 @@ impl Provider for OpenAI {
 
         Ok(stream)
     }
+}
+
+fn responses_function_call_chunk(value: &serde_json::Value) -> Option<String> {
+    let event_type = value.get("type").and_then(|v| v.as_str())?;
+
+    let chunk = match event_type {
+        "response.output_item.added" => {
+            let item = value.get("item")?;
+            if item.get("type").and_then(|v| v.as_str())? != "function_call" {
+                return None;
+            }
+
+            response_function_call_item_chunk(value, item, false)?
+        }
+        "response.output_item.done" => {
+            let item = value.get("item")?;
+            if item.get("type").and_then(|v| v.as_str())? != "function_call" {
+                return None;
+            }
+
+            response_function_call_item_chunk(value, item, true)?
+        }
+        "response.function_call_arguments.delta" => {
+            let mut function = serde_json::Map::new();
+            function.insert(
+                "arguments".to_string(),
+                value
+                    .get("delta")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            response_function_call_chunk_base(value, function)?
+        }
+        "response.function_call_arguments.done" => {
+            let mut function = serde_json::Map::new();
+            function.insert(
+                "arguments_done".to_string(),
+                value
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            response_function_call_chunk_base(value, function)?
+        }
+        _ => return None,
+    };
+
+    serde_json::to_string(&vec![serde_json::Value::Object(chunk)]).ok()
+}
+
+fn response_function_call_item_chunk(
+    value: &serde_json::Value,
+    item: &serde_json::Value,
+    include_final_arguments: bool,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut function = serde_json::Map::new();
+
+    if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+        function.insert(
+            "name".to_string(),
+            serde_json::Value::String(name.to_string()),
+        );
+    }
+
+    if include_final_arguments {
+        if let Some(arguments) = item.get("arguments") {
+            function.insert("arguments_done".to_string(), arguments.clone());
+        }
+    }
+
+    response_function_call_chunk_base_with_item(value, item, function)
+}
+
+fn response_function_call_chunk_base(
+    value: &serde_json::Value,
+    function: serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut chunk = serde_json::Map::new();
+
+    if let Some(index) = value.get("output_index").and_then(|v| v.as_u64()) {
+        chunk.insert(
+            "index".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(index)),
+        );
+    }
+
+    if let Some(id) = value
+        .get("item_id")
+        .or_else(|| value.get("call_id"))
+        .and_then(|v| v.as_str())
+    {
+        chunk.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+    }
+
+    chunk.insert(
+        "type".to_string(),
+        serde_json::Value::String("function".to_string()),
+    );
+    chunk.insert("function".to_string(), serde_json::Value::Object(function));
+
+    Some(chunk)
+}
+
+fn response_function_call_chunk_base_with_item(
+    value: &serde_json::Value,
+    item: &serde_json::Value,
+    function: serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut chunk = response_function_call_chunk_base(value, function)?;
+
+    if !chunk.contains_key("id") {
+        if let Some(id) = item
+            .get("id")
+            .or_else(|| item.get("call_id"))
+            .and_then(|v| v.as_str())
+        {
+            chunk.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
+    }
+
+    Some(chunk)
 }
 
 fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_json::Value> {
@@ -369,4 +496,51 @@ fn openai_responses_user_content(user: &crate::message::UserMessage) -> serde_js
         })
     }));
     serde_json::Value::Array(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::responses_function_call_chunk;
+
+    #[test]
+    fn maps_responses_function_call_item_to_tool_call_shape() {
+        let event = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": "fc_123",
+                "call_id": "call_123",
+                "type": "function_call",
+                "name": "read",
+                "arguments": ""
+            }
+        });
+
+        let chunk = responses_function_call_chunk(&event).expect("expected function call chunk");
+        let parsed: serde_json::Value = serde_json::from_str(&chunk).unwrap();
+
+        assert_eq!(parsed[0]["index"], 0);
+        assert_eq!(parsed[0]["id"], "fc_123");
+        assert_eq!(parsed[0]["function"]["name"], "read");
+    }
+
+    #[test]
+    fn maps_responses_function_call_argument_delta_to_tool_call_shape() {
+        let event = serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "item_id": "fc_123",
+            "delta": "{\"file_path\":\"Cargo.toml\"}"
+        });
+
+        let chunk = responses_function_call_chunk(&event).expect("expected argument chunk");
+        let parsed: serde_json::Value = serde_json::from_str(&chunk).unwrap();
+
+        assert_eq!(parsed[0]["index"], 0);
+        assert_eq!(parsed[0]["id"], "fc_123");
+        assert_eq!(
+            parsed[0]["function"]["arguments"],
+            "{\"file_path\":\"Cargo.toml\"}"
+        );
+    }
 }

@@ -131,6 +131,7 @@ pub struct ToolPermissions {
     workdir: PathBuf,
     always_grants: Arc<RwLock<HashSet<PermissionFingerprint>>>,
     agent_policies: Arc<AgentToolPolicies>,
+    dangerously_skip_permissions: bool,
 }
 
 impl ToolPermissions {
@@ -139,11 +140,17 @@ impl ToolPermissions {
             workdir: normalize_path(&workdir.into()),
             always_grants: Arc::new(RwLock::new(HashSet::new())),
             agent_policies: Arc::new(AgentToolPolicies::default()),
+            dangerously_skip_permissions: false,
         }
     }
 
     pub fn with_agent_policies(mut self, policies: AgentToolPolicies) -> Self {
         self.agent_policies = Arc::new(policies);
+        self
+    }
+
+    pub fn dangerously_skip_permissions(mut self, enabled: bool) -> Self {
+        self.dangerously_skip_permissions = enabled;
         self
     }
 
@@ -167,6 +174,10 @@ impl ToolPermissions {
                 "Tool '{}' is not available in {} mode",
                 tool_id, agent_mode
             )));
+        }
+
+        if self.dangerously_skip_permissions {
+            return Ok(());
         }
 
         let action = PermissionAction::from_tool_id(tool_id);
@@ -482,6 +493,18 @@ mod tests {
 
         let second = perms.preflight("build", "read", &params, Some(&tx)).await;
         assert!(second.is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dangerous_skip_bypasses_permission_prompts() {
+        let perms = ToolPermissions::new("/tmp/workspace").dangerously_skip_permissions(true);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({ "file_path": "/tmp/workspace/.env" });
+
+        let result = perms.preflight("build", "read", &params, Some(&tx)).await;
+
+        assert!(result.is_ok());
         assert!(rx.try_recv().is_err());
     }
 }
