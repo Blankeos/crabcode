@@ -274,15 +274,16 @@ impl HistoryDAO {
 
         self.conn.execute(
             "INSERT INTO messages (
-                 id, session_id, role, parts, tokens_used, model, provider, agent_mode, duration_ms,
+                 id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
                  t0_ms, t1_ms, tn_ms, output_tokens
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 &msg.id,
                 msg.session_id,
                 &msg.role,
                 &parts_json,
+                msg.timestamp,
                 msg.tokens_used,
                 msg.model.as_deref(),
                 msg.provider.as_deref(),
@@ -299,11 +300,81 @@ impl HistoryDAO {
         Ok(())
     }
 
+    pub fn replace_messages(&self, session_id: i64, messages: &[Message]) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
+
+        let mut total_tokens: i64 = 0;
+        let mut updated_at = chrono::Utc::now().timestamp();
+
+        for msg in messages {
+            let parts_json = serde_json::to_string(&msg.parts)?;
+            total_tokens += msg.tokens_used as i64;
+            updated_at = msg.timestamp;
+
+            self.conn.execute(
+                "INSERT INTO messages (
+                     id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
+                     t0_ms, t1_ms, tn_ms, output_tokens
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    &msg.id,
+                    session_id,
+                    &msg.role,
+                    &parts_json,
+                    msg.timestamp,
+                    msg.tokens_used,
+                    msg.model.as_deref(),
+                    msg.provider.as_deref(),
+                    msg.agent_mode.as_deref(),
+                    msg.duration_ms,
+                    msg.t0_ms,
+                    msg.t1_ms,
+                    msg.tn_ms,
+                    msg.output_tokens,
+                ],
+            )?;
+        }
+
+        let session = self.get_session(session_id)?;
+        let total_time_sec = session
+            .as_ref()
+            .map(|session| (updated_at - session.created_at).max(0) as f64)
+            .unwrap_or(0.0);
+        let avg_tokens_per_sec = if total_time_sec > 0.0 {
+            total_tokens as f64 / total_time_sec
+        } else {
+            0.0
+        };
+
+        self.conn.execute(
+            "UPDATE sessions
+             SET total_tokens = ?1,
+                 total_cost = 0,
+                 total_time_sec = ?2,
+                 avg_tokens_per_sec = ?3,
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![
+                total_tokens,
+                total_time_sec,
+                avg_tokens_per_sec,
+                updated_at,
+                session_id
+            ],
+        )?;
+
+        Ok(())
+    }
+
     pub fn get_messages(&self, session_id: i64) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
                     t0_ms, t1_ms, tn_ms, output_tokens
-             FROM messages WHERE session_id = ?1 ORDER BY timestamp ASC",
+             FROM messages WHERE session_id = ?1 ORDER BY timestamp ASC, rowid ASC",
         )?;
 
         let message_iter = stmt.query_map(params![session_id], |row| {

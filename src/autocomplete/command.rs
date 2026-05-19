@@ -161,6 +161,13 @@ mod tests {
             hidden_tokens: vec![],
             chat_only: false,
         });
+        registry.register(Command {
+            name: "compact".to_string(),
+            description: "Compact session".to_string(),
+            handler: dummy_handler,
+            hidden_tokens: vec![],
+            chat_only: true,
+        });
         registry
     }
 
@@ -168,7 +175,7 @@ mod tests {
     fn test_command_auto_creation() {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);
-        assert_eq!(auto.commands.len(), 3);
+        assert_eq!(auto.commands.len(), 4);
     }
 
     #[test]
@@ -182,7 +189,19 @@ mod tests {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);
         let suggestions = auto.get_suggestions("", true);
-        assert_eq!(suggestions.len(), 3);
+        assert_eq!(suggestions.len(), 4);
+    }
+
+    #[test]
+    fn test_chat_only_suggestions_hidden_outside_chat() {
+        let registry = setup_registry();
+        let auto = CommandAuto::new(&registry);
+
+        let home_suggestions = auto.get_suggestions("c", false);
+        assert!(home_suggestions.iter().all(|s| s.name != "compact"));
+
+        let chat_suggestions = auto.get_suggestions("c", true);
+        assert!(chat_suggestions.iter().any(|s| s.name == "compact"));
     }
 
     #[test]

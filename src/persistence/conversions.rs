@@ -1,5 +1,5 @@
 use crate::persistence::{Message, MessagePart, Session as PersistenceSession};
-use crate::session::types::{Message as SessionMessage, MessageRole, Session};
+use crate::session::types::{CompactionStats, Message as SessionMessage, MessageRole, Session};
 
 impl From<SessionMessage> for Message {
     fn from(msg: SessionMessage) -> Self {
@@ -23,6 +23,15 @@ impl From<SessionMessage> for Message {
                 part_type: "local_image".to_string(),
                 data: serde_json::json!({ "path": path }),
             });
+        }
+
+        if let Some(stats) = msg.compaction_stats {
+            if let Ok(data) = serde_json::to_value(stats) {
+                parts.push(MessagePart {
+                    part_type: "compaction_stats".to_string(),
+                    data,
+                });
+            }
         }
 
         Message {
@@ -92,6 +101,12 @@ impl TryFrom<Message> for SessionMessage {
             .map(|path| path.to_string())
             .collect();
 
+        let compaction_stats = msg
+            .parts
+            .iter()
+            .find(|p| p.part_type == "compaction_stats")
+            .and_then(|p| serde_json::from_value::<CompactionStats>(p.data.clone()).ok());
+
         let role = match msg.role.as_str() {
             "user" => MessageRole::User,
             "assistant" => MessageRole::Assistant,
@@ -132,6 +147,7 @@ impl TryFrom<Message> for SessionMessage {
             model: msg.model.clone(),
             provider: msg.provider.clone(),
             local_image_paths,
+            compaction_stats,
         })
     }
 }
@@ -151,4 +167,30 @@ pub fn persistence_to_session(
         session.add_message(msg.try_into()?);
     }
     Ok(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compaction_stats_round_trip_through_message_parts() {
+        let stats = CompactionStats {
+            before_tokens: 12_000,
+            after_tokens: 360,
+            before_messages: 8,
+            after_messages: 2,
+        };
+        let mut session_message = SessionMessage::user("summary");
+        session_message.compaction_stats = Some(stats);
+
+        let persistence_message: Message = session_message.into();
+        assert!(persistence_message
+            .parts
+            .iter()
+            .any(|part| part.part_type == "compaction_stats"));
+
+        let restored = SessionMessage::try_from(persistence_message).unwrap();
+        assert_eq!(restored.compaction_stats, Some(stats));
+    }
 }

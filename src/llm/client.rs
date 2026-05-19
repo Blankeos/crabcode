@@ -177,6 +177,42 @@ pub async fn stream_llm_with_cancellation(
     Ok(())
 }
 
+pub async fn summarize_for_compaction(
+    provider_name: String,
+    model: String,
+    prompt: String,
+) -> Result<String, DynError> {
+    let (warning_sender, _warning_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let request_config = prepare_request_config(&provider_name, model, &warning_sender).await?;
+    let messages = vec![AisdkMessage::user(prompt)];
+    let mut response = stream_provider_request(&request_config, messages, Vec::new(), None).await?;
+
+    let mut summary = String::new();
+    while let Some(chunk) = response.stream.next().await {
+        match chunk {
+            ChunkType::Text(text) => summary.push_str(&text),
+            ChunkType::Failed(err) => {
+                return Err(anyhow::anyhow!("Compaction failed: {}", err).into());
+            }
+            ChunkType::NotSupported(msg) => {
+                return Err(anyhow::anyhow!("Compaction unsupported: {}", msg).into());
+            }
+            ChunkType::Reasoning(_)
+            | ChunkType::ToolCall(_)
+            | ChunkType::End(_)
+            | ChunkType::Start
+            | ChunkType::Incomplete(_) => {}
+        }
+    }
+
+    let summary = summary.trim().to_string();
+    if summary.is_empty() {
+        return Err(anyhow::anyhow!("Compaction returned an empty summary").into());
+    }
+
+    Ok(summary)
+}
+
 async fn prepare_request_config(
     provider_name: &str,
     model: String,

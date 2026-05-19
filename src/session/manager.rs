@@ -315,6 +315,37 @@ impl SessionManager {
         Ok(())
     }
 
+    pub fn replace_session_messages(
+        &mut self,
+        session_id: &str,
+        messages: Vec<crate::session::types::Message>,
+    ) -> Result<(), SessionError> {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.messages = messages.clone();
+            session.updated_at = SystemTime::now();
+        } else {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
+
+        if let Some(ref dao) = self.history_dao {
+            if let Some(db_id) = self.id_mapping.get(session_id) {
+                let persistence_messages: Vec<crate::persistence::Message> = messages
+                    .into_iter()
+                    .map(|message| {
+                        let mut db_message: crate::persistence::Message = message.into();
+                        db_message.session_id = *db_id;
+                        db_message
+                    })
+                    .collect();
+
+                dao.replace_messages(*db_id, &persistence_messages)
+                    .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn set_session_status(
         &mut self,
         id: &str,

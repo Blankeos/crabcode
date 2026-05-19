@@ -1,4 +1,4 @@
-- [ ] VERY VERY far future. Rearchitect - multi-workspace, just like the codex desktop app.
+- [x] VERY VERY far future. Rearchitect - multi-workspace, just like the codex desktop app.
   - Since it's a terminal, we have a special case to make it run even when closed, or when there are multiple instances of the program running. They have the same sort of "streaming" state. I will elaborate.
   - Mutli-workspace feature is essentially having multiple "chat sessions" running. Currently.. Every run of `crabcode` is its own isolated session.
   - We want to change that by making `crabcode` a multi-workspace agentic TUI by default, just like the codex desktop app, superconductor, etc. But simpler because the idea is literally just like a chat app on the web. Wherein, I want to be able to check the "sessions" in the sidebar, create new chats in the same tab (in this case a tab is a run of `crabcode`).
@@ -32,7 +32,7 @@
 
 - [x] Chore: Create a /checkparity-opencode (the most important thing is only the agent-loop, nothing else. We do differ a bit in terms of UX anyway, but the agent-loop, tool calling, etc has to be very very close so that the performance is mostly the same) and /checkparity-codex (au) command
 
-- [ ] Feature: Subagents just like opencode.
+- [x] Feature: Subagents just like opencode.
 
 - [x] Feature: Rename command `/rename` - parity with opencode.
 
@@ -50,6 +50,7 @@
 
 - [x] Tool call rendering:
   - [x] editing files w/ diffs, like opencode does.
+  - [ ] webfetch rendering like codex does.
   - [x] todowrite - better looking, like opencode does.
   - [x] rendering subagents - just like opencode, clickable to go into their page.. OR I can do `ctrl-x ↓` to go into it if there's a subagent running. I can also switch between subagents with `←` and `→`
 
@@ -69,8 +70,22 @@
 
 - [x] Highlight enhancements, if I click 1 place, then shift+click another. Treat it like the highlight in the browser that doesn't need a drag. Whatever I last clicked (without shift+click), treat it as the anchor for the "select start", and then whatever I shift+click after, treat it as a "select end" and autohighlight that part. (not supported)
 
-- [ ] Remote usage.
+- [ ] Remote usage. Also talk about how to use for remote usages in the docs later. I can imagine multiple usecases. But this stands out in particular:
+  - Remotely accessing crabcode on VPS / another device.
+    - via another PC.
+    - via phone.
+  - More questions from me:
+    - Do we need a separate app?
+    - Should we recommend tailscale
 
 - [x] File referencing with @
 
-- [ ] compaction
+- [x] compaction
+
+- [ ] More mouse-friendly chat input box floating popovers i.e. `@` for files. `/` for commands. Requirements:
+  - scroll w/ my mouse (no thumbs, just scroll)
+  - click the item with my mouse
+
+- [ ] Benchmark script to test performance against opencode + codex in comparison. As cheaply as possible. Using the same models. It doesn't need to be a state-of-the-art benchmark. It just needs to test a couple of usual things i.e. small stuff, see if the agent is at least just as capable, because what we're chasing is kinda exactly just the same as codex/opencode, not better. The "better" will be in the UX, it will have the better UX changes I want. So I will want to also explicitly say it's a make-shift benchmark. I want the benchmark to output:
+  - [ ] Cost to test - this is just my personal add
+  - [ ] Idk what metric usually is used, to define "better". - the goal is crabcode will have the same score as the others.

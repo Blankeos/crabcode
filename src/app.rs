@@ -116,6 +116,25 @@ enum OpenAIOAuthTaskMessage {
 }
 
 #[derive(Debug)]
+enum CompactionTaskMessage {
+    Success {
+        session_id: String,
+        messages: Vec<crate::session::types::Message>,
+        stats: crate::session::types::CompactionStats,
+    },
+    Failed {
+        session_id: String,
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct CompactionPending {
+    session_id: String,
+    before_tokens: usize,
+}
+
+#[derive(Debug)]
 struct SessionStreamState {
     chunk_receiver: crate::llm::ChunkReceiver,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -188,6 +207,8 @@ pub struct App {
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     openai_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<OpenAIOAuthTaskMessage>>,
     openai_oauth_in_progress: bool,
+    compaction_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<CompactionTaskMessage>>,
+    compaction_pending: Option<CompactionPending>,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
     pub agent_steps: std::collections::HashMap<String, usize>,
@@ -388,6 +409,8 @@ impl App {
             api_key_input,
             openai_oauth_receiver: None,
             openai_oauth_in_progress: false,
+            compaction_receiver: None,
+            compaction_pending: None,
             prefs_dao,
             agent,
             agent_steps,
@@ -549,13 +572,12 @@ impl App {
             self.chat_state.chat.scroll_to_bottom_on_next_render();
             self.input.set_text(&state.input_draft);
             state.unread_completed = false;
-            self.is_streaming = state.stream.is_some() || state.external_stream.is_some();
         } else {
             self.chat_state.chat.clear();
             self.input.clear();
-            self.is_streaming = false;
         }
 
+        self.sync_active_streaming_flag();
         self.cached_usage_check = (usize::MAX, usize::MAX);
     }
 
@@ -708,7 +730,7 @@ impl App {
         self.chat_state.chat.clear();
         self.input.clear();
         self.base_focus = BaseFocus::Home;
-        self.is_streaming = false;
+        self.sync_active_streaming_flag();
         self.cached_usage_check = (usize::MAX, usize::MAX);
         self.refresh_sessions_dialog();
         session_id
@@ -754,11 +776,12 @@ impl App {
     }
 
     fn sync_active_streaming_flag(&mut self) {
-        self.is_streaming = self
-            .session_manager
-            .get_current_session_id()
-            .and_then(|id| self.session_view_states.get(id))
-            .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some());
+        self.is_streaming = self.compaction_receiver.is_some()
+            || self
+                .session_manager
+                .get_current_session_id()
+                .and_then(|id| self.session_view_states.get(id))
+                .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some());
     }
 
     fn get_random_placeholder() -> String {
@@ -788,47 +811,55 @@ impl App {
     }
 
     fn session_usage_text(&self) -> String {
-        let total_tokens: usize = self
-            .chat_state
-            .chat
-            .messages
-            .iter()
-            .filter_map(|m| m.token_count)
-            .sum();
+        let messages = &self.chat_state.chat.messages;
+        let total_tokens = crate::session::compaction::total_context_tokens(messages);
 
-        if total_tokens == 0 {
-            return String::new();
+        let mut text = if total_tokens == 0 {
+            String::new()
+        } else {
+            crate::session::compaction::format_token_count(total_tokens)
+        };
+
+        if total_tokens > 0 {
+            if let Some(ref discovery) = self.discovery {
+                if let Some(limit) =
+                    discovery.get_model_limit(&self.provider_name.to_lowercase(), &self.model)
+                {
+                    if limit > 0 {
+                        let pct = ((total_tokens as f64 / limit as f64) * 100.0).round() as u32;
+                        text = format!("{} ({}%)", text, pct);
+                    }
+                }
+
+                if let Some(cost) =
+                    discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
+                {
+                    let output_tokens: usize =
+                        messages.iter().filter_map(|m| m.output_tokens).sum();
+                    let total = (output_tokens.max(total_tokens)) as f64;
+                    let price = total / 1_000_000.0 * cost.output;
+                    if price > 0.001 {
+                        text = format!("{} \u{00b7} ${:.2}", text, price);
+                    }
+                }
+            }
         }
 
-        let token_text = format_token_count(total_tokens);
-        let mut text = token_text;
+        if let Some(pending) = self.compaction_pending.as_ref().filter(|pending| {
+            self.session_manager
+                .get_current_session_id()
+                .is_some_and(|id| id == &pending.session_id)
+        }) {
+            let suffix = format!(
+                "compacting {}",
+                crate::session::compaction::format_token_count(pending.before_tokens)
+            );
+            return append_usage_suffix(text, suffix);
+        }
 
-        if let Some(ref discovery) = self.discovery {
-            if let Some(limit) =
-                discovery.get_model_limit(&self.provider_name.to_lowercase(), &self.model)
-            {
-                if limit > 0 {
-                    let pct = ((total_tokens as f64 / limit as f64) * 100.0).round() as u32;
-                    text = format!("{} ({}%)", text, pct);
-                }
-            }
-
-            if let Some(cost) =
-                discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
-            {
-                let output_tokens: usize = self
-                    .chat_state
-                    .chat
-                    .messages
-                    .iter()
-                    .filter_map(|m| m.output_tokens)
-                    .sum();
-                let total = (output_tokens.max(total_tokens)) as f64;
-                let price = total / 1_000_000.0 * cost.output;
-                if price > 0.001 {
-                    return format!("{} \u{00b7} ${:.2}", text, price);
-                }
-            }
+        if let Some(stats) = crate::session::compaction::latest_compaction_stats(messages) {
+            let suffix = format!("last compact {}%", stats.reduction_percent());
+            return append_usage_suffix(text, suffix);
         }
 
         text
@@ -2308,6 +2339,136 @@ impl App {
         }
     }
 
+    fn reject_chat_only_command_outside_chat(&mut self, command_name: &str) -> bool {
+        if self.base_focus == BaseFocus::Chat || !self.command_registry.is_chat_only(command_name) {
+            return false;
+        }
+
+        self.play_sound_event(crate::sound::SoundEvent::Error);
+        push_toast(Toast::new(
+            format!("/{command_name} is only available during chat"),
+            ToastLevel::Error,
+            Some(std::time::Duration::from_secs(3)),
+        ));
+        true
+    }
+
+    async fn compact_current_session(&mut self) {
+        if self.compaction_receiver.is_some() {
+            push_toast(Toast::new(
+                "Compaction is already running",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        if self.is_streaming {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "Cannot compact while a response is running",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "No active session to compact",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        };
+
+        let messages = self.chat_state.chat.messages.clone();
+        let Some(selection) = crate::session::compaction::select_messages(
+            &messages,
+            crate::session::compaction::DEFAULT_TAIL_TURNS,
+        ) else {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "Nothing to compact",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        };
+
+        let before_tokens = crate::session::compaction::total_context_tokens(&messages);
+        let before_messages = messages.len();
+        let prompt = crate::session::compaction::build_prompt(&selection.messages_to_summarize);
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<CompactionTaskMessage>();
+        self.compaction_receiver = Some(receiver);
+        self.compaction_pending = Some(CompactionPending {
+            session_id: session_id.clone(),
+            before_tokens,
+        });
+        self.is_streaming = true;
+        self.cached_usage_check = (usize::MAX, usize::MAX);
+        let _ = self.session_manager.set_session_status(
+            &session_id,
+            crate::session::types::SessionStatus::Waiting,
+            None,
+        );
+        push_toast(Toast::new(
+            "Compacting session...",
+            ToastLevel::Info,
+            Some(std::time::Duration::from_secs(2)),
+        ));
+
+        let provider_name = self.provider_name.clone();
+        let model = self.model.clone();
+        let agent = self.agent.clone();
+        let tail_messages = selection.tail_messages;
+        let task_session_id = session_id.clone();
+
+        tokio::spawn(async move {
+            let result = crate::llm::client::summarize_for_compaction(
+                provider_name.clone(),
+                model.clone(),
+                prompt,
+            )
+            .await
+            .map(|summary| {
+                let mut messages = crate::session::compaction::build_compacted_messages(
+                    &summary,
+                    tail_messages,
+                    Some(model),
+                    Some(provider_name),
+                    Some(agent),
+                    None,
+                );
+                let after_tokens = crate::session::compaction::total_context_tokens(&messages);
+                let stats = crate::session::types::CompactionStats {
+                    before_tokens,
+                    after_tokens,
+                    before_messages,
+                    after_messages: messages.len(),
+                };
+                if let Some(summary_message) = messages.first_mut() {
+                    summary_message.compaction_stats = Some(stats);
+                }
+                (messages, stats)
+            });
+
+            let message = match result {
+                Ok((messages, stats)) => CompactionTaskMessage::Success {
+                    session_id: task_session_id,
+                    messages,
+                    stats,
+                },
+                Err(err) => CompactionTaskMessage::Failed {
+                    session_id: task_session_id,
+                    error: err.to_string(),
+                },
+            };
+            let _ = sender.send(message);
+        });
+    }
+
     async fn process_input(&mut self, input: &str) {
         use crate::command::parser::parse_input;
 
@@ -2360,6 +2521,22 @@ impl App {
                 }
                 if parsed.name == "timeline" && self.base_focus == BaseFocus::Chat {
                     self.open_timeline_dialog();
+                    return;
+                }
+                if parsed.name == "compact" && self.base_focus == BaseFocus::Chat {
+                    if !parsed.args.is_empty() {
+                        self.play_sound_event(crate::sound::SoundEvent::Error);
+                        push_toast(Toast::new(
+                            "Usage: /compact",
+                            ToastLevel::Error,
+                            Some(std::time::Duration::from_secs(3)),
+                        ));
+                    } else {
+                        self.compact_current_session().await;
+                    }
+                    return;
+                }
+                if self.reject_chat_only_command_outside_chat(&parsed.name) {
                     return;
                 }
                 parsed.prefs_dao = self.prefs_dao.as_ref();
@@ -2519,6 +2696,22 @@ impl App {
         }
         if parsed.name == "timeline" && self.base_focus == BaseFocus::Chat {
             self.open_timeline_dialog();
+            return;
+        }
+        if parsed.name == "compact" && self.base_focus == BaseFocus::Chat {
+            if !parsed.args.is_empty() {
+                self.play_sound_event(crate::sound::SoundEvent::Error);
+                push_toast(Toast::new(
+                    "Usage: /compact",
+                    ToastLevel::Error,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+            } else {
+                self.compact_current_session().await;
+            }
+            return;
+        }
+        if self.reject_chat_only_command_outside_chat(&parsed.name) {
             return;
         }
         parsed.prefs_dao = self.prefs_dao.as_ref();
@@ -3469,6 +3662,105 @@ impl App {
         }
     }
 
+    fn process_compaction_events(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+
+        if let Some(receiver) = &mut self.compaction_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected || !events.is_empty() {
+            self.compaction_receiver = None;
+            self.compaction_pending = None;
+            self.cached_usage_check = (usize::MAX, usize::MAX);
+        }
+
+        for event in events {
+            match event {
+                CompactionTaskMessage::Success {
+                    session_id,
+                    messages,
+                    stats,
+                } => {
+                    match self
+                        .session_manager
+                        .replace_session_messages(&session_id, messages.clone())
+                    {
+                        Ok(()) => {
+                            let is_active = self.is_active_session(&session_id);
+                            if is_active {
+                                self.chat_state.chat = Chat::with_messages(messages.clone());
+                                self.chat_state.chat.scroll_to_bottom_on_next_render();
+                                self.chat_state.chat.clear_highlighted_message();
+                            }
+
+                            self.ensure_session_view_state(&session_id);
+                            if let Some(state) = self.session_view_states.get_mut(&session_id) {
+                                state.chat = Chat::with_messages(messages);
+                                state.tool_calls = ToolCallViewState::default();
+                                state.unread_completed = !is_active;
+                            }
+
+                            let _ = self.session_manager.set_session_status(
+                                &session_id,
+                                crate::session::types::SessionStatus::Idle,
+                                None,
+                            );
+                            self.cached_usage_check = (usize::MAX, usize::MAX);
+                            self.refresh_sessions_dialog();
+                            push_toast(Toast::new(
+                                format!(
+                                    "Session compacted: {}",
+                                    crate::session::compaction::format_compaction_stats(stats)
+                                ),
+                                ToastLevel::Info,
+                                Some(std::time::Duration::from_secs(3)),
+                            ));
+                        }
+                        Err(err) => {
+                            let _ = self.session_manager.set_session_status(
+                                &session_id,
+                                crate::session::types::SessionStatus::Idle,
+                                None,
+                            );
+                            self.play_sound_event(crate::sound::SoundEvent::Error);
+                            push_toast(Toast::new(
+                                format!("Failed to save compacted session: {:?}", err),
+                                ToastLevel::Error,
+                                Some(std::time::Duration::from_secs(3)),
+                            ));
+                        }
+                    }
+                }
+                CompactionTaskMessage::Failed { session_id, error } => {
+                    let _ = self.session_manager.set_session_status(
+                        &session_id,
+                        crate::session::types::SessionStatus::Idle,
+                        None,
+                    );
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
+                    push_toast(Toast::new(
+                        format!("Failed to compact session: {}", error),
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                }
+            }
+        }
+
+        self.sync_active_streaming_flag();
+    }
+
     fn cleanup_streaming(&mut self) {
         if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
             self.cleanup_streaming_for_session(&session_id);
@@ -3528,6 +3820,7 @@ impl App {
     pub fn is_animation_running(&self) -> bool {
         self.base_focus == BaseFocus::Home
             || self.is_streaming
+            || self.compaction_receiver.is_some()
             || self
                 .session_view_states
                 .values()
@@ -3538,6 +3831,7 @@ impl App {
 
     pub fn process_streaming_chunks(&mut self) {
         self.process_openai_oauth_events();
+        self.process_compaction_events();
 
         let streaming_ids: Vec<String> = self
             .session_view_states
@@ -4166,12 +4460,7 @@ impl App {
 
         let fingerprint: (usize, usize) = (
             self.chat_state.chat.messages.len(),
-            self.chat_state
-                .chat
-                .messages
-                .iter()
-                .filter_map(|m| m.token_count)
-                .sum(),
+            crate::session::compaction::total_context_tokens(&self.chat_state.chat.messages),
         );
         if self.cached_usage_check != fingerprint {
             self.cached_usage_check = fingerprint;
@@ -4237,6 +4526,7 @@ impl App {
                     self.provider_name.clone(),
                     &colors,
                     self.is_streaming,
+                    self.compaction_receiver.is_some(),
                     &usage_text,
                     subagent_tabs,
                 );
@@ -4359,16 +4649,14 @@ impl App {
     }
 }
 
-fn format_token_count(count: usize) -> String {
-    if count < 1000 {
-        return count.to_string();
+fn append_usage_suffix(mut text: String, suffix: String) -> String {
+    if text.is_empty() {
+        suffix
+    } else {
+        text.push_str(" \u{00b7} ");
+        text.push_str(&suffix);
+        text
     }
-    if count < 1_000_000 {
-        let k = count as f64 / 1000.0;
-        return format!("{:.1}K", k);
-    }
-    let m = count as f64 / 1_000_000.0;
-    format!("{:.1}M", m)
 }
 
 impl Default for App {
@@ -4418,6 +4706,8 @@ mod tests {
             api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
             openai_oauth_receiver: None,
             openai_oauth_in_progress: false,
+            compaction_receiver: None,
+            compaction_pending: None,
             prefs_dao: None,
             agent: "Build".to_string(),
             agent_steps: std::collections::HashMap::new(),
@@ -4461,6 +4751,78 @@ mod tests {
 
         assert!(!App::can_submit_input(&input_type, true));
         assert!(App::can_submit_input(&input_type, false));
+    }
+
+    #[test]
+    fn chat_only_commands_are_rejected_outside_chat() {
+        let mut app = test_app();
+
+        assert!(app.reject_chat_only_command_outside_chat("compact"));
+
+        app.base_focus = BaseFocus::Chat;
+        assert!(!app.reject_chat_only_command_outside_chat("compact"));
+    }
+
+    #[test]
+    fn compaction_result_is_applied_from_receiver() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Compact".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        let stats = crate::session::types::CompactionStats {
+            before_tokens: 1_000,
+            after_tokens: 120,
+            before_messages: 5,
+            after_messages: 1,
+        };
+        let mut summary = crate::session::types::Message::user("summary");
+        summary.compaction_stats = Some(stats);
+        let compacted_messages = vec![summary];
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender
+            .send(CompactionTaskMessage::Success {
+                session_id: session_id.clone(),
+                messages: compacted_messages.clone(),
+                stats,
+            })
+            .unwrap();
+        drop(sender);
+        app.compaction_receiver = Some(receiver);
+        app.compaction_pending = Some(CompactionPending {
+            session_id: session_id.clone(),
+            before_tokens: stats.before_tokens,
+        });
+        app.is_streaming = true;
+
+        app.process_compaction_events();
+
+        assert!(app.compaction_receiver.is_none());
+        assert!(app.compaction_pending.is_none());
+        assert!(!app.is_streaming);
+        assert_eq!(app.chat_state.chat.messages, compacted_messages);
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .map(|session| session.messages.clone()),
+            Some(compacted_messages)
+        );
+    }
+
+    #[test]
+    fn session_usage_text_includes_compaction_stats() {
+        let mut app = test_app();
+        let stats = crate::session::types::CompactionStats {
+            before_tokens: 12_000,
+            after_tokens: 360,
+            before_messages: 8,
+            after_messages: 2,
+        };
+        let mut summary = crate::session::types::Message::user("summary");
+        summary.token_count = Some(stats.after_tokens);
+        summary.compaction_stats = Some(stats);
+        app.chat_state.chat.messages.push(summary);
+
+        assert_eq!(app.session_usage_text(), "360 \u{00b7} last compact 97%");
     }
 
     #[test]

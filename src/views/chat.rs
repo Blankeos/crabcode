@@ -69,6 +69,7 @@ pub fn render_chat(
     provider_name: String,
     colors: &ThemeColors,
     is_streaming: bool,
+    is_compacting: bool,
     usage_text: &str,
     subagent_tabs: Option<SubagentTabs>,
 ) {
@@ -152,34 +153,45 @@ pub fn render_chat(
 
         let mut streaming_text = chat_state.wave_spinner.spans();
 
-        let tps = chat_state.chat.get_streaming_tokens_per_sec();
-
-        if let Some(tps) = tps {
+        if is_compacting {
             streaming_text.push(Span::raw(" "));
             streaming_text.push(Span::styled(
-                format!("{:.0}t/s", tps),
+                "compacting context",
                 Style::default().fg(colors.info),
             ));
-        }
 
-        if let Some(elapsed) = chat_state.chat.get_streaming_elapsed_seconds() {
-            streaming_text.push(Span::raw(if tps.is_some() { " · " } else { " " }));
+            let streaming_paragraph = Paragraph::new(Line::from(streaming_text));
+            f.render_widget(streaming_paragraph, status_chunks[0]);
+        } else {
+            let tps = chat_state.chat.get_streaming_tokens_per_sec();
+
+            if let Some(tps) = tps {
+                streaming_text.push(Span::raw(" "));
+                streaming_text.push(Span::styled(
+                    format!("{:.0}t/s", tps),
+                    Style::default().fg(colors.info),
+                ));
+            }
+
+            if let Some(elapsed) = chat_state.chat.get_streaming_elapsed_seconds() {
+                streaming_text.push(Span::raw(if tps.is_some() { " · " } else { " " }));
+                streaming_text.push(Span::styled(
+                    format!("{:.1}s", elapsed),
+                    Style::default().fg(colors.info),
+                ));
+            }
+
+            streaming_text.push(Span::raw("  "));
             streaming_text.push(Span::styled(
-                format!("{:.1}s", elapsed),
-                Style::default().fg(colors.info),
+                "esc to stop",
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
             ));
+
+            let streaming_paragraph = Paragraph::new(Line::from(streaming_text));
+            f.render_widget(streaming_paragraph, status_chunks[0]);
         }
-
-        streaming_text.push(Span::raw("  "));
-        streaming_text.push(Span::styled(
-            "esc to stop",
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
-        ));
-
-        let streaming_paragraph = Paragraph::new(Line::from(streaming_text));
-        f.render_widget(streaming_paragraph, status_chunks[0]);
     }
 
     if !usage_text.is_empty() {

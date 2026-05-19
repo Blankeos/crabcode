@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,28 @@ pub enum MessageRole {
     Tool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CompactionStats {
+    pub before_tokens: usize,
+    pub after_tokens: usize,
+    pub before_messages: usize,
+    pub after_messages: usize,
+}
+
+impl CompactionStats {
+    pub fn saved_tokens(self) -> usize {
+        self.before_tokens.saturating_sub(self.after_tokens)
+    }
+
+    pub fn reduction_percent(self) -> u32 {
+        if self.before_tokens == 0 {
+            return 0;
+        }
+
+        ((self.saved_tokens() as f64 / self.before_tokens as f64) * 100.0).round() as u32
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub role: MessageRole,
@@ -62,6 +85,7 @@ pub struct Message {
     pub model: Option<String>,
     pub provider: Option<String>,
     pub local_image_paths: Vec<String>,
+    pub compaction_stats: Option<CompactionStats>,
 }
 
 impl Message {
@@ -82,6 +106,7 @@ impl Message {
             model: None,
             provider: None,
             local_image_paths: Vec::new(),
+            compaction_stats: None,
         }
     }
 
@@ -118,6 +143,7 @@ impl Message {
             model: None,
             provider: None,
             local_image_paths: Vec::new(),
+            compaction_stats: None,
         }
     }
 

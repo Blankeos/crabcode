@@ -66,6 +66,10 @@ impl Registry {
         None
     }
 
+    pub fn is_chat_only(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|cmd| cmd.chat_only)
+    }
+
     pub async fn execute<'a>(
         &self,
         parsed: &'a ParsedCommand<'a>,
@@ -187,6 +191,23 @@ mod tests {
         registry.register(command);
         assert!(registry.get("alias").is_some());
         assert_eq!(registry.get("alias").unwrap().name, "test");
+    }
+
+    #[test]
+    fn test_is_chat_only_checks_hidden_token() {
+        let mut registry = Registry::new();
+        let command = Command {
+            name: "test".to_string(),
+            description: "Test command".to_string(),
+            handler: dummy_handler,
+            hidden_tokens: vec!["alias".to_string()],
+            chat_only: true,
+        };
+        registry.register(command);
+
+        assert!(registry.is_chat_only("test"));
+        assert!(registry.is_chat_only("alias"));
+        assert!(!registry.is_chat_only("missing"));
     }
 
     #[tokio::test]

@@ -493,6 +493,7 @@ impl Chat {
             msg.output_tokens.hash(&mut h);
             msg.model.hash(&mut h);
             msg.provider.hash(&mut h);
+            msg.compaction_stats.hash(&mut h);
         }
         max_width.hash(&mut h);
         h.finish()
@@ -1200,6 +1201,11 @@ impl Chat {
             idx += 1;
         }
 
+        if let Some(stats) = latest_compaction_marker_stats(&self.messages) {
+            all_lines.extend(format_compaction_marker(stats, max_width, colors));
+            all_lines.push(Line::from(""));
+        }
+
         (all_lines, positions)
     }
 
@@ -1319,6 +1325,10 @@ impl Chat {
 
         match message.role {
             MessageRole::User => {
+                if crate::session::compaction::is_compaction_summary(message) {
+                    return lines;
+                }
+
                 // User message: Box with left border colored by agent mode
                 let border_color =
                     crate::theme::agent_mode_color(message.agent_mode.as_deref(), colors);
@@ -2259,6 +2269,44 @@ impl Chat {
     }
 }
 
+fn latest_compaction_marker_stats(
+    messages: &[Message],
+) -> Option<Option<crate::session::types::CompactionStats>> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| crate::session::compaction::is_compaction_summary(message))
+        .map(|message| message.compaction_stats)
+}
+
+fn format_compaction_marker<'a>(
+    stats: Option<crate::session::types::CompactionStats>,
+    max_width: usize,
+    colors: &'a ThemeColors,
+) -> Vec<Line<'a>> {
+    let detail = stats
+        .map(crate::session::compaction::format_compaction_stats)
+        .unwrap_or_else(|| "summary retained".to_string());
+
+    let line = Line::from(vec![
+        Span::styled("• ", Style::default().fg(colors.info)),
+        Span::styled(
+            "Context compacted",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" ({})", detail),
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ),
+    ]);
+
+    wrap_styled_line(&line, WrapOptions::new(max_width.max(1)))
+}
+
 fn is_compact_tool_panel(content: &str) -> bool {
     serde_json::from_str::<JsonValue>(content)
         .ok()
@@ -2724,6 +2772,32 @@ mod tests {
         assert_eq!(
             rendered,
             vec!["• Added src/new.rs (+1 -0)", "    1 +fn main() {}"]
+        );
+    }
+
+    #[test]
+    fn test_compaction_summary_renders_marker() {
+        let mut msg = Message::user(format!(
+            "{}\nsummary content that should stay hidden",
+            crate::session::compaction::SUMMARY_PREFIX
+        ));
+        msg.compaction_stats = Some(crate::session::types::CompactionStats {
+            before_tokens: 12_000,
+            after_tokens: 360,
+            before_messages: 8,
+            after_messages: 2,
+        });
+        let chat = Chat::with_messages(vec![msg, Message::user("tail")]);
+        let colors = test_colors();
+
+        let lines = chat.build_all_lines(80, "model", &colors);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(!rendered.iter().any(|line| line.contains("summary content")));
+        assert!(rendered.iter().any(|line| line.contains("tail")));
+        assert_eq!(
+            rendered.iter().rev().find(|line| !line.is_empty()),
+            Some(&"• Context compacted (12.0K -> 360, saved 97%)".to_string())
         );
     }
 
