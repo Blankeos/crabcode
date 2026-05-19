@@ -4,8 +4,8 @@ use crate::message::Message;
 use crate::provider::Provider;
 use crate::stop::{StopReason, StopWhenFn};
 use crate::tool::Tool;
-use futures::StreamExt;
-use std::collections::HashMap;
+use futures::{future::join_all, StreamExt};
+use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -82,6 +82,7 @@ pub async fn stream_with_tools<P: Provider>(
         let mut current_messages = messages;
         let mut step_idx: usize = 0;
         let max_steps = max_steps.unwrap_or(usize::MAX);
+        let mut cached_repeatable_tool_results: HashMap<String, String> = HashMap::new();
 
         loop {
             step_idx += 1;
@@ -191,30 +192,75 @@ pub async fn stream_with_tools<P: Provider>(
                 }
             };
 
-            for (_call_id, tool_name, args) in &tool_calls_to_execute {
-                let tool = tools.iter().find(|t| &t.name == tool_name);
-                match tool {
-                    Some(t) => match t.execute.call(args.clone()).await {
-                        Ok(result) => {
-                            let observation = format!("Tool `{}` result:\n{}", tool_name, result);
-                            current_messages.push(Message::user(observation.clone()));
-                            messages_arc.lock().await.push(Message::user(observation));
+            let mut successful_tool_results = Vec::new();
+            let mut tool_calls_to_run = Vec::new();
+
+            for (call_id, tool_name, args) in tool_calls_to_execute {
+                let cache_key = repeatable_tool_cache_key(&tool_name, &args);
+                if let Some(cached_output) = cache_key
+                    .as_ref()
+                    .and_then(|key| cached_repeatable_tool_results.get(key))
+                    .cloned()
+                {
+                    successful_tool_results.push(ToolExecutionResult {
+                        call_id,
+                        tool_name,
+                        output: format!(
+                            "Duplicate task call skipped; reusing the prior result from this response.\n\n{}",
+                            cached_output
+                        ),
+                        cache_key: None,
+                    });
+                } else {
+                    tool_calls_to_run.push((call_id, tool_name, args, cache_key));
+                }
+            }
+
+            let tool_results = join_all(tool_calls_to_run.into_iter().map(
+                |(call_id, tool_name, args, cache_key)| {
+                    let tool = tools.iter().find(|t| t.name == tool_name).cloned();
+
+                    async move {
+                        match tool {
+                            Some(t) => t
+                                .execute
+                                .call(args)
+                                .await
+                                .map(|output| ToolExecutionResult {
+                                    call_id,
+                                    tool_name: tool_name.clone(),
+                                    output,
+                                    cache_key,
+                                })
+                                .map_err(|e| format!("Tool '{}' error: {}", tool_name, e)),
+                            None => Err(format!("Tool not found: {}", tool_name)),
                         }
-                        Err(e) => {
-                            let _ = tx_loop.send(ChunkType::Failed(format!(
-                                "Tool '{}' error: {}",
-                                tool_name, e
-                            )));
+                    }
+                },
+            ))
+            .await;
+
+            for result in tool_results {
+                match result {
+                    Ok(result) => {
+                        if let Some(cache_key) = result.cache_key.as_ref() {
+                            cached_repeatable_tool_results
+                                .insert(cache_key.clone(), result.output.clone());
                         }
-                    },
-                    None => {
-                        let _ = tx_loop
-                            .send(ChunkType::Failed(format!("Tool not found: {}", tool_name)));
+                        successful_tool_results.push(result);
+                    }
+                    Err(err) => {
+                        let _ = tx_loop.send(ChunkType::Failed(err));
                     }
                 }
             }
+
+            if !successful_tool_results.is_empty() {
+                let observation = format_tool_observation(&successful_tool_results);
+                current_messages.push(Message::user(observation.clone()));
+                messages_arc.lock().await.push(Message::user(observation));
+            }
         }
-        let _ = std::fs::write("aisdk_debug.log", "spawned task done, dropping tx\n");
     });
 
     response.add_handle(handle);
@@ -233,6 +279,71 @@ struct PendingToolCall {
     name: Option<String>,
     arguments: String,
     saw_arguments: bool,
+}
+
+#[derive(Debug)]
+struct ToolExecutionResult {
+    call_id: String,
+    tool_name: String,
+    output: String,
+    cache_key: Option<String>,
+}
+
+fn repeatable_tool_cache_key(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    if tool_name != "task" {
+        return None;
+    }
+
+    Some(format!("{}:{}", tool_name, canonical_json(args)))
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            value.to_string()
+        }
+        serde_json::Value::String(s) => {
+            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+        }
+        serde_json::Value::Array(items) => {
+            let parts = items.iter().map(canonical_json).collect::<Vec<_>>();
+            format!("[{}]", parts.join(","))
+        }
+        serde_json::Value::Object(map) => {
+            let sorted = map.iter().collect::<BTreeMap<_, _>>();
+            let parts = sorted
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+                    format!("{}:{}", key, canonical_json(value))
+                })
+                .collect::<Vec<_>>();
+            format!("{{{}}}", parts.join(","))
+        }
+    }
+}
+
+fn format_tool_observation(results: &[ToolExecutionResult]) -> String {
+    if let [result] = results {
+        return format!("Tool `{}` result:\n{}", result.tool_name, result.output);
+    }
+
+    let mut observation = format!(
+        "Tool batch results: {} tool calls completed. Use these results to answer the user's request. Do not repeat the same tool calls unless the results are missing or insufficient.",
+        results.len()
+    );
+
+    for (idx, result) in results.iter().enumerate() {
+        observation.push_str(&format!(
+            "\n\n<tool_result index=\"{}\" tool=\"{}\" call_id=\"{}\">\n{}\n</tool_result>",
+            idx + 1,
+            result.tool_name,
+            result.call_id,
+            result.output
+        ));
+    }
+
+    observation
 }
 
 impl ToolCallAccumulator {
@@ -364,7 +475,227 @@ fn tool_call_key(item: &serde_json::Value, array_index: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::ToolCallAccumulator;
+    use super::{stream_with_tools, ToolCallAccumulator};
+    use crate::chunk::ChunkType;
+    use crate::message::Message;
+    use crate::provider::{Provider, ProviderStream};
+    use crate::tool::{Tool, ToolExecute};
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use schemars::Schema;
+    use std::collections::HashMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+    use tokio::sync::Barrier;
+
+    #[derive(Debug, Clone)]
+    struct TwoToolCallProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct RepeatingTaskProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for TwoToolCallProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let chunks = if request == 0 {
+                vec![
+                    Ok(ChunkType::ToolCall(
+                        r#"[{"index":0,"id":"call_1","type":"function","function":{"name":"wait","arguments":"{\"id\":1}"}},{"index":1,"id":"call_2","type":"function","function":{"name":"wait","arguments":"{\"id\":2}"}}]"#
+                            .to_string(),
+                    )),
+                    Ok(ChunkType::End(String::new())),
+                ]
+            } else {
+                vec![
+                    Ok(ChunkType::Text("done".to_string())),
+                    Ok(ChunkType::End(String::new())),
+                ]
+            };
+
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RepeatingTaskProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let chunks = match request {
+                0 | 1 => vec![
+                    Ok(ChunkType::ToolCall(
+                        r#"[{"index":0,"id":"call_repeat","type":"function","function":{"name":"task","arguments":"{\"description\":\"Write haiku\",\"prompt\":\"Write a haiku\",\"subagent_type\":\"general\"}"}}]"#
+                            .to_string(),
+                    )),
+                    Ok(ChunkType::End(String::new())),
+                ],
+                _ => vec![
+                    Ok(ChunkType::Text("done".to_string())),
+                    Ok(ChunkType::End(String::new())),
+                ],
+            };
+
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[tokio::test]
+    async fn executes_same_step_tool_calls_concurrently() {
+        let provider = TwoToolCallProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let executions = Arc::new(AtomicUsize::new(0));
+
+        let tool_barrier = barrier.clone();
+        let tool_executions = executions.clone();
+        let wait_tool = Tool::builder()
+            .name("wait")
+            .description("wait for a peer tool call")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(move |_input| {
+                let barrier = tool_barrier.clone();
+                let executions = tool_executions.clone();
+                async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    barrier.wait().await;
+                    Ok("ok".to_string())
+                }
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider,
+            vec![Message::user("run both")],
+            vec![wait_tool],
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let saw_done = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut saw_done = false;
+            while let Some(chunk) = response.stream.next().await {
+                if let ChunkType::Text(text) = chunk {
+                    saw_done |= text == "done";
+                }
+            }
+            saw_done
+        })
+        .await
+        .expect("tool calls in the same step should not run serially");
+
+        assert!(saw_done);
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+
+        let observations = response
+            .messages()
+            .await
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::User(user) if user.content.starts_with("Tool batch results:") => {
+                    Some(user.content)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observations.len(), 1);
+        assert!(observations[0].contains("call_1"));
+        assert!(observations[0].contains("call_2"));
+    }
+
+    #[tokio::test]
+    async fn skips_exact_repeated_task_call_in_same_response() {
+        let provider = RepeatingTaskProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let executions = Arc::new(AtomicUsize::new(0));
+
+        let tool_executions = executions.clone();
+        let task_tool = Tool::builder()
+            .name("task")
+            .description("launch subagent")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(move |_input| {
+                let executions = tool_executions.clone();
+                async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok("subagent result".to_string())
+                }
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider,
+            vec![Message::user("run task")],
+            vec![task_tool],
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let mut saw_done = false;
+        while let Some(chunk) = response.stream.next().await {
+            if let ChunkType::Text(text) = chunk {
+                saw_done |= text == "done";
+            }
+        }
+
+        assert!(saw_done);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        let observations = response
+            .messages()
+            .await
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::User(user) if user.content.contains("Duplicate task call skipped") => {
+                    Some(user.content)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observations.len(), 1);
+    }
 
     #[test]
     fn accumulates_streamed_openai_tool_call_arguments() {
