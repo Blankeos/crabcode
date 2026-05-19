@@ -28,7 +28,7 @@ IMPORTANT RULES:
 - Be thorough and verify your work using available tools
 - Return a single comprehensive message with your results
 - Do NOT ask questions back to the user - just complete the task
-- Do NOT use the todowrite tool
+- Do NOT use the update_plan tool
 
 You will receive a detailed task description from the primary agent. Complete it and return your findings in a single comprehensive message."#;
 

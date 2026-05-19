@@ -12,8 +12,8 @@ pub mod question;
 pub mod registry;
 pub mod skill;
 pub mod task;
-pub mod todowrite;
 pub mod types;
+pub mod update_plan;
 pub mod webfetch;
 
 pub use bash::BashTool;
@@ -27,8 +27,8 @@ pub use question::QuestionTool;
 pub use registry::ToolRegistry;
 pub use skill::SkillTool;
 pub use task::TaskTool;
-pub use todowrite::TodowriteTool;
 pub use types::{ParameterSchema, ParameterType, Tool, ToolError, ToolId, ToolResult};
+pub use update_plan::UpdatePlanTool;
 pub use webfetch::WebfetchTool;
 
 #[async_trait]

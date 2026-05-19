@@ -68,11 +68,14 @@ pub struct Chat {
     cached_width: usize,
     cached_colors_hash: u64,
     cached_fingerprint: u64,
+    tool_marker_animation_phase: bool,
 }
 
 // Minimum elapsed time before showing tokens/s (250ms)
 const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
 const TOOL_RESULT_MAX_SCREEN_LINES: usize = 8;
+const TOOL_MARKER_ACTIVE: &str = "⬡";
+const TOOL_MARKER_DONE: &str = "⬢";
 
 #[derive(Debug, Clone)]
 struct ParsedToolMessage {
@@ -89,6 +92,33 @@ struct ExplorationToolItem {
     label: &'static str,
     target: String,
     active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskToolItem {
+    subagent_type: String,
+    description: String,
+    active: bool,
+    failed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanStep {
+    step: String,
+    status: PlanStepStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanUpdateDisplay {
+    explanation: Option<String>,
+    plan: Vec<PlanStep>,
 }
 
 fn now_epoch_ms() -> u64 {
@@ -248,6 +278,53 @@ fn exploration_tool_item_for_message(message: &Message) -> Option<ExplorationToo
         .and_then(exploration_tool_item)
 }
 
+fn task_tool_item(info: &ParsedToolMessage) -> Option<TaskToolItem> {
+    if info.name != "task" {
+        return None;
+    }
+
+    let args_obj = info.args.as_ref().and_then(|v| v.as_object());
+    let subagent_type = args_obj
+        .and_then(|o| o.get("subagent_type"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            info.metadata
+                .as_ref()
+                .and_then(|m| m.get("subagent_type"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("general");
+    let description = args_obj
+        .and_then(|o| o.get("description"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            info.metadata
+                .as_ref()
+                .and_then(|m| m.get("child_session_title"))
+                .and_then(|v| v.as_str())
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Task");
+
+    Some(TaskToolItem {
+        subagent_type: titlecase_ascii(subagent_type),
+        description: description.to_string(),
+        active: matches!(info.status.as_str(), "running" | "pending"),
+        failed: info.status == "error",
+    })
+}
+
+fn task_tool_item_for_message(message: &Message) -> Option<TaskToolItem> {
+    if message.role != MessageRole::Tool {
+        return None;
+    }
+
+    parse_tool_message(&message.content)
+        .as_ref()
+        .and_then(task_tool_item)
+}
+
 fn metadata_usize(metadata: Option<&JsonValue>, keys: &[&str]) -> Option<usize> {
     keys.iter()
         .find_map(|key| {
@@ -267,6 +344,207 @@ fn parse_line_number(text: &str) -> Option<usize> {
         .take_while(|ch| ch.is_ascii_digit())
         .collect();
     digits.parse().ok()
+}
+
+fn titlecase_ascii(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_ascii_uppercase().to_string() + chars.as_str()
+}
+
+fn normalize_plan_status(status: Option<&str>) -> PlanStepStatus {
+    match status
+        .unwrap_or("pending")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "completed" | "complete" | "done" | "x" | "✓" | "✔" => PlanStepStatus::Completed,
+        "in_progress" | "in-progress" | "in progress" | "doing" | "active" | "current" => {
+            PlanStepStatus::InProgress
+        }
+        _ => PlanStepStatus::Pending,
+    }
+}
+
+fn strip_plain_list_marker(line: &str) -> &str {
+    let trimmed = line.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("+ "))
+    {
+        return rest.trim_start();
+    }
+
+    if let Some((prefix, rest)) = trimmed.split_once(". ") {
+        if !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit()) {
+            return rest.trim_start();
+        }
+    }
+
+    trimmed
+}
+
+fn parse_plan_checkbox_line(line: &str) -> Option<PlanStep> {
+    let line = strip_plain_list_marker(line);
+    let (status, rest) = if let Some(rest) = line.strip_prefix("[ ]") {
+        (PlanStepStatus::Pending, rest)
+    } else if let Some(rest) = line.strip_prefix("[x]") {
+        (PlanStepStatus::Completed, rest)
+    } else if let Some(rest) = line.strip_prefix("[X]") {
+        (PlanStepStatus::Completed, rest)
+    } else if let Some(rest) = line.strip_prefix("[✓]") {
+        (PlanStepStatus::Completed, rest)
+    } else if let Some(rest) = line.strip_prefix("[✔]") {
+        (PlanStepStatus::Completed, rest)
+    } else if let Some(rest) = line.strip_prefix("✔") {
+        (PlanStepStatus::Completed, rest)
+    } else if let Some(rest) = line.strip_prefix("[•]") {
+        (PlanStepStatus::InProgress, rest)
+    } else if let Some(rest) = line.strip_prefix("□") {
+        (PlanStepStatus::Pending, rest)
+    } else {
+        return None;
+    };
+
+    let step = rest.trim();
+    if step.is_empty() {
+        None
+    } else {
+        Some(PlanStep {
+            step: step.to_string(),
+            status,
+        })
+    }
+}
+
+fn plan_steps_from_text(raw: &str) -> Vec<PlanStep> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            parse_plan_checkbox_line(trimmed).or_else(|| {
+                let step = strip_plain_list_marker(trimmed);
+                if step.is_empty() {
+                    None
+                } else {
+                    Some(PlanStep {
+                        step: step.to_string(),
+                        status: PlanStepStatus::Pending,
+                    })
+                }
+            })
+        })
+        .collect()
+}
+
+fn plan_step_from_json(value: &JsonValue) -> Option<PlanStep> {
+    match value {
+        JsonValue::Object(obj) => {
+            let step = ["step", "content", "todo", "task", "title", "description"]
+                .iter()
+                .find_map(|key| obj.get(*key).and_then(|v| v.as_str()))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            Some(PlanStep {
+                step: step.to_string(),
+                status: normalize_plan_status(obj.get("status").and_then(|v| v.as_str())),
+            })
+        }
+        JsonValue::String(step) => {
+            let trimmed = step.trim();
+            if trimmed.is_empty() {
+                None
+            } else if trimmed.lines().count() > 1
+                || trimmed
+                    .lines()
+                    .any(|line| parse_plan_checkbox_line(line).is_some())
+            {
+                let steps = plan_steps_from_text(trimmed);
+                if steps.len() == 1 {
+                    steps.into_iter().next()
+                } else {
+                    None
+                }
+            } else {
+                Some(PlanStep {
+                    step: trimmed.to_string(),
+                    status: PlanStepStatus::Pending,
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn plan_steps_from_json(value: &JsonValue) -> Vec<PlanStep> {
+    match value {
+        JsonValue::Array(items) => items.iter().filter_map(plan_step_from_json).collect(),
+        JsonValue::Object(_) => plan_step_from_json(value).into_iter().collect(),
+        JsonValue::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.starts_with('[') || trimmed.starts_with('{') {
+                if let Ok(parsed) = serde_json::from_str::<JsonValue>(trimmed) {
+                    let parsed_steps = plan_steps_from_json(&parsed);
+                    if !parsed_steps.is_empty() {
+                        return parsed_steps;
+                    }
+                }
+            }
+            plan_steps_from_text(trimmed)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn plan_update_display(
+    name: &str,
+    args: &Option<JsonValue>,
+    metadata: &Option<JsonValue>,
+    output_preview: &Option<String>,
+) -> Option<PlanUpdateDisplay> {
+    if !matches!(name, "update_plan" | "todowrite") {
+        return None;
+    }
+
+    let explanation = metadata
+        .as_ref()
+        .and_then(|m| m.get("explanation"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            args.as_ref()
+                .and_then(|a| a.get("explanation"))
+                .and_then(|v| v.as_str())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+
+    let plan_value = metadata
+        .as_ref()
+        .and_then(|m| m.get("plan").or_else(|| m.get("todo_items")))
+        .or_else(|| {
+            args.as_ref()
+                .and_then(|a| a.get("plan").or_else(|| a.get("todos")))
+        });
+
+    let mut plan = plan_value.map(plan_steps_from_json).unwrap_or_default();
+    if plan.is_empty() {
+        if let Some(preview) = output_preview.as_deref() {
+            plan = plan_steps_from_text(preview);
+        }
+    }
+
+    if plan.is_empty() {
+        None
+    } else {
+        Some(PlanUpdateDisplay { explanation, plan })
+    }
 }
 
 impl Chat {
@@ -306,6 +584,7 @@ impl Chat {
             cached_width: 0,
             cached_colors_hash: 0,
             cached_fingerprint: 0,
+            tool_marker_animation_phase: false,
         }
     }
 
@@ -345,6 +624,7 @@ impl Chat {
             cached_width: 0,
             cached_colors_hash: 0,
             cached_fingerprint: 0,
+            tool_marker_animation_phase: false,
         }
     }
 
@@ -502,6 +782,7 @@ impl Chat {
         self.cached_width = 0;
         self.cached_colors_hash = 0;
         self.cached_fingerprint = 0;
+        self.tool_marker_animation_phase = false;
         self.invalidate_cache();
     }
 
@@ -672,6 +953,35 @@ impl Chat {
         self.streaming_message_idx = None;
         self.streaming_token_counter = None;
         self.invalidate_cache();
+    }
+
+    fn current_tool_marker_animation_phase() -> bool {
+        (now_epoch_ms() / 500) % 2 == 1
+    }
+
+    fn active_tool_marker(&self) -> &'static str {
+        if self.tool_marker_animation_phase {
+            TOOL_MARKER_DONE
+        } else {
+            TOOL_MARKER_ACTIVE
+        }
+    }
+
+    fn tool_marker(&self, active: bool) -> &'static str {
+        if active {
+            self.active_tool_marker()
+        } else {
+            TOOL_MARKER_DONE
+        }
+    }
+
+    pub(crate) fn has_active_tool_messages(&self) -> bool {
+        self.messages.iter().rev().any(|message| {
+            message.role == MessageRole::Tool
+                && parse_tool_message(&message.content)
+                    .map(|info| matches!(info.status.as_str(), "running" | "pending"))
+                    .unwrap_or(false)
+        })
     }
 
     pub fn prepare_streaming_token_counter(&mut self, model: &str) {
@@ -1080,6 +1390,19 @@ impl Chat {
         let max_width = content_area.width as usize;
 
         let colors_hash = Self::cache_colors_hash(colors);
+        let has_active_tools = self.has_active_tool_messages();
+        let animation_phase = if has_active_tools {
+            Self::current_tool_marker_animation_phase()
+        } else {
+            false
+        };
+        if self.tool_marker_animation_phase != animation_phase {
+            self.tool_marker_animation_phase = animation_phase;
+            if has_active_tools {
+                self.cached_revision = 0;
+            }
+        }
+
         let cache_valid = self.cached_revision == self.render_revision
             && self.cached_width == max_width
             && self.cached_colors_hash == colors_hash;
@@ -1228,6 +1551,16 @@ impl Chat {
 
         while idx < self.messages.len() {
             positions.push(all_lines.len());
+            if let Some(items) = self.task_group_at(idx) {
+                let group_start = all_lines.len();
+                let group_len = items.len();
+                all_lines.extend(self.format_task_group(&items, max_width, colors));
+                all_lines.push(Line::from(""));
+                positions.extend(std::iter::repeat(group_start).take(group_len.saturating_sub(1)));
+                idx += group_len;
+                continue;
+            }
+
             if let Some(items) = self.exploration_group_at(idx) {
                 let group_start = all_lines.len();
                 let group_len = items.len();
@@ -1278,6 +1611,123 @@ impl Chat {
         Some(items)
     }
 
+    fn task_group_at(&self, start: usize) -> Option<Vec<TaskToolItem>> {
+        let first = task_tool_item_for_message(self.messages.get(start)?)?;
+        let mut items = vec![first];
+
+        for message in self.messages.iter().skip(start + 1) {
+            let Some(item) = task_tool_item_for_message(message) else {
+                break;
+            };
+            items.push(item);
+        }
+
+        Some(items)
+    }
+
+    fn format_task_group<'a>(
+        &'a self,
+        items: &[TaskToolItem],
+        max_width: usize,
+        colors: &'a ThemeColors,
+    ) -> Vec<Line<'a>> {
+        fn push_wrapped<'a>(
+            out: &mut Vec<Line<'a>>,
+            line: Line<'static>,
+            max_width: usize,
+            subsequent_indent: Line<'static>,
+        ) {
+            out.extend(wrap_styled_line(
+                &line,
+                WrapOptions::new(max_width.max(1)).subsequent_indent(subsequent_indent),
+            ));
+        }
+
+        let mut out = Vec::new();
+        if items.is_empty() {
+            return out;
+        }
+
+        let active = items.iter().any(|item| item.active);
+        let failed = items.iter().any(|item| item.failed);
+        let marker = self.tool_marker(active);
+        let marker_color = if failed {
+            colors.error
+        } else if active {
+            colors.accent
+        } else {
+            colors.success
+        };
+        let marker_style = Style::default()
+            .fg(marker_color)
+            .add_modifier(Modifier::BOLD);
+        let title_style = Style::default()
+            .fg(if failed { colors.error } else { colors.text })
+            .add_modifier(Modifier::BOLD);
+        let hint_key_style = Style::default()
+            .fg(colors.text)
+            .add_modifier(Modifier::BOLD);
+        let hint_style = Style::default().fg(colors.text_weak);
+
+        let noun = if items.len() == 1 {
+            "subagent"
+        } else {
+            "subagents"
+        };
+        push_wrapped(
+            &mut out,
+            Line::from(vec![
+                Span::styled(marker.to_string(), marker_style),
+                Span::raw(" "),
+                Span::styled(format!("Started {} {}", items.len(), noun), title_style),
+                Span::styled(" - ", hint_style),
+                Span::styled("ctrl+x", hint_key_style),
+                Span::raw(" "),
+                Span::styled("down", hint_key_style),
+                Span::raw(" "),
+                Span::styled("to view subagents", hint_style),
+            ]),
+            max_width,
+            Line::from(Span::styled("  ", hint_style)),
+        );
+
+        let gutter_style = Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM);
+        let type_style = Style::default()
+            .fg(colors.text)
+            .add_modifier(Modifier::BOLD);
+        let desc_style = Style::default().fg(colors.text_weak);
+        for (idx, item) in items.iter().enumerate() {
+            let item_marker = self.tool_marker(item.active);
+            let item_marker_style = Style::default()
+                .fg(if item.failed {
+                    colors.error
+                } else if item.active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled("  ".to_string(), gutter_style),
+                    Span::styled(item_marker.to_string(), item_marker_style),
+                    Span::raw(" "),
+                    Span::styled(item.subagent_type.clone(), type_style),
+                    Span::styled(" - ".to_string(), desc_style),
+                    Span::styled(item.description.clone(), desc_style),
+                    Span::styled(format!(" #{}", idx + 1), desc_style),
+                ]),
+                max_width,
+                Line::from(Span::styled("    ", gutter_style)),
+            );
+        }
+
+        out
+    }
+
     fn format_exploration_group<'a>(
         &'a self,
         items: &[ExplorationToolItem],
@@ -1317,9 +1767,16 @@ impl Chat {
         } else {
             items.to_vec()
         };
-        let marker = if active { "~" } else { "•" };
+        let marker = self.tool_marker(active);
         let heading = if active { "Exploring" } else { "Explored" };
 
+        let marker_style = Style::default()
+            .fg(if active {
+                colors.accent
+            } else {
+                colors.success
+            })
+            .add_modifier(Modifier::BOLD);
         let gutter_style = Style::default()
             .fg(colors.text_weak)
             .add_modifier(Modifier::DIM);
@@ -1332,7 +1789,7 @@ impl Chat {
         let target_style = Style::default().fg(colors.text);
 
         out.push(Line::from(vec![
-            Span::styled(marker, gutter_style),
+            Span::styled(marker, marker_style),
             Span::raw(" "),
             Span::styled(heading, title_style),
         ]));
@@ -1686,22 +2143,6 @@ impl Chat {
             }
         }
 
-        fn titlecase_ascii(value: &str) -> String {
-            let mut chars = value.chars();
-            let Some(first) = chars.next() else {
-                return String::new();
-            };
-            first.to_ascii_uppercase().to_string() + chars.as_str()
-        }
-
-        fn format_duration_ms(ms: u64) -> String {
-            if ms >= 1000 {
-                format!("{:.1}s", ms as f64 / 1000.0)
-            } else {
-                format!("{}ms", ms)
-            }
-        }
-
         fn push_wrapped<'a>(
             out: &mut Vec<Line<'a>>,
             line: Line<'static>,
@@ -1714,29 +2155,65 @@ impl Chat {
             ));
         }
 
-        fn push_limited_wrapped<'a>(
+        fn push_preview_lines<'a>(
             out: &mut Vec<Line<'a>>,
-            line: Line<'static>,
+            preview: &str,
             max_width: usize,
-            subsequent_indent: Line<'static>,
-            max_lines: usize,
             style: Style,
         ) {
-            let wrapped = wrap_styled_line(
-                &line,
-                WrapOptions::new(max_width.max(1)).subsequent_indent(subsequent_indent),
-            );
-            if wrapped.len() <= max_lines {
-                out.extend(wrapped);
+            let trimmed = preview.trim_matches('\n');
+            if trimmed.trim().is_empty() {
                 return;
             }
 
-            let omitted = wrapped.len().saturating_sub(max_lines.saturating_sub(1));
-            out.extend(wrapped.into_iter().take(max_lines.saturating_sub(1)));
-            out.push(Line::from(Span::styled(
-                format!("  … +{} lines", omitted),
-                style,
-            )));
+            let raw_lines: Vec<&str> = trimmed.lines().collect();
+            let max_lines = TOOL_RESULT_MAX_SCREEN_LINES.max(1);
+            let mut display_lines: Vec<String> = Vec::new();
+            if raw_lines.len() <= max_lines {
+                display_lines.extend(raw_lines.iter().map(|line| line.to_string()));
+            } else {
+                let tail_count = if max_lines >= 3 { 1 } else { 0 };
+                let head_count = max_lines.saturating_sub(tail_count + 1).max(1);
+                for line in raw_lines.iter().take(head_count) {
+                    display_lines.push((*line).to_string());
+                }
+                let omitted = raw_lines.len().saturating_sub(head_count + tail_count);
+                display_lines.push(format!("… +{} lines", omitted));
+                if tail_count > 0 {
+                    for line in raw_lines
+                        .iter()
+                        .skip(raw_lines.len().saturating_sub(tail_count))
+                    {
+                        display_lines.push((*line).to_string());
+                    }
+                }
+            }
+
+            for (idx, raw_line) in display_lines.into_iter().enumerate() {
+                let prefix = if idx == 0 { "  └ " } else { "    " };
+                let line = Line::from(Span::styled(format!("{}{}", prefix, raw_line), style));
+                out.extend(wrap_styled_line(
+                    &line,
+                    WrapOptions::new(max_width.max(1))
+                        .subsequent_indent(Line::from(Span::styled("    ", style))),
+                ));
+            }
+        }
+
+        fn push_prefixed_inner_lines<'a>(
+            out: &mut Vec<Line<'a>>,
+            mut inner: Vec<Line<'static>>,
+            colors: &'a ThemeColors,
+        ) {
+            let gutter_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM);
+            for (idx, line) in inner.iter_mut().enumerate() {
+                let prefix = if idx == 0 { "  └ " } else { "    " };
+                line.spans
+                    .insert(0, Span::styled(prefix.to_string(), gutter_style));
+            }
+            out.extend(inner);
         }
 
         let _ = attached;
@@ -1765,13 +2242,6 @@ impl Chat {
                 )
             };
 
-        let icon = match status.as_str() {
-            "running" => "~",
-            "ok" => "✓",
-            "error" => "✗",
-            _ => "•",
-        };
-
         let tool_label = match name.as_str() {
             "glob" => "Glob",
             "read" => "Read",
@@ -1780,69 +2250,125 @@ impl Chat {
             "bash" => "Bash",
             "list" => "List",
             "grep" => "Grep",
-            "todowrite" => "Todos",
-            "question" => "Questions",
+            "update_plan" | "todowrite" => "Updated Plan",
+            "question" => "Question",
             "task" => "Task",
+            "webfetch" => "Webfetch",
+            "skill" => "Skill",
             other => other,
         };
 
         let args_obj = args.as_ref().and_then(|v| v.as_object());
+        if let Some(item) = parsed.as_ref().and_then(task_tool_item) {
+            return self.format_task_group(&[item], max_width, colors);
+        }
+
         if let Some(item) = parsed.as_ref().and_then(exploration_tool_item) {
             return self.format_exploration_group(&[item], max_width, colors);
         }
 
-        let args_str = if name == "glob" {
-            let pat = args_obj
-                .and_then(|o| o.get("pattern"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let base = args_obj
-                .and_then(|o| o.get("path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let mut s = String::new();
-            if !pat.is_empty() {
-                s.push_str(&format!("\"{}\"", pat));
+        if let Some(plan_update) = plan_update_display(&name, &args, &metadata, &output_preview) {
+            let active = matches!(status.as_str(), "running" | "pending");
+            let marker_style = Style::default()
+                .fg(if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
+            let title_style = Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD);
+            let note_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::ITALIC);
+
+            out.push(Line::from(vec![
+                Span::styled(self.tool_marker(active), marker_style),
+                Span::raw(" "),
+                Span::styled("Updated Plan", title_style),
+            ]));
+
+            let inner_width = max_width.saturating_sub(4).max(1);
+            let mut inner: Vec<Line<'static>> = Vec::new();
+            if let Some(explanation) = plan_update.explanation {
+                push_wrapped(
+                    &mut inner,
+                    Line::from(Span::styled(explanation, note_style)),
+                    inner_width,
+                    Line::from(Span::styled("", note_style)),
+                );
             }
-            if !base.is_empty() && base != "." {
-                if !s.is_empty() {
-                    s.push(' ');
+
+            for item in plan_update.plan {
+                let (marker, item_style) = match item.status {
+                    PlanStepStatus::Completed => (
+                        "✔ ",
+                        Style::default()
+                            .fg(colors.text_weak)
+                            .add_modifier(Modifier::DIM | Modifier::CROSSED_OUT),
+                    ),
+                    PlanStepStatus::InProgress => (
+                        "□ ",
+                        Style::default()
+                            .fg(colors.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    PlanStepStatus::Pending => (
+                        "□ ",
+                        Style::default()
+                            .fg(colors.text_weak)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                };
+                push_wrapped(
+                    &mut inner,
+                    Line::from(vec![
+                        Span::styled(marker.to_string(), item_style),
+                        Span::styled(item.step, item_style),
+                    ]),
+                    inner_width,
+                    Line::from(Span::styled("  ", item_style)),
+                );
+            }
+
+            push_prefixed_inner_lines(&mut out, inner, colors);
+        } else if name == "question" && status != "error" {
+            let active = matches!(status.as_str(), "running" | "pending");
+            let questions = question_values(&args, &metadata);
+            let count = questions.len();
+            let header_text = if matches!(status.as_str(), "running" | "pending") {
+                if count == 1 {
+                    "Asking 1 question...".to_string()
+                } else if count > 1 {
+                    format!("Asking {} questions...", count)
+                } else {
+                    "Asking questions...".to_string()
                 }
-                s.push_str(&format!("in \"{}\"", base));
-            }
-            s
-        } else if name == "edit" {
-            // For edits, show only the file path in the header; the diff is rendered below.
-            args_obj
-                .and_then(|o| o.get("file_path"))
-                .and_then(|v| v.as_str())
-                .map(|p| format!("\"{}\"", p))
-                .unwrap_or_default()
-        } else if name == "todowrite" {
-            String::new()
-        } else {
-            args.as_ref().map(args_preview).unwrap_or_default()
-        };
+            } else {
+                "Questions".to_string()
+            };
+            let marker_style = Style::default()
+                .fg(if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
+            let title_style = Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD);
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled(self.tool_marker(active), marker_style),
+                    Span::raw(" "),
+                    Span::styled(header_text, title_style),
+                ]),
+                max_width,
+                Line::from(Span::styled("  ", marker_style)),
+            );
 
-        let mut header = format!("{}{} {}", indent, icon, tool_label);
-        if !args_str.is_empty() {
-            header.push(' ');
-            header.push_str(&args_str);
-        }
-
-        if name == "glob" {
-            if let Some(mc) = metadata
-                .as_ref()
-                .and_then(|m| m.get("match_count"))
-                .and_then(|v| v.as_i64())
-            {
-                header.push_str(&format!(" ({} matches)", mc));
-            }
-        }
-
-        // Panel-style tools render header and body inside one solid background
-        // and skip the normal dim header path.
-        if name == "question" && status != "error" {
             let bg = colors.background_element;
             let pad_style = Style::default().bg(bg);
             let header_style = Style::default()
@@ -1856,7 +2382,6 @@ impl Chat {
                 .bg(bg);
 
             let panel_width = max_width.saturating_sub(2).max(10);
-            let questions = question_values(&args, &metadata);
             let answers = answer_values(&metadata, &output_preview);
             let mut panel_lines: Vec<Line<'_>> = Vec::new();
 
@@ -1864,15 +2389,27 @@ impl Chat {
             panel_lines.push(Line::from(vec![Span::styled("# Questions", header_style)]));
 
             if status == "running" {
-                let count = questions.len();
-                let text = if count == 1 {
-                    "Asking 1 question...".to_string()
-                } else if count > 1 {
-                    format!("Asking {} questions...", count)
+                if questions.is_empty() {
+                    panel_lines.push(Line::from(vec![Span::styled(
+                        "Waiting for question details...",
+                        question_style,
+                    )]));
                 } else {
-                    "Asking questions...".to_string()
-                };
-                panel_lines.push(Line::from(vec![Span::styled(text, question_style)]));
+                    for (idx, question) in questions.iter().enumerate() {
+                        if idx > 0 {
+                            panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
+                        }
+                        let q_line = Line::from(vec![Span::styled(
+                            question_text(question, idx),
+                            question_style,
+                        )]);
+                        panel_lines.extend(wrap_styled_line(
+                            &q_line,
+                            WrapOptions::new(panel_width)
+                                .subsequent_indent(Line::from(Span::styled("  ", question_style))),
+                        ));
+                    }
+                }
             } else {
                 for (idx, question) in questions.iter().enumerate() {
                     if idx > 0 {
@@ -1907,139 +2444,102 @@ impl Chat {
             }
 
             out.extend(panel_lines);
-        } else if name == "task" {
-            let subagent_type = args_obj
-                .and_then(|o| o.get("subagent_type"))
+        } else if name == "webfetch" {
+            let active = matches!(status.as_str(), "running" | "pending");
+            let url = metadata
+                .as_ref()
+                .and_then(|m| m.get("url"))
+                .and_then(|v| v.as_str())
+                .or_else(|| args_obj.and_then(|o| o.get("url")).and_then(|v| v.as_str()))
+                .or_else(|| strip_tool_title(title.as_deref(), "Fetched"))
+                .unwrap_or("url");
+            let marker_style = Style::default()
+                .fg(if status == "error" {
+                    colors.error
+                } else if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
+            let title_style = Style::default()
+                .fg(if status == "error" {
+                    colors.error
+                } else {
+                    colors.text
+                })
+                .add_modifier(Modifier::BOLD);
+            let target_style = Style::default().fg(colors.text);
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled(self.tool_marker(active), marker_style),
+                    Span::raw(" "),
+                    Span::styled("Webfetch", title_style),
+                    Span::raw(" "),
+                    Span::styled(url.to_string(), target_style),
+                ]),
+                max_width,
+                Line::from(Span::styled("  ", marker_style)),
+            );
+            if status == "ok" {
+                if let Some(ref preview) = output_preview {
+                    let result_style = Style::default()
+                        .fg(colors.text_weak)
+                        .add_modifier(Modifier::DIM);
+                    push_preview_lines(&mut out, preview, max_width, result_style);
+                }
+            }
+        } else if name == "bash" {
+            let command = metadata
+                .as_ref()
+                .and_then(|m| m.get("command"))
                 .and_then(|v| v.as_str())
                 .or_else(|| {
-                    metadata
-                        .as_ref()
-                        .and_then(|m| m.get("subagent_type"))
+                    args_obj
+                        .and_then(|o| o.get("command"))
                         .and_then(|v| v.as_str())
                 })
-                .unwrap_or("general");
-            let description = args_obj
-                .and_then(|o| o.get("description"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or("Task");
-            let header_text = format!(
-                "{} Task — {}",
-                titlecase_ascii(subagent_type),
-                description.trim()
-            );
-
-            let count = metadata
-                .as_ref()
-                .and_then(|m| m.get("child_tool_call_count"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let plural = if count == 1 { "toolcall" } else { "toolcalls" };
-            let duration = metadata
-                .as_ref()
-                .and_then(|m| m.get("duration_ms"))
-                .and_then(|v| v.as_u64())
-                .map(format_duration_ms);
-            let stats = match status.as_str() {
-                "running" => "running".to_string(),
-                "error" => "failed".to_string(),
-                _ => {
-                    let base = format!("{} {}", count, plural);
-                    duration
-                        .map(|d| format!("{} · {}", base, d))
-                        .unwrap_or(base)
-                }
-            };
-
-            let connector_style = Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM);
-            let header_style = Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM);
-            let stats_style = Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM);
-            let hint_key_style = Style::default()
-                .fg(colors.text)
+                .or_else(|| strip_tool_title(title.as_deref(), "Bash"))
+                .unwrap_or("command");
+            let active = matches!(status.as_str(), "running" | "pending");
+            let verb = if active { "Running" } else { "Ran" };
+            let marker_style = Style::default()
+                .fg(if status == "error" {
+                    colors.error
+                } else if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
                 .add_modifier(Modifier::BOLD);
-            let hint_style = Style::default().fg(colors.text_weak);
-
+            let title_style = Style::default()
+                .fg(if status == "error" {
+                    colors.error
+                } else {
+                    colors.text
+                })
+                .add_modifier(Modifier::BOLD);
+            let command_style = Style::default().fg(colors.text);
             push_wrapped(
                 &mut out,
                 Line::from(vec![
-                    Span::styled("  ┌ ", connector_style),
-                    Span::styled(header_text, header_style),
+                    Span::styled(self.tool_marker(active), marker_style),
+                    Span::raw(" "),
+                    Span::styled(verb.to_string(), title_style),
+                    Span::raw(" "),
+                    Span::styled(command.to_string(), command_style),
                 ]),
                 max_width,
-                Line::from(Span::styled("    ", header_style)),
+                Line::from(Span::styled("  ", marker_style)),
             );
-            push_wrapped(
-                &mut out,
-                Line::from(vec![
-                    Span::styled("  │ ", connector_style),
-                    Span::styled(stats, stats_style),
-                ]),
-                max_width,
-                Line::from(Span::styled("    ", stats_style)),
-            );
-
-            out.push(Line::from(""));
-            out.push(Line::from(vec![
-                Span::styled("ctrl+x", hint_key_style),
-                Span::raw(" "),
-                Span::styled("down", hint_key_style),
-                Span::raw(" "),
-                Span::styled("view subagents", hint_style),
-            ]));
-        } else if name == "todowrite" && status == "ok" {
-            if let Some(ref preview) = output_preview {
-                let bg = colors.background_element;
-                let pad_style = Style::default().bg(bg);
-                let header_style = Style::default()
-                    .fg(colors.text_weak)
-                    .add_modifier(Modifier::DIM)
-                    .bg(bg);
-                let item_style = Style::default().fg(colors.text).bg(bg);
-
-                let panel_width = max_width.saturating_sub(2).max(10);
-
-                // Panel header: # + label (opencode style)
-                let header_text = format!("# {}", tool_label);
-                let mut panel_lines: Vec<Line<'_>> = Vec::new();
-
-                // Padding top
-                panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
-
-                // Panel header
-                panel_lines.push(Line::from(vec![Span::styled(header_text, header_style)]));
-
-                // Body: each todo item as plain text (no markdown — avoids
-                // brackets being interpreted as links).
-                let preview_trimmed = preview.trim_end();
-                for raw_line in preview_trimmed.lines() {
-                    let trimmed = raw_line.trim_end();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let line = Line::from(vec![Span::styled(trimmed.to_string(), item_style)]);
-                    panel_lines.extend(wrap_styled_line(
-                        &line,
-                        WrapOptions::new(panel_width)
-                            .subsequent_indent(Line::from(Span::styled("  ", item_style))),
-                    ));
+            if status == "ok" {
+                if let Some(ref preview) = output_preview {
+                    let result_style = Style::default()
+                        .fg(colors.text_weak)
+                        .add_modifier(Modifier::DIM);
+                    push_preview_lines(&mut out, preview, max_width, result_style);
                 }
-
-                // Padding bottom
-                panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
-
-                // Indent text one cell; the panel background is painted in a
-                // separate pass so padding rows do not wrap.
-                for line in &mut panel_lines {
-                    line.spans.insert(0, Span::styled(" ", pad_style));
-                }
-
-                out.extend(panel_lines);
             }
         } else if matches!(name.as_str(), "edit" | "write") && status != "error" {
             let file_path = args_obj
@@ -2094,10 +2594,14 @@ impl Chat {
                 "Wrote"
             };
 
-            let marker = if active { "~" } else { "•" };
+            let marker = self.tool_marker(active);
             let marker_style = Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM);
+                .fg(if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
             let title_style = Style::default()
                 .fg(colors.text)
                 .add_modifier(Modifier::BOLD);
@@ -2139,50 +2643,55 @@ impl Chat {
                 out.extend(diff_lines);
             }
         } else {
-            // Default header for all other tools.
-            let header_style = Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM);
+            let active = matches!(status.as_str(), "running" | "pending");
+            let marker_style = Style::default()
+                .fg(if status == "error" {
+                    colors.error
+                } else if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
+            let title_style = Style::default()
+                .fg(if status == "error" {
+                    colors.error
+                } else {
+                    colors.text
+                })
+                .add_modifier(Modifier::BOLD);
+            let args_str = if name == "skill" {
+                args_obj
+                    .and_then(|o| o.get("name"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| strip_tool_title(title.as_deref(), "Loaded skill"))
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            } else {
+                args.as_ref().map(args_preview).unwrap_or_default()
+            };
+            let mut spans = vec![
+                Span::styled(self.tool_marker(active), marker_style),
+                Span::raw(" "),
+                Span::styled(tool_label.to_string(), title_style),
+            ];
+            if !args_str.is_empty() {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(args_str, Style::default().fg(colors.text)));
+            }
             push_wrapped(
                 &mut out,
-                Line::from(Span::styled(header, header_style)),
+                Line::from(spans),
                 max_width,
-                Line::from(Span::styled("  ", header_style)),
+                Line::from(Span::styled("  ", marker_style)),
             );
 
-            // Render a subtle result line for completed tools.
             if status == "ok" {
                 if let Some(ref preview) = output_preview {
-                    let mut result_text = preview.clone();
-                    // For edits, prepend the title (e.g. "Edit: file.rs") if available.
-                    if name == "edit" {
-                        if let Some(ref t) = title {
-                            result_text = format!("{} — {}", t, preview);
-                        }
-                    }
-                    let result_style = Style::default().fg(colors.text_weak);
-                    let mut emitted = 0usize;
-                    for (line_idx, raw_line) in result_text.lines().enumerate() {
-                        if emitted >= TOOL_RESULT_MAX_SCREEN_LINES {
-                            out.push(Line::from(Span::styled("  …", result_style)));
-                            break;
-                        }
-                        let prefix = if line_idx == 0 { "  → " } else { "    " };
-                        let line = Line::from(Span::styled(
-                            format!("{}{}", prefix, raw_line),
-                            result_style,
-                        ));
-                        let before = out.len();
-                        push_limited_wrapped(
-                            &mut out,
-                            line,
-                            max_width,
-                            Line::from(Span::styled("    ", result_style)),
-                            TOOL_RESULT_MAX_SCREEN_LINES.saturating_sub(emitted),
-                            result_style,
-                        );
-                        emitted += out.len().saturating_sub(before);
-                    }
+                    let result_style = Style::default()
+                        .fg(colors.text_weak)
+                        .add_modifier(Modifier::DIM);
+                    push_preview_lines(&mut out, preview, max_width, result_style);
                 }
             }
         }
@@ -2634,6 +3143,82 @@ mod tests {
     }
 
     #[test]
+    fn test_webfetch_tool_renders_semantic_preview() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "webfetch",
+            "status": "ok",
+            "args": { "url": "https://gittydocs.carlo.tl/llms.txt" },
+            "metadata": { "url": "https://gittydocs.carlo.tl/llms.txt" },
+            "output_preview": "# gittydocs\n\nSimple, fast docs from your Markdown.",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 80, &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered[0],
+            "⬢ Webfetch https://gittydocs.carlo.tl/llms.txt"
+        );
+        assert_eq!(rendered[1], "  └ # gittydocs");
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Simple, fast docs")));
+        assert!(!rendered.iter().any(|line| line.contains("curl")));
+    }
+
+    #[test]
+    fn test_active_tool_marker_uses_animation_phase() {
+        let mut chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "webfetch",
+            "status": "running",
+            "args": { "url": "https://example.com" },
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let first_frame = chat
+            .format_tool_row(&msg, 80, &colors, false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        chat.tool_marker_animation_phase = true;
+        let second_frame = chat
+            .format_tool_row(&msg, 80, &colors, false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(first_frame[0], "⬡ Webfetch https://example.com");
+        assert_eq!(second_frame[0], "⬢ Webfetch https://example.com");
+    }
+
+    #[test]
+    fn test_bash_tool_renders_ran_command_preview() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "bash",
+            "status": "ok",
+            "args": { "command": "printf hello" },
+            "metadata": { "command": "printf hello", "exit_code": 0 },
+            "output_preview": "hello",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 80, &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["⬢ Ran printf hello", "  └ hello"]);
+    }
+
+    #[test]
     fn test_read_tool_renders_codex_style_explored_summary() {
         let chat = Chat::new();
         let content = serde_json::json!({
@@ -2649,7 +3234,7 @@ mod tests {
         let lines = chat.format_tool_row(&msg, 80, &colors, false);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert_eq!(rendered, vec!["• Explored", "  └ Read AGENTS.md"]);
+        assert_eq!(rendered, vec!["⬢ Explored", "  └ Read AGENTS.md"]);
     }
 
     #[test]
@@ -2668,7 +3253,7 @@ mod tests {
         let lines = chat.format_tool_row(&msg, 80, &colors, false);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert_eq!(rendered, vec!["• Explored", "  └ List src/ui"]);
+        assert_eq!(rendered, vec!["⬢ Explored", "  └ List src/ui"]);
     }
 
     #[test]
@@ -2709,7 +3294,7 @@ mod tests {
         assert_eq!(
             rendered,
             vec![
-                "• Explored",
+                "⬢ Explored",
                 "  └ List .",
                 "    Read README.md",
                 "    Search opencode|codex in references",
@@ -2739,7 +3324,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            vec!["• Explored", "  └ Read README.md, AGENTS.md", ""]
+            vec!["⬢ Explored", "  └ Read README.md, AGENTS.md", ""]
         );
     }
 
@@ -2767,7 +3352,7 @@ mod tests {
         assert_eq!(
             rendered,
             vec![
-                "• Edited README.md (+1 -1)",
+                "⬢ Edited README.md (+1 -1)",
                 "    3  alpha",
                 "    4 -beta",
                 "    4 +bravo",
@@ -2797,7 +3382,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            vec!["• Added src/new.rs (+1 -0)", "    1 +fn main() {}"]
+            vec!["⬢ Added src/new.rs (+1 -0)", "    1 +fn main() {}"]
         );
     }
 
@@ -2848,12 +3433,13 @@ mod tests {
         let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert_eq!(rendered.len(), 6);
-        assert!(rendered[0].trim().is_empty());
-        assert_eq!(rendered[1].trim(), "# Questions");
-        assert!(rendered[3].contains("Provide columns and rows"));
-        assert!(rendered[4].trim().is_empty());
+        assert_eq!(rendered.len(), 7);
+        assert_eq!(rendered[0].trim(), "⬢ Questions");
+        assert!(rendered[1].trim().is_empty());
+        assert_eq!(rendered[2].trim(), "# Questions");
+        assert!(rendered[4].contains("Provide columns and rows"));
         assert!(rendered[5].trim().is_empty());
+        assert!(rendered[6].trim().is_empty());
     }
 
     #[test]
@@ -2882,7 +3468,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_tool_renders_opencode_style_summary() {
+    fn test_task_tool_renders_cursor_style_subagent_summary() {
         let chat = Chat::new();
         let content = serde_json::json!({
             "name": "task",
@@ -2908,13 +3494,13 @@ mod tests {
 
         assert!(rendered
             .iter()
-            .any(|line| line.contains("General Task") && line.contains("Say hi")));
+            .any(|line| line.contains("Started 1 subagent")));
         assert!(rendered
             .iter()
-            .any(|line| line.contains("0 toolcalls") && line.contains("4.1s")));
+            .any(|line| line.contains("ctrl+x down to view subagents")));
         assert!(rendered
             .iter()
-            .any(|line| line.contains("ctrl+x down view subagents")));
+            .any(|line| line.contains("⬢ General - Say hi #1")));
         assert!(!rendered
             .iter()
             .any(|line| line.contains("prompt=\"Say hi\"")));
@@ -2922,7 +3508,48 @@ mod tests {
     }
 
     #[test]
-    fn test_todowrite_panel_uses_bottom_margin_and_inner_padding() {
+    fn test_adjacent_task_tools_render_as_one_subagent_group() {
+        let mut chat = Chat::new();
+        for (description, status) in [
+            ("read", "running"),
+            ("write a haiku", "ok"),
+            ("write a haiku", "ok"),
+        ] {
+            chat.add_message(Message::tool(
+                serde_json::json!({
+                    "name": "task",
+                    "status": status,
+                    "args": {
+                        "subagent_type": "explore",
+                        "description": description,
+                        "prompt": description
+                    },
+                    "metadata": {
+                        "subagent_type": "explore"
+                    }
+                })
+                .to_string(),
+            ));
+        }
+        let colors = test_colors();
+
+        let lines = chat.build_all_lines(100, "model", &colors);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "⬡ Started 3 subagents - ctrl+x down to view subagents",
+                "  ⬡ Explore - read #1",
+                "  ⬢ Explore - write a haiku #2",
+                "  ⬢ Explore - write a haiku #3",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_legacy_todowrite_history_renders_as_updated_plan() {
         let chat = Chat::new();
         let content = serde_json::json!({
             "name": "todowrite",
@@ -2936,16 +3563,20 @@ mod tests {
         let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert_eq!(rendered.len(), 7);
-        assert!(rendered[0].trim().is_empty());
-        assert_eq!(rendered[1].trim(), "# Todos");
-        assert!(rendered[4].contains("Implement rendering"));
-        assert!(rendered[5].trim().is_empty());
-        assert!(rendered[6].trim().is_empty());
+        assert_eq!(
+            rendered,
+            vec![
+                "⬢ Updated Plan",
+                "  └ □ Define table data",
+                "    □ Choose rendering file",
+                "    □ Implement rendering",
+                "",
+            ]
+        );
     }
 
     #[test]
-    fn test_short_tool_panel_renders_with_bottom_margin() {
+    fn test_short_updated_plan_content_renders_at_top() {
         use ratatui::{backend::TestBackend, Terminal};
 
         let mut colors = test_colors();
@@ -2971,12 +3602,11 @@ mod tests {
             .map(|y| buffer_row_text(buffer, 38, y))
             .collect::<Vec<_>>();
 
-        assert!(rows[0].trim().is_empty());
-        assert_eq!(rows[1].trim(), "# Todos");
-        assert!(rows[4].contains("Implement rendering"));
+        assert!(rows[0].contains("⬢ Updated Plan"));
+        assert!(rows[1].contains("Define table data"));
+        assert!(rows[3].contains("Implement rendering"));
+        assert!(rows[4].trim().is_empty());
         assert!(rows[5].trim().is_empty());
-        assert_eq!(buffer[(0, 0)].bg, colors.background_element);
-        assert_eq!(buffer[(0, 5)].bg, colors.background_element);
         assert!(rows[6].trim().is_empty());
         assert!(rows[7].trim().is_empty());
     }

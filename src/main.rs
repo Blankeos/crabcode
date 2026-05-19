@@ -177,11 +177,11 @@ async fn run_print_mode(prompt: &str, no_session_persistence: bool) -> Result<()
             crate::llm::ChunkMessage::ToolCalls(calls) => {
                 println!();
                 for call in &calls {
-                    println!("  🔧 {}", call.function.name);
+                    println!("  ⬡ {}", call.function.name);
                 }
             }
             crate::llm::ChunkMessage::ToolResult(result) => {
-                println!("  ✓ {}", result.name);
+                println!("  ⬢ {}", result.name);
             }
             crate::llm::ChunkMessage::End => {
                 println!();

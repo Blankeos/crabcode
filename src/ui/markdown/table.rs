@@ -321,11 +321,11 @@ mod tests {
 
     #[test]
     fn test_real_world_table() {
-        let input = "| Category | Tool | Description |\n|----------|------|-------------|\n| **File Operations** | `read` | Read file or directory contents with pagination |\n| | `write` | Create or overwrite a file |\n| | `edit` | Replace text in files with smart matching |\n| | `list` | List directory contents in tree format |\n| | `glob` | Find files by glob pattern |\n| | `grep` | Search file contents using regex |\n| **Code & Development** | `bash` | Execute shell commands with timeout and output streaming |\n| | `task` | Launch subagents for complex multi-step tasks |\n| | `explore` | Fast agent for exploring codebases (read-only) |\n| | `general` | General-purpose agent for research and complex tasks |\n| **Specialized Skills** | `skill` | Load domain-specific skills (frontend-design, ratatui) |\n| **Data & Search** | `question` | Ask user questions during execution |\n| | `todowrite` | Create and manage structured task lists |\n| | `webfetch` | Fetch content from URLs and convert to markdown |";
+        let input = "| Category | Tool | Description |\n|----------|------|-------------|\n| **File Operations** | `read` | Read file or directory contents with pagination |\n| | `write` | Create or overwrite a file |\n| | `edit` | Replace text in files with smart matching |\n| | `list` | List directory contents in tree format |\n| | `glob` | Find files by glob pattern |\n| | `grep` | Search file contents using regex |\n| **Code & Development** | `bash` | Execute shell commands with timeout and output streaming |\n| | `task` | Launch subagents for complex multi-step tasks |\n| | `explore` | Fast agent for exploring codebases (read-only) |\n| | `general` | General-purpose agent for research and complex tasks |\n| **Specialized Skills** | `skill` | Load domain-specific skills (frontend-design, ratatui) |\n| **Data & Search** | `question` | Ask user questions during execution |\n| | `update_plan` | Update the current task plan |\n| | `webfetch` | Fetch content from URLs and convert to markdown |";
         let result = preprocess_tables(input, 80);
         assert!(result.contains("File Operations"));
         assert!(result.contains("Specialized Skills"));
-        assert!(result.contains("todowrite"));
+        assert!(result.contains("update_plan"));
         // Each row should have 3 cells — no concatenation
         assert!(!result.contains("File Operations`read`"));
         assert!(!result.contains('|'));

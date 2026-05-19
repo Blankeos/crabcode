@@ -3976,6 +3976,7 @@ impl App {
     pub fn is_animation_running(&self) -> bool {
         self.base_focus == BaseFocus::Home
             || self.is_streaming
+            || self.chat_state.chat.has_active_tool_messages()
             || self.compaction_receiver.is_some()
             || self
                 .session_view_states
