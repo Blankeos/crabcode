@@ -30,7 +30,7 @@ impl ToolHandler for WebfetchTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "webfetch".to_string(),
-            description: "Fetches content from a specified URL and returns it as markdown. Handles HTML to markdown conversion.\n\nUsage notes:\n- The URL must be a fully-formed valid URL\n- HTTP URLs will be automatically upgraded to HTTPS\n- Format options: \"markdown\" (default), \"text\", or \"html\"\n- Results may be summarized if the content is very large".to_string(),
+            description: "Fetches content from a specified URL and returns it as markdown. Handles HTML to markdown conversion.\n\nUsage notes:\n- The URL must be a fully-formed valid URL\n- HTTP URLs will be automatically upgraded to HTTPS, except localhost and loopback URLs\n- Format options: \"markdown\" (default), \"text\", or \"html\"\n- Results may be summarized if the content is very large".to_string(),
             parameters: vec![
                 ParameterSchema {
                     name: "url".to_string(),
@@ -83,11 +83,7 @@ impl ToolHandler for WebfetchTool {
             .max(1)
             .min(MAX_TIMEOUT_SECS as i64) as u64;
 
-        let url = if raw_url.starts_with("http://") {
-            format!("https://{}", &raw_url[7..])
-        } else {
-            raw_url.clone()
-        };
+        let url = fetch_url_for(&raw_url);
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -177,6 +173,36 @@ impl ToolHandler for WebfetchTool {
                 .with_metadata("content_type", serde_json::json!(content_type)),
         )
     }
+}
+
+fn fetch_url_for(raw_url: &str) -> String {
+    if raw_url.starts_with("http://") && !is_loopback_http_url(raw_url) {
+        format!("https://{}", &raw_url[7..])
+    } else {
+        raw_url.to_string()
+    }
+}
+
+fn is_loopback_http_url(raw_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw_url) else {
+        return false;
+    };
+
+    if url.scheme() != "http" {
+        return false;
+    }
+
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return true;
+    }
+
+    host.trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|addr| addr.is_loopback())
 }
 
 async fn send_request(
@@ -723,6 +749,34 @@ mod tests {
         assert_eq!(
             markdown,
             "Read [the docs](https://Example.com/Path?A=1&B=2)."
+        );
+    }
+
+    #[test]
+    fn fetch_url_preserves_local_http_urls() {
+        assert_eq!(
+            fetch_url_for("http://127.0.0.1:41234/api/releases.json"),
+            "http://127.0.0.1:41234/api/releases.json"
+        );
+        assert_eq!(
+            fetch_url_for("http://localhost:3000/index.html"),
+            "http://localhost:3000/index.html"
+        );
+        assert_eq!(
+            fetch_url_for("http://[::1]:3000/index.html"),
+            "http://[::1]:3000/index.html"
+        );
+    }
+
+    #[test]
+    fn fetch_url_upgrades_public_http_urls() {
+        assert_eq!(
+            fetch_url_for("http://example.com/docs"),
+            "https://example.com/docs"
+        );
+        assert_eq!(
+            fetch_url_for("https://example.com/docs"),
+            "https://example.com/docs"
         );
     }
 

@@ -3,9 +3,10 @@
 
 // @ts-nocheck
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, extname, join, resolve, sep } from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:http'
 
 type AgentName = 'crabcode' | 'opencode' | 'codex'
 
@@ -14,6 +15,9 @@ type Task = {
   title: string
   prompt: string
   files: Record<string, string>
+  site?: {
+    root: string
+  }
   check: (cwd: string) => CheckResult[]
 }
 
@@ -51,6 +55,7 @@ const DEFAULT_RUNS = 1
 const DEFAULT_INPUT_USD_PER_MTOK = 1.25
 const DEFAULT_OUTPUT_USD_PER_MTOK = 10
 const DEFAULT_BENCHMARK_DIR = join(REPO_ROOT, '.benchmarks')
+const DEFAULT_REPORT_DIR = join(REPO_ROOT, 'benchmark-reports')
 const DEFAULT_AGENTS: AgentName[] = ['crabcode', 'opencode', 'codex']
 const AGENT_LABELS: Record<AgentName, string> = {
   crabcode: '🦀 crabcode',
@@ -155,6 +160,151 @@ Build steps: 12
       ]
     },
   },
+  {
+    id: 'local-site-fetch',
+    title: 'Fetch local site data and update docs',
+    site: {
+      root: 'site',
+    },
+    files: {
+      'site/api/releases.json': JSON.stringify(
+        {
+          releases: [
+            {
+              version: '1.8.0-beta.1',
+              channel: 'beta',
+              recommended: false,
+              migrationNote: 'Beta users should keep the experimental flag enabled.',
+            },
+            {
+              version: '1.7.4',
+              channel: 'stable',
+              recommended: true,
+              migrationNote: 'Set `snapshotMode` to `sparse` before rollout.',
+            },
+          ],
+        },
+        null,
+        2,
+      ) + '\n',
+      'docs/release.md': `# Release Notes
+
+Recommended stable: 1.6.2
+Migration note: TBD
+`,
+    },
+    prompt: `Fetch {siteUrl}/api/releases.json, find the recommended stable release, and update docs/release.md with its version and migrationNote. Do not change files under site/.`,
+    check: (cwd) => {
+      const doc = readFileSync(join(cwd, 'docs/release.md'), 'utf8')
+      const siteData = readFileSync(join(cwd, 'site/api/releases.json'), 'utf8')
+      return [
+        { name: 'documents recommended stable version', pass: /1\.7\.4/.test(doc) },
+        { name: 'copies fetched migration note', pass: /snapshotMode/.test(doc) && /sparse/.test(doc) },
+        { name: 'removes placeholder note', pass: !/TBD/.test(doc) },
+        { name: 'keeps served fixture intact', pass: siteData.includes('"version": "1.7.4"') },
+      ]
+    },
+  },
+  {
+    id: 'invoice-ts-fix',
+    title: 'Fix a cross-file TypeScript invoice bug',
+    files: {
+      'package.json': JSON.stringify({ type: 'module', scripts: { test: 'bun test' } }, null, 2) + '\n',
+      'src/invoice.ts': `export type InvoiceLine = {
+  sku: string
+  unitCents: number
+  quantity: number
+}
+
+export function invoiceTotalCents(lines: InvoiceLine[], discountPercent = 0, taxRate = 0): number {
+  const subtotal = lines.reduce((sum, line) => sum + line.unitCents, 0)
+  const discounted = subtotal - Math.round(subtotal * discountPercent)
+  return Math.round(discounted * (1 + taxRate))
+}
+`,
+      'tests/invoice.test.ts': `import { expect, test } from 'bun:test'
+import { invoiceTotalCents } from '../src/invoice'
+
+test('counts quantities before discount and tax', () => {
+  const total = invoiceTotalCents(
+    [
+      { sku: 'seat', unitCents: 1000, quantity: 2 },
+      { sku: 'addon', unitCents: 500, quantity: 1 },
+    ],
+    10,
+    0.08,
+  )
+
+  expect(total).toBe(2430)
+})
+
+test('handles quantity-only totals', () => {
+  expect(invoiceTotalCents([{ sku: 'usage', unitCents: 333, quantity: 3 }])).toBe(999)
+})
+`,
+    },
+    prompt: `Fix src/invoice.ts so invoiceTotalCents counts line quantities, treats discountPercent as a whole percent where 10 means 10%, and keeps taxRate as a decimal. Do not change the tests or add dependencies.`,
+    check: (cwd) => {
+      const testFile = readFileSync(join(cwd, 'tests/invoice.test.ts'), 'utf8')
+      return [
+        { name: 'keeps invoice behavior tests', pass: testFile.includes('toBe(2430)') && testFile.includes('quantity: 3') },
+        bunTestCheck(cwd),
+      ]
+    },
+  },
+  {
+    id: 'jsonc-config-parser',
+    title: 'Add tiny JSONC config parser support',
+    files: {
+      'package.json': JSON.stringify({ type: 'module', scripts: { test: 'bun test' } }, null, 2) + '\n',
+      'src/config.ts': `export type AppConfig = {
+  model: string
+  limits: {
+    maxTurns: number
+  }
+  features: string[]
+}
+
+export function parseConfig(text: string): AppConfig {
+  return JSON.parse(text)
+}
+`,
+      'tests/config.test.ts': `import { expect, test } from 'bun:test'
+import { parseConfig } from '../src/config'
+
+test('parses line comments and trailing commas', () => {
+  const config = parseConfig(\`{
+    // default benchmark model
+    "model": "openai/gpt-5.3-codex-spark",
+    "limits": {
+      "maxTurns": 8,
+    },
+    "features": [
+      "shell",
+      "edit",
+    ],
+  }\`)
+
+  expect(config).toEqual({
+    model: 'openai/gpt-5.3-codex-spark',
+    limits: { maxTurns: 8 },
+    features: ['shell', 'edit'],
+  })
+})
+`,
+    },
+    prompt: `Update src/config.ts so parseConfig accepts JSONC-style // line comments and trailing commas in objects/arrays. Keep the public API the same, keep the existing test, and do not add dependencies.`,
+    check: (cwd) => {
+      const testFile = readFileSync(join(cwd, 'tests/config.test.ts'), 'utf8')
+      return [
+        {
+          name: 'keeps JSONC coverage',
+          pass: testFile.includes('// default benchmark model') && testFile.includes('"maxTurns": 8,') && testFile.includes('"edit",'),
+        },
+        bunTestCheck(cwd),
+      ]
+    },
+  },
 ]
 
 const args = parseArgs(process.argv.slice(2))
@@ -178,7 +328,7 @@ const reportPath = args['no-report']
   ? null
   : args.report && args.report !== true
     ? resolve(String(args.report))
-    : join(runRoot, 'report.md')
+    : join(resolve(String(args['report-dir'] ?? process.env.BENCH_REPORT_DIR ?? DEFAULT_REPORT_DIR)), `agent-benchmark-${runId}.md`)
 
 if (args.help) {
   printHelp()
@@ -207,6 +357,7 @@ activeRunRoot = runRoot
 printPaths()
 
 const results: RunResult[] = []
+writeCurrentMarkdownReport()
 
 try {
   let runNumber = 0
@@ -216,8 +367,9 @@ try {
       for (const agent of agents) {
         if (shutdownRequested) break runLoop
         runNumber += 1
-        const result = await runBenchmark(agent, task, runIndex, runNumber, plannedPrompts)
+        const result = await safeRunBenchmark(agent, task, runIndex, runNumber, plannedPrompts)
         results.push(result)
+        writeCurrentMarkdownReport()
         printResult(result)
       }
     }
@@ -226,22 +378,7 @@ try {
   printSummary(results)
 
   if (reportPath) {
-    writeMarkdownReport(reportPath, {
-      runId,
-      runRoot,
-      workspacesRoot,
-      logsRoot,
-      model,
-      agents,
-      tasks: selectedTasks,
-      runs,
-      timeoutMs,
-      keep,
-      inputPrice,
-      outputPrice,
-      results,
-      stopped: shutdownRequested,
-    })
+    writeCurrentMarkdownReport()
     console.log(`\nWrote Markdown report to ${reportPath}`)
   }
 
@@ -278,12 +415,62 @@ try {
     console.log(`\nWrote JSON results to ${outputPath}`)
   }
 } finally {
+  writeCurrentMarkdownReport()
   if (keep) {
     console.log(`\nKept benchmark workspaces in ${workspacesRoot}`)
   } else {
     cleanupWorkspaceChildren(workspacesRoot)
   }
   activeRunRoot = null
+}
+
+function writeCurrentMarkdownReport() {
+  if (!reportPath || estimateOnly) return
+
+  writeMarkdownReport(reportPath, {
+    runId,
+    runRoot,
+    workspacesRoot,
+    logsRoot,
+    model,
+    agents,
+    tasks: selectedTasks,
+    runs,
+    plannedPrompts,
+    timeoutMs,
+    keep,
+    inputPrice,
+    outputPrice,
+    results,
+    stopped: shutdownRequested,
+  })
+}
+
+async function safeRunBenchmark(
+  agent: AgentName,
+  task: Task,
+  runIndex: number,
+  runNumber: number,
+  totalRuns: number,
+): Promise<RunResult> {
+  try {
+    return await runBenchmark(agent, task, runIndex, runNumber, totalRuns)
+  } catch (err) {
+    return {
+      agent,
+      task: task.id,
+      ok: false,
+      passedChecks: 0,
+      totalChecks: 0,
+      elapsedMs: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      estimatedCostUsd: 0,
+      exitCode: null,
+      timedOut: false,
+      error: `benchmark runner crashed: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
 }
 
 async function runBenchmark(
@@ -297,6 +484,7 @@ async function runBenchmark(
   const workspace = join(workspacesRoot, runLabel)
   mkdirSync(workspace, { recursive: true })
   activeWorkspaces.add(workspace)
+  let staticServer: Awaited<ReturnType<typeof startStaticServer>> | null = null
 
   try {
     writeFixture(workspace, task)
@@ -305,9 +493,34 @@ async function runBenchmark(
       writeFileSync(join(workspace, 'crabcode.jsonc'), JSON.stringify({ model }, null, 2) + '\n')
     }
 
-    const prompt = benchmarkPrompt(task.prompt)
-    const command = commandFor(agent, prompt)
     printRunStart(runNumber, totalRuns, agent, task.id, workspace)
+
+    if (task.site) {
+      try {
+        staticServer = await startStaticServer(join(workspace, task.site.root))
+      } catch (err) {
+        const checks = runChecks(task, workspace)
+        const passedChecks = checks.filter((check) => check.pass).length
+        return {
+          agent,
+          task: task.id,
+          ok: false,
+          passedChecks,
+          totalChecks: checks.length,
+          elapsedMs: 0,
+          estimatedInputTokens: 0,
+          estimatedOutputTokens: 0,
+          estimatedCostUsd: 0,
+          exitCode: null,
+          timedOut: false,
+          error: `failed to start local static server: ${err instanceof Error ? err.message : String(err)}`,
+          workspace,
+        }
+      }
+    }
+
+    const prompt = benchmarkPrompt(resolveTaskPrompt(task, staticServer?.url))
+    const command = commandFor(agent, prompt)
     const started = performance.now()
     const proc = await runShell(command, workspace, timeoutMs)
     const elapsedMs = Math.round(performance.now() - started)
@@ -348,6 +561,7 @@ async function runBenchmark(
       stderrTail: tailText(proc.stderr),
     }
   } finally {
+    await staticServer?.close()
     activeWorkspaces.delete(workspace)
   }
 }
@@ -368,8 +582,7 @@ function commandFor(agent: AgentName, prompt: string) {
   const defaults: Record<AgentName, string> = {
     crabcode: defaultCrabcodeCommand(),
     opencode: 'opencode run --dangerously-skip-permissions -m {model} {prompt}',
-    codex:
-      'codex exec --ephemeral --skip-git-repo-check --sandbox workspace-write -c \'approval_policy="never"\' -m {model} {prompt}',
+    codex: 'codex exec --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m {model} {prompt}',
   }
   const envName = `BENCH_${agent.toUpperCase()}_CMD`
   const template = process.env[envName] || defaults[agent]
@@ -385,9 +598,15 @@ function benchmarkPrompt(prompt: string) {
     'You are running inside an isolated benchmark fixture.',
     'Modify files in the current working directory directly. Do not only describe the change.',
     'Keep the change minimal. When the task is complete, stop.',
+    'If the task names exact file paths, inspect those paths directly instead of listing directories first.',
+    'Do not repeat identical tool calls or run optional extra checks after the requested change is complete.',
     '',
     `Task: ${prompt}`,
   ].join('\n')
+}
+
+function resolveTaskPrompt(task: Task, siteUrl?: string) {
+  return task.prompt.replaceAll('{siteUrl}', siteUrl ?? '')
 }
 
 function modelForAgent(agent: AgentName, modelRef: string) {
@@ -479,14 +698,144 @@ function runChecks(task: Task, workspace: string): CheckResult[] {
   }
 }
 
+function bunTestCheck(cwd: string): CheckResult {
+  const result = runCheckCommand(cwd, process.execPath, ['test'])
+  return {
+    name: 'bun test passes',
+    pass: result.ok,
+    detail: result.detail,
+  }
+}
+
+function runCheckCommand(cwd: string, command: string, args: string[]) {
+  const proc = spawnSync(command, args, {
+    cwd,
+    encoding: 'utf8',
+    timeout: 15_000,
+    env: {
+      ...process.env,
+      NO_COLOR: '1',
+      CI: '1',
+    },
+  })
+  const output = `${proc.stdout ?? ''}\n${proc.stderr ?? ''}`.trim()
+  const detail = proc.error
+    ? proc.error.message
+    : proc.status === 0
+      ? undefined
+      : tailText(output, 600) || `exit code ${proc.status}`
+
+  return {
+    ok: proc.status === 0,
+    detail,
+  }
+}
+
+async function startStaticServer(root: string) {
+  const absoluteRoot = resolve(root)
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const port = 41_000 + Math.floor(Math.random() * 20_000)
+    try {
+      return await listenStaticServer(absoluteRoot, port)
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+    }
+  }
+
+  throw lastError ?? new Error('failed to start static server')
+}
+
+function listenStaticServer(absoluteRoot: string, port: number) {
+  const server = createServer((request, response) => {
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      response.writeHead(405, { allow: 'GET, HEAD' })
+      response.end('Method not allowed')
+      return
+    }
+
+    let requestPath = 'index.html'
+    try {
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+      requestPath = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html'
+    } catch {
+      response.writeHead(400)
+      response.end('Bad request')
+      return
+    }
+
+    const filePath = resolve(absoluteRoot, requestPath)
+    if (filePath !== absoluteRoot && !filePath.startsWith(absoluteRoot + sep)) {
+      response.writeHead(403)
+      response.end('Forbidden')
+      return
+    }
+
+    if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
+      response.writeHead(404)
+      response.end('Not found')
+      return
+    }
+
+    response.writeHead(200, { 'content-type': contentTypeFor(filePath) })
+    if (request.method === 'HEAD') {
+      response.end()
+      return
+    }
+    response.end(readFileSync(filePath))
+  })
+
+  return new Promise<{ url: string; close: () => Promise<void> }>((resolveStart, rejectStart) => {
+    let settled = false
+    const onError = (err: Error) => {
+      if (settled) return
+      settled = true
+      rejectStart(err)
+    }
+    server.once('error', onError)
+    try {
+      server.listen(port, '127.0.0.1', () => {
+        if (settled) return
+        settled = true
+        server.off('error', onError)
+        resolveStart({
+          url: `http://127.0.0.1:${port}`,
+          close: () =>
+            new Promise((resolveClose) => {
+              server.close(() => resolveClose())
+            }),
+        })
+      })
+    } catch (err) {
+      onError(err instanceof Error ? err : new Error(String(err)))
+    }
+  })
+}
+
+function contentTypeFor(path: string) {
+  switch (extname(path)) {
+    case '.json':
+      return 'application/json; charset=utf-8'
+    case '.md':
+      return 'text/markdown; charset=utf-8'
+    case '.txt':
+      return 'text/plain; charset=utf-8'
+    default:
+      return 'application/octet-stream'
+  }
+}
+
 function requestShutdown(signal: string) {
   if (shutdownRequested) {
+    writeCurrentMarkdownReport()
     cleanupActiveWorkspaces()
     process.exit(signal === 'SIGINT' ? 130 : 143)
   }
 
   shutdownRequested = true
   console.error(`\nReceived ${signal}; stopping active agent processes...`)
+  writeCurrentMarkdownReport()
 
   for (const child of activeChildren) {
     terminateChild(child, 'SIGTERM')
@@ -496,6 +845,7 @@ function requestShutdown(signal: string) {
     for (const child of activeChildren) {
       terminateChild(child, 'SIGKILL')
     }
+    writeCurrentMarkdownReport()
     cleanupActiveWorkspaces()
     process.exit(signal === 'SIGINT' ? 130 : 143)
   }, 2_500).unref()
@@ -574,6 +924,7 @@ function printPaths() {
   console.log('Notes')
   console.log('  Permission-gated actions are auto-approved for opencode and codex in isolated workspaces.')
   console.log('  Crabcode print mode is run with --dangerously-skip-permissions in isolated workspaces.')
+  console.log('  Site-fetch tasks use a per-run 127.0.0.1 static server; they do not hit the public internet.')
   if (!keep) {
     console.log('  Workspaces are removed at exit. Pass --keep to preserve them.')
   }
@@ -650,6 +1001,7 @@ function writeMarkdownReport(
     agents: AgentName[]
     tasks: Task[]
     runs: number
+    plannedPrompts: number
     timeoutMs: number
     keep: boolean
     inputPrice: number
@@ -670,6 +1022,7 @@ function writeMarkdownReport(
   lines.push(`Agents: ${report.agents.map((agent) => `\`${displayAgent(agent)}\``).join(', ')}`)
   lines.push(`Tasks: ${report.tasks.map((task) => `\`${task.id}\``).join(', ')}`)
   lines.push(`Runs per agent/task: ${report.runs}`)
+  lines.push(`Completed runs: ${report.results.length}/${report.plannedPrompts}`)
   lines.push(`Timeout per run: ${report.timeoutMs}ms`)
   lines.push(`Benchmark run directory: \`${report.runRoot}\``)
   lines.push(`Agents ran in: \`${report.workspacesRoot}\``)
@@ -678,6 +1031,7 @@ function writeMarkdownReport(
   lines.push(`Stopped early: ${report.stopped ? 'yes' : 'no'}`)
   lines.push('')
   lines.push(`Permission-gated actions are auto-approved for benchmark agent commands in isolated workspaces.`)
+  lines.push(`Site-fetch tasks use a per-run 127.0.0.1 static server and do not hit the public internet.`)
   lines.push(`Cost is a rough estimate from prompt/output text tokens only; provider dashboards are the source of truth.`)
   lines.push('')
 
@@ -850,14 +1204,15 @@ function printHelp() {
 Options:
   --model provider/model             Model passed to each agent.
   --agents crabcode,opencode,codex   Agents to run.
-  --tasks bugfix-js,add-rust-test    Task IDs to run.
+  --tasks id-a,id-b                  Task IDs to run.
   --runs 1                           Repetitions per agent/task.
   --timeout-ms 45000                 Timeout per run.
   --estimate                         Print planned prompt count and prompt-only cost, then exit.
   --input-price 1.25                 Input USD per 1M tokens for rough cost estimates.
   --output-price 10                  Output USD per 1M tokens for rough cost estimates.
   --out bench-results.json           Write machine-readable JSON results.
-  --report benchmark.md              Write Markdown report. Default: .benchmarks/<run-id>/report.md.
+  --report benchmark.md              Write Markdown report at an exact path.
+  --report-dir benchmark-reports     Directory for default Markdown reports.
   --no-report                        Disable Markdown report generation.
   --dir .benchmarks                  Parent directory for benchmark runs.
   --keep                             Keep temporary workspaces for inspection.
@@ -871,10 +1226,11 @@ Default params:
   input-price: ${DEFAULT_INPUT_USD_PER_MTOK}
   output-price: ${DEFAULT_OUTPUT_USD_PER_MTOK}
   dir: ${DEFAULT_BENCHMARK_DIR}
+  report-dir: ${DEFAULT_REPORT_DIR}
 
 Environment overrides:
   BENCH_MODEL, BENCH_AGENTS, BENCH_TASKS, BENCH_RUNS, BENCH_TIMEOUT_MS,
-  BENCH_INPUT_USD_PER_MTOK, BENCH_OUTPUT_USD_PER_MTOK, BENCH_DIR
+  BENCH_INPUT_USD_PER_MTOK, BENCH_OUTPUT_USD_PER_MTOK, BENCH_DIR, BENCH_REPORT_DIR
 
 Stop behavior:
   Ctrl+C stops the active agent process tree and removes temporary workspaces unless --keep is set.
@@ -882,7 +1238,7 @@ Stop behavior:
 Command overrides:
   BENCH_CRABCODE_CMD='crabcode -p --no-session-persistence --dangerously-skip-permissions {prompt}'
   BENCH_OPENCODE_CMD='opencode run --dangerously-skip-permissions -m {model} {prompt}'
-  BENCH_CODEX_CMD='codex exec --ephemeral --skip-git-repo-check --sandbox workspace-write -c approval_policy="never" -m {model} {prompt}'
+  BENCH_CODEX_CMD='codex exec --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m {model} {prompt}'
 
 Template tokens: {prompt}, {model}, {repo}
 Note: {model} is agent-aware; codex strips a leading openai/ provider prefix.
