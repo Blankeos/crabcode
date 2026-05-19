@@ -10,3 +10,5 @@ _dev_reference2
 .env
 node_modules
 .devrefs/references
+.benchmarks/
+benchmark-reports/

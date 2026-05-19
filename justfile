@@ -13,6 +13,9 @@ dpreview:
 gen-themes:
     bun run scripts/gen-themes.ts
 
+bench-agents *args:
+    bun run scripts/bench-agents.ts {{ args }}
+
 devdocs:
     gittydocs dev _docs
 
