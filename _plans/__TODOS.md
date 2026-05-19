@@ -86,8 +86,18 @@
   - scroll w/ my mouse (no thumbs, just scroll)
   - click the item with my mouse
 
-- [ ] Benchmark script to test performance against opencode + codex in comparison. As cheaply as possible. Using the same models. It doesn't need to be a state-of-the-art benchmark. It just needs to test a couple of usual things i.e. small stuff, see if the agent is at least just as capable, because what we're chasing is kinda exactly just the same as codex/opencode, not better. The "better" will be in the UX, it will have the better UX changes I want. So I will want to also explicitly say it's a make-shift benchmark. I want the benchmark to output:
-  - [ ] Cost to test - this is just my personal add
-  - [ ] Idk what metric usually is used, to define "better". - the goal is crabcode will have the same score as the others.
+- [x] Benchmark script to test performance against opencode + codex in comparison. As cheaply as possible. Using the same models. It doesn't need to be a state-of-the-art benchmark. It just needs to test a couple of usual things i.e. small stuff, see if the agent is at least just as capable, because what we're chasing is kinda exactly just the same as codex/opencode, not better. The "better" will be in the UX, it will have the better UX changes I want. So I will want to also explicitly say it's a make-shift benchmark. I want the benchmark to output:
+  - [x] Cost to test - this is just my personal add
+  - [x] Idk what metric usually is used, to define "better". - the goal is crabcode will have the same score as the others.
 
 - [ ] Paste compaction i.e. [Pasted Content 1865 chars]
+
+- [x] multiworkspace not working when I open other directories, I should be able to see in
+
+- [ ] better timeline highlighting of each "message"
+
+- [ ] IN /models, can we use the ❤︎ icon, but colored pink. instead of the long heart + favorite indicator.
+
+- [ ] Reasoning effort adjustment in /models. Or a hotkey? In opencode it's ctrl-t.
+
+- [ ] /commands and custom commands.

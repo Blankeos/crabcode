@@ -30,6 +30,7 @@ pub struct Session {
     pub workspace_id: i64,
     pub workspace_path: String,
     pub workspace_name: String,
+    pub workspace_sort_order: i64,
     pub status: String,
     pub pinned_at: Option<i64>,
     pub archived_at: Option<i64>,
@@ -182,6 +183,7 @@ impl HistoryDAO {
                     COALESCE(s.workspace_id, ?1) AS workspace_id,
                     COALESCE(w.root_path, ?2) AS workspace_path,
                     COALESCE(w.display_name, ?3) AS workspace_name,
+                    COALESCE(w.sort_order, COALESCE(s.workspace_id, ?1)) AS workspace_sort_order,
                     COALESCE(s.status, 'idle') AS status,
                     s.pinned_at,
                     s.archived_at
@@ -211,9 +213,10 @@ impl HistoryDAO {
                     workspace_id: row.get(10)?,
                     workspace_path: row.get(11)?,
                     workspace_name: row.get(12)?,
-                    status: row.get(13)?,
-                    pinned_at: row.get(14)?,
-                    archived_at: row.get(15)?,
+                    workspace_sort_order: row.get(13)?,
+                    status: row.get(14)?,
+                    pinned_at: row.get(15)?,
+                    archived_at: row.get(16)?,
                 })
             },
         )?;
@@ -230,6 +233,7 @@ impl HistoryDAO {
                     COALESCE(s.workspace_id, ?2) AS workspace_id,
                     COALESCE(w.root_path, ?3) AS workspace_path,
                     COALESCE(w.display_name, ?4) AS workspace_name,
+                    COALESCE(w.sort_order, COALESCE(s.workspace_id, ?2)) AS workspace_sort_order,
                     COALESCE(s.status, 'idle') AS status,
                     s.pinned_at,
                     s.archived_at
@@ -259,13 +263,47 @@ impl HistoryDAO {
                 workspace_id: row.get(10)?,
                 workspace_path: row.get(11)?,
                 workspace_name: row.get(12)?,
-                status: row.get(13)?,
-                pinned_at: row.get(14)?,
-                archived_at: row.get(15)?,
+                workspace_sort_order: row.get(13)?,
+                status: row.get(14)?,
+                pinned_at: row.get(15)?,
+                archived_at: row.get(16)?,
             }))
         } else {
             Ok(None)
         }
+    }
+
+    pub fn move_workspace_sort_order(&self, workspace_id: i64, offset: isize) -> Result<bool> {
+        let mut workspaces = self.list_workspaces()?;
+        let Some(index) = workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        else {
+            return Ok(false);
+        };
+
+        let target_index = if offset < 0 {
+            index.checked_sub(1)
+        } else if offset > 0 && index + 1 < workspaces.len() {
+            Some(index + 1)
+        } else {
+            None
+        };
+
+        let Some(target_index) = target_index else {
+            return Ok(false);
+        };
+
+        workspaces.swap(index, target_index);
+
+        for (sort_order, workspace) in workspaces.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE workspaces SET sort_order = ?1 WHERE id = ?2",
+                params![sort_order as i64, workspace.id],
+            )?;
+        }
+
+        Ok(true)
     }
 
     pub fn add_message(&self, msg: &Message) -> Result<()> {

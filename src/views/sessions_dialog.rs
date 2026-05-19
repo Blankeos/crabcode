@@ -6,6 +6,7 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::{layout::Rect, Frame};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionsDialogFilter {
@@ -17,9 +18,9 @@ pub enum SessionsDialogFilter {
 impl SessionsDialogFilter {
     pub fn next(self) -> Self {
         match self {
-            Self::Active => Self::All,
-            Self::All => Self::Archived,
-            Self::Archived => Self::Active,
+            Self::All => Self::Active,
+            Self::Active => Self::Archived,
+            Self::Archived => Self::All,
         }
     }
 
@@ -37,6 +38,7 @@ pub struct SessionsDialogState {
     pub dialog: Dialog,
     pub pending_delete: Option<String>,
     pub filter: SessionsDialogFilter,
+    workspace_group_ids: HashMap<String, i64>,
 }
 
 impl SessionsDialogState {
@@ -44,18 +46,21 @@ impl SessionsDialogState {
         Self {
             dialog,
             pending_delete: None,
-            filter: SessionsDialogFilter::Active,
+            filter: SessionsDialogFilter::All,
+            workspace_group_ids: HashMap::new(),
         }
     }
 
     pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
         let dialog = Dialog::with_items(title, items)
             .with_position(DialogPosition::Left)
-            .with_collapsible_groups(true);
+            .with_collapsible_groups(true)
+            .with_focusable_group_headers(true);
         Self {
-            dialog: with_sessions_actions(dialog, SessionsDialogFilter::Active, false),
+            dialog: with_sessions_actions(dialog, SessionsDialogFilter::All, false),
             pending_delete: None,
-            filter: SessionsDialogFilter::Active,
+            filter: SessionsDialogFilter::All,
+            workspace_group_ids: HashMap::new(),
         }
     }
 
@@ -64,6 +69,7 @@ impl SessionsDialogState {
         let title = self.dialog.title.clone();
         let was_visible = self.dialog.is_visible();
         let selected_index = self.dialog.selected_index;
+        let focused_group = self.dialog.get_focused_group_header().map(str::to_string);
         let scroll_offset = self.dialog.scroll_offset;
         let items_clone = items.clone();
         let search_query = self.dialog.search_query.clone();
@@ -72,7 +78,8 @@ impl SessionsDialogState {
 
         self.dialog = Dialog::with_items(title, items)
             .with_position(DialogPosition::Left)
-            .with_collapsible_groups(true);
+            .with_collapsible_groups(true)
+            .with_focusable_group_headers(true);
         self.dialog.set_collapsed_groups(collapsed_groups);
         self.dialog = with_sessions_actions(self.dialog.clone(), filter, false);
         self.dialog.set_search_query(search_query);
@@ -81,12 +88,24 @@ impl SessionsDialogState {
             self.dialog.show();
         }
 
-        if selected_index < items_clone.len() {
+        if let Some(group) = focused_group {
+            let _ = self.dialog.focus_group_header(&group);
+        } else if selected_index < items_clone.len() {
             self.dialog.selected_index = selected_index;
         }
         self.dialog.scroll_offset = scroll_offset;
         self.dialog
             .preserve_scrollbar_drag_state_from(&previous_dialog);
+    }
+
+    pub fn set_workspace_group_ids(&mut self, group_ids: HashMap<String, i64>) {
+        self.workspace_group_ids = group_ids;
+    }
+
+    fn focused_workspace_group(&self) -> Option<(String, i64)> {
+        let group = self.dialog.get_focused_group_header()?.to_string();
+        let workspace_id = self.workspace_group_ids.get(&group).copied()?;
+        Some((group, workspace_id))
     }
 }
 
@@ -130,6 +149,43 @@ pub fn handle_sessions_dialog_key_event(
         return SessionsDialogAction::ChangeFilter(dialog_state.filter);
     }
 
+    if event.modifiers.contains(KeyModifiers::ALT) {
+        if let Some((group, workspace_id)) = dialog_state.focused_workspace_group() {
+            match event.code {
+                KeyCode::Up => {
+                    dialog_state.pending_delete = None;
+                    return SessionsDialogAction::MoveWorkspaceGroup {
+                        workspace_id,
+                        group,
+                        direction: WorkspaceGroupMoveDirection::Up,
+                    };
+                }
+                KeyCode::Down => {
+                    dialog_state.pending_delete = None;
+                    return SessionsDialogAction::MoveWorkspaceGroup {
+                        workspace_id,
+                        group,
+                        direction: WorkspaceGroupMoveDirection::Down,
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if event.code == KeyCode::Right {
+        if let Some(group) = dialog_state
+            .dialog
+            .get_focused_group_header()
+            .map(str::to_string)
+        {
+            dialog_state.dialog.toggle_group_collapsed(&group);
+            let _ = dialog_state.dialog.focus_group_header(&group);
+            dialog_state.pending_delete = None;
+            return SessionsDialogAction::Handled;
+        }
+    }
+
     if event.code == KeyCode::Char('p') && event.modifiers == KeyModifiers::CONTROL {
         if let Some(selected) = dialog_state.dialog.get_selected() {
             return SessionsDialogAction::TogglePin(selected.id.clone());
@@ -164,7 +220,17 @@ pub fn handle_sessions_dialog_key_event(
         }
     }
 
-    let handled = dialog_state.dialog.handle_key_event(event);
+    let handled = match event.code {
+        KeyCode::Up if was_visible => {
+            dialog_state.dialog.previous_wrapping();
+            true
+        }
+        KeyCode::Down if was_visible => {
+            dialog_state.dialog.next_wrapping();
+            true
+        }
+        _ => dialog_state.dialog.handle_key_event(event),
+    };
 
     // Clear pending delete when user navigates away
     if matches!(event.code, KeyCode::Up | KeyCode::Down | KeyCode::Esc) {
@@ -200,6 +266,7 @@ pub fn handle_sessions_dialog_mouse_event(
             .dialog
             .group_at_position(event.column, event.row)
         {
+            let _ = dialog_state.dialog.focus_group_header(&group);
             dialog_state.dialog.toggle_group_collapsed(&group);
             dialog_state.pending_delete = None;
             return SessionsDialogAction::Handled;
@@ -256,6 +323,26 @@ pub enum SessionsDialogAction {
     Delete(String),
     PendingDelete(String),
     Rename(String, String),
+    MoveWorkspaceGroup {
+        workspace_id: i64,
+        group: String,
+        direction: WorkspaceGroupMoveDirection,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceGroupMoveDirection {
+    Up,
+    Down,
+}
+
+impl WorkspaceGroupMoveDirection {
+    pub fn offset(self) -> isize {
+        match self {
+            Self::Up => -1,
+            Self::Down => 1,
+        }
+    }
 }
 
 fn with_sessions_actions(
@@ -336,6 +423,22 @@ mod tests {
     }
 
     #[test]
+    fn filter_cycle_starts_from_all() {
+        assert_eq!(
+            SessionsDialogFilter::All.next(),
+            SessionsDialogFilter::Active
+        );
+        assert_eq!(
+            SessionsDialogFilter::Active.next(),
+            SessionsDialogFilter::Archived
+        );
+        assert_eq!(
+            SessionsDialogFilter::Archived.next(),
+            SessionsDialogFilter::All
+        );
+    }
+
+    #[test]
     fn ctrl_n_requests_new_session_when_sessions_dialog_is_focused() {
         let mut state =
             init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
@@ -347,6 +450,119 @@ mod tests {
         );
 
         assert_eq!(action, SessionsDialogAction::NewSession);
+    }
+
+    #[test]
+    fn down_moves_from_last_session_in_workspace_to_next_workspace_header() {
+        let mut state = init_sessions_dialog(
+            "Sessions",
+            vec![
+                session_item_in_group("session-1", "First session", "Workspace A"),
+                session_item_in_group("session-2", "Second session", "Workspace A"),
+                session_item_in_group("session-3", "Third session", "Workspace B"),
+            ],
+        );
+        state.dialog.show();
+        state.dialog.selected_index = 1;
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        );
+
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert_eq!(state.dialog.get_focused_group_header(), Some("Workspace B"));
+        assert!(state.dialog.get_selected().is_none());
+    }
+
+    #[test]
+    fn arrow_navigation_cycles_across_workspace_groups() {
+        let mut state = init_sessions_dialog(
+            "Sessions",
+            vec![
+                session_item_in_group("session-1", "First session", "Workspace A"),
+                session_item_in_group("session-2", "Second session", "Workspace A"),
+                session_item_in_group("session-3", "Third session", "Workspace B"),
+            ],
+        );
+        state.dialog.show();
+        state.dialog.selected_index = 2;
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        );
+
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert_eq!(state.dialog.get_focused_group_header(), Some("Workspace A"));
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        );
+
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert_eq!(state.dialog.get_selected().unwrap().id, "session-3");
+    }
+
+    #[test]
+    fn right_toggles_focused_workspace_header_collapse() {
+        let mut state = init_sessions_dialog(
+            "Sessions",
+            vec![session_item_in_group(
+                "session-1",
+                "First session",
+                "Workspace A",
+            )],
+        );
+        state.dialog.show();
+        assert!(state.dialog.focus_group_header("Workspace A"));
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        );
+
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert!(state.dialog.is_group_collapsed("Workspace A"));
+        assert_eq!(state.dialog.get_focused_group_header(), Some("Workspace A"));
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        );
+
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert!(!state.dialog.is_group_collapsed("Workspace A"));
+    }
+
+    #[test]
+    fn option_arrows_request_workspace_group_move_when_header_focused() {
+        let mut state = init_sessions_dialog(
+            "Sessions",
+            vec![session_item_in_group(
+                "session-1",
+                "First session",
+                "Workspace A",
+            )],
+        );
+        state.dialog.show();
+        state.set_workspace_group_ids(HashMap::from([("Workspace A".to_string(), 42)]));
+        assert!(state.dialog.focus_group_header("Workspace A"));
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::ALT),
+        );
+
+        assert_eq!(
+            action,
+            SessionsDialogAction::MoveWorkspaceGroup {
+                workspace_id: 42,
+                group: "Workspace A".to_string(),
+                direction: WorkspaceGroupMoveDirection::Up
+            }
+        );
     }
 
     #[test]

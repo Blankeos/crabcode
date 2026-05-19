@@ -81,6 +81,8 @@ pub struct Dialog {
     pub pending_delete_id: Option<String>,
     collapsible_groups: bool,
     collapsed_groups: HashSet<String>,
+    focusable_group_headers: bool,
+    focused_group_header: Option<String>,
     matcher: Matcher,
 }
 
@@ -115,6 +117,8 @@ impl Dialog {
             pending_delete_id: None,
             collapsible_groups: false,
             collapsed_groups: HashSet::new(),
+            focusable_group_headers: false,
+            focused_group_header: None,
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -128,6 +132,14 @@ impl Dialog {
         self.collapsible_groups = enabled;
         if !enabled {
             self.collapsed_groups.clear();
+        }
+        self
+    }
+
+    pub fn with_focusable_group_headers(mut self, enabled: bool) -> Self {
+        self.focusable_group_headers = enabled;
+        if !enabled {
+            self.focused_group_header = None;
         }
         self
     }
@@ -253,6 +265,28 @@ impl Dialog {
         self.update_scrollbar();
     }
 
+    pub fn focus_group_header(&mut self, group: &str) -> bool {
+        if !self.focusable_group_headers || !Self::group_has_header(group) {
+            return false;
+        }
+
+        if !self
+            .filtered_items
+            .iter()
+            .any(|(candidate, items)| candidate == group && !items.is_empty())
+        {
+            return false;
+        }
+
+        self.focused_group_header = Some(group.to_string());
+        self.adjust_scroll();
+        true
+    }
+
+    pub fn get_focused_group_header(&self) -> Option<&str> {
+        self.focused_group_header.as_deref()
+    }
+
     pub fn collapsed_groups(&self) -> HashSet<String> {
         self.collapsed_groups.clone()
     }
@@ -352,32 +386,45 @@ impl Dialog {
     }
 
     fn reconcile_selection_after_filter(&mut self, preferred_selected: Option<(String, String)>) {
-        let flat_items = self.get_flat_items();
-        if flat_items.is_empty() {
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
+            if let Some(group) = self.focused_group_header.clone() {
+                if self.focus_group_header(&group) {
+                    return;
+                }
+            }
+            self.focused_group_header = None;
             self.selected_index = 0;
             self.scroll_offset = 0;
             self.update_scrollbar();
             return;
         }
 
-        if let Some((id, provider_id)) = preferred_selected {
-            if let Some(pos) = flat_items
-                .iter()
-                .position(|item| item.id == id && item.provider_id == provider_id)
-            {
-                self.selected_index = pos;
-                self.adjust_scroll();
+        if let Some(group) = self.focused_group_header.clone() {
+            if self.focus_group_header(&group) {
                 return;
             }
+            self.focused_group_header = None;
+        }
 
-            if let Some(pos) = flat_items.iter().position(|item| item.id == id) {
+        if let Some((id, provider_id)) = preferred_selected {
+            let selected_pos = {
+                let flat_items = self.get_flat_items();
+                flat_items
+                    .iter()
+                    .position(|item| item.id == id && item.provider_id == provider_id)
+                    .or_else(|| flat_items.iter().position(|item| item.id == id))
+            };
+
+            if let Some(pos) = selected_pos {
                 self.selected_index = pos;
+                self.focused_group_header = None;
                 self.adjust_scroll();
                 return;
             }
         }
 
-        if self.selected_index >= flat_items.len() {
+        if self.selected_index >= flat_len {
             self.selected_index = 0;
         }
 
@@ -401,31 +448,35 @@ impl Dialog {
     }
 
     pub fn next(&mut self) {
-        let flat_items = self.get_flat_items();
-        if flat_items.is_empty() {
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
             return;
         }
 
-        if self.selected_index >= flat_items.len() {
+        self.focused_group_header = None;
+
+        if self.selected_index >= flat_len {
             self.selected_index = 0;
             self.adjust_scroll();
             return;
         }
 
-        if self.selected_index < flat_items.len() - 1 {
+        if self.selected_index < flat_len - 1 {
             self.selected_index += 1;
             self.adjust_scroll();
         }
     }
 
     pub fn previous(&mut self) {
-        let flat_items = self.get_flat_items();
-        if flat_items.is_empty() {
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
             return;
         }
 
-        if self.selected_index >= flat_items.len() {
-            self.selected_index = flat_items.len().saturating_sub(1);
+        self.focused_group_header = None;
+
+        if self.selected_index >= flat_len {
+            self.selected_index = flat_len.saturating_sub(1);
             self.adjust_scroll();
             return;
         }
@@ -434,6 +485,46 @@ impl Dialog {
             self.selected_index -= 1;
             self.adjust_scroll();
         }
+    }
+
+    pub fn next_wrapping(&mut self) {
+        if self.focusable_group_headers {
+            self.move_focus_wrapping(1);
+            return;
+        }
+
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
+            return;
+        }
+
+        self.focused_group_header = None;
+        self.selected_index = if self.selected_index >= flat_len.saturating_sub(1) {
+            0
+        } else {
+            self.selected_index + 1
+        };
+        self.adjust_scroll();
+    }
+
+    pub fn previous_wrapping(&mut self) {
+        if self.focusable_group_headers {
+            self.move_focus_wrapping(-1);
+            return;
+        }
+
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
+            return;
+        }
+
+        self.focused_group_header = None;
+        self.selected_index = if self.selected_index == 0 || self.selected_index >= flat_len {
+            flat_len.saturating_sub(1)
+        } else {
+            self.selected_index - 1
+        };
+        self.adjust_scroll();
     }
 
     pub fn scroll_down(&mut self) {
@@ -450,6 +541,77 @@ impl Dialog {
     pub fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
         self.update_scrollbar();
+    }
+
+    fn move_focus_wrapping(&mut self, delta: isize) {
+        let rows = self.focus_rows();
+        if rows.is_empty() {
+            return;
+        }
+
+        let current = self
+            .current_focus_row_index(&rows)
+            .unwrap_or(if delta >= 0 { 0 } else { rows.len() - 1 });
+        let next = if delta >= 0 {
+            (current + 1) % rows.len()
+        } else if current == 0 {
+            rows.len() - 1
+        } else {
+            current - 1
+        };
+
+        self.apply_focus_row(&rows[next]);
+        self.adjust_scroll();
+    }
+
+    fn focus_rows(&self) -> Vec<DialogFocusRow> {
+        let mut rows = Vec::new();
+        let mut item_index = 0;
+
+        for (group, items) in &self.filtered_items {
+            if items.is_empty() {
+                continue;
+            }
+
+            if self.focusable_group_headers && Self::group_has_header(group) {
+                rows.push(DialogFocusRow::Group(group.clone()));
+            }
+
+            if self.is_group_collapsed(group) {
+                continue;
+            }
+
+            for _ in items {
+                rows.push(DialogFocusRow::Item(item_index));
+                item_index += 1;
+            }
+        }
+
+        rows
+    }
+
+    fn current_focus_row_index(&self, rows: &[DialogFocusRow]) -> Option<usize> {
+        if let Some(group) = &self.focused_group_header {
+            return rows.iter().position(
+                |row| matches!(row, DialogFocusRow::Group(candidate) if candidate == group),
+            );
+        }
+
+        rows.iter().position(
+            |row| matches!(row, DialogFocusRow::Item(index) if *index == self.selected_index),
+        )
+    }
+
+    fn apply_focus_row(&mut self, row: &DialogFocusRow) {
+        match row {
+            DialogFocusRow::Group(group) => {
+                self.focused_group_header = Some(group.clone());
+            }
+            DialogFocusRow::Item(index) => {
+                self.focused_group_header = None;
+                self.selected_index = *index;
+            }
+        }
     }
 
     fn get_flat_items(&self) -> Vec<&DialogItem> {
@@ -510,9 +672,36 @@ impl Dialog {
         line_index
     }
 
+    fn get_line_index_of_group_header(&self, target_group: &str) -> usize {
+        let mut line_index = 0;
+
+        for (group, items) in &self.filtered_items {
+            if items.is_empty() {
+                continue;
+            }
+
+            if Self::group_has_header(group) {
+                if group == target_group {
+                    return line_index;
+                }
+                line_index += 1;
+            }
+
+            if !self.is_group_collapsed(group) {
+                line_index += items.len();
+            }
+        }
+
+        line_index
+    }
+
     pub fn adjust_scroll(&mut self) {
         let visible_rows = self.get_visible_row_count().max(1);
-        let selected_line = self.get_line_index_of_item(self.selected_index);
+        let selected_line = self
+            .focused_group_header
+            .as_deref()
+            .map(|group| self.get_line_index_of_group_header(group))
+            .unwrap_or_else(|| self.get_line_index_of_item(self.selected_index));
 
         if selected_line < self.scroll_offset {
             self.scroll_offset = selected_line;
@@ -524,7 +713,7 @@ impl Dialog {
             self.scroll_offset = selected_line.saturating_sub(visible_rows.saturating_sub(1));
         }
 
-        if self.selected_index == 0 {
+        if self.focused_group_header.is_none() && self.selected_index == 0 {
             self.scroll_offset = 0;
         }
 
@@ -561,6 +750,10 @@ impl Dialog {
     }
 
     pub fn get_selected(&self) -> Option<&DialogItem> {
+        if self.focused_group_header.is_some() {
+            return None;
+        }
+
         let flat_items = self.get_flat_items();
         flat_items.get(self.selected_index).copied()
     }
@@ -572,6 +765,7 @@ impl Dialog {
             .position(|item| item.id == id && item.provider_id == provider_id)
         {
             self.selected_index = pos;
+            self.focused_group_header = None;
             self.adjust_scroll();
             return true;
         }
@@ -582,6 +776,7 @@ impl Dialog {
         let flat_items = self.get_flat_items();
         if let Some(pos) = flat_items.iter().position(|item| item.id == id) {
             self.selected_index = pos;
+            self.focused_group_header = None;
             self.adjust_scroll();
             return true;
         }
@@ -591,12 +786,14 @@ impl Dialog {
     pub fn select_index_clamped(&mut self, index: usize) -> bool {
         let item_count = self.get_flat_items().len();
         if item_count == 0 {
+            self.focused_group_header = None;
             self.selected_index = 0;
             self.scroll_offset = 0;
             self.update_scrollbar();
             return false;
         }
 
+        self.focused_group_header = None;
         self.selected_index = index.min(item_count.saturating_sub(1));
         self.adjust_scroll();
         true
@@ -884,6 +1081,7 @@ impl Dialog {
                 } else {
                     if let Some(item_index) = self.item_index_at_position(event.column, event.row) {
                         self.selected_index = item_index;
+                        self.focused_group_header = None;
                         return true;
                     }
                     false
@@ -900,8 +1098,10 @@ impl Dialog {
             MouseEventKind::Moved => {
                 if !is_on_scrollbar {
                     if let Some(item_index) = self.item_index_at_position(event.column, event.row) {
-                        if item_index != self.selected_index {
+                        if item_index != self.selected_index || self.focused_group_header.is_some()
+                        {
                             self.selected_index = item_index;
+                            self.focused_group_header = None;
                         }
                     }
                 }
@@ -1107,6 +1307,7 @@ impl Dialog {
             let item_at_offset = self.get_item_index_from_line(self.scroll_offset);
             if let Some(idx) = item_at_offset {
                 self.selected_index = idx;
+                self.focused_group_header = None;
             }
         }
 
@@ -1265,6 +1466,16 @@ impl Dialog {
                         )]
                     };
 
+                    let mut header_spans = header_spans;
+                    if self.focused_group_header.as_deref() == Some(group.as_str()) {
+                        let fg = contrast_text(colors.primary);
+                        for span in &mut header_spans {
+                            let mut style = span.style.clone();
+                            style = style.fg(fg).bg(colors.primary);
+                            span.style = style;
+                        }
+                    }
+
                     content_lines.push(Line::from(header_spans));
                 }
 
@@ -1273,7 +1484,8 @@ impl Dialog {
                 }
 
                 for item in items {
-                    let is_selected = item_index == self.selected_index;
+                    let is_selected =
+                        self.focused_group_header.is_none() && item_index == self.selected_index;
                     let is_pending_delete = self.pending_delete_id.as_ref() == Some(&item.id);
                     let mut spans =
                         Self::item_spans_for_width(item, list_area_width as usize, colors);
@@ -1421,9 +1633,17 @@ impl Clone for Dialog {
             pending_delete_id: self.pending_delete_id.clone(),
             collapsible_groups: self.collapsible_groups,
             collapsed_groups: self.collapsed_groups.clone(),
+            focusable_group_headers: self.focusable_group_headers,
+            focused_group_header: self.focused_group_header.clone(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DialogFocusRow {
+    Group(String),
+    Item(usize),
 }
 
 #[cfg(test)]

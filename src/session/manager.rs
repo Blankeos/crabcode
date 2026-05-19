@@ -26,6 +26,7 @@ pub struct SessionInfo {
     pub workspace_id: i64,
     pub workspace_path: String,
     pub workspace_name: String,
+    pub workspace_sort_order: i64,
     pub status: SessionStatus,
     pub pinned_at: Option<SystemTime>,
     pub archived_at: Option<SystemTime>,
@@ -39,6 +40,7 @@ pub struct SessionManager {
     history_dao: Option<HistoryDAO>,
     id_mapping: HashMap<String, i64>,
     db_id_to_id: HashMap<i64, String>,
+    workspace_sort_orders: HashMap<i64, i64>,
     current_workspace_id: i64,
     current_workspace_path: String,
     current_workspace_name: String,
@@ -59,6 +61,7 @@ impl SessionManager {
             history_dao: None,
             id_mapping: HashMap::new(),
             db_id_to_id: HashMap::new(),
+            workspace_sort_orders: HashMap::new(),
             current_workspace_id: 0,
             current_workspace_path,
             current_workspace_name,
@@ -71,9 +74,21 @@ impl SessionManager {
         self.current_workspace_id = history_dao.current_workspace_id();
         self.current_workspace_path = history_dao.current_workspace_path().to_string();
         self.current_workspace_name = history_dao.current_workspace_name().to_string();
+        self.refresh_workspace_sort_orders(&history_dao)?;
         self.load_sessions_from_db(&history_dao)?;
         self.history_dao = Some(history_dao);
         Ok(self)
+    }
+
+    fn refresh_workspace_sort_orders(&mut self, dao: &HistoryDAO) -> Result<(), SessionError> {
+        let workspaces = dao
+            .list_workspaces()
+            .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+        self.workspace_sort_orders = workspaces
+            .into_iter()
+            .map(|workspace| (workspace.id, workspace.sort_order))
+            .collect();
+        Ok(())
     }
 
     fn load_sessions_from_db(&mut self, dao: &HistoryDAO) -> Result<(), SessionError> {
@@ -103,6 +118,7 @@ impl SessionManager {
             session.workspace_id = db_session.workspace_id;
             session.workspace_path = db_session.workspace_path;
             session.workspace_name = db_session.workspace_name;
+            session.workspace_sort_order = db_session.workspace_sort_order;
             session.status = SessionStatus::from_str(&db_session.status);
             if session.status.is_active() {
                 session.status = SessionStatus::Interrupted;
@@ -179,7 +195,11 @@ impl SessionManager {
         self.sort_child_session_indexes();
     }
 
-    fn session_info_from_session(id: &str, session: &Session) -> SessionInfo {
+    fn session_info_from_session(
+        id: &str,
+        session: &Session,
+        workspace_sort_order: i64,
+    ) -> SessionInfo {
         SessionInfo {
             id: id.to_string(),
             parent_id: session.parent_id.clone(),
@@ -190,6 +210,7 @@ impl SessionManager {
             workspace_id: session.workspace_id,
             workspace_path: session.workspace_path.clone(),
             workspace_name: session.workspace_name.clone(),
+            workspace_sort_order,
             status: session.status,
             pinned_at: session.pinned_at,
             archived_at: session.archived_at,
@@ -229,6 +250,7 @@ impl SessionManager {
         session.workspace_id = self.current_workspace_id;
         session.workspace_path = self.current_workspace_path.clone();
         session.workspace_name = self.current_workspace_name.clone();
+        session.workspace_sort_order = self.workspace_sort_order(self.current_workspace_id);
 
         self.sessions.insert(session_id.clone(), session);
         if let Some(ref parent_id) = parent_id {
@@ -252,7 +274,13 @@ impl SessionManager {
     pub fn list_sessions(&self) -> Vec<SessionInfo> {
         self.sessions
             .iter()
-            .map(|(id, session)| Self::session_info_from_session(id, session))
+            .map(|(id, session)| {
+                Self::session_info_from_session(
+                    id,
+                    session,
+                    self.workspace_sort_order(session.workspace_id),
+                )
+            })
             .collect()
     }
 
@@ -287,9 +315,13 @@ impl SessionManager {
             .into_iter()
             .flat_map(|children| children.iter())
             .filter_map(|id| {
-                self.sessions
-                    .get(id)
-                    .map(|session| Self::session_info_from_session(id, session))
+                self.sessions.get(id).map(|session| {
+                    Self::session_info_from_session(
+                        id,
+                        session,
+                        self.workspace_sort_order(session.workspace_id),
+                    )
+                })
             })
             .collect()
     }
@@ -317,6 +349,45 @@ impl SessionManager {
 
     pub fn current_workspace_name(&self) -> &str {
         &self.current_workspace_name
+    }
+
+    pub fn workspace_sort_order(&self, workspace_id: i64) -> i64 {
+        self.workspace_sort_orders
+            .get(&workspace_id)
+            .copied()
+            .unwrap_or(workspace_id)
+    }
+
+    pub fn move_workspace_sort_order(
+        &mut self,
+        workspace_id: i64,
+        offset: isize,
+    ) -> Result<bool, SessionError> {
+        let moved = if let Some(dao) = self.history_dao.as_ref() {
+            let moved = dao
+                .move_workspace_sort_order(workspace_id, offset)
+                .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+            let workspaces = dao
+                .list_workspaces()
+                .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+            self.workspace_sort_orders = workspaces
+                .into_iter()
+                .map(|workspace| (workspace.id, workspace.sort_order))
+                .collect();
+            moved
+        } else {
+            false
+        };
+
+        let workspace_sort_orders = self.workspace_sort_orders.clone();
+        for session in self.sessions.values_mut() {
+            session.workspace_sort_order = workspace_sort_orders
+                .get(&session.workspace_id)
+                .copied()
+                .unwrap_or(session.workspace_id);
+        }
+
+        Ok(moved)
     }
 
     pub fn clear_current_session(&mut self) {

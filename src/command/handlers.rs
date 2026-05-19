@@ -17,15 +17,12 @@ pub fn handle_sessions<'a>(
     sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        let current_workspace_id = sm.current_workspace_id();
         let mut sessions = sm.list_sessions();
-        sessions.retain(|session| {
-            session.archived_at.is_none()
-                && (session.workspace_id == current_workspace_id || session.status.is_active())
-        });
+        sessions.retain(|session| session.parent_id.is_none() && session.archived_at.is_none());
         sessions.sort_by(|a, b| {
-            a.workspace_id
-                .cmp(&b.workspace_id)
+            a.workspace_sort_order
+                .cmp(&b.workspace_sort_order)
+                .then_with(|| a.workspace_id.cmp(&b.workspace_id))
                 .then_with(|| b.pinned_at.is_some().cmp(&a.pinned_at.is_some()))
                 .then_with(|| b.status.is_active().cmp(&a.status.is_active()))
                 .then_with(|| b.updated_at.cmp(&a.updated_at))
@@ -43,7 +40,11 @@ pub fn handle_sessions<'a>(
                 crate::command::registry::DialogItem {
                     id: session.id.clone(),
                     name,
-                    group: session.workspace_name.clone(),
+                    group: if session.workspace_name.trim().is_empty() {
+                        session.workspace_path.clone()
+                    } else {
+                        session.workspace_name.clone()
+                    },
                     description: String::new(),
                     tip: None,
                     provider_id: session.title.clone(),
@@ -744,6 +745,37 @@ mod tests {
                     items.iter().map(|i| &i.name).collect::<Vec<_>>()
                 );
                 assert!(items.iter().any(|item| item.name == "session-2"));
+            }
+            _ => panic!("Expected ShowDialog"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_sessions_includes_other_workspaces() {
+        let mut session_manager = SessionManager::new();
+        let current_id = session_manager.create_session(Some("current".to_string()));
+        let other_id = session_manager.create_session(Some("other".to_string()));
+        let other_session = session_manager.get_session(&other_id).unwrap();
+        other_session.workspace_id = 42;
+        other_session.workspace_path = "/tmp/other-workspace".to_string();
+        other_session.workspace_name = "other-workspace".to_string();
+
+        let parsed = ParsedCommand {
+            name: "sessions".to_string(),
+            args: vec![],
+            raw: "/sessions".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
+        };
+        let result = handle_sessions(&parsed, &mut session_manager).await;
+        match result {
+            CommandResult::ShowDialog { title, items } => {
+                assert_eq!(title, "Sessions");
+                assert_eq!(items.len(), 2);
+                assert!(items.iter().any(|item| item.id == current_id));
+                assert!(items
+                    .iter()
+                    .any(|item| item.id == other_id && item.group == "other-workspace"));
             }
             _ => panic!("Expected ShowDialog"),
         }

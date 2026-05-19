@@ -237,6 +237,7 @@ pub struct App {
     last_animation_update: std::time::Instant,
     last_session_spinner_update: std::time::Instant,
     cached_git_branch: Option<String>,
+    cached_git_branch_path: String,
     last_git_branch_check: std::time::Instant,
     discovery: Option<crate::model::discovery::Discovery>,
     cached_usage_text: String,
@@ -381,7 +382,7 @@ impl App {
             .with_agent_policies(agent_policies);
 
         let discovery = crate::model::discovery::Discovery::new().ok();
-        let cached_git_branch = git::get_current_branch();
+        let cached_git_branch = git::get_branch_for_path(&cwd);
         let now = std::time::Instant::now();
 
         Ok(Self {
@@ -420,7 +421,7 @@ impl App {
             provider_timeouts,
             model: active_model,
             provider_name: active_provider_name,
-            cwd,
+            cwd: cwd.clone(),
             base_focus: BaseFocus::Home,
             overlay_focus: OverlayFocus::None,
             ctrl_c_press_count: 0,
@@ -440,6 +441,7 @@ impl App {
             last_animation_update: now,
             last_session_spinner_update: now,
             cached_git_branch,
+            cached_git_branch_path: cwd.clone(),
             last_git_branch_check: now,
             discovery,
             cached_usage_text: String::new(),
@@ -944,11 +946,24 @@ impl App {
         theme.get_colors(self.dark_mode)
     }
 
-    fn current_git_branch(&mut self) -> Option<String> {
+    fn active_workspace_path(&self) -> String {
+        self.session_manager
+            .get_current_session_id()
+            .and_then(|id| self.session_manager.get_session_ref(id))
+            .map(|session| session.workspace_path.trim())
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.cwd.clone())
+    }
+
+    fn current_git_branch(&mut self, cwd: &str) -> Option<String> {
         const GIT_BRANCH_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 
-        if self.last_git_branch_check.elapsed() >= GIT_BRANCH_REFRESH {
-            self.cached_git_branch = git::get_current_branch();
+        if self.cached_git_branch_path != cwd
+            || self.last_git_branch_check.elapsed() >= GIT_BRANCH_REFRESH
+        {
+            self.cached_git_branch = git::get_branch_for_path(cwd);
+            self.cached_git_branch_path = cwd.to_string();
             self.last_git_branch_check = std::time::Instant::now();
         }
 
@@ -1384,6 +1399,29 @@ impl App {
                             .set_colors(self.get_current_theme_colors());
                         self.session_rename_dialog_state.show(id, title);
                         self.overlay_focus = OverlayFocus::SessionRenameDialog;
+                        true
+                    }
+                    SessionsDialogAction::MoveWorkspaceGroup {
+                        workspace_id,
+                        group,
+                        direction,
+                    } => {
+                        match self
+                            .session_manager
+                            .move_workspace_sort_order(workspace_id, direction.offset())
+                        {
+                            Ok(true) => {
+                                self.refresh_sessions_dialog();
+                                let _ =
+                                    self.sessions_dialog_state.dialog.focus_group_header(&group);
+                            }
+                            Ok(false) => {}
+                            Err(err) => push_toast(Toast::new(
+                                format!("Failed to move workspace: {:?}", err),
+                                ToastLevel::Error,
+                                None,
+                            )),
+                        }
                         true
                     }
                 }
@@ -2999,13 +3037,15 @@ impl App {
         });
 
         sessions.sort_by(|a, b| {
-            a.workspace_id
-                .cmp(&b.workspace_id)
+            a.workspace_sort_order
+                .cmp(&b.workspace_sort_order)
+                .then_with(|| a.workspace_id.cmp(&b.workspace_id))
                 .then_with(|| b.pinned_at.is_some().cmp(&a.pinned_at.is_some()))
                 .then_with(|| b.status.is_active().cmp(&a.status.is_active()))
                 .then_with(|| b.updated_at.cmp(&a.updated_at))
         });
 
+        let mut workspace_group_ids = std::collections::HashMap::new();
         let items: Vec<crate::ui::components::dialog::DialogItem> = sessions
             .into_iter()
             .map(|session| {
@@ -3032,6 +3072,9 @@ impl App {
                 } else {
                     session.workspace_name.clone()
                 };
+                workspace_group_ids
+                    .entry(group.clone())
+                    .or_insert(session.workspace_id);
 
                 crate::ui::components::dialog::DialogItem {
                     id: session.id.clone(),
@@ -3047,6 +3090,8 @@ impl App {
             .collect();
 
         self.sessions_dialog_state.refresh_items(items);
+        self.sessions_dialog_state
+            .set_workspace_group_ids(workspace_group_ids);
     }
 
     fn session_loading_glyph(&self) -> &'static str {
@@ -4617,7 +4662,8 @@ impl App {
             self.cached_usage_check = fingerprint;
             self.cached_usage_text = self.session_usage_text();
         }
-        let branch = self.current_git_branch();
+        let status_cwd = self.active_workspace_path();
+        let branch = self.current_git_branch(&status_cwd);
         let usage_text = &self.cached_usage_text;
 
         match self.base_focus {
@@ -4627,7 +4673,7 @@ impl App {
                     &mut self.input,
                     &self.home_state,
                     self.version.clone(),
-                    self.cwd.clone(),
+                    status_cwd.clone(),
                     branch.clone(),
                     self.agent.clone(),
                     self.model.clone(),
@@ -4657,7 +4703,7 @@ impl App {
                     &mut self.chat_state,
                     &mut self.input,
                     self.version.clone(),
-                    self.cwd.clone(),
+                    status_cwd.clone(),
                     branch,
                     self.agent.clone(),
                     self.model.clone(),
@@ -4884,6 +4930,7 @@ mod tests {
             last_animation_update: std::time::Instant::now(),
             last_session_spinner_update: std::time::Instant::now(),
             cached_git_branch: None,
+            cached_git_branch_path: ".".to_string(),
             last_git_branch_check: std::time::Instant::now(),
             discovery: None,
             cached_usage_text: String::new(),
@@ -5013,6 +5060,52 @@ mod tests {
         assert!(!handled);
         assert!(app.session_manager.get_current_session_id().is_some());
         assert_eq!(app.session_manager.list_sessions().len(), 1);
+    }
+
+    #[test]
+    fn sessions_dialog_defaults_to_all_unarchived_workspaces() {
+        let mut app = test_app();
+        let current_id = app.create_new_session(Some("Current".to_string()));
+        let other_id = app.create_new_session(Some("Other".to_string()));
+        let other_session = app.session_manager.get_session(&other_id).unwrap();
+        other_session.workspace_id = 42;
+        other_session.workspace_path = "/tmp/other-workspace".to_string();
+        other_session.workspace_name = "other-workspace".to_string();
+
+        app.open_sessions_dialog();
+
+        assert_eq!(app.sessions_dialog_state.filter, SessionsDialogFilter::All);
+        let items = &app.sessions_dialog_state.dialog.items;
+        assert!(items.iter().any(|item| item.id == current_id));
+        assert!(items
+            .iter()
+            .any(|item| item.id == other_id && item.group == "other-workspace"));
+    }
+
+    #[test]
+    fn status_workspace_path_follows_active_session() {
+        let mut app = test_app();
+        app.cwd = "/tmp/fallback-workspace".to_string();
+        let first_id = app.create_new_session(Some("First".to_string()));
+        let second_id = app.create_new_session(Some("Second".to_string()));
+
+        app.session_manager
+            .get_session(&first_id)
+            .unwrap()
+            .workspace_path = "/tmp/workspace-a".to_string();
+        app.session_manager
+            .get_session(&second_id)
+            .unwrap()
+            .workspace_path = "/tmp/workspace-b".to_string();
+
+        assert!(app.switch_to_session(&first_id));
+        assert_eq!(app.active_workspace_path(), "/tmp/workspace-a");
+
+        assert!(app.switch_to_session(&second_id));
+        assert_eq!(app.active_workspace_path(), "/tmp/workspace-b");
+
+        app.session_manager.clear_current_session();
+        assert_eq!(app.active_workspace_path(), "/tmp/fallback-workspace");
     }
 
     #[test]
