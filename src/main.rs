@@ -182,15 +182,7 @@ async fn run_print_mode(
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
             }
-            crate::llm::ChunkMessage::ToolCalls(calls) => {
-                println!();
-                for call in &calls {
-                    println!("  ⬡ {}", call.function.name);
-                }
-            }
-            crate::llm::ChunkMessage::ToolResult(result) => {
-                println!("  ⬢ {}", result.name);
-            }
+            crate::llm::ChunkMessage::ToolCalls(_) | crate::llm::ChunkMessage::ToolResult(_) => {}
             crate::llm::ChunkMessage::End => {
                 println!();
                 break;
