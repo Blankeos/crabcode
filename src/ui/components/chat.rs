@@ -475,7 +475,7 @@ impl Chat {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Bump this whenever rendering logic changes (tables, markdown, etc.)
-        const RENDER_VERSION: u64 = 4;
+        const RENDER_VERSION: u64 = 5;
         RENDER_VERSION.hash(&mut h);
         colors.hash(&mut h);
         self.messages.len().hash(&mut h);
@@ -1456,16 +1456,7 @@ impl Chat {
                     lines.push(Line::from(metadata));
                     lines.push(Line::from(""));
                 } else {
-                    // Keep spacing consistent between segments, but skip the
-                    // blank line when the next message is a compact tool panel.
-                    let next_is_compact_tool_panel = self
-                        .messages
-                        .get(idx + 1)
-                        .map(|m| m.role == MessageRole::Tool && is_compact_tool_panel(&m.content))
-                        .unwrap_or(false);
-                    if !next_is_compact_tool_panel {
-                        lines.push(Line::from(""));
-                    }
+                    lines.push(Line::from(""));
                 }
             }
             MessageRole::System => {
@@ -1483,10 +1474,7 @@ impl Chat {
                     colors,
                     attached_to_assistant,
                 ));
-                // Panel-style tools already own their vertical spacing.
-                if !is_compact_tool_panel(&message.content) {
-                    lines.push(Line::from(""));
-                }
+                lines.push(Line::from(""));
             }
         }
 
@@ -1949,7 +1937,6 @@ impl Chat {
                 Span::raw(" "),
                 Span::styled("view subagents", hint_style),
             ]));
-            out.push(Line::from(""));
         } else if name == "todowrite" && status == "ok" {
             if let Some(ref preview) = output_preview {
                 let bg = colors.background_element;
@@ -2305,22 +2292,6 @@ fn format_compaction_marker<'a>(
     ]);
 
     wrap_styled_line(&line, WrapOptions::new(max_width.max(1)))
-}
-
-fn is_compact_tool_panel(content: &str) -> bool {
-    serde_json::from_str::<JsonValue>(content)
-        .ok()
-        .and_then(|v| {
-            let name = v.get("name").and_then(|n| n.as_str())?;
-            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("ok");
-            Some(match name {
-                "question" => status != "error",
-                "todowrite" => status == "ok",
-                "task" => true,
-                _ => false,
-            })
-        })
-        .unwrap_or(false)
 }
 
 fn is_synthetic_tool_result_text(content: &str) -> bool {
@@ -2802,7 +2773,7 @@ mod tests {
     }
 
     #[test]
-    fn test_question_panel_keeps_padding_without_extra_gap() {
+    fn test_question_panel_uses_bottom_margin_and_inner_padding() {
         let chat = Chat::new();
         let content = serde_json::json!({
             "name": "question",
@@ -2822,11 +2793,12 @@ mod tests {
         let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert_eq!(rendered.len(), 5);
+        assert_eq!(rendered.len(), 6);
         assert!(rendered[0].trim().is_empty());
         assert_eq!(rendered[1].trim(), "# Questions");
         assert!(rendered[3].contains("Provide columns and rows"));
         assert!(rendered[4].trim().is_empty());
+        assert!(rendered[5].trim().is_empty());
     }
 
     #[test]
@@ -2895,7 +2867,7 @@ mod tests {
     }
 
     #[test]
-    fn test_todowrite_panel_keeps_padding_without_extra_gap() {
+    fn test_todowrite_panel_uses_bottom_margin_and_inner_padding() {
         let chat = Chat::new();
         let content = serde_json::json!({
             "name": "todowrite",
@@ -2909,15 +2881,16 @@ mod tests {
         let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert_eq!(rendered.len(), 6);
+        assert_eq!(rendered.len(), 7);
         assert!(rendered[0].trim().is_empty());
         assert_eq!(rendered[1].trim(), "# Todos");
         assert!(rendered[4].contains("Implement rendering"));
         assert!(rendered[5].trim().is_empty());
+        assert!(rendered[6].trim().is_empty());
     }
 
     #[test]
-    fn test_short_tool_panel_renders_without_trailing_blank_row() {
+    fn test_short_tool_panel_renders_with_bottom_margin() {
         use ratatui::{backend::TestBackend, Terminal};
 
         let mut colors = test_colors();
