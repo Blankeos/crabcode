@@ -50,7 +50,7 @@
 
 - [x] Tool call rendering:
   - [x] editing files w/ diffs, like opencode does.
-  - [ ] webfetch rendering like codex does.
+  - [x] webfetch rendering like codex does.
   - [x] todowrite - better looking, like opencode does.
   - [x] rendering subagents - just like opencode, clickable to go into their page.. OR I can do `ctrl-x ↓` to go into it if there's a subagent running. I can also switch between subagents with `←` and `→`
 
@@ -101,3 +101,7 @@
 - [ ] Reasoning effort adjustment in /models. Or a hotkey? In opencode it's ctrl-t.
 
 - [ ] /commands and custom commands.
+
+- [ ] Read my <> (ask for permission), deny. The chat doesn't get persisted, just gone. Please save everything before errors. So we can easily say "continue"
+
+- [ ] wysiwyg double escape to G
