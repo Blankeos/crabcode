@@ -178,8 +178,10 @@ impl Provider for OpenAICompatible {
         let byte_stream = response.bytes_stream();
         let line_stream = bytes_to_lines(byte_stream);
         let stream = line_stream
-            .map(|line| process_sse_data(&line))
-            .flat_map(|v| stream::iter(v))
+            .flat_map(|line| match line {
+                Ok(line) => stream::iter(process_sse_data(&line)),
+                Err(err) => stream::iter(vec![Err(err)]),
+            })
             .boxed();
 
         Ok(stream)
@@ -223,9 +225,13 @@ fn debug_log(msg: &str) {
 fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     let data = data.trim();
 
-    // [DONE] is ignored — the HTTP stream end signals completion.
-    if data == "[DONE]" || data.is_empty() || is_sse_metadata_line(data) {
-        debug_log("[SSE] Ignored: [DONE], empty, or metadata/comment");
+    if data == "[DONE]" {
+        debug_log("[SSE] Terminal: [DONE]");
+        return vec![Ok(ChunkType::End(String::new()))];
+    }
+
+    if data.is_empty() || is_sse_metadata_line(data) {
+        debug_log("[SSE] Ignored: empty or metadata/comment");
         return vec![];
     }
 
@@ -321,6 +327,17 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
         }
     }
 
+    match finish_reason {
+        "" => {}
+        "length" => chunks.push(Ok(ChunkType::Incomplete(
+            "finish_reason=length".to_string(),
+        ))),
+        "content_filter" => chunks.push(Ok(ChunkType::Failed(
+            "finish_reason=content_filter".to_string(),
+        ))),
+        _ => chunks.push(Ok(ChunkType::End(String::new()))),
+    }
+
     if chunks.is_empty() {
         debug_log(&format!(
             "[SSE] No chunks produced. finish_reason='{}'",
@@ -365,6 +382,35 @@ mod tests {
     }
 
     #[test]
+    fn done_marker_emits_terminal_chunk() {
+        let chunks = process_sse_data("[DONE]");
+
+        assert!(matches!(chunks.as_slice(), [Ok(ChunkType::End(_))]));
+    }
+
+    #[test]
+    fn finish_reason_emits_terminal_chunk() {
+        let data = r#"{"choices":[{"index":0,"finish_reason":"stop","delta":{"role":"assistant","content":""}}]}"#;
+
+        let chunks = process_sse_data(data);
+
+        assert!(chunks
+            .iter()
+            .any(|chunk| matches!(chunk, Ok(ChunkType::End(_)))));
+    }
+
+    #[test]
+    fn length_finish_reason_emits_incomplete_chunk() {
+        let data = r#"{"choices":[{"index":0,"finish_reason":"length","delta":{"role":"assistant","content":""}}]}"#;
+
+        let chunks = process_sse_data(data);
+
+        assert!(chunks
+            .iter()
+            .any(|chunk| matches!(chunk, Ok(ChunkType::Incomplete(_)))));
+    }
+
+    #[test]
     fn ignores_sse_comments_and_metadata() {
         for data in [
             ": OPENROUTER PROCESSING",
@@ -387,17 +433,34 @@ mod tests {
             )),
         ]);
 
-        let lines = futures::executor::block_on(bytes_to_lines(byte_stream).collect::<Vec<_>>());
+        let lines = futures::executor::block_on(bytes_to_lines(byte_stream).collect::<Vec<_>>())
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .expect("byte stream should parse");
 
         assert_eq!(
             lines,
             vec![r#"{"choices":[{"delta":{"content":"hello"}}]}"#.to_string()]
         );
     }
+
+    #[test]
+    fn bytes_to_lines_preserves_done_marker() {
+        let byte_stream = stream::iter(vec![Ok::<_, reqwest::Error>(bytes::Bytes::from_static(
+            b"data: [DONE]\n",
+        ))]);
+
+        let lines = futures::executor::block_on(bytes_to_lines(byte_stream).collect::<Vec<_>>())
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .expect("byte stream should parse");
+
+        assert_eq!(lines, vec!["[DONE]".to_string()]);
+    }
 }
 
 /// Convert a byte stream into a stream of lines, handling both SSE (`data: ...`) and raw NDJSON.
-fn bytes_to_lines<S>(byte_stream: S) -> impl futures::Stream<Item = String>
+fn bytes_to_lines<S>(byte_stream: S) -> impl futures::Stream<Item = Result<String>>
 where
     S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
 {
@@ -418,11 +481,11 @@ where
                     } else {
                         line.to_string()
                     };
-                    if data == "[DONE]" || data.is_empty() {
+                    if data.is_empty() {
                         continue;
                     }
                     debug_log(&format!("[LINE] Extracted: {}", data));
-                    return Some((data, (stream, buffer)));
+                    return Some((Ok(data), (stream, buffer)));
                 }
                 match stream.next().await {
                     Some(Ok(bytes)) => {
@@ -431,15 +494,12 @@ where
                     }
                     Some(Err(e)) => {
                         debug_log(&format!("[BYTES] Error: {}", e));
-                        return None;
+                        return Some((Err(Error::Http(e)), (stream, buffer)));
                     }
                     None => {
                         let remaining = String::from_utf8_lossy(&buffer).trim().to_string();
                         buffer.clear();
-                        if remaining.is_empty()
-                            || remaining == "[DONE]"
-                            || is_sse_metadata_line(&remaining)
-                        {
+                        if remaining.is_empty() || is_sse_metadata_line(&remaining) {
                             debug_log("[LINE] Stream ended, no remaining data");
                             return None;
                         }
@@ -449,7 +509,7 @@ where
                             remaining
                         };
                         debug_log(&format!("[LINE] Remaining at EOF: {}", data));
-                        return Some((data, (stream, buffer)));
+                        return Some((Ok(data), (stream, buffer)));
                     }
                 }
             }

@@ -116,6 +116,7 @@ pub async fn stream_with_tools<P: Provider>(
             let mut has_tool_call = false;
             let mut tool_call_accumulator = ToolCallAccumulator::default();
             let mut accumulated_text = String::new();
+            let mut saw_terminal_event = false;
 
             while let Some(chunk) = stream.next().await {
                 match chunk {
@@ -140,9 +141,13 @@ pub async fn stream_with_tools<P: Provider>(
                         // Forwarding End would cause relay_stream_to_sender
                         // to return Ended prematurely, dropping the channel
                         // before tool execution / subsequent steps.
+                        saw_terminal_event = true;
                     }
                     Ok(ChunkType::Incomplete(msg)) => {
-                        let _ = tx_loop.send(ChunkType::Incomplete(msg));
+                        let err = format!("Provider response incomplete: {}", msg);
+                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                        *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                        return;
                     }
                     Ok(ChunkType::Failed(err)) => {
                         let _ = tx_loop.send(ChunkType::Failed(err.clone()));
@@ -162,6 +167,13 @@ pub async fn stream_with_tools<P: Provider>(
                         return;
                     }
                 }
+            }
+
+            if !saw_terminal_event {
+                let err = "Provider stream ended without a terminal completion event".to_string();
+                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                return;
             }
 
             // Build assistant message from accumulated text deltas
@@ -530,6 +542,7 @@ mod tests {
     use crate::chunk::ChunkType;
     use crate::message::Message;
     use crate::provider::{Provider, ProviderStream};
+    use crate::stop::StopReason;
     use crate::tool::{Tool, ToolExecute};
     use async_trait::async_trait;
     use futures::StreamExt;
@@ -551,6 +564,9 @@ mod tests {
     struct RepeatingTaskProvider {
         requests: Arc<AtomicUsize>,
     }
+
+    #[derive(Debug, Clone)]
+    struct UnterminatedProvider;
 
     #[async_trait]
     impl Provider for TwoToolCallProvider {
@@ -620,6 +636,28 @@ mod tests {
             };
 
             Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for UnterminatedProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            Ok(Box::pin(futures::stream::iter(vec![Ok(ChunkType::Text(
+                "still working".to_string(),
+            ))])))
         }
     }
 
@@ -746,6 +784,36 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(observations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_without_terminal_event_fails() {
+        let mut response = stream_with_tools(
+            UnterminatedProvider,
+            vec![Message::user("work")],
+            Vec::new(),
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let mut chunks = Vec::new();
+        while let Some(chunk) = response.stream.next().await {
+            chunks.push(chunk);
+        }
+
+        assert!(chunks.iter().any(|chunk| matches!(
+            chunk,
+            ChunkType::Failed(message)
+                if message.contains("without a terminal completion event")
+        )));
+        assert!(matches!(
+            response.stop_reason().await,
+            Some(StopReason::Error(message))
+                if message.contains("without a terminal completion event")
+        ));
     }
 
     #[test]

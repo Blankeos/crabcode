@@ -164,6 +164,14 @@ impl Provider for OpenAI {
             reqwest::header::CONTENT_TYPE,
             "application/json".parse().unwrap(),
         );
+        request_headers.insert(
+            reqwest::header::ACCEPT,
+            "text/event-stream".parse().unwrap(),
+        );
+        request_headers.insert(
+            reqwest::header::ACCEPT_ENCODING,
+            "identity".parse().unwrap(),
+        );
 
         if !self.api_key.is_empty() {
             request_headers.insert(
@@ -262,82 +270,64 @@ impl Provider for OpenAI {
         let stream = response
             .bytes_stream()
             .eventsource()
-            .filter_map(|ev| {
-                match ev {
-                    Ok(event) => {
-                        let data = &event.data;
-                        // [DONE] / empty data → stream exhausts naturally
-                        if data == "[DONE]" || data.is_empty() {
-                            return futures::future::ready(None);
-                        }
-
-                        match serde_json::from_str::<serde_json::Value>(data) {
-                            Ok(value) => {
-                                let event_type = value["type"].as_str().unwrap_or("");
-
-                                match event_type {
-                                    "response.output_text.delta" => {
-                                        let delta = value["delta"].as_str().unwrap_or("");
-                                        futures::future::ready(Some(Ok(ChunkType::Text(
-                                            delta.to_string(),
-                                        ))))
-                                    }
-                                    "response.reasoning_summary_text.delta" => {
-                                        let delta = value["delta"].as_str().unwrap_or("");
-                                        futures::future::ready(Some(Ok(ChunkType::Reasoning(
-                                            delta.to_string(),
-                                        ))))
-                                    }
-                                    "response.completed" => {
-                                        let resp = &value["response"];
-                                        if let Some(error) = resp.get("error") {
-                                            if let Some(code) = error.get("code") {
-                                                return futures::future::ready(Some(Ok(
-                                                    ChunkType::Failed(code.to_string()),
-                                                )));
-                                            }
-                                        }
-                                        // Stream exhausts naturally — no End chunk forwarded
-                                        futures::future::ready(None)
-                                    }
-                                    "response.incomplete" => futures::future::ready(Some(Ok(
-                                        ChunkType::Incomplete("Response incomplete".to_string()),
-                                    ))),
-                                    "response.failed" => futures::future::ready(Some(Ok(
-                                        ChunkType::Failed("Response failed".to_string()),
-                                    ))),
-                                    _ => {
-                                        if let Some(tool_call) =
-                                            responses_function_call_chunk(&value)
-                                        {
-                                            futures::future::ready(Some(Ok(ChunkType::ToolCall(
-                                                tool_call,
-                                            ))))
-                                        } else if event_type.contains("tool_call") {
-                                            futures::future::ready(Some(Ok(ChunkType::ToolCall(
-                                                data.clone(),
-                                            ))))
-                                        } else {
-                                            futures::future::ready(None)
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => futures::future::ready(Some(Ok(ChunkType::Failed(format!(
-                                "Invalid SSE data: {}",
-                                e
-                            ))))),
-                        }
-                    }
-                    Err(e) => {
-                        let err = format!("SSE error: {}", e);
-                        futures::future::ready(Some(Ok(ChunkType::Failed(err))))
-                    }
+            .filter_map(|ev| match ev {
+                Ok(event) => futures::future::ready(response_sse_data_to_chunk(&event.data)),
+                Err(e) => {
+                    let err = format!("SSE error: {}", e);
+                    futures::future::ready(Some(Ok(ChunkType::Failed(err))))
                 }
             })
             .boxed();
 
         Ok(stream)
+    }
+}
+
+fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
+    if data == "[DONE]" {
+        return Some(Ok(ChunkType::End(String::new())));
+    }
+    if data.is_empty() {
+        return None;
+    }
+
+    let value = match serde_json::from_str::<serde_json::Value>(data) {
+        Ok(value) => value,
+        Err(err) => {
+            return Some(Ok(ChunkType::Failed(format!("Invalid SSE data: {}", err))));
+        }
+    };
+
+    let event_type = value["type"].as_str().unwrap_or("");
+    match event_type {
+        "response.output_text.delta" => {
+            let delta = value["delta"].as_str().unwrap_or("");
+            Some(Ok(ChunkType::Text(delta.to_string())))
+        }
+        "response.reasoning_summary_text.delta" => {
+            let delta = value["delta"].as_str().unwrap_or("");
+            Some(Ok(ChunkType::Reasoning(delta.to_string())))
+        }
+        "response.completed" => {
+            let resp = &value["response"];
+            if let Some(error) = resp.get("error") {
+                if let Some(code) = error.get("code") {
+                    return Some(Ok(ChunkType::Failed(code.to_string())));
+                }
+            }
+            Some(Ok(ChunkType::End(String::new())))
+        }
+        "response.incomplete" => Some(Ok(ChunkType::Incomplete("Response incomplete".to_string()))),
+        "response.failed" => Some(Ok(ChunkType::Failed("Response failed".to_string()))),
+        _ => {
+            if let Some(tool_call) = responses_function_call_chunk(&value) {
+                Some(Ok(ChunkType::ToolCall(tool_call)))
+            } else if event_type.contains("tool_call") {
+                Some(Ok(ChunkType::ToolCall(data.to_string())))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -512,7 +502,25 @@ fn openai_responses_user_content(user: &crate::message::UserMessage) -> serde_js
 
 #[cfg(test)]
 mod tests {
-    use super::responses_function_call_chunk;
+    use super::{response_sse_data_to_chunk, responses_function_call_chunk};
+    use crate::chunk::ChunkType;
+
+    #[test]
+    fn done_marker_emits_terminal_chunk() {
+        let chunk = response_sse_data_to_chunk("[DONE]").expect("expected terminal chunk");
+
+        assert!(matches!(chunk, Ok(ChunkType::End(_))));
+    }
+
+    #[test]
+    fn response_completed_emits_terminal_chunk() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.completed","response":{"id":"resp_123"}}"#,
+        )
+        .expect("expected terminal chunk");
+
+        assert!(matches!(chunk, Ok(ChunkType::End(_))));
+    }
 
     #[test]
     fn maps_responses_function_call_item_to_tool_call_shape() {
