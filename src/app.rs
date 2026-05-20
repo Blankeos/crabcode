@@ -576,7 +576,7 @@ impl App {
             state.input_draft = if is_child_session {
                 String::new()
             } else {
-                self.input.get_text()
+                self.input.submission_text()
             };
         }
     }
@@ -1883,8 +1883,8 @@ impl App {
 
         match key.code {
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
-                let input_text = self.input.get_text();
                 let image_paths = self.input.local_image_paths_for_submission();
+                let input_text = self.input.submission_text();
                 if !input_text.is_empty() || !image_paths.is_empty() {
                     use crate::command::parser::parse_input;
 
@@ -2459,7 +2459,7 @@ impl App {
                 if self.try_attach_pasted_image_paths(&text) {
                     return;
                 }
-                self.input.insert_str(&text);
+                self.input.insert_paste(&text);
             }
             (_, OverlayFocus::ModelsDialog) => {
                 self.models_dialog_state
@@ -2564,7 +2564,7 @@ impl App {
                 if self.try_attach_pasted_image_paths(&text) {
                     return;
                 }
-                self.input.insert_str(&text);
+                self.input.insert_paste(&text);
                 self.update_suggestions();
             }
             (_, OverlayFocus::QuestionDialog) => {

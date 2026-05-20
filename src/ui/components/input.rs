@@ -4,6 +4,7 @@ use crate::push_toast;
 use crate::theme::{agent_color, ThemeColors};
 use crate::toast::{Toast, ToastLevel};
 use crate::utils::image_attachment;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -14,6 +15,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use tui_textarea::{CursorMove, Input as TuiInput, TextArea};
 use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 /// Convert a display-column position to a byte offset within a string.
 /// Handles multi-byte and wide characters (emoji, CJK, etc.)
@@ -52,14 +54,24 @@ fn char_kind(c: char) -> u8 {
     }
 }
 
+const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+
 pub struct Input {
     textarea: TextArea<'static>,
     pub autocomplete: Option<AutoComplete>,
     textarea_area: Option<Rect>,
     viewport_top: usize,
+    viewport_left: usize,
     prompt_history: Option<PromptHistoryCache>,
     draft_text: Option<String>,
     local_images: Vec<LocalImageAttachment>,
+    pending_pastes: Vec<PendingPaste>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingPaste {
+    placeholder: String,
+    content: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,9 +102,11 @@ impl Input {
             autocomplete: None,
             textarea_area: None,
             viewport_top: 0,
+            viewport_left: 0,
             prompt_history,
             draft_text: None,
             local_images: Vec::new(),
+            pending_pastes: Vec::new(),
         }
     }
 
@@ -166,12 +180,12 @@ impl Input {
                 .bg(colors.background_element),
         );
 
-        let line_count = self.textarea.lines().len();
         let visible_lines = v_chunks[1].height as usize;
-        let max_viewport_top = line_count.saturating_sub(visible_lines);
-        self.viewport_top = self.viewport_top.min(max_viewport_top);
+        let visible_cols = v_chunks[1].width as usize;
+        self.update_viewport(visible_lines, visible_cols);
 
         frame.render_widget(&self.textarea, v_chunks[1]);
+        self.style_placeholder_ranges(frame.buffer_mut(), v_chunks[1], colors);
 
         let mut info_spans = vec![
             ratatui::text::Span::styled(agent.to_string(), Style::default().fg(agent_color)),
@@ -233,6 +247,7 @@ impl Input {
         if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::SHIFT) {
             self.textarea.insert_newline();
             self.sync_image_placeholders();
+            self.sync_pending_pastes();
             return true;
         }
 
@@ -240,6 +255,7 @@ impl Input {
         if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::ALT) {
             self.textarea.insert_newline();
             self.sync_image_placeholders();
+            self.sync_pending_pastes();
             return true;
         }
 
@@ -315,6 +331,7 @@ impl Input {
             KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => {
                 self.textarea.insert_newline();
                 self.sync_image_placeholders();
+                self.sync_pending_pastes();
                 true
             }
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
@@ -329,6 +346,7 @@ impl Input {
                     }
                 }
                 self.sync_image_placeholders();
+                self.sync_pending_pastes();
                 true
             }
             KeyCode::Tab => false,
@@ -340,11 +358,13 @@ impl Input {
                 // tui-textarea's buggy word boundary with multi-byte emoji
                 self.delete_word_backward();
                 self.sync_image_placeholders();
+                self.sync_pending_pastes();
                 true
             }
             _ => {
                 self.textarea.input(input);
                 self.sync_image_placeholders();
+                self.sync_pending_pastes();
                 true
             }
         }
@@ -410,7 +430,8 @@ impl Input {
 
                 if target_row < lines.len() {
                     let line = &lines[target_row];
-                    let target_col = display_col_to_byte_offset(line, relative_x as usize);
+                    let target_col =
+                        display_col_to_byte_offset(line, self.viewport_left + relative_x as usize);
                     let offset = self.flat_offset_for_position(target_row, target_col);
                     if let Some(image) = self.image_at_offset(offset) {
                         match image_attachment::open_path(&image.path) {
@@ -450,7 +471,8 @@ impl Input {
 
                 if target_row < lines.len() {
                     let line = &lines[target_row];
-                    let target_col = display_col_to_byte_offset(line, relative_x as usize);
+                    let target_col =
+                        display_col_to_byte_offset(line, self.viewport_left + relative_x as usize);
                     // Since start_selection() was called and is_selecting() is true,
                     // move_cursor extends the selection
                     self.textarea
@@ -667,10 +689,224 @@ impl Input {
         self.textarea
             .move_cursor(CursorMove::Jump(row as u16, col as u16));
         self.viewport_top = 0;
+        self.viewport_left = 0;
     }
 
     fn image_placeholder(number: usize) -> String {
         format!("[Image #{}]", number)
+    }
+
+    fn next_scroll_offset(previous: usize, cursor: usize, visible_len: usize) -> usize {
+        if visible_len == 0 {
+            return 0;
+        }
+        if cursor < previous {
+            cursor
+        } else if previous + visible_len <= cursor {
+            cursor + 1 - visible_len
+        } else {
+            previous
+        }
+    }
+
+    fn update_viewport(&mut self, visible_lines: usize, visible_cols: usize) {
+        let (cursor_row, cursor_col) = self.textarea.cursor();
+        let line_count = self.textarea.lines().len();
+        let max_viewport_top = line_count.saturating_sub(visible_lines);
+
+        self.viewport_top = self.viewport_top.min(max_viewport_top);
+        self.viewport_top = Self::next_scroll_offset(self.viewport_top, cursor_row, visible_lines)
+            .min(max_viewport_top);
+        self.viewport_left = Self::next_scroll_offset(self.viewport_left, cursor_col, visible_cols);
+    }
+
+    fn style_placeholder_ranges(&self, buffer: &mut Buffer, area: Rect, colors: &ThemeColors) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let placeholder_style = Style::default().fg(colors.markdown_image);
+        let lines = self.textarea.lines();
+
+        for (line_idx, line) in lines
+            .iter()
+            .enumerate()
+            .skip(self.viewport_top)
+            .take(area.height as usize)
+        {
+            let y = area.y + (line_idx - self.viewport_top) as u16;
+
+            for image in &self.local_images {
+                for (start, _) in line.match_indices(&image.placeholder) {
+                    Self::style_line_byte_range(
+                        buffer,
+                        area,
+                        y,
+                        line,
+                        start..start + image.placeholder.len(),
+                        self.viewport_left,
+                        placeholder_style,
+                    );
+                }
+            }
+
+            for paste in &self.pending_pastes {
+                for (start, _) in line.match_indices(&paste.placeholder) {
+                    Self::style_line_byte_range(
+                        buffer,
+                        area,
+                        y,
+                        line,
+                        start..start + paste.placeholder.len(),
+                        self.viewport_left,
+                        placeholder_style,
+                    );
+                }
+            }
+        }
+    }
+
+    fn style_line_byte_range(
+        buffer: &mut Buffer,
+        area: Rect,
+        y: u16,
+        line: &str,
+        range: Range<usize>,
+        viewport_left: usize,
+        style: Style,
+    ) {
+        if range.start > range.end
+            || range.end > line.len()
+            || !line.is_char_boundary(range.start)
+            || !line.is_char_boundary(range.end)
+        {
+            return;
+        }
+
+        let start_col = UnicodeWidthStr::width(&line[..range.start]);
+        let end_col = start_col + UnicodeWidthStr::width(&line[range]);
+        let visible_start = start_col.max(viewport_left);
+        let visible_end = end_col.min(viewport_left + area.width as usize);
+
+        for col in visible_start..visible_end {
+            let x = area.x + (col - viewport_left) as u16;
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_style(style);
+            }
+        }
+    }
+
+    fn next_large_paste_placeholder(&self, char_count: usize) -> String {
+        let base = format!("[Pasted Content {char_count} chars]");
+        let prefix = format!("{base} #");
+        let mut max_suffix = 0usize;
+
+        for paste in &self.pending_pastes {
+            if paste.placeholder == base {
+                max_suffix = max_suffix.max(1);
+                continue;
+            }
+            if let Some(suffix) = paste.placeholder.strip_prefix(&prefix) {
+                if let Ok(value) = suffix.parse::<usize>() {
+                    max_suffix = max_suffix.max(value);
+                }
+            }
+        }
+
+        if max_suffix == 0 {
+            base
+        } else {
+            format!("{base} #{}", max_suffix + 1)
+        }
+    }
+
+    fn pending_paste_indices_by_placeholder_len(&self) -> Vec<usize> {
+        let mut indices = (0..self.pending_pastes.len()).collect::<Vec<_>>();
+        indices.sort_by(|&left, &right| {
+            self.pending_pastes[right]
+                .placeholder
+                .len()
+                .cmp(&self.pending_pastes[left].placeholder.len())
+                .then_with(|| left.cmp(&right))
+        });
+        indices
+    }
+
+    fn pending_paste_match_at_offset(
+        &self,
+        text: &str,
+        offset: usize,
+        indices: &[usize],
+        used_indices: &[usize],
+    ) -> Option<usize> {
+        indices.iter().copied().find(|idx| {
+            !used_indices.contains(idx)
+                && text[offset..].starts_with(&self.pending_pastes[*idx].placeholder)
+        })
+    }
+
+    fn pending_paste_indices_in_text(&self, text: &str) -> Vec<usize> {
+        let indices = self.pending_paste_indices_by_placeholder_len();
+        let mut matched = Vec::new();
+        let mut offset = 0;
+
+        while offset < text.len() {
+            if let Some(idx) = self.pending_paste_match_at_offset(text, offset, &indices, &matched)
+            {
+                matched.push(idx);
+                offset += self.pending_pastes[idx].placeholder.len();
+            } else if let Some(ch) = text[offset..].chars().next() {
+                offset += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        matched
+    }
+
+    fn sync_pending_pastes(&mut self) {
+        if self.pending_pastes.is_empty() {
+            return;
+        }
+
+        let text = self.get_text();
+        let matched = self.pending_paste_indices_in_text(&text);
+        if matched.len() == self.pending_pastes.len()
+            && matched.iter().copied().eq(0..self.pending_pastes.len())
+        {
+            return;
+        }
+
+        self.pending_pastes = matched
+            .into_iter()
+            .map(|idx| self.pending_pastes[idx].clone())
+            .collect();
+    }
+
+    fn replace_pending_pastes(&self, text: &str) -> String {
+        let indices = self.pending_paste_indices_by_placeholder_len();
+        let mut expanded = String::with_capacity(text.len());
+        let mut used_indices = Vec::new();
+        let mut offset = 0;
+
+        while offset < text.len() {
+            if let Some(idx) =
+                self.pending_paste_match_at_offset(text, offset, &indices, &used_indices)
+            {
+                let paste = &self.pending_pastes[idx];
+                expanded.push_str(&paste.content);
+                used_indices.push(idx);
+                offset += paste.placeholder.len();
+            } else if let Some(ch) = text[offset..].chars().next() {
+                expanded.push(ch);
+                offset += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        expanded
     }
 
     fn replace_range(&mut self, range: Range<usize>, replacement: &str) {
@@ -685,6 +921,7 @@ impl Input {
         let cursor_offset = range.start + replacement.len();
         self.set_text_preserving_images(&new_text, cursor_offset);
         self.sync_image_placeholders();
+        self.sync_pending_pastes();
     }
 
     fn quote_completion_path(path: &str) -> String {
@@ -698,17 +935,28 @@ impl Input {
     fn remove_placeholder_at_cursor(&mut self, forward: bool) -> bool {
         let text = self.get_text();
         let cursor = self.flat_cursor_offset().min(text.len());
-        let target = self.local_images.iter().find_map(|image| {
-            text.match_indices(&image.placeholder)
-                .find_map(|(start, _)| {
-                    let end = start + image.placeholder.len();
-                    let should_remove = if forward {
-                        cursor >= start && cursor < end
-                    } else {
-                        cursor > start && cursor <= end
-                    };
-                    should_remove.then_some(start..end)
-                })
+        let mut placeholders = self
+            .local_images
+            .iter()
+            .map(|image| image.placeholder.as_str())
+            .chain(
+                self.pending_pastes
+                    .iter()
+                    .map(|paste| paste.placeholder.as_str()),
+            )
+            .collect::<Vec<_>>();
+        placeholders.sort_by_key(|placeholder| std::cmp::Reverse(placeholder.len()));
+
+        let target = placeholders.into_iter().find_map(|placeholder| {
+            text.match_indices(placeholder).find_map(|(start, _)| {
+                let end = start + placeholder.len();
+                let should_remove = if forward {
+                    cursor >= start && cursor < end
+                } else {
+                    cursor > start && cursor <= end
+                };
+                should_remove.then_some(start..end)
+            })
         });
 
         if let Some(range) = target {
@@ -844,6 +1092,10 @@ impl Input {
         self.textarea.lines().join("\n")
     }
 
+    pub fn submission_text(&self) -> String {
+        self.replace_pending_pastes(&self.get_text())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.get_text().is_empty()
     }
@@ -851,15 +1103,17 @@ impl Input {
     pub fn clear(&mut self) {
         self.reset_textarea();
         self.viewport_top = 0;
+        self.viewport_left = 0;
         self.draft_text = None;
         self.local_images.clear();
+        self.pending_pastes.clear();
         if let Some(ref mut history) = self.prompt_history {
             history.reset_navigation();
         }
     }
 
     pub fn save_current_to_history(&mut self) {
-        let text = self.get_text();
+        let text = self.submission_text();
         if !text.trim().is_empty() {
             if let Some(ref mut history) = self.prompt_history {
                 let _ = history.add_prompt(&text);
@@ -879,17 +1133,40 @@ impl Input {
         self.reset_textarea();
         self.textarea.insert_str(text);
         self.viewport_top = 0;
+        self.viewport_left = 0;
         self.local_images.clear();
+        self.pending_pastes.clear();
     }
 
     pub fn insert_char(&mut self, c: char) {
         self.textarea.insert_str(c.to_string().as_str());
         self.sync_image_placeholders();
+        self.sync_pending_pastes();
     }
 
     pub fn insert_str(&mut self, text: &str) {
         self.textarea.insert_str(text);
         self.sync_image_placeholders();
+        self.sync_pending_pastes();
+    }
+
+    pub fn insert_paste(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let char_count = text.chars().count();
+
+        if char_count > LARGE_PASTE_CHAR_THRESHOLD {
+            self.sync_pending_pastes();
+            let placeholder = self.next_large_paste_placeholder(char_count);
+            self.textarea.insert_str(&placeholder);
+            self.pending_pastes.push(PendingPaste {
+                placeholder,
+                content: text,
+            });
+            self.sync_image_placeholders();
+            return;
+        }
+
+        self.insert_str(&text);
     }
 
     pub fn get_autocomplete_suggestions(&self, is_chat: bool) -> Vec<Suggestion> {
@@ -915,6 +1192,76 @@ impl Default for Input {
 mod tests {
     use super::*;
     use ratatui::crossterm::event::{KeyEventKind, KeyEventState};
+    use ratatui::style::Color;
+
+    fn test_colors() -> ThemeColors {
+        ThemeColors {
+            primary: Color::Reset,
+            secondary: Color::Reset,
+            accent: Color::Yellow,
+            interactive: Color::Reset,
+            background: Color::Black,
+            dialog_background: Color::Black,
+            background_element: Color::Black,
+            text: Color::White,
+            text_weak: Color::Gray,
+            text_strong: Color::White,
+            border: Color::Gray,
+            border_weak_focus: Color::Gray,
+            border_focus: Color::Gray,
+            border_strong_focus: Color::Gray,
+            success: Color::Green,
+            warning: Color::Yellow,
+            error: Color::Red,
+            info: Color::Cyan,
+            markdown_text: Color::White,
+            markdown_heading: Color::Yellow,
+            markdown_link: Color::Yellow,
+            markdown_link_text: Color::Cyan,
+            markdown_code: Color::Green,
+            markdown_block_quote: Color::Gray,
+            markdown_emph: Color::Yellow,
+            markdown_strong: Color::Yellow,
+            markdown_horizontal_rule: Color::Gray,
+            markdown_list_item: Color::Yellow,
+            markdown_list_enumeration: Color::Cyan,
+            markdown_image: Color::Red,
+            markdown_image_text: Color::Blue,
+            markdown_code_block: Color::White,
+            diff_add: Color::Green,
+            diff_add_bg: Color::Green,
+            diff_remove: Color::Red,
+            diff_remove_bg: Color::Red,
+            diff_gutter: Color::Gray,
+        }
+    }
+
+    fn backspace_event() -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn buffer_row_text(buffer: &ratatui::buffer::Buffer, width: u16, y: u16) -> String {
+        (0..width)
+            .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_string()))
+            .collect()
+    }
+
+    fn find_buffer_text(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        height: u16,
+        needle: &str,
+    ) -> Option<(u16, u16)> {
+        (0..height).find_map(|y| {
+            let row = buffer_row_text(buffer, width, y);
+            row.find(needle).map(|x| (x as u16, y))
+        })
+    }
 
     #[test]
     fn test_input_creation() {
@@ -996,17 +1343,145 @@ mod tests {
     fn test_backspace_removes_image_placeholder() {
         let mut input = Input::new();
         input.attach_image(PathBuf::from("/tmp/example.png"));
-        let event = KeyEvent {
-            code: KeyCode::Backspace,
-            modifiers: KeyModifiers::empty(),
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        };
+        let event = backspace_event();
 
         let handled = input.handle_event(event);
 
         assert!(handled);
         assert_eq!(input.get_text(), "");
         assert!(input.local_image_paths_for_submission().is_empty());
+    }
+
+    #[test]
+    fn test_large_paste_is_compacted_for_display() {
+        let mut input = Input::new();
+        let paste = "a".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+
+        input.insert_paste(&paste);
+
+        assert_eq!(
+            input.get_text(),
+            format!("[Pasted Content {} chars]", LARGE_PASTE_CHAR_THRESHOLD + 1)
+        );
+        assert_eq!(input.submission_text(), paste);
+    }
+
+    #[test]
+    fn test_threshold_sized_paste_stays_inline() {
+        let mut input = Input::new();
+        let paste = "a".repeat(LARGE_PASTE_CHAR_THRESHOLD);
+
+        input.insert_paste(&paste);
+
+        assert_eq!(input.get_text(), paste);
+        assert_eq!(input.submission_text(), paste);
+    }
+
+    #[test]
+    fn test_duplicate_large_paste_placeholders_are_unique() {
+        let mut input = Input::new();
+        let paste = "a".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+
+        input.insert_paste(&paste);
+        input.insert_paste(&paste);
+
+        assert_eq!(
+            input.get_text(),
+            format!(
+                "[Pasted Content {} chars][Pasted Content {} chars] #2",
+                LARGE_PASTE_CHAR_THRESHOLD + 1,
+                LARGE_PASTE_CHAR_THRESHOLD + 1
+            )
+        );
+        assert_eq!(input.submission_text(), format!("{paste}{paste}"));
+    }
+
+    #[test]
+    fn test_large_paste_payload_is_pruned_after_placeholder_erasure() {
+        let mut input = Input::new();
+        let first = "a".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+        let second = "b".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+
+        input.insert_paste(&first);
+        assert!(input.handle_event(backspace_event()));
+        input.insert_paste(&second);
+
+        assert_eq!(
+            input.get_text(),
+            format!("[Pasted Content {} chars]", LARGE_PASTE_CHAR_THRESHOLD + 1)
+        );
+        assert_eq!(input.submission_text(), second);
+    }
+
+    #[test]
+    fn test_large_paste_suffix_is_reused_after_latest_duplicate_erasure() {
+        let mut input = Input::new();
+        let paste = "a".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+        let base = format!("[Pasted Content {} chars]", LARGE_PASTE_CHAR_THRESHOLD + 1);
+        let second = format!("{base} #2");
+
+        input.insert_paste(&paste);
+        input.insert_paste(&paste);
+        assert_eq!(input.get_text(), format!("{base}{second}"));
+
+        assert!(input.handle_event(backspace_event()));
+        assert_eq!(input.get_text(), base);
+
+        input.insert_paste(&paste);
+        assert_eq!(input.get_text(), format!("{base}{second}"));
+    }
+
+    #[test]
+    fn test_backspace_removes_large_paste_placeholder() {
+        let mut input = Input::new();
+        input.insert_paste(&"a".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1));
+        let event = backspace_event();
+
+        let handled = input.handle_event(event);
+
+        assert!(handled);
+        assert_eq!(input.get_text(), "");
+        assert_eq!(input.submission_text(), "");
+    }
+
+    #[test]
+    fn test_image_and_large_paste_placeholders_render_with_same_color() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        input.attach_image(PathBuf::from("/tmp/example.png"));
+        input.insert_str(" ");
+        input.insert_paste(&"a".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1));
+
+        let colors = test_colors();
+        let backend = TestBackend::new(80, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 80, 6),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let image_pos = find_buffer_text(buffer, 80, 6, "[Image #1]").expect("image placeholder");
+        let paste_pos =
+            find_buffer_text(buffer, 80, 6, "[Pasted Content").expect("paste placeholder");
+
+        assert_eq!(
+            buffer.cell(image_pos).expect("image cell").style().fg,
+            Some(colors.markdown_image)
+        );
+        assert_eq!(
+            buffer.cell(paste_pos).expect("paste cell").style().fg,
+            Some(colors.markdown_image)
+        );
     }
 }

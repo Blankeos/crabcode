@@ -90,7 +90,7 @@
   - [x] Cost to test - this is just my personal add
   - [x] Idk what metric usually is used, to define "better". - the goal is crabcode will have the same score as the others.
 
-- [ ] Paste compaction i.e. [Pasted Content 1865 chars]
+- [x] Paste compaction i.e. [Pasted Content 1865 chars]
 
 - [x] multiworkspace not working when I open other directories, I should be able to see in
 
