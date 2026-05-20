@@ -249,10 +249,9 @@ impl App {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
-        let autocomplete = AutoComplete::new(crate::autocomplete::CommandAuto::new(&registry));
         let placeholder = Self::get_random_placeholder();
         let placeholder_static: &'static str = Box::leak(placeholder.into_boxed_str());
-        let mut input = Input::new().with_autocomplete(autocomplete);
+        let mut input = Input::new();
         input.set_placeholder(placeholder_static);
 
         let cwd_path = crate::utils::cwd::current_dir()?;
@@ -308,7 +307,13 @@ impl App {
         }
 
         crate::skill::init_skill_store(&loaded_config.xdg_config_home, &loaded_config.project_root);
+        for command in loaded_config.merged_config.commands.clone() {
+            registry.register_custom(command);
+        }
         crate::command::handlers::register_skill_commands(&mut registry);
+        input.autocomplete = Some(AutoComplete::new(crate::autocomplete::CommandAuto::new(
+            &registry,
+        )));
 
         if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
             if !default_agent.trim().is_empty() {
@@ -2794,6 +2799,32 @@ impl App {
 
         match parse_input(input) {
             InputType::Command(mut parsed) => {
+                if self.command_registry.is_custom_command(&parsed.name) {
+                    parsed.prefs_dao = self.prefs_dao.as_ref();
+                    parsed.active_model_id = Some(self.model.clone());
+                    let result = self
+                        .command_registry
+                        .execute(&parsed, &mut self.session_manager)
+                        .await;
+                    match result {
+                        crate::command::registry::CommandResult::RunPrompt {
+                            prompt,
+                            agent,
+                            model,
+                            subtask,
+                        } => self.run_custom_command_prompt(prompt, agent, model, subtask),
+                        crate::command::registry::CommandResult::Error(msg) => {
+                            self.play_sound_event(crate::sound::SoundEvent::Error);
+                            push_toast(Toast::new(
+                                msg,
+                                ToastLevel::Error,
+                                Some(std::time::Duration::from_secs(3)),
+                            ));
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
                 if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
                     self.copy_session_transcript();
                     return;
@@ -2909,6 +2940,12 @@ impl App {
                             self.chat_state.chat.add_assistant_message(error_msg);
                         }
                     }
+                    crate::command::registry::CommandResult::RunPrompt {
+                        prompt,
+                        agent,
+                        model,
+                        subtask,
+                    } => self.run_custom_command_prompt(prompt, agent, model, subtask),
                     crate::command::registry::CommandResult::ShowDialog { title, items } => {
                         if title == "Connect a provider" {
                             let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
@@ -2970,6 +3007,32 @@ impl App {
         &mut self,
         mut parsed: crate::command::parser::ParsedCommand<'_>,
     ) {
+        if self.command_registry.is_custom_command(&parsed.name) {
+            parsed.prefs_dao = self.prefs_dao.as_ref();
+            parsed.active_model_id = Some(self.model.clone());
+            let result = self
+                .command_registry
+                .execute(&parsed, &mut self.session_manager)
+                .await;
+            match result {
+                crate::command::registry::CommandResult::RunPrompt {
+                    prompt,
+                    agent,
+                    model,
+                    subtask,
+                } => self.run_custom_command_prompt(prompt, agent, model, subtask),
+                crate::command::registry::CommandResult::Error(msg) => {
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
+                    push_toast(Toast::new(
+                        msg,
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                }
+                _ => {}
+            }
+            return;
+        }
         if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
             self.copy_session_transcript();
             return;
@@ -3079,6 +3142,12 @@ impl App {
                     self.chat_state.chat.add_assistant_message(error_msg);
                 }
             }
+            crate::command::registry::CommandResult::RunPrompt {
+                prompt,
+                agent,
+                model,
+                subtask,
+            } => self.run_custom_command_prompt(prompt, agent, model, subtask),
             crate::command::registry::CommandResult::ShowDialog { title, items } => {
                 if title == "Connect a provider" {
                     let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
@@ -4795,6 +4864,48 @@ impl App {
 
     fn handle_message_input(&mut self, msg: String) {
         self.handle_message_input_with_images(msg, Vec::new());
+    }
+
+    fn run_custom_command_prompt(
+        &mut self,
+        prompt: String,
+        agent: Option<String>,
+        model: Option<String>,
+        _subtask: Option<bool>,
+    ) {
+        if prompt.trim().is_empty() {
+            return;
+        }
+
+        if self.is_streaming {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "Cannot run a custom command while streaming",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        let previous_agent = self.agent.clone();
+        let previous_model = self.model.clone();
+        let previous_provider = self.provider_name.clone();
+
+        if let Some(agent) = agent.filter(|value| !value.trim().is_empty()) {
+            self.agent = agent;
+        }
+
+        if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+            let (provider_id, model_id) = parse_model_ref(&model);
+            self.provider_name = provider_id;
+            self.model = model_id;
+        }
+
+        self.handle_message_input(prompt);
+
+        self.agent = previous_agent;
+        self.model = previous_model;
+        self.provider_name = previous_provider;
     }
 
     fn handle_message_input_with_images(

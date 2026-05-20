@@ -7,6 +7,18 @@ pub struct ParsedCommand<'a> {
     pub active_model_id: Option<String>,
 }
 
+impl<'a> ParsedCommand<'a> {
+    pub fn raw_args(&self) -> &str {
+        let Some(without_slash) = self.raw.trim().strip_prefix('/') else {
+            return "";
+        };
+        let without_name = without_slash
+            .strip_prefix(&self.name)
+            .unwrap_or(without_slash);
+        without_name.trim_start()
+    }
+}
+
 impl<'a> PartialEq for ParsedCommand<'a> {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.args == other.args
@@ -33,14 +45,19 @@ pub fn parse_input(input: &str) -> InputType {
 
 fn parse_command(input: &str) -> Option<ParsedCommand> {
     let without_slash = input.strip_prefix('/')?;
-    let parts: Vec<&str> = without_slash.split_whitespace().collect();
+    let parts = shlex::split(without_slash).unwrap_or_else(|| {
+        without_slash
+            .split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect()
+    });
 
     if parts.is_empty() {
         return None;
     }
 
     let name = parts[0].to_string();
-    let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+    let args: Vec<String> = parts[1..].to_vec();
 
     Some(ParsedCommand {
         name,
@@ -101,6 +118,33 @@ mod tests {
                 active_model_id: None,
             })
         );
+    }
+
+    #[test]
+    fn test_parse_command_with_quoted_args() {
+        let input = r#"/create-file config.json src "{ \"key\": \"value\" }""#;
+        let result = parse_command(input);
+        assert_eq!(
+            result,
+            Some(ParsedCommand {
+                name: "create-file".to_string(),
+                args: vec![
+                    "config.json".to_string(),
+                    "src".to_string(),
+                    r#"{ "key": "value" }"#.to_string()
+                ],
+                raw: input.to_string(),
+                prefs_dao: None,
+                active_model_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_raw_args_preserves_user_text_after_command_name() {
+        let input = r#"/test "quoted arg" plain"#;
+        let result = parse_command(input).unwrap();
+        assert_eq!(result.raw_args(), r#""quoted arg" plain"#);
     }
 
     #[test]

@@ -22,6 +22,12 @@ pub struct Command {
 pub enum CommandResult {
     Success(String),
     Error(String),
+    RunPrompt {
+        prompt: String,
+        agent: Option<String>,
+        model: Option<String>,
+        subtask: Option<bool>,
+    },
     ShowDialog {
         title: String,
         items: Vec<DialogItem>,
@@ -40,17 +46,41 @@ pub struct DialogItem {
 
 pub struct Registry {
     commands: HashMap<String, Command>,
+    custom_commands: HashMap<String, crate::command::custom::CustomCommand>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self {
             commands: HashMap::new(),
+            custom_commands: HashMap::new(),
         }
     }
 
     pub fn register(&mut self, command: Command) {
         self.commands.insert(command.name.clone(), command);
+    }
+
+    pub fn register_custom(&mut self, command: crate::command::custom::CustomCommand) {
+        self.commands.insert(
+            command.name.clone(),
+            Command {
+                name: command.name.clone(),
+                description: command.description.clone().unwrap_or_default(),
+                handler: handle_custom_command,
+                hidden_tokens: vec![],
+                chat_only: false,
+            },
+        );
+        self.custom_commands.insert(command.name.clone(), command);
+    }
+
+    pub fn has_public_command(&self, name: &str) -> bool {
+        self.commands.contains_key(name)
+    }
+
+    pub fn is_custom_command(&self, name: &str) -> bool {
+        self.custom_commands.contains_key(name)
     }
 
     pub fn get(&self, name: &str) -> Option<&Command> {
@@ -75,6 +105,21 @@ impl Registry {
         parsed: &'a ParsedCommand<'a>,
         session_manager: &'a mut SessionManager,
     ) -> CommandResult {
+        if let Some(command) = self.custom_commands.get(&parsed.name) {
+            return match command.render(parsed.raw_args()).await {
+                Ok(rendered) => CommandResult::RunPrompt {
+                    prompt: rendered.prompt,
+                    agent: rendered.agent,
+                    model: rendered.model,
+                    subtask: rendered.subtask,
+                },
+                Err(err) => CommandResult::Error(format!(
+                    "Failed to render command {}: {}",
+                    parsed.name, err
+                )),
+            };
+        }
+
         if let Some(command) = self.get(&parsed.name) {
             (command.handler)(parsed, session_manager).await
         } else {
@@ -91,6 +136,14 @@ impl Registry {
         names.sort();
         names
     }
+}
+
+fn handle_custom_command<'a>(
+    parsed: &'a ParsedCommand<'a>,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let name = parsed.name.clone();
+    Box::pin(async move { CommandResult::Error(format!("Unknown command: {}", name)) })
 }
 
 impl Default for Registry {
@@ -250,6 +303,51 @@ mod tests {
             result,
             CommandResult::Error("Unknown command: unknown".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_custom_command_overrides_registered_command() {
+        let mut registry = Registry::new();
+        registry.register(Command {
+            name: "test".to_string(),
+            description: "Built in test".to_string(),
+            handler: dummy_handler,
+            hidden_tokens: vec![],
+            chat_only: false,
+        });
+        registry.register_custom(crate::command::custom::CustomCommand {
+            name: "test".to_string(),
+            description: Some("Custom test".to_string()),
+            agent: Some("build".to_string()),
+            model: Some("openai/gpt-5".to_string()),
+            subtask: Some(false),
+            template: "Run $ARGUMENTS".to_string(),
+            source: crate::command::custom::CustomCommandSource::Config(std::path::PathBuf::from(
+                "/tmp/opencode.json",
+            )),
+            workdir: std::path::PathBuf::from("."),
+        });
+
+        let parsed = ParsedCommand {
+            name: "test".to_string(),
+            args: vec!["unit".to_string()],
+            raw: "/test unit".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
+        };
+        let mut session_manager = SessionManager::new();
+        let result = registry.execute(&parsed, &mut session_manager).await;
+
+        assert_eq!(
+            result,
+            CommandResult::RunPrompt {
+                prompt: "Run unit".to_string(),
+                agent: Some("build".to_string()),
+                model: Some("openai/gpt-5".to_string()),
+                subtask: Some(false),
+            }
+        );
+        assert_eq!(registry.get("test").unwrap().description, "Custom test");
     }
 
     #[test]

@@ -1,0 +1,56 @@
+---
+title: Overview
+description: How crabcode resolves OpenCode-compatible and crabcode-native configuration.
+---
+
+# Configure crabcode
+
+crabcode is meant to fit into the same config surface you already use for OpenCode. Keep shared team config in `.opencode/`, add `.crabcode/` only when you want terminal-only behavior or a crabcode override.
+
+## Config resolution
+
+crabcode finds the project root by walking up to the nearest `.git` directory. If no `.git` directory exists, the current directory is the project root.
+
+| Priority | Layer | Candidate files |
+| --- | --- | --- |
+| 1 | OpenCode global | `~/.config/opencode/opencode.jsonc`, `~/.config/opencode/opencode.json`, `~/.config/opencode.jsonc`, `~/.config/opencode.json` |
+| 2 | crabcode global | `~/.config/crabcode/crabcode.jsonc`, `~/.config/crabcode/crabcode.json`, `~/.config/crabcode.jsonc`, `~/.config/crabcode.json` |
+| 3 | OpenCode project | `<project>/.opencode/opencode.jsonc`, `<project>/.opencode/opencode.json`, `<project>/opencode.jsonc`, `<project>/opencode.json` |
+| 4 | crabcode project | `<project>/.crabcode/crabcode.jsonc`, `<project>/.crabcode/crabcode.json`, `<project>/.opencode/crabcode.jsonc`, `<project>/.opencode/crabcode.json`, `<project>/crabcode.jsonc`, `<project>/crabcode.json` |
+
+Higher priority layers override lower priority layers. Object values are deep-merged; `null` removes a value from a lower layer. If more than one candidate exists in the same layer, crabcode stops and asks you to keep only one.
+
+If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the global paths.
+
+## File layout
+
+| Platform | Directory | Root file | Rules | Commands | Agents | Skills | MCP / config |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| OpenCode | `.opencode/` | `AGENTS.md` | none | `.opencode/commands/` | `.opencode/agents/` | `.opencode/skills/` | `.opencode/opencode.jsonc` |
+| crabcode | `.crabcode/` | `AGENTS.md` | none | `.crabcode/commands/` | `.crabcode/agents/` | `.crabcode/skills/` | `.crabcode/crabcode.jsonc` |
+
+## Example
+
+```jsonc title="crabcode.jsonc"
+{
+  "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json",
+  "model": "openai/gpt-5.2",
+  "theme": "crabcode-orange",
+  "sounds": {
+    "complete": { "enabled": true },
+    "error": { "enabled": true }
+  }
+}
+```
+
+## What belongs where
+
+| Need | Put it in |
+| --- | --- |
+| Shared OpenCode-compatible project config | `.opencode/opencode.jsonc` |
+| crabcode-only project settings | `.crabcode/crabcode.jsonc` or `crabcode.jsonc` |
+| Shared slash commands | `.opencode/commands/` |
+| crabcode-specific command overrides | `.crabcode/commands/` |
+| Personal defaults | `~/.config/crabcode/crabcode.jsonc` |
+
+For command syntax, frontmatter, arguments, shell output, and file references, use the [OpenCode commands docs](https://opencode.ai/docs/commands/). crabcode reads the same markdown command format.

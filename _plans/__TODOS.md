@@ -100,8 +100,8 @@
 
 - [x] Reasoning effort adjustment in /models. Or a hotkey? In opencode it's ctrl-t.
 
-- [ ] /commands and custom commands.
+- [x] /commands and custom commands.
 
-- [ ] Read my <> (ask for permission), deny. The chat doesn't get persisted, just gone. Please save everything before errors. So we can easily say "continue"
+- [x] Read my <> (ask for permission), deny. The chat doesn't get persisted, just gone. Please save everything before errors. So we can easily say "continue"
 
 - [ ] wysiwyg double escape to G

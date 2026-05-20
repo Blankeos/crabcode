@@ -91,7 +91,7 @@ Your credentials are stored in crabcode's state directory:
 - Default: `~/.local/state/crabcode/auth.json`
 - With `XDG_STATE_HOME`: `$XDG_STATE_HOME/crabcode/auth.json`
 
-Read the [extensive list of configs here](/_docs/config.mdx).
+Read the [configuration docs here](/_docs/config/index.mdx).
 
 ### Supported Providers
 

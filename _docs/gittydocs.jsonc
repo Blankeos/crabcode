@@ -18,7 +18,15 @@
       "items": [
         { "label": "Overview", "path": "/" },
         { "label": "Quickstart", "path": "/quickstart" },
-        { "label": "Configuration", "path": "/config" },
+      ],
+    },
+    {
+      "label": "Configuration",
+      "items": [
+        { "label": "Overview", "path": "/config" },
+        { "label": "OpenCode Compatibility", "path": "/config/opencode-compatibility" },
+        { "label": "Sounds", "path": "/config/sounds" },
+        { "label": "Theme", "path": "/config/theme" },
       ],
     },
   ],

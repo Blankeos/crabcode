@@ -1,0 +1,61 @@
+---
+title: OpenCode Compatibility
+description: What OpenCode configuration works in crabcode and what is crabcode-specific.
+---
+
+# Treat it like OpenCode
+
+> Don't think CrabCode as another agent config to manage, just treat it like configuring OpenCode.
+
+Most OpenCode docs apply directly: config is JSON/JSONC, project assets live under `.opencode/`, and command files use the OpenCode markdown command format. crabcode adds a small terminal-specific layer for sounds and theme selection.
+
+## Compatibility map
+
+Blank cells mean that runtime behavior is not supported by that project today. `❌` means crabcode intentionally ignores the OpenCode setting.
+
+| Area / setting | OpenCode | crabcode | Notes |
+| --- | --- | --- | --- |
+| `model` | ✅ | ✅ | Default model when no persisted active model is set. |
+| `default_agent` | ✅ | ✅ | Selects the startup agent mode. |
+| `command` config | ✅ | ✅ | JSON-defined slash commands with `template`, `description`, `agent`, `model`, and `subtask`. |
+| `.opencode/commands/*.md` | ✅ | ✅ | Markdown command files, including nested names. |
+| `.crabcode/commands/*.md` |  | ✅ | crabcode-specific command overrides. |
+| `$ARGUMENTS`, `$1`, `$2` | ✅ | ✅ | The final positional placeholder consumes the rest of the arguments. |
+| ``!`command` `` in command files | ✅ | ✅ | Runs from the project root and injects command output. |
+| `@path` file references in commands | ✅ | ✅ | File or directory content is appended to the rendered prompt. |
+| `AGENTS.md` project instructions | ✅ | ✅ | crabcode walks up from the working directory and prefers `AGENTS.md` over `CLAUDE.md` in the same directory. |
+| `~/.config/crabcode/AGENTS.md` |  | ✅ | crabcode global instructions. |
+| Claude Code fallback rules | ✅ | ✅ | `CLAUDE.md` and `~/.claude/CLAUDE.md` are read unless disabled by crabcode environment flags. |
+| Skills | ✅ | ✅ | Reads `SKILL.md` files from OpenCode, crabcode, Claude, and `.agents` skill roots. |
+| `agent.<name>.tools` | ✅ | partial | crabcode supports tool allowlists for configured agents. |
+| `agent.<name>.steps` | ✅ | partial | crabcode supports `steps`; `maxSteps` is not supported. |
+| Markdown agent files | ✅ |  | Discovered for diagnostics, not applied as runtime agent definitions yet. |
+| `provider.<id>.options.timeout` | ✅ | partial | Integer milliseconds or `false` to disable timeout. |
+| `theme` | ✅ | ✅ | In crabcode config files only. OpenCode config `theme` is ignored by crabcode. |
+| `sounds` |  | ✅ | crabcode-specific terminal audio and notifications. |
+| `mcp` | ✅ |  | Accepted at the top level for forward compatibility, not wired to tools yet. |
+| `permission` | ✅ |  | Accepted at the top level, not enforced from config yet. |
+| `instructions` | ✅ |  | Accepted at the top level, but config-driven instruction files are not loaded yet. |
+| `tools` | ✅ |  | Accepted at the top level, not used as global tool config yet. |
+| `compaction` | ✅ |  | Accepted at the top level, not used as config yet. |
+| `watcher` | ✅ |  | Accepted at the top level, not used as config yet. |
+| `formatter` | ✅ |  | Accepted at the top level, not used as config yet. |
+| `disabled_providers` | ✅ |  | Accepted at the top level, not applied yet. |
+| `enabled_providers` | ✅ |  | Accepted at the top level, not applied yet. |
+| `keybinds` | ✅ | ❌ | Ignored because crabcode does not use OpenCode keybind config. |
+| `share` | ✅ | ❌ | Ignored. |
+| `tui` | ✅ | ❌ | Ignored. crabcode owns its terminal UI. |
+| `server` | ✅ | ❌ | Ignored. |
+| `plugin` | ✅ | ❌ | Ignored. |
+| custom tools (`tool`, `custom_tools`, `customTools`) | ✅ | ❌ | Ignored. |
+
+## Use the OpenCode docs
+
+| Topic | Reference |
+| --- | --- |
+| Config shape | [OpenCode config](https://opencode.ai/docs/config/) |
+| Commands | [OpenCode commands](https://opencode.ai/docs/commands/) |
+| Rules | [OpenCode rules](https://opencode.ai/docs/rules/) |
+| Agents | [OpenCode agents](https://opencode.ai/docs/agents/) |
+| MCP | [OpenCode MCP servers](https://opencode.ai/docs/mcp/) |
+| Themes | [OpenCode themes](https://opencode.ai/docs/themes/) |

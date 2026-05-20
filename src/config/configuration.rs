@@ -125,6 +125,7 @@ pub struct ConfigDiagnostics {
 pub struct ConfigInventory {
     pub opencode_agents: Vec<PathBuf>,
     pub opencode_skills_dirs: Vec<PathBuf>,
+    pub command_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,6 +181,7 @@ pub struct MergedConfig {
     pub theme: Option<String>,
     pub model: Option<String>,
     pub default_agent: Option<String>,
+    pub commands: Vec<crate::command::custom::CustomCommand>,
     pub agent_tool_policies: HashMap<String, Vec<String>>,
     pub agent_steps: HashMap<String, usize>,
     pub provider_timeouts: HashMap<String, ProviderTimeout>,
@@ -221,7 +223,7 @@ impl ConfigLoader {
         let mut provenance: HashMap<String, PathBuf> = HashMap::new();
         provenance.insert("".to_string(), cwd.clone());
 
-        for source in sources {
+        for source in &sources {
             let parsed = match load_config_value(&source.path) {
                 Ok(v) => v,
                 Err(e) => {
@@ -252,7 +254,15 @@ impl ConfigLoader {
 
         substitute_placeholders(&mut merged, &provenance, &mut diagnostics);
 
-        let merged_config = parse_merged_config(&merged, &mut diagnostics);
+        let commands = load_custom_commands(
+            &sources,
+            &xdg_config_home,
+            &project_root,
+            &mut inventory,
+            &mut diagnostics,
+        );
+        let mut merged_config = parse_merged_config(&merged, &mut diagnostics);
+        merged_config.commands = commands;
         diagnostics.unimplemented_keys = collect_unimplemented_keys(&merged);
 
         Ok(LoadedConfig {
@@ -354,6 +364,131 @@ fn discover_opencode_inventory(
         ));
     }
     inventory.opencode_skills_dirs = skills_dirs;
+}
+
+fn load_custom_commands(
+    sources: &[SourceFile],
+    xdg_config_home: &Path,
+    project_root: &Path,
+    inventory: &mut ConfigInventory,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Vec<crate::command::custom::CustomCommand> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut commands = Vec::new();
+    let mut command_by_name: HashMap<String, usize> = HashMap::new();
+
+    for layer in command_layers(xdg_config_home, project_root, &home) {
+        if let Some(source) = sources.iter().find(|source| source.label == layer.label) {
+            merge_config_commands(
+                source,
+                project_root,
+                &mut commands,
+                &mut command_by_name,
+                diagnostics,
+            );
+        }
+
+        for dir in layer.dirs {
+            let discovered = crate::command::custom::commands_from_directory(
+                &dir,
+                project_root,
+                &mut diagnostics.warnings,
+            );
+            for command in discovered {
+                if let crate::command::custom::CustomCommandSource::File(path) = &command.source {
+                    inventory.command_files.push(path.clone());
+                }
+                upsert_custom_command(&mut commands, &mut command_by_name, command);
+            }
+        }
+    }
+
+    inventory.command_files.sort();
+    inventory.command_files.dedup();
+
+    if !commands.is_empty() {
+        diagnostics
+            .info
+            .push(format!("Discovered {} custom commands", commands.len()));
+    }
+
+    commands
+}
+
+struct CommandLayer {
+    label: &'static str,
+    dirs: Vec<PathBuf>,
+}
+
+fn command_layers(xdg_config_home: &Path, project_root: &Path, home: &Path) -> Vec<CommandLayer> {
+    vec![
+        CommandLayer {
+            label: "OpenCode global",
+            dirs: vec![xdg_config_home.join("opencode"), home.join(".opencode")],
+        },
+        CommandLayer {
+            label: "Crabcode global",
+            dirs: vec![xdg_config_home.join("crabcode"), home.join(".crabcode")],
+        },
+        CommandLayer {
+            label: "OpenCode local",
+            dirs: vec![project_root.join(".opencode")],
+        },
+        CommandLayer {
+            label: "Crabcode local",
+            dirs: vec![project_root.join(".crabcode")],
+        },
+    ]
+}
+
+fn merge_config_commands(
+    source: &SourceFile,
+    project_root: &Path,
+    commands: &mut Vec<crate::command::custom::CustomCommand>,
+    command_by_name: &mut HashMap<String, usize>,
+    diagnostics: &mut ConfigDiagnostics,
+) {
+    let parsed = match load_config_value(&source.path) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let filtered = filter_top_level(parsed, source.kind);
+    let Some(mut command_value) = filtered.get("command").cloned() else {
+        return;
+    };
+
+    let base_dir = source
+        .path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let mut provenance = HashMap::new();
+    provenance.insert("".to_string(), base_dir);
+    substitute_placeholders(&mut command_value, &provenance, diagnostics);
+
+    let parsed_commands = crate::command::custom::commands_from_config_value(
+        &command_value,
+        &source.path,
+        project_root,
+        &mut diagnostics.warnings,
+    );
+    for command in parsed_commands {
+        upsert_custom_command(commands, command_by_name, command);
+    }
+}
+
+fn upsert_custom_command(
+    commands: &mut Vec<crate::command::custom::CustomCommand>,
+    command_by_name: &mut HashMap<String, usize>,
+    command: crate::command::custom::CustomCommand,
+) {
+    if let Some(idx) = command_by_name.get(&command.name).copied() {
+        commands[idx] = command;
+    } else {
+        let idx = commands.len();
+        command_by_name.insert(command.name.clone(), idx);
+        commands.push(command);
+    }
 }
 
 fn list_md_files(dir: &Path) -> Vec<PathBuf> {
@@ -1062,6 +1197,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "model",
         "sounds",
         "default_agent",
+        "command",
         "agent",
         "provider",
     ]

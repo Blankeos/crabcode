@@ -485,6 +485,9 @@ pub fn handle_skill_command<'a>(
 pub fn register_skill_commands(registry: &mut Registry) {
     if let Some(store) = crate::skill::get_skill_store() {
         for skill in store.all() {
+            if registry.has_public_command(&skill.name) {
+                continue;
+            }
             registry.register(Command {
                 name: skill.name.clone(),
                 description: skill.description.clone().unwrap_or_default(),
