@@ -273,7 +273,7 @@ impl Provider for OpenAI {
             .filter_map(|ev| match ev {
                 Ok(event) => futures::future::ready(response_sse_data_to_chunk(&event.data)),
                 Err(e) => {
-                    let err = format!("SSE error: {}", e);
+                    let err = format!("SSE error: {}; debug={:?}", e, e);
                     futures::future::ready(Some(Ok(ChunkType::Failed(err))))
                 }
             })

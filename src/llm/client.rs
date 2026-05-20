@@ -80,6 +80,91 @@ enum StreamRelayOutcome {
     Exhausted,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct StreamLogContext<'a> {
+    phase: &'a str,
+    provider_name: &'a str,
+    provider_kind: ProviderKind,
+    base_url: &'a str,
+    model_name: &'a str,
+    message_count: usize,
+    tool_count: usize,
+    agent_max_steps: Option<usize>,
+}
+
+impl<'a> StreamLogContext<'a> {
+    fn new(
+        phase: &'a str,
+        config: &'a ProviderRequestConfig,
+        message_count: usize,
+        tool_count: usize,
+        agent_max_steps: Option<usize>,
+    ) -> Self {
+        Self {
+            phase,
+            provider_name: &config.provider_name,
+            provider_kind: config.kind,
+            base_url: &config.base_url,
+            model_name: &config.model_name,
+            message_count,
+            tool_count,
+            agent_max_steps,
+        }
+    }
+
+    fn describe(self) -> String {
+        format!(
+            "phase={} provider={} provider_kind={:?} base_url={} model={} messages={} tools={} agent_max_steps={:?}",
+            self.phase,
+            self.provider_name,
+            self.provider_kind,
+            self.base_url,
+            self.model_name,
+            self.message_count,
+            self.tool_count,
+            self.agent_max_steps,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RelayStats {
+    start_chunks: usize,
+    text_chunks: usize,
+    reasoning_chunks: usize,
+    tool_call_chunks: usize,
+    incomplete_chunks: usize,
+    not_supported_chunks: usize,
+    text_chars: usize,
+    reasoning_chars: usize,
+    tool_call_bytes: usize,
+    last_chunk: Option<&'static str>,
+}
+
+impl RelayStats {
+    fn describe(&self) -> String {
+        format!(
+            "chunks[start={}, text={} text_chars={}, reasoning={} reasoning_chars={}, tool_calls={} tool_call_bytes={}, incomplete={}, not_supported={}, last={}]",
+            self.start_chunks,
+            self.text_chunks,
+            self.text_chars,
+            self.reasoning_chunks,
+            self.reasoning_chars,
+            self.tool_call_chunks,
+            self.tool_call_bytes,
+            self.incomplete_chunks,
+            self.not_supported_chunks,
+            self.last_chunk.unwrap_or("none"),
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StreamRelayResult {
+    outcome: StreamRelayOutcome,
+    stats: RelayStats,
+}
+
 pub async fn stream_llm_with_cancellation(
     cancel_token: CancellationToken,
     session_id: String,
@@ -126,6 +211,17 @@ pub async fn stream_llm_with_cancellation(
     )
     .await;
 
+    let message_count = aisdk_messages.len();
+    let tool_count = aisdk_tools.len();
+    let primary_log_context = StreamLogContext::new(
+        "primary",
+        &request_config,
+        message_count,
+        tool_count,
+        agent_max_steps,
+    );
+    log_stream_request(primary_log_context, &request_config);
+
     let mut response = stream_provider_request(
         &request_config,
         aisdk_messages,
@@ -137,19 +233,50 @@ pub async fn stream_llm_with_cancellation(
     let start_time = Instant::now();
     let mut token_count: usize = 0;
 
-    let stream_outcome = relay_stream_to_sender(
+    let relay_result = match relay_stream_to_sender(
         &mut response.stream,
         &cancel_token,
         &sender,
         &mut token_count,
         &start_time,
+        primary_log_context,
     )
-    .await?;
+    .await
+    .map_err(|err| err.to_string())
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let stop_reason = response.stop_reason().await;
+            log_stream_summary(
+                primary_log_context,
+                "Error",
+                stop_reason.as_ref(),
+                token_count,
+                start_time.elapsed().as_millis(),
+                None,
+                Some(&error),
+            );
+            return Err(anyhow::anyhow!(error).into());
+        }
+    };
 
     let stop_reason = response.stop_reason().await;
+    let stream_outcome = relay_result.outcome;
     let _ = log(&format!(
         "Stream completed: outcome={stream_outcome:?}, stop_reason={stop_reason:?}, agent_max_steps={agent_max_steps:?}",
     ));
+    log_stream_summary(
+        primary_log_context,
+        match stream_outcome {
+            StreamRelayOutcome::Ended => "Ended",
+            StreamRelayOutcome::Exhausted => "Exhausted",
+        },
+        stop_reason.as_ref(),
+        token_count,
+        start_time.elapsed().as_millis(),
+        Some(&relay_result.stats),
+        None,
+    );
 
     if stream_outcome == StreamRelayOutcome::Ended {
         return Ok(());
@@ -167,18 +294,59 @@ pub async fn stream_llm_with_cancellation(
 
     let mut follow_up_messages = response.messages().await;
     follow_up_messages.push(AisdkMessage::assistant(MAX_STEPS_REACHED_PROMPT));
+    let summary_message_count = follow_up_messages.len();
+    let summary_log_context = StreamLogContext::new(
+        "max_steps_summary",
+        &request_config,
+        summary_message_count,
+        0,
+        None,
+    );
+    log_stream_request(summary_log_context, &request_config);
 
     let mut summary_response =
         stream_provider_request(&request_config, follow_up_messages, Vec::new(), None).await?;
 
-    let _ = relay_stream_to_sender(
+    match relay_stream_to_sender(
         &mut summary_response.stream,
         &cancel_token,
         &sender,
         &mut token_count,
         &start_time,
+        summary_log_context,
     )
-    .await?;
+    .await
+    .map_err(|err| err.to_string())
+    {
+        Ok(result) => {
+            let stop_reason = summary_response.stop_reason().await;
+            log_stream_summary(
+                summary_log_context,
+                match result.outcome {
+                    StreamRelayOutcome::Ended => "Ended",
+                    StreamRelayOutcome::Exhausted => "Exhausted",
+                },
+                stop_reason.as_ref(),
+                token_count,
+                start_time.elapsed().as_millis(),
+                Some(&result.stats),
+                None,
+            );
+        }
+        Err(error) => {
+            let stop_reason = summary_response.stop_reason().await;
+            log_stream_summary(
+                summary_log_context,
+                "Error",
+                stop_reason.as_ref(),
+                token_count,
+                start_time.elapsed().as_millis(),
+                None,
+                Some(&error),
+            );
+            return Err(anyhow::anyhow!(error).into());
+        }
+    }
 
     Ok(())
 }
@@ -500,18 +668,89 @@ fn openai_request_instructions(
     (!parts.is_empty()).then(|| parts.join("\n\n---\n\n"))
 }
 
+fn log_stream_request(context: StreamLogContext<'_>, config: &ProviderRequestConfig) {
+    let reasoning_effort = config
+        .reasoning_effort
+        .map(|effort| effort.as_str())
+        .unwrap_or("none");
+    let mut header_names = config
+        .openai_options
+        .additional_headers
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    header_names.sort_unstable();
+    let _ = log(&format!(
+        "[STREAM_REQUEST] {} reasoning_effort={} responses_path={:?} force_store_false={} disallow_system_messages={} force_tool_strict_false={} extra_header_names=[{}]",
+        context.describe(),
+        reasoning_effort,
+        config.openai_options.response_path,
+        config.openai_options.force_store_false,
+        config.openai_options.disallow_system_messages,
+        config.openai_options.force_tool_strict_false,
+        header_names.join(","),
+    ));
+}
+
+fn log_stream_summary(
+    context: StreamLogContext<'_>,
+    relay_result: &str,
+    stop_reason: Option<&StopReason>,
+    token_count: usize,
+    elapsed_ms: u128,
+    stats: Option<&RelayStats>,
+    error: Option<&str>,
+) {
+    let stats = stats
+        .map(RelayStats::describe)
+        .unwrap_or_else(|| "chunks=unavailable".to_string());
+    let error = error
+        .map(|err| format!(" error={}", err))
+        .unwrap_or_default();
+    let _ = log(&format!(
+        "[STREAM_SUMMARY] {} relay_result={} stop_reason={:?} token_estimate={} elapsed_ms={} {}{}",
+        context.describe(),
+        relay_result,
+        stop_reason,
+        token_count,
+        elapsed_ms,
+        stats,
+        error,
+    ));
+}
+
+fn is_sse_transport_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("sse error")
+        && (lower.contains("transport")
+            || lower.contains("decoding response body")
+            || lower.contains("body"))
+}
+
 async fn relay_stream_to_sender(
     stream: &mut LanguageModelStream,
     cancel_token: &CancellationToken,
     sender: &crate::llm::ChunkSender,
     token_count: &mut usize,
     start_time: &Instant,
-) -> Result<StreamRelayOutcome, DynError> {
-    let _ = log("[RELAY] relay_stream_to_sender started");
+    context: StreamLogContext<'_>,
+) -> Result<StreamRelayResult, DynError> {
+    let mut stats = RelayStats::default();
+    let _ = log(&format!(
+        "[RELAY] relay_stream_to_sender started {}",
+        context.describe()
+    ));
     loop {
         let chunk = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
+                let _ = log(&format!(
+                    "[STREAM_CANCELLED] {} elapsed_ms={} token_estimate={} {}",
+                    context.describe(),
+                    start_time.elapsed().as_millis(),
+                    *token_count,
+                    stats.describe(),
+                ));
                 return Err(anyhow::anyhow!("Streaming cancelled by user").into());
             }
             chunk = stream.next() => chunk,
@@ -524,11 +763,17 @@ async fn relay_stream_to_sender(
 
         match chunk {
             ChunkType::Text(text) => {
+                stats.text_chunks += 1;
+                stats.text_chars += text.len();
+                stats.last_chunk = Some("Text");
                 *token_count += estimate_tokens(&text);
                 let _ = log(&format!("[RELAY] Text chunk ({} chars)", text.len()));
                 let _ = sender.send(crate::llm::ChunkMessage::Text(text));
             }
             ChunkType::Reasoning(reasoning) => {
+                stats.reasoning_chunks += 1;
+                stats.reasoning_chars += reasoning.len();
+                stats.last_chunk = Some("Reasoning");
                 *token_count += estimate_tokens(&reasoning);
                 let _ = log(&format!(
                     "[RELAY] Reasoning chunk ({} chars)",
@@ -537,6 +782,9 @@ async fn relay_stream_to_sender(
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
             ChunkType::ToolCall(tool_call) => {
+                stats.tool_call_chunks += 1;
+                stats.tool_call_bytes += tool_call.len();
+                stats.last_chunk = Some("ToolCall");
                 let names = serde_json::from_str::<serde_json::Value>(&tool_call)
                     .ok()
                     .and_then(|value| {
@@ -561,6 +809,7 @@ async fn relay_stream_to_sender(
                 ));
             }
             ChunkType::End(_msg) => {
+                stats.last_chunk = Some("End");
                 let _ = log("[RELAY] End chunk — returning Ended");
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 let _ = sender.send(crate::llm::ChunkMessage::Metrics {
@@ -568,23 +817,56 @@ async fn relay_stream_to_sender(
                     duration_ms,
                 });
                 let _ = sender.send(crate::llm::ChunkMessage::End);
-                return Ok(StreamRelayOutcome::Ended);
+                return Ok(StreamRelayResult {
+                    outcome: StreamRelayOutcome::Ended,
+                    stats,
+                });
             }
             ChunkType::Start => {
+                stats.start_chunks += 1;
+                stats.last_chunk = Some("Start");
                 let _ = log("[RELAY] Start chunk received");
             }
             ChunkType::Failed(err) => {
+                stats.last_chunk = Some("Failed");
                 let _ = sender.send(crate::llm::ChunkMessage::Failed(err.clone()));
                 let _ = log(&format!("Stream Chunk Failed {}", err));
+                let _ = log(&format!(
+                    "[STREAM_ERROR] {} elapsed_ms={} token_estimate={} {} error={}",
+                    context.describe(),
+                    start_time.elapsed().as_millis(),
+                    *token_count,
+                    stats.describe(),
+                    err,
+                ));
+                if is_sse_transport_error(&err) {
+                    let _ = log("[STREAM_ERROR_HINT] SSE transport/body decode failure. This happened below the model layer while reading the response stream; if it repeats, compare network/proxy/VPN state and provider status with the request context above.");
+                }
                 return Err(anyhow::anyhow!("Streaming failed: {}", err).into());
             }
-            ChunkType::Incomplete(_msg) => {}
-            ChunkType::NotSupported(_msg) => {}
+            ChunkType::Incomplete(msg) => {
+                stats.incomplete_chunks += 1;
+                stats.last_chunk = Some("Incomplete");
+                let _ = log(&format!("[RELAY] Incomplete chunk received: {}", msg));
+            }
+            ChunkType::NotSupported(msg) => {
+                stats.not_supported_chunks += 1;
+                stats.last_chunk = Some("NotSupported");
+                let _ = log(&format!("[RELAY] NotSupported chunk received: {}", msg));
+            }
         }
     }
 
-    let _ = log("[RELAY] stream exhausted — returning Exhausted");
-    Ok(StreamRelayOutcome::Exhausted)
+    let _ = log(&format!(
+        "[RELAY] stream exhausted — returning Exhausted {} token_estimate={} {}",
+        context.describe(),
+        *token_count,
+        stats.describe(),
+    ));
+    Ok(StreamRelayResult {
+        outcome: StreamRelayOutcome::Exhausted,
+        stats,
+    })
 }
 
 async fn reached_step_limit(agent_max_steps: Option<usize>, response: &StreamTextResponse) -> bool {
