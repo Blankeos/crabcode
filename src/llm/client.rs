@@ -679,16 +679,17 @@ fn tool_message_observation(content: &str) -> String {
 }
 
 fn is_openai_oauth_model_allowed(model: &str) -> bool {
-    matches!(
-        model,
-        "gpt-5.1-codex-max"
-            | "gpt-5.1-codex-mini"
-            | "gpt-5.2"
-            | "gpt-5.2-codex"
-            | "gpt-5.3-codex"
-            | "gpt-5.1-codex"
-            | "codex-mini-latest"
-    ) || model.contains("codex")
+    let model = model.trim().to_ascii_lowercase();
+    model.contains("codex") || is_openai_oauth_gpt5_model(&model)
+}
+
+fn is_openai_oauth_gpt5_model(model: &str) -> bool {
+    let model = model.strip_prefix("openai/").unwrap_or(model);
+    if model.contains("-chat") {
+        return false;
+    }
+
+    model == "gpt-5" || model.starts_with("gpt-5.") || model.starts_with("gpt-5-")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -733,7 +734,10 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{openai_request_instructions, AisdkMessage, OpenAIRequestOptions};
+    use super::{
+        is_openai_oauth_model_allowed, openai_request_instructions, AisdkMessage,
+        OpenAIRequestOptions,
+    };
 
     #[test]
     fn openai_oauth_instructions_preserve_stripped_system_prompt() {
@@ -767,5 +771,24 @@ mod tests {
             openai_request_instructions(&options, &messages).as_deref(),
             Some("base codex instructions")
         );
+    }
+
+    #[test]
+    fn openai_oauth_allows_versioned_gpt5_models() {
+        assert!(is_openai_oauth_model_allowed("gpt-5.4"));
+        assert!(is_openai_oauth_model_allowed("gpt-5.5"));
+        assert!(is_openai_oauth_model_allowed("openai/gpt-5.6"));
+    }
+
+    #[test]
+    fn openai_oauth_allows_codex_named_models() {
+        assert!(is_openai_oauth_model_allowed("gpt-5.3-codex"));
+        assert!(is_openai_oauth_model_allowed("codex-mini-latest"));
+    }
+
+    #[test]
+    fn openai_oauth_rejects_known_non_codex_chat_models() {
+        assert!(!is_openai_oauth_model_allowed("gpt-5-chat-latest"));
+        assert!(!is_openai_oauth_model_allowed("gpt-4o"));
     }
 }
