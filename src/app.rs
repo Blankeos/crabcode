@@ -4390,14 +4390,44 @@ impl App {
     }
 
     fn finish_streaming_session(&mut self, session_id: &str) {
-        let Some((start, model, provider)) = self.streaming_boundary_for_session(session_id) else {
+        let Some(completion_stats) = self.finalize_and_persist_streamed_messages(session_id, None)
+        else {
             return;
         };
 
+        let _ = self.session_manager.set_session_status(
+            session_id,
+            crate::session::types::SessionStatus::Idle,
+            None,
+        );
+
+        if !self.is_active_session(session_id) {
+            if let Some(state) = self.session_view_states.get_mut(session_id) {
+                state.unread_completed = true;
+            }
+        }
+
+        self.cleanup_streaming_for_session(session_id);
+        self.play_sound_event_with_notification_detail(
+            crate::sound::SoundEvent::Complete,
+            completion_stats.as_deref(),
+        );
+    }
+
+    fn finalize_and_persist_streamed_messages(
+        &mut self,
+        session_id: &str,
+        terminal_error: Option<&str>,
+    ) -> Option<Option<String>> {
+        let (start, model, provider) = self.streaming_boundary_for_session(session_id)?;
         let mut messages_to_persist = Vec::new();
         let completion_stats = if let Some(chat) = self.chat_for_session_mut(session_id) {
             chat.mark_streaming_end();
             chat.finalize_streaming_metrics();
+
+            if let Some(error) = terminal_error {
+                Self::mark_running_tool_messages_failed(chat, start, error);
+            }
 
             for msg in chat.messages.iter_mut().skip(start) {
                 match msg.role {
@@ -4426,35 +4456,42 @@ impl App {
             let _ = self.session_manager.add_message_to_session(session_id, msg);
         }
 
-        let _ = self.session_manager.set_session_status(
-            session_id,
-            crate::session::types::SessionStatus::Idle,
-            None,
-        );
+        Some(completion_stats)
+    }
 
-        if !self.is_active_session(session_id) {
-            if let Some(state) = self.session_view_states.get_mut(session_id) {
-                state.unread_completed = true;
+    fn mark_running_tool_messages_failed(chat: &mut Chat, start: usize, error: &str) {
+        for msg in chat.messages.iter_mut().skip(start) {
+            if msg.role != crate::session::types::MessageRole::Tool {
+                continue;
             }
-        }
 
-        self.cleanup_streaming_for_session(session_id);
-        self.play_sound_event_with_notification_detail(
-            crate::sound::SoundEvent::Complete,
-            completion_stats.as_deref(),
-        );
+            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&msg.content) else {
+                continue;
+            };
+
+            let is_running = value
+                .get("status")
+                .and_then(|status| status.as_str())
+                .map(|status| status == "running")
+                .unwrap_or(true);
+
+            if !is_running {
+                continue;
+            }
+
+            value["status"] = serde_json::Value::String("error".to_string());
+            value["title"] = serde_json::Value::String("Tool failed".to_string());
+            value["output_preview"] = serde_json::Value::String(error.to_string());
+            msg.content = value.to_string();
+        }
     }
 
     fn fail_streaming_session(&mut self, session_id: &str, error: String) {
-        let start = self
-            .streaming_boundary_for_session(session_id)
-            .map(|(start, _, _)| start)
-            .unwrap_or(0);
-
-        if let Some(chat) = self.chat_for_session_mut(session_id) {
-            chat.mark_streaming_end();
-            chat.finalize_streaming_metrics();
-            chat.truncate_messages(start);
+        if self
+            .finalize_and_persist_streamed_messages(session_id, Some(&error))
+            .is_none()
+        {
+            return;
         }
 
         let _ = self.session_manager.set_session_status(
@@ -4640,8 +4677,8 @@ impl App {
 
         self.is_streaming = true;
 
-        // Track the message boundary for this streaming turn so we can cleanly
-        // roll back assistant/tool messages on failure or cancellation.
+        // Track the message boundary for this streaming turn so terminal paths
+        // can persist or roll back only the assistant/tool messages from this turn.
         let chat_len_before_assistant = self.chat_state.chat.messages.len();
 
         // Capture the current model and provider at the start of streaming
@@ -5170,6 +5207,84 @@ mod tests {
 
         assert!(!App::can_submit_input(&input_type, true));
         assert!(App::can_submit_input(&input_type, false));
+    }
+
+    #[test]
+    fn failed_stream_persists_partial_messages() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Failure".to_string()));
+
+        let user_message = crate::session::types::Message::user("Prompt");
+        app.chat_state.chat.add_message(user_message.clone());
+        app.session_manager
+            .add_message_to_current_session(&user_message)
+            .unwrap();
+
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete(
+                "I'll inspect that file.",
+            ));
+        app.chat_state.chat.begin_streaming_turn();
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::tool(
+                serde_json::json!({
+                    "id": "call_1",
+                    "name": "read",
+                    "status": "running",
+                    "args": { "path": "/private/file" },
+                })
+                .to_string(),
+            ));
+
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream = Some(SessionStreamState {
+            chunk_receiver: receiver,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            streaming_model: Some("test-model".to_string()),
+            streaming_provider: Some("test-provider".to_string()),
+            chat_len_before_assistant: 1,
+        });
+        app.is_streaming = true;
+
+        app.fail_streaming_session(&session_id, "Permission denied by user".to_string());
+
+        assert_eq!(app.chat_state.chat.messages.len(), 3);
+
+        let session_messages = &app
+            .session_manager
+            .get_session_ref(&session_id)
+            .unwrap()
+            .messages;
+        assert_eq!(session_messages.len(), 3);
+        assert_eq!(
+            session_messages[1].role,
+            crate::session::types::MessageRole::Assistant
+        );
+        assert!(session_messages[1].is_complete);
+        assert_eq!(session_messages[1].model.as_deref(), Some("test-model"));
+        assert_eq!(
+            session_messages[1].provider.as_deref(),
+            Some("test-provider")
+        );
+
+        let tool_payload: serde_json::Value =
+            serde_json::from_str(&session_messages[2].content).unwrap();
+        assert_eq!(tool_payload["status"], "error");
+        assert_eq!(tool_payload["output_preview"], "Permission denied by user");
+
+        app.fail_streaming_session(&session_id, "duplicate terminal chunk".to_string());
+
+        assert_eq!(app.chat_state.chat.messages.len(), 3);
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .unwrap()
+                .messages
+                .len(),
+            3
+        );
     }
 
     #[test]
