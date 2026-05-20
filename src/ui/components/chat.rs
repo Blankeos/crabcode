@@ -1440,20 +1440,16 @@ impl Chat {
                 None
             }
         });
+        let visible_highlight_range =
+            trim_trailing_blank_highlight_lines(highlight_range, all_lines);
 
         let mut content_lines: Vec<Line<'static>> = all_lines[visible_start..visible_end].to_vec();
-
-        if let Some((start, end)) = highlight_range {
-            let hl_fg = contrast_text(colors.interactive);
-            for (line_idx, line) in content_lines.iter_mut().enumerate() {
-                let global_idx = visible_start + line_idx;
-                if global_idx >= start && global_idx < end {
-                    for span in line.spans.iter_mut() {
-                        span.style = span.style.fg(hl_fg);
-                    }
-                }
-            }
-        }
+        apply_timeline_highlight_to_lines(
+            &mut content_lines,
+            visible_highlight_range,
+            visible_start,
+            colors.interactive,
+        );
 
         let render_area = Rect {
             x: content_area.x,
@@ -1462,8 +1458,18 @@ impl Chat {
             height: content_area.height,
         };
 
-        // Render timeline highlight as a full-width background overlay
-        if let Some((start, end)) = highlight_range {
+        render_line_backgrounds(
+            f,
+            render_area,
+            all_lines,
+            clamped_scroll,
+            render_area.height as usize,
+            colors.background_element,
+        );
+
+        // Render timeline highlight after panel backgrounds so every selected
+        // message has a visible full-width band.
+        if let Some((start, end)) = visible_highlight_range {
             let vis_start = start.max(clamped_scroll);
             let vis_end = end.min(clamped_scroll.saturating_add(viewport));
 
@@ -1471,7 +1477,7 @@ impl Chat {
                 let y = content_area
                     .y
                     .saturating_add((vis_start - clamped_scroll) as u16);
-                let height = (vis_end - vis_start).saturating_sub(1) as u16;
+                let height = (vis_end - vis_start) as u16;
                 if height > 0 {
                     let hl_area = Rect {
                         x: content_area.x,
@@ -1484,15 +1490,6 @@ impl Chat {
                 }
             }
         }
-
-        render_line_backgrounds(
-            f,
-            render_area,
-            all_lines,
-            clamped_scroll,
-            render_area.height as usize,
-            colors.background_element,
-        );
 
         let content_lines = crate::ui::selection::apply_selection_to_lines_with_offset(
             content_lines,
@@ -2895,6 +2892,48 @@ fn render_line_backgrounds(
     if let Some(start) = run_start {
         render_background_run(f, area, scroll_offset, start, visible_end, bg);
     }
+}
+
+fn apply_timeline_highlight_to_lines(
+    lines: &mut [Line<'static>],
+    highlight_range: Option<(usize, usize)>,
+    visible_start: usize,
+    bg: Color,
+) {
+    let Some((start, end)) = highlight_range else {
+        return;
+    };
+
+    let fg = contrast_text(bg);
+    let highlight_style = Style::default().fg(fg).bg(bg);
+
+    for (line_idx, line) in lines.iter_mut().enumerate() {
+        let global_idx = visible_start + line_idx;
+        if global_idx < start || global_idx >= end {
+            continue;
+        }
+
+        line.style = line.style.patch(highlight_style);
+        for span in line.spans.iter_mut() {
+            span.style = span.style.fg(fg).bg(bg);
+        }
+    }
+}
+
+fn trim_trailing_blank_highlight_lines(
+    highlight_range: Option<(usize, usize)>,
+    lines: &[Line<'_>],
+) -> Option<(usize, usize)> {
+    let (start, mut end) = highlight_range?;
+    while end > start && line_is_blank(&lines[end - 1]) {
+        end -= 1;
+    }
+
+    (end > start).then_some((start, end))
+}
+
+fn line_is_blank(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|span| span.content.trim().is_empty())
 }
 
 fn render_background_run(

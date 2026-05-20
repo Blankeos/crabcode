@@ -266,7 +266,7 @@ pub fn handle_models<'a>(
                             let tip = if is_active {
                                 Some("Active".to_string())
                             } else if is_favorite {
-                                Some("♥︎ Favorite".to_string())
+                                Some("❤︎".to_string())
                             } else {
                                 None
                             };

@@ -11,7 +11,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::{
     prelude::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph, ScrollbarState},
     Frame,
@@ -915,19 +915,28 @@ impl Dialog {
             .as_ref()
             .map(|tip| Self::truncate_to_width(tip, width));
         let tip_width = tip.as_ref().map(|tip| tip.width()).unwrap_or(0);
+        let right_padding = tip
+            .as_deref()
+            .filter(|tip| *tip == "❤︎" && width > tip_width)
+            .map(|_| 1usize)
+            .unwrap_or(0);
         let minimum_gap = if tip_width > 0 && width > tip_width {
             1
         } else {
             0
         };
-        let left_budget = width.saturating_sub(tip_width + minimum_gap);
+        let left_budget = width.saturating_sub(tip_width + minimum_gap + right_padding);
         let (mut spans, left_width) = Self::left_item_spans_for_width(item, left_budget, colors);
 
         if let Some(tip) = tip {
-            let padding_len = width.saturating_sub(left_width + tip_width);
+            let padding_len = width.saturating_sub(left_width + tip_width + right_padding);
             spans.push(Span::raw(" ".repeat(padding_len)));
 
-            let tip_style = if has_description {
+            let tip_style = if tip == "❤︎" {
+                Style::default()
+                    .fg(Color::Rgb(255, 105, 180))
+                    .add_modifier(Modifier::BOLD)
+            } else if has_description {
                 Style::default()
                     .fg(colors.text)
                     .add_modifier(Modifier::BOLD)
@@ -937,6 +946,9 @@ impl Dialog {
                     .add_modifier(Modifier::DIM)
             };
             spans.push(Span::styled(tip, tip_style));
+            if right_padding > 0 {
+                spans.push(Span::raw(" ".repeat(right_padding)));
+            }
         } else {
             spans.push(Span::raw(" ".repeat(width.saturating_sub(left_width))));
         }
