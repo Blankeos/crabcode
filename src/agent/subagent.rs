@@ -174,11 +174,15 @@ pub async fn run_subagent(
 
     let mut response: StreamTextResponse = match session.provider_kind {
         ProviderKind::OpenAICompatible => {
-            let provider = OpenAICompatible::builder()
+            let mut builder = OpenAICompatible::builder()
                 .base_url(&session.base_url)
                 .model_name(&session.model)
                 .provider_name(&session.provider_name)
-                .api_key(session.api_key.as_deref().unwrap_or(""))
+                .api_key(session.api_key.as_deref().unwrap_or(""));
+            if let Some(effort) = session.reasoning_effort {
+                builder = builder.reasoning_effort(effort.as_str());
+            }
+            let provider = builder
                 .build()
                 .map_err(|e| format!("Failed to build OpenAICompatible provider: {}", e))?;
 
@@ -187,11 +191,15 @@ pub async fn run_subagent(
                 .map_err(|e| format!("Stream error: {}", e))?
         }
         ProviderKind::Anthropic => {
-            let provider = Anthropic::builder()
+            let mut builder = Anthropic::builder()
                 .base_url(&session.base_url)
                 .model_name(&session.model)
                 .provider_name(&session.provider_name)
-                .api_key(session.api_key.as_deref().unwrap_or(""))
+                .api_key(session.api_key.as_deref().unwrap_or(""));
+            if let Some(effort) = session.reasoning_effort {
+                builder = builder.reasoning_effort(effort.as_str());
+            }
+            let provider = builder
                 .build()
                 .map_err(|e| format!("Failed to build Anthropic provider: {}", e))?;
 
@@ -200,11 +208,15 @@ pub async fn run_subagent(
                 .map_err(|e| format!("Stream error: {}", e))?
         }
         ProviderKind::OpenAI => {
-            let provider = OpenAI::builder()
+            let mut builder = OpenAI::builder()
                 .base_url(&session.base_url)
                 .model_name(&session.model)
                 .provider_name(&session.provider_name)
-                .api_key(session.api_key.as_deref().unwrap_or(""))
+                .api_key(session.api_key.as_deref().unwrap_or(""));
+            if let Some(effort) = session.reasoning_effort {
+                builder = builder.reasoning_effort(effort.as_str());
+            }
+            let provider = builder
                 .build()
                 .map_err(|e| format!("Failed to build OpenAI provider: {}", e))?;
 

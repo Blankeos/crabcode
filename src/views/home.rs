@@ -75,6 +75,7 @@ pub fn render_home(
     agent: String,
     model: String,
     provider_name: String,
+    reasoning_effort: Option<String>,
     colors: &ThemeColors,
     usage_text: &str,
 ) {
@@ -196,7 +197,15 @@ pub fn render_home(
         f.render_widget(mascot, stack[0]);
         f.render_widget(logo, stack[2]);
     }
-    input.render(f, home_chunks[1], &agent, &model, &provider_name, colors);
+    input.render(
+        f,
+        home_chunks[1],
+        &agent,
+        &model,
+        &provider_name,
+        reasoning_effort.as_deref(),
+        colors,
+    );
 
     let help_text = vec![
         Span::styled("/", Style::default().fg(colors.info)),

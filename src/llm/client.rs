@@ -49,6 +49,7 @@ struct ProviderRequestConfig {
     base_url: String,
     model_name: String,
     api_key: Option<String>,
+    reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     openai_options: OpenAIRequestOptions,
 }
 
@@ -59,6 +60,7 @@ impl ProviderRequestConfig {
         base_url: String,
         model_name: String,
         api_key: Option<String>,
+        reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     ) -> Self {
         Self {
             kind,
@@ -66,6 +68,7 @@ impl ProviderRequestConfig {
             base_url,
             model_name,
             api_key,
+            reasoning_effort,
             openai_options: OpenAIRequestOptions::default(),
         }
     }
@@ -82,6 +85,7 @@ pub async fn stream_llm_with_cancellation(
     session_id: String,
     provider_name: String,
     model: String,
+    reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     agent_mode: String,
     agent_max_steps: Option<usize>,
     tool_permissions: crate::tools::ToolPermissions,
@@ -89,7 +93,8 @@ pub async fn stream_llm_with_cancellation(
     sender: crate::llm::ChunkSender,
 ) -> Result<(), DynError> {
     let _ = log("GOING TO STREAM");
-    let request_config = prepare_request_config(&provider_name, model, &sender).await?;
+    let request_config =
+        prepare_request_config(&provider_name, model, reasoning_effort, &sender).await?;
 
     let aisdk_messages = convert_messages(&messages);
 
@@ -108,6 +113,7 @@ pub async fn stream_llm_with_cancellation(
             ProviderKind::Anthropic => crate::agent::config::ProviderKind::Anthropic,
         },
         base_url: request_config.base_url.clone(),
+        reasoning_effort: request_config.reasoning_effort,
     });
 
     let aisdk_tools = convert_to_aisdk_tools(
@@ -180,10 +186,12 @@ pub async fn stream_llm_with_cancellation(
 pub async fn summarize_for_compaction(
     provider_name: String,
     model: String,
+    reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     prompt: String,
 ) -> Result<String, DynError> {
     let (warning_sender, _warning_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let request_config = prepare_request_config(&provider_name, model, &warning_sender).await?;
+    let request_config =
+        prepare_request_config(&provider_name, model, reasoning_effort, &warning_sender).await?;
     let messages = vec![AisdkMessage::user(prompt)];
     let mut response = stream_provider_request(&request_config, messages, Vec::new(), None).await?;
 
@@ -216,6 +224,7 @@ pub async fn summarize_for_compaction(
 async fn prepare_request_config(
     provider_name: &str,
     model: String,
+    reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     sender: &crate::llm::ChunkSender,
 ) -> Result<ProviderRequestConfig, DynError> {
     let auth_dao = crate::persistence::AuthDAO::new()?;
@@ -235,6 +244,7 @@ async fn prepare_request_config(
         provider_kind.normalize_base_url(&provider.api),
         model,
         configured_api_key(auth_config.as_ref()),
+        reasoning_effort,
     );
 
     maybe_apply_openai_oauth_overrides(
@@ -393,6 +403,9 @@ async fn stream_provider_request(
                 .base_url(&config.base_url)
                 .model_name(&config.model_name)
                 .provider_name(&config.provider_name);
+            if let Some(effort) = config.reasoning_effort {
+                builder = builder.reasoning_effort(effort.as_str());
+            }
             if let Some(key) = config.api_key.as_deref() {
                 builder = builder.api_key(key);
             }
@@ -406,6 +419,9 @@ async fn stream_provider_request(
                 .base_url(&config.base_url)
                 .model_name(&config.model_name)
                 .provider_name(&config.provider_name);
+            if let Some(effort) = config.reasoning_effort {
+                builder = builder.reasoning_effort(effort.as_str());
+            }
             if let Some(key) = config.api_key.as_deref() {
                 builder = builder.api_key(key);
             }
@@ -419,6 +435,9 @@ async fn stream_provider_request(
                 .base_url(&config.base_url)
                 .model_name(&config.model_name)
                 .provider_name(&config.provider_name);
+            if let Some(effort) = config.reasoning_effort {
+                builder = builder.reasoning_effort(effort.as_str());
+            }
             if let Some(key) = config.api_key.as_deref() {
                 builder = builder.api_key(key);
             }

@@ -4,7 +4,7 @@ use crate::ui::scrollbar::{
 };
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
-    Config, Matcher,
+    Config, Matcher, Utf32Str,
 };
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -21,6 +21,8 @@ use tui_textarea::{Input as TuiInput, TextArea};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const SEARCH_AREA_HEIGHT: u16 = 2;
+const PROVIDER_EXACT_MATCH_BOOST: u32 = 1_000_000;
+const PROVIDER_PREFIX_MATCH_BOOST: u32 = 900_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DialogPosition {
@@ -77,6 +79,7 @@ pub struct Dialog {
     scrollbar_drag_offset: Option<u16>,
     pub visible_row_count: usize,
     pub actions: Vec<DialogAction>,
+    bottom_gap_height: u16,
     pub position: DialogPosition,
     pub pending_delete_id: Option<String>,
     collapsible_groups: bool,
@@ -113,6 +116,7 @@ impl Dialog {
             scrollbar_drag_offset: None,
             visible_row_count: 0,
             actions: Vec::new(),
+            bottom_gap_height: 1,
             position: DialogPosition::Center,
             pending_delete_id: None,
             collapsible_groups: false,
@@ -153,6 +157,10 @@ impl Dialog {
     pub fn with_actions(mut self, actions: Vec<DialogAction>) -> Self {
         self.actions = actions;
         self
+    }
+
+    pub fn set_bottom_gap_height(&mut self, height: u16) {
+        self.bottom_gap_height = height.max(1);
     }
 
     pub fn set_items(&mut self, items: Vec<DialogItem>) {
@@ -332,57 +340,145 @@ impl Dialog {
                 CaseMatching::Ignore,
                 Normalization::Smart,
             );
-            let mut filtered: Vec<(String, Vec<DialogItem>)> = Vec::new();
+            let groups = self.groups.clone();
+            let mut filtered: Vec<(String, Vec<DialogItem>, u32, usize)> = Vec::new();
 
-            for group in &self.groups {
-                let items = self.grouped_items.get(group).unwrap();
-
-                let combined_strings: Vec<String> = items
+            for (group_index, group) in groups.iter().enumerate() {
+                let items = self.grouped_items.get(group).cloned().unwrap_or_default();
+                let mut scored_items: Vec<(DialogItem, u32, usize)> = items
                     .iter()
-                    .map(|item| {
-                        let base = format!("{} {}", group, item.name);
-                        match &item.tip {
-                            Some(tip) => format!("{} {}", base, tip),
-                            None => base,
-                        }
+                    .enumerate()
+                    .filter_map(|(item_index, item)| {
+                        Self::search_item_score(
+                            &pattern,
+                            &mut self.matcher,
+                            &self.search_query,
+                            group,
+                            item,
+                        )
+                        .map(|score| (item.clone(), score, item_index))
                     })
                     .collect();
 
-                let matched: Vec<(&str, u32)> = pattern.match_list(
-                    combined_strings.iter().map(|s| s.as_str()),
-                    &mut self.matcher,
-                );
+                if !scored_items.is_empty() {
+                    scored_items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
 
-                if !matched.is_empty() {
-                    let mut scored_items: Vec<(DialogItem, u32)> = matched
-                        .into_iter()
-                        .filter_map(|(combined_str, score)| {
-                            items
-                                .iter()
-                                .find(|item| {
-                                    let base = format!("{} {}", group, item.name);
-                                    let s = match &item.tip {
-                                        Some(tip) => format!("{} {}", base, tip),
-                                        None => base,
-                                    };
-                                    s == *combined_str
-                                })
-                                .map(|item| (item.clone(), score))
-                        })
-                        .collect();
-
-                    scored_items.sort_by(|a, b| b.1.cmp(&a.1));
-
+                    let group_score = scored_items
+                        .first()
+                        .map(|(_, score, _)| *score)
+                        .unwrap_or(0);
                     let sorted_items: Vec<DialogItem> =
-                        scored_items.into_iter().map(|(item, _)| item).collect();
+                        scored_items.into_iter().map(|(item, _, _)| item).collect();
 
-                    filtered.push((group.clone(), sorted_items));
+                    filtered.push((group.clone(), sorted_items, group_score, group_index));
                 }
             }
-            self.filtered_items = filtered;
+
+            filtered.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.3.cmp(&b.3)));
+            self.filtered_items = filtered
+                .into_iter()
+                .map(|(group, items, _, _)| (group, items))
+                .collect();
         }
 
         self.reconcile_selection_after_filter(preferred_selected);
+    }
+
+    fn search_item_score(
+        pattern: &Pattern,
+        matcher: &mut Matcher,
+        query: &str,
+        group: &str,
+        item: &DialogItem,
+    ) -> Option<u32> {
+        let mut best_score = None;
+
+        Self::consider_search_field(
+            pattern,
+            matcher,
+            group,
+            Self::provider_match_boost(query, group),
+            &mut best_score,
+        );
+        Self::consider_search_field(
+            pattern,
+            matcher,
+            &item.provider_id,
+            Self::provider_match_boost(query, &item.provider_id),
+            &mut best_score,
+        );
+        Self::consider_search_field(pattern, matcher, &item.name, 0, &mut best_score);
+        Self::consider_search_field(pattern, matcher, &item.description, 0, &mut best_score);
+        if let Some(tip) = &item.tip {
+            Self::consider_search_field(pattern, matcher, tip, 0, &mut best_score);
+        }
+
+        let combined = match &item.tip {
+            Some(tip) => format!(
+                "{} {} {} {} {}",
+                group, item.provider_id, item.name, item.description, tip
+            ),
+            None => format!(
+                "{} {} {} {}",
+                group, item.provider_id, item.name, item.description
+            ),
+        };
+        Self::consider_search_field(pattern, matcher, &combined, 0, &mut best_score);
+
+        best_score
+    }
+
+    fn consider_search_field(
+        pattern: &Pattern,
+        matcher: &mut Matcher,
+        text: &str,
+        boost: u32,
+        best_score: &mut Option<u32>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+
+        let mut buf = Vec::new();
+        if let Some(score) = pattern.score(Utf32Str::new(text, &mut buf), matcher) {
+            let boosted_score = score.saturating_add(boost);
+            *best_score = Some(
+                best_score
+                    .map(|current| current.max(boosted_score))
+                    .unwrap_or(boosted_score),
+            );
+        }
+    }
+
+    fn provider_match_boost(query: &str, text: &str) -> u32 {
+        let query = Self::normalize_search_text(query);
+        if query.is_empty() {
+            return 0;
+        }
+
+        let normalized_text = Self::normalize_search_text(text);
+        if normalized_text == query {
+            PROVIDER_EXACT_MATCH_BOOST
+        } else if normalized_text.starts_with(&query)
+            || Self::normalized_token_starts_with(text, &query)
+        {
+            PROVIDER_PREFIX_MATCH_BOOST
+        } else {
+            0
+        }
+    }
+
+    fn normalize_search_text(text: &str) -> String {
+        text.chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    fn normalized_token_starts_with(text: &str, query: &str) -> bool {
+        text.split(|ch: char| !ch.is_alphanumeric())
+            .map(Self::normalize_search_text)
+            .any(|token| !token.is_empty() && token.starts_with(query))
     }
 
     fn reconcile_selection_after_filter(&mut self, preferred_selected: Option<(String, String)>) {
@@ -799,7 +895,7 @@ impl Dialog {
         true
     }
 
-    fn footer_height(&self) -> u16 {
+    pub(crate) fn footer_height(&self) -> u16 {
         if self.actions.len() > 4 {
             3
         } else if self.actions.len() > 2 {
@@ -815,7 +911,7 @@ impl Dialog {
             ratatui::layout::Constraint::Length(1),
             ratatui::layout::Constraint::Length(SEARCH_AREA_HEIGHT),
             ratatui::layout::Constraint::Min(0),
-            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(self.bottom_gap_height),
             ratatui::layout::Constraint::Length(self.footer_height()),
         ]
     }
@@ -932,7 +1028,7 @@ impl Dialog {
             let padding_len = width.saturating_sub(left_width + tip_width + right_padding);
             spans.push(Span::raw(" ".repeat(padding_len)));
 
-            let tip_style = if tip == "❤︎" {
+            let tip_style = if tip.starts_with("❤︎") {
                 Style::default()
                     .fg(Color::Rgb(255, 105, 180))
                     .add_modifier(Modifier::BOLD)
@@ -1641,6 +1737,7 @@ impl Clone for Dialog {
             scrollbar_drag_offset: self.scrollbar_drag_offset,
             visible_row_count: self.visible_row_count,
             actions: self.actions.clone(),
+            bottom_gap_height: self.bottom_gap_height,
             position: self.position,
             pending_delete_id: self.pending_delete_id.clone(),
             collapsible_groups: self.collapsible_groups,
@@ -1729,6 +1826,27 @@ mod tests {
                 description: "".to_string(),
                 tip: None,
                 provider_id: "p".to_string(),
+            },
+        ]
+    }
+
+    fn create_provider_weight_test_items() -> Vec<DialogItem> {
+        vec![
+            DialogItem {
+                id: "nanogpt-openai-o1".to_string(),
+                name: "OpenAI o1".to_string(),
+                group: "NanoGPT".to_string(),
+                description: "NanoGPT | reasoning".to_string(),
+                tip: None,
+                provider_id: "nanogpt".to_string(),
+            },
+            DialogItem {
+                id: "openai-gpt-5".to_string(),
+                name: "GPT-5".to_string(),
+                group: "OpenAI".to_string(),
+                description: "OpenAI | reasoning, tools".to_string(),
+                tip: None,
+                provider_id: "openai".to_string(),
             },
         ]
     }
@@ -1898,6 +2016,20 @@ mod tests {
         dialog.set_search_query("model a");
         assert_eq!(dialog.filtered_items.len(), 1);
         assert_eq!(dialog.filtered_items[0].1[0].name, "Model A");
+    }
+
+    #[test]
+    fn test_dialog_search_prioritizes_provider_match_over_model_match() {
+        let mut dialog = Dialog::with_items("Models", create_provider_weight_test_items());
+
+        dialog.set_search_query("openai");
+
+        let flat_items = dialog.get_flat_items();
+        assert_eq!(flat_items.len(), 2);
+        assert_eq!(flat_items[0].provider_id, "openai");
+        assert_eq!(flat_items[0].name, "GPT-5");
+        assert_eq!(flat_items[1].provider_id, "nanogpt");
+        assert_eq!(flat_items[1].name, "OpenAI o1");
     }
 
     #[test]

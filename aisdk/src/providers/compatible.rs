@@ -14,6 +14,7 @@ pub struct OpenAICompatible {
     api_key: String,
     model_name: String,
     provider_name: String,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAICompatible {
@@ -28,6 +29,7 @@ pub struct OpenAICompatibleBuilder {
     api_key: Option<String>,
     model_name: Option<String>,
     provider_name: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAICompatibleBuilder {
@@ -51,6 +53,11 @@ impl OpenAICompatibleBuilder {
         self
     }
 
+    pub fn reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
+        self
+    }
+
     pub fn build(self) -> Result<OpenAICompatible> {
         Ok(OpenAICompatible {
             base_url: self
@@ -63,6 +70,7 @@ impl OpenAICompatibleBuilder {
             provider_name: self
                 .provider_name
                 .unwrap_or_else(|| "openai-compatible".to_string()),
+            reasoning_effort: self.reasoning_effort,
         })
     }
 }
@@ -131,6 +139,10 @@ impl Provider for OpenAICompatible {
 
         if !tool_params.is_empty() {
             body["tools"] = serde_json::Value::Array(tool_params);
+        }
+
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = serde_json::Value::String(effort.clone());
         }
 
         let mut request_headers = reqwest::header::HeaderMap::new();

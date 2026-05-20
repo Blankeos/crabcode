@@ -73,6 +73,7 @@ pub fn render_chat(
     agent: String,
     model: String,
     provider_name: String,
+    reasoning_effort: Option<String>,
     colors: &ThemeColors,
     is_streaming: bool,
     is_compacting: bool,
@@ -134,6 +135,7 @@ pub fn render_chat(
             &agent,
             &model,
             &provider_name,
+            reasoning_effort.as_deref(),
             colors,
         );
     }

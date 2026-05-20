@@ -14,6 +14,7 @@ pub struct Anthropic {
     api_key: String,
     model_name: String,
     provider_name: String,
+    reasoning_effort: Option<String>,
 }
 
 impl Anthropic {
@@ -28,6 +29,7 @@ pub struct AnthropicBuilder {
     api_key: Option<String>,
     model_name: Option<String>,
     provider_name: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 impl AnthropicBuilder {
@@ -51,6 +53,11 @@ impl AnthropicBuilder {
         self
     }
 
+    pub fn reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
+        self
+    }
+
     pub fn build(self) -> Result<Anthropic> {
         Ok(Anthropic {
             base_url: self
@@ -63,6 +70,7 @@ impl AnthropicBuilder {
             provider_name: self
                 .provider_name
                 .unwrap_or_else(|| "anthropic".to_string()),
+            reasoning_effort: self.reasoning_effort,
         })
     }
 }
@@ -136,6 +144,10 @@ impl Provider for Anthropic {
 
         if !tool_params.is_empty() {
             body["tools"] = serde_json::Value::Array(tool_params);
+        }
+
+        if let Some(effort) = &self.reasoning_effort {
+            body["output_config"] = serde_json::json!({ "effort": effort });
         }
 
         let mut request_headers = reqwest::header::HeaderMap::new();

@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct LlmSessionConfig {
@@ -7,6 +7,7 @@ pub struct LlmSessionConfig {
     pub api_key: Option<String>,
     pub provider_kind: ProviderKind,
     pub base_url: String,
+    pub reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,12 +17,18 @@ pub enum ProviderKind {
     Anthropic,
 }
 
-static LLM_SESSION: OnceLock<LlmSessionConfig> = OnceLock::new();
+static LLM_SESSION: OnceLock<RwLock<Option<LlmSessionConfig>>> = OnceLock::new();
 
 pub fn set_llm_session(config: LlmSessionConfig) {
-    let _ = LLM_SESSION.set(config);
+    let session = LLM_SESSION.get_or_init(|| RwLock::new(None));
+    if let Ok(mut guard) = session.write() {
+        *guard = Some(config);
+    }
 }
 
-pub fn get_llm_session() -> Option<&'static LlmSessionConfig> {
-    LLM_SESSION.get()
+pub fn get_llm_session() -> Option<LlmSessionConfig> {
+    LLM_SESSION
+        .get()
+        .and_then(|session| session.read().ok())
+        .and_then(|guard| guard.clone())
 }

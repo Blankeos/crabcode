@@ -20,6 +20,7 @@ pub struct OpenAI {
     strip_system_and_developer_messages: bool,
     tool_strict_override: Option<bool>,
     default_instructions: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAI {
@@ -40,6 +41,7 @@ pub struct OpenAIBuilder {
     strip_system_and_developer_messages: bool,
     tool_strict_override: Option<bool>,
     default_instructions: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAIBuilder {
@@ -93,6 +95,11 @@ impl OpenAIBuilder {
         self
     }
 
+    pub fn reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
+        self
+    }
+
     pub fn build(self) -> Result<OpenAI> {
         let base_url = self
             .base_url
@@ -125,6 +132,7 @@ impl OpenAIBuilder {
             strip_system_and_developer_messages: self.strip_system_and_developer_messages,
             tool_strict_override: self.tool_strict_override,
             default_instructions: self.default_instructions,
+            reasoning_effort: self.reasoning_effort,
         })
     }
 }
@@ -225,6 +233,10 @@ impl Provider for OpenAI {
 
         if let Some(store) = self.store_override {
             body["store"] = serde_json::Value::Bool(store);
+        }
+
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning"] = serde_json::json!({ "effort": effort });
         }
 
         let client = reqwest::Client::builder()

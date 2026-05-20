@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     pub id: String,
     pub name: String,
+    pub family: String,
     pub provider_id: String,
     pub provider_name: String,
     pub capabilities: Vec<String>,
+    pub reasoning: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

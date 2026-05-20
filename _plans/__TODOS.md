@@ -94,11 +94,11 @@
 
 - [x] multiworkspace not working when I open other directories, I should be able to see in
 
-- [ ] better timeline highlighting of each "message"
+- [x] better timeline highlighting of each "message"
 
-- [ ] IN /models, can we use the ❤︎ icon, but colored pink. instead of the long heart + favorite indicator.
+- [x] IN /models, can we use the ❤︎ icon, but colored pink. instead of the long heart + favorite indicator.
 
-- [ ] Reasoning effort adjustment in /models. Or a hotkey? In opencode it's ctrl-t.
+- [x] Reasoning effort adjustment in /models. Or a hotkey? In opencode it's ctrl-t.
 
 - [ ] /commands and custom commands.
 

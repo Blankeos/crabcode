@@ -899,6 +899,114 @@ impl App {
         text
     }
 
+    fn reasoning_capability_for_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<crate::model::reasoning::ReasoningCapability> {
+        self.discovery
+            .as_ref()
+            .and_then(|discovery| discovery.get_model_reasoning_capability(provider_id, model_id))
+    }
+
+    fn saved_reasoning_effort_for_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<crate::model::reasoning::ReasoningEffort> {
+        self.prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_model_reasoning_effort(provider_id, model_id).ok())
+            .flatten()
+    }
+
+    fn resolved_reasoning_effort_for_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<crate::model::reasoning::ReasoningEffort> {
+        let capability = self.reasoning_capability_for_model(provider_id, model_id)?;
+        let saved = self.saved_reasoning_effort_for_model(provider_id, model_id)?;
+        let resolved = capability.resolve(Some(saved))?;
+        if resolved == crate::model::reasoning::ReasoningEffort::None {
+            return None;
+        }
+        if saved != resolved {
+            if let Some(ref dao) = self.prefs_dao {
+                let _ = dao.set_model_reasoning_effort(
+                    provider_id.to_string(),
+                    model_id.to_string(),
+                    resolved,
+                );
+            }
+        }
+        Some(resolved)
+    }
+
+    fn reasoning_control_label_for_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<String> {
+        let capability = self.reasoning_capability_for_model(provider_id, model_id)?;
+        if capability.values().is_empty() {
+            return None;
+        }
+
+        Some(
+            self.resolved_reasoning_effort_for_model(provider_id, model_id)
+                .map(|effort| effort.as_str().to_string())
+                .unwrap_or_else(|| "off".to_string()),
+        )
+    }
+
+    fn selected_model_reasoning_control_label(&self) -> Option<String> {
+        let selected = self.models_dialog_state.dialog.get_selected()?;
+        self.reasoning_control_label_for_model(&selected.provider_id, &selected.id)
+    }
+
+    fn active_reasoning_effort(&self) -> Option<crate::model::reasoning::ReasoningEffort> {
+        self.resolved_reasoning_effort_for_model(&self.provider_name, &self.model)
+    }
+
+    fn active_reasoning_effort_label(&self) -> Option<String> {
+        self.active_reasoning_effort()
+            .map(|effort| effort.as_str().to_string())
+    }
+
+    fn cycle_reasoning_effort_for_model(
+        &mut self,
+        provider_id: String,
+        model_id: String,
+        direction: i8,
+    ) -> bool {
+        let Some(capability) = self.reasoning_capability_for_model(&provider_id, &model_id) else {
+            return false;
+        };
+        let saved = self.saved_reasoning_effort_for_model(&provider_id, &model_id);
+        let Some(next) = capability.cycle_override(saved, direction) else {
+            return false;
+        };
+
+        if let Some(ref dao) = self.prefs_dao {
+            let result = if let Some(next) = next {
+                dao.set_model_reasoning_effort(provider_id, model_id, next)
+            } else {
+                dao.clear_model_reasoning_effort(&provider_id, &model_id)
+            };
+
+            if result.is_err() {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn cycle_active_reasoning_effort(&mut self) -> bool {
+        self.cycle_reasoning_effort_for_model(self.provider_name.clone(), self.model.clone(), 1)
+    }
+
     pub fn get_current_theme_colors(&self) -> theme::ThemeColors {
         if self.themes.is_empty() {
             return theme::ThemeColors {
@@ -1165,6 +1273,15 @@ impl App {
                         ));
 
                         self.refresh_models_dialog();
+                    }
+                    crate::views::models_dialog::ModelsDialogAction::CycleReasoning {
+                        provider_id,
+                        model_id,
+                        direction,
+                    } => {
+                        if self.cycle_reasoning_effort_for_model(provider_id, model_id, direction) {
+                            self.refresh_models_dialog();
+                        }
                     }
                     crate::views::models_dialog::ModelsDialogAction::None => {}
                 }
@@ -1685,6 +1802,9 @@ impl App {
                 self.which_key_state.show();
                 true
             }
+            KeyCode::Char('t') if key.modifiers == event::KeyModifiers::CONTROL => {
+                self.cycle_active_reasoning_effort()
+            }
             KeyCode::Left
                 if key.modifiers == event::KeyModifiers::NONE
                     && self.should_handle_child_session_arrow() =>
@@ -1938,6 +2058,15 @@ impl App {
                     ));
 
                     self.refresh_models_dialog();
+                }
+                crate::views::models_dialog::ModelsDialogAction::CycleReasoning {
+                    provider_id,
+                    model_id,
+                    direction,
+                } => {
+                    if self.cycle_reasoning_effort_for_model(provider_id, model_id, direction) {
+                        self.refresh_models_dialog();
+                    }
                 }
                 crate::views::models_dialog::ModelsDialogAction::None => {}
             }
@@ -2610,6 +2739,7 @@ impl App {
 
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();
+        let reasoning_effort = self.active_reasoning_effort();
         let agent = self.agent.clone();
         let tail_messages = selection.tail_messages;
         let task_session_id = session_id.clone();
@@ -2618,6 +2748,7 @@ impl App {
             let result = crate::llm::client::summarize_for_compaction(
                 provider_name.clone(),
                 model.clone(),
+                reasoning_effort,
                 prompt,
             )
             .await
@@ -2824,9 +2955,7 @@ impl App {
                                         provider_id: item.provider_id.clone(),
                                     })
                                     .collect();
-                            self.models_dialog_state = init_models_dialog(title, dialog_items);
-                            self.models_dialog_state.dialog.show();
-                            self.overlay_focus = OverlayFocus::ModelsDialog;
+                            self.show_models_dialog(title, dialog_items);
                         }
                     }
                 }
@@ -2993,9 +3122,7 @@ impl App {
                             provider_id: item.provider_id.clone(),
                         })
                         .collect();
-                    self.models_dialog_state = init_models_dialog(title, dialog_items);
-                    self.models_dialog_state.dialog.show();
-                    self.overlay_focus = OverlayFocus::ModelsDialog;
+                    self.show_models_dialog(title, dialog_items);
                 }
             }
         }
@@ -3121,9 +3248,10 @@ impl App {
     fn show_message_actions(&mut self, idx: usize) {
         use crate::ui::components::dialog::{Dialog, DialogItem};
 
+        let can_undo = self.selected_message_can_undo(idx);
         self.message_actions_index = Some(idx);
 
-        let items = vec![
+        let mut items = vec![
             DialogItem {
                 id: "copy".to_string(),
                 name: "Copy".to_string(),
@@ -3140,20 +3268,35 @@ impl App {
                 tip: None,
                 provider_id: "fork".to_string(),
             },
-            DialogItem {
+        ];
+
+        if can_undo {
+            items.push(DialogItem {
                 id: "undo".to_string(),
                 name: "Undo".to_string(),
                 group: String::new(),
                 description: "Remove messages from here onward".to_string(),
                 tip: None,
                 provider_id: "undo".to_string(),
-            },
-        ];
+            });
+        }
 
         let mut dialog = Dialog::with_items("Message Actions", items);
         dialog.show();
         self.message_actions_dialog = Some(dialog);
         self.overlay_focus = OverlayFocus::MessageActions;
+    }
+
+    fn selected_message_can_undo(&self, idx: usize) -> bool {
+        let Some(session_id) = self.session_manager.get_current_session_id() else {
+            return false;
+        };
+
+        self.session_manager
+            .get_session_ref(session_id)
+            .and_then(|session| session.messages.get(idx))
+            .map(|message| message.role == crate::session::types::MessageRole::User)
+            .unwrap_or(false)
     }
 
     fn execute_message_action(&mut self, action: &str) {
@@ -3220,6 +3363,11 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
             }
             "undo" => {
+                if !self.selected_message_can_undo(idx) {
+                    self.close_message_actions();
+                    return;
+                }
+
                 let undone_content: Option<String> = {
                     if let Some(session) = self.session_manager.get_current_session() {
                         let content = session.messages.get(idx).map(|m| m.content.clone());
@@ -3339,7 +3487,7 @@ impl App {
         let mut items: Vec<DialogItem> = Vec::new();
 
         let add_model_item = |items: &mut Vec<DialogItem>, model: &ModelType, group: &str| {
-            let is_active = self.model == model.id;
+            let is_active = self.model == model.id && self.provider_name == model.provider_id;
             let is_favorite =
                 favorites_set.contains(&(model.provider_id.clone(), model.id.clone()));
 
@@ -3454,6 +3602,29 @@ impl App {
         });
 
         self.models_dialog_state.refresh_items(items);
+    }
+
+    fn show_models_dialog(
+        &mut self,
+        title: impl Into<String>,
+        mut items: Vec<crate::ui::components::dialog::DialogItem>,
+    ) {
+        for item in &mut items {
+            let is_active = item.id == self.model && item.provider_id == self.provider_name;
+            if is_active {
+                item.tip = Some("Active".to_string());
+            } else if item.tip.as_deref() == Some("Active") {
+                item.tip = None;
+            }
+        }
+
+        self.models_dialog_state = init_models_dialog(title, items);
+        self.models_dialog_state.dialog.show();
+        let _ = self
+            .models_dialog_state
+            .dialog
+            .select_item_by_key(&self.model, &self.provider_name);
+        self.overlay_focus = OverlayFocus::ModelsDialog;
     }
 
     fn show_sessions_dialog(
@@ -4509,6 +4680,7 @@ impl App {
 
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();
+        let reasoning_effort = self.active_reasoning_effort();
         let agent_mode = self.agent.clone();
         let provider_timeout = self
             .provider_timeouts
@@ -4552,6 +4724,7 @@ impl App {
                 session_id,
                 provider_name,
                 model,
+                reasoning_effort,
                 agent_mode,
                 agent_max_steps,
                 tool_permissions,
@@ -4665,6 +4838,7 @@ impl App {
         let status_cwd = self.active_workspace_path();
         let branch = self.current_git_branch(&status_cwd);
         let usage_text = &self.cached_usage_text;
+        let reasoning_effort = self.active_reasoning_effort_label();
 
         match self.base_focus {
             BaseFocus::Home => {
@@ -4678,6 +4852,7 @@ impl App {
                     self.agent.clone(),
                     self.model.clone(),
                     self.provider_name.clone(),
+                    reasoning_effort.clone(),
                     &colors,
                     &usage_text,
                 );
@@ -4708,6 +4883,7 @@ impl App {
                     self.agent.clone(),
                     self.model.clone(),
                     self.provider_name.clone(),
+                    reasoning_effort,
                     &colors,
                     self.is_streaming,
                     self.compaction_receiver.is_some(),
@@ -4734,7 +4910,14 @@ impl App {
         if self.overlay_focus == OverlayFocus::ModelsDialog
             && self.models_dialog_state.dialog.is_visible()
         {
-            render_models_dialog(f, &mut self.models_dialog_state, size, colors);
+            let reasoning_effort = self.selected_model_reasoning_control_label();
+            render_models_dialog(
+                f,
+                &mut self.models_dialog_state,
+                size,
+                colors,
+                reasoning_effort.as_deref(),
+            );
         }
 
         if self.overlay_focus == OverlayFocus::ThemesDialog
@@ -4936,6 +5119,42 @@ mod tests {
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0),
         }
+    }
+
+    fn message_action_names(app: &App) -> Vec<String> {
+        app.message_actions_dialog
+            .as_ref()
+            .map(|dialog| dialog.items.iter().map(|item| item.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn message_actions_include_undo_for_user_messages() {
+        let mut app = test_app();
+        app.create_new_session(Some("Timeline".to_string()));
+        app.session_manager
+            .add_message_to_current_session(&crate::session::types::Message::user("Prompt"))
+            .unwrap();
+
+        app.show_message_actions(0);
+
+        assert!(message_action_names(&app).contains(&"Undo".to_string()));
+    }
+
+    #[test]
+    fn message_actions_omit_undo_for_agent_messages() {
+        let mut app = test_app();
+        app.create_new_session(Some("Timeline".to_string()));
+        app.session_manager
+            .add_message_to_current_session(&crate::session::types::Message::user("Prompt"))
+            .unwrap();
+        app.session_manager
+            .add_message_to_current_session(&crate::session::types::Message::assistant("Answer"))
+            .unwrap();
+
+        app.show_message_actions(1);
+
+        assert!(!message_action_names(&app).contains(&"Undo".to_string()));
     }
 
     #[test]

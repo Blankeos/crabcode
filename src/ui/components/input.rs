@@ -108,6 +108,7 @@ impl Input {
         agent: &str,
         model: &str,
         provider_name: &str,
+        reasoning_effort: Option<&str>,
         colors: &ThemeColors,
     ) {
         let agent_color = agent_color(agent, colors);
@@ -172,7 +173,7 @@ impl Input {
 
         frame.render_widget(&self.textarea, v_chunks[1]);
 
-        let info_text = ratatui::text::Line::from(vec![
+        let mut info_spans = vec![
             ratatui::text::Span::styled(agent.to_string(), Style::default().fg(agent_color)),
             ratatui::text::Span::raw("  "),
             ratatui::text::Span::styled(model.to_string(), Style::default().fg(colors.text)),
@@ -183,7 +184,19 @@ impl Input {
                     .fg(colors.text_weak)
                     .add_modifier(ratatui::style::Modifier::DIM),
             ),
-        ]);
+        ];
+
+        if let Some(reasoning_effort) = reasoning_effort {
+            info_spans.push(ratatui::text::Span::raw("  "));
+            info_spans.push(ratatui::text::Span::styled(
+                reasoning_effort.to_string(),
+                Style::default()
+                    .fg(colors.warning)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ));
+        }
+
+        let info_text = ratatui::text::Line::from(info_spans);
 
         let info_paragraph = Paragraph::new(info_text);
         frame.render_widget(info_paragraph, v_chunks[3]);

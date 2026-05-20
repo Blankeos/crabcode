@@ -272,6 +272,10 @@ impl Discovery {
                     capabilities.push("structured_output".to_string());
                 }
 
+                if model.reasoning {
+                    capabilities.push("reasoning".to_string());
+                }
+
                 let is_text_model = model.modalities.as_ref().map_or(true, |m| {
                     m.output.contains(&"text".to_string())
                         && !m.output.contains(&"image".to_string())
@@ -281,9 +285,11 @@ impl Discovery {
                     models.push(crate::model::types::Model {
                         id: model_id.clone(),
                         name: model.name.clone(),
+                        family: model.family.clone(),
                         provider_id: provider_id.clone(),
                         provider_name: provider.name.clone(),
                         capabilities,
+                        reasoning: model.reasoning,
                     });
                 }
             }
@@ -314,6 +320,31 @@ impl Discovery {
         let provider = entry.data.get(provider_id)?;
         let model = provider.models.get(model_id)?;
         model.limit.as_ref().map(|l| l.context)
+    }
+
+    pub fn get_model_reasoning_capability(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<crate::model::reasoning::ReasoningCapability> {
+        let cache_path = self.get_cache_path();
+        if !cache_path.exists() {
+            return None;
+        }
+        let cached_json = std::fs::read_to_string(cache_path).ok()?;
+        let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
+        let provider = entry.data.get(provider_id)?;
+        let model = provider.models.get(model_id)?;
+        Some(crate::model::reasoning::capability_for_model(
+            provider_id,
+            &provider.npm,
+            model_id,
+            &model.id,
+            &model.name,
+            &model.family,
+            &model.release_date,
+            model.reasoning,
+        ))
     }
 
     pub async fn list_models(&self, provider_filter: Option<&str>) -> Result<String> {

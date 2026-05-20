@@ -126,6 +126,25 @@ async fn run_print_mode(
         .clone()
         .unwrap_or_else(|| "Build".to_string());
 
+    let reasoning_effort = crate::model::discovery::Discovery::new()
+        .ok()
+        .and_then(|discovery| discovery.get_model_reasoning_capability(&provider_name, &model_id))
+        .and_then(|capability| {
+            let saved = prefs_dao
+                .as_ref()
+                .and_then(|dao| {
+                    dao.get_model_reasoning_effort(&provider_name, &model_id)
+                        .ok()
+                })
+                .flatten()?;
+            let resolved = capability.resolve(Some(saved))?;
+            if resolved == crate::model::reasoning::ReasoningEffort::None {
+                None
+            } else {
+                Some(resolved)
+            }
+        });
+
     let cwd = loaded_config.cwd.to_string_lossy().to_string();
 
     let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
@@ -163,6 +182,7 @@ async fn run_print_mode(
             cuid2::create_id(),
             provider_name_clone,
             model_clone,
+            reasoning_effort,
             agent_mode.clone(),
             agent_max_steps,
             tool_permissions,

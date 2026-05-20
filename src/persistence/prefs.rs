@@ -1,7 +1,7 @@
+use crate::model::reasoning::{parse_effort, ReasoningEffort};
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 use super::{ensure_data_dir, get_data_dir};
 
@@ -39,6 +39,10 @@ impl Default for ModelPreferences {
 }
 
 impl ModelPreferences {
+    fn model_variant_key(provider_id: &str, model_id: &str) -> String {
+        format!("{provider_id}/{model_id}")
+    }
+
     pub fn get_active_model(&self) -> Option<&ModelRef> {
         self.recent.first()
     }
@@ -77,6 +81,41 @@ impl ModelPreferences {
         self.favorite
             .iter()
             .any(|m| m.provider_id == provider_id && m.model_id == model_id)
+    }
+
+    pub fn get_reasoning_effort(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<ReasoningEffort> {
+        let key = Self::model_variant_key(provider_id, model_id);
+        self.variant
+            .as_object()
+            .and_then(|map| map.get(&key))
+            .and_then(parse_effort)
+    }
+
+    pub fn set_reasoning_effort(
+        &mut self,
+        provider_id: String,
+        model_id: String,
+        effort: ReasoningEffort,
+    ) {
+        let key = Self::model_variant_key(&provider_id, &model_id);
+        if !self.variant.is_object() {
+            self.variant = serde_json::json!({});
+        }
+
+        if let Some(map) = self.variant.as_object_mut() {
+            map.insert(key, serde_json::Value::String(effort.as_str().to_string()));
+        }
+    }
+
+    pub fn clear_reasoning_effort(&mut self, provider_id: &str, model_id: &str) {
+        let key = Self::model_variant_key(provider_id, model_id);
+        if let Some(map) = self.variant.as_object_mut() {
+            map.remove(&key);
+        }
     }
 }
 
@@ -163,6 +202,32 @@ impl PrefsDAO {
     pub fn is_favorite(&self, provider_id: &str, model_id: &str) -> Result<bool> {
         let prefs = self.get_model_preferences()?;
         Ok(prefs.is_favorite(provider_id, model_id))
+    }
+
+    pub fn set_model_reasoning_effort(
+        &self,
+        provider_id: String,
+        model_id: String,
+        effort: ReasoningEffort,
+    ) -> Result<()> {
+        let mut prefs = self.get_model_preferences()?;
+        prefs.set_reasoning_effort(provider_id, model_id, effort);
+        self.set_model_preferences(&prefs)
+    }
+
+    pub fn clear_model_reasoning_effort(&self, provider_id: &str, model_id: &str) -> Result<()> {
+        let mut prefs = self.get_model_preferences()?;
+        prefs.clear_reasoning_effort(provider_id, model_id);
+        self.set_model_preferences(&prefs)
+    }
+
+    pub fn get_model_reasoning_effort(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<Option<ReasoningEffort>> {
+        let prefs = self.get_model_preferences()?;
+        Ok(prefs.get_reasoning_effort(provider_id, model_id))
     }
 }
 
