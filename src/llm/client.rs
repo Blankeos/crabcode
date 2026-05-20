@@ -448,8 +448,10 @@ async fn stream_provider_request(
             if config.openai_options.force_store_false {
                 builder = builder.store_override(false);
             }
-            if let Some(instructions) = &config.openai_options.default_instructions {
-                builder = builder.default_instructions(instructions.clone());
+            if let Some(instructions) =
+                openai_request_instructions(&config.openai_options, &messages)
+            {
+                builder = builder.default_instructions(instructions);
             }
             if config.openai_options.disallow_system_messages {
                 builder = builder.strip_system_and_developer_messages(true);
@@ -467,6 +469,35 @@ async fn stream_provider_request(
                 .map_err(|e| Box::new(e) as DynError)
         }
     }
+}
+
+fn openai_request_instructions(
+    options: &OpenAIRequestOptions,
+    messages: &[AisdkMessage],
+) -> Option<String> {
+    let mut parts = Vec::new();
+
+    if let Some(instructions) = options
+        .default_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|instructions| !instructions.is_empty())
+    {
+        parts.push(instructions.to_string());
+    }
+
+    if options.disallow_system_messages {
+        parts.extend(messages.iter().filter_map(|message| {
+            let AisdkMessage::System(system) = message else {
+                return None;
+            };
+
+            let content = system.content.trim();
+            (!content.is_empty()).then(|| content.to_string())
+        }));
+    }
+
+    (!parts.is_empty()).then(|| parts.join("\n\n---\n\n"))
 }
 
 async fn relay_stream_to_sender(
@@ -697,5 +728,44 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
         trimmed.trim_end_matches("/v1").to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{openai_request_instructions, AisdkMessage, OpenAIRequestOptions};
+
+    #[test]
+    fn openai_oauth_instructions_preserve_stripped_system_prompt() {
+        let options = OpenAIRequestOptions {
+            default_instructions: Some("base codex instructions".to_string()),
+            disallow_system_messages: true,
+            ..OpenAIRequestOptions::default()
+        };
+        let messages = vec![
+            AisdkMessage::system("rich system prompt with AGENTS.md"),
+            AisdkMessage::user("Go ahead"),
+        ];
+
+        let instructions = openai_request_instructions(&options, &messages)
+            .expect("instructions should be present");
+
+        assert!(instructions.contains("base codex instructions"));
+        assert!(instructions.contains("rich system prompt with AGENTS.md"));
+    }
+
+    #[test]
+    fn openai_instructions_do_not_duplicate_system_when_not_stripping() {
+        let options = OpenAIRequestOptions {
+            default_instructions: Some("base codex instructions".to_string()),
+            disallow_system_messages: false,
+            ..OpenAIRequestOptions::default()
+        };
+        let messages = vec![AisdkMessage::system("system stays in input")];
+
+        assert_eq!(
+            openai_request_instructions(&options, &messages).as_deref(),
+            Some("base codex instructions")
+        );
     }
 }
