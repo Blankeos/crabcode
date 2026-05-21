@@ -138,3 +138,138 @@ Added narrow lifecycle logging to make the next recurrence attributable.
 - Does the UI mark a turn complete solely when the relay exhausts, even if task/subagent senders still exist?
 - Should `final_answer + end_turn=None` be trusted for ChatGPT OAuth/Codex transport, or should `end_turn=true` be required for final completion when tools are enabled?
 - What should be the canonical crabcode pending-work signal that can keep the turn alive without inspecting assistant prose or plan/todo text?
+
+## 2026-05-22 Recurrence
+
+### User-Visible Symptom
+
+Crabcode was asked to add an opencode-style `ctrl+p` command palette and reduce the footer hint text. It completed a long implementation turn early with another preamble-shaped message:
+
+> I’ll add Ctrl+P handling before other base shortcuts.
+
+The visible transcript still had unfinished work: the command palette was only partially wired, the footer text had not been changed, and validation had not run.
+
+The user's immediate follow-up was `Continue`, but that follow-up was cancelled almost immediately. Treat that cancellation as a separate event when reading `app.log`.
+
+### `app.log` Evidence
+
+Primary session id: `ypw8yixa4em0rg8v9hldfkl3`.
+
+Relevant sequence:
+
+- `23:51:08` through `00:05:08`: the primary turn executed steps 1-29, including reads, searches, plan updates, a new `src/views/command_palette.rs`, and several `src/app.rs` / `src/views/mod.rs` edits.
+- `00:05:08`: `edit` call `call_64` succeeded and tool results were added.
+- `00:05:08`: provider step 30 started with the same primary session.
+- `00:05:10`: metadata said `assistant_message_phase=final_answer`.
+- `00:05:10`: metadata said `response.completed end_turn=None`.
+- `00:05:10`: AISDK logged `provider_step_finish step=30 has_tool_call=false end_turn=None last_phase=final_answer assistant_text_chars=55 action=finish preview="I’ll add Ctrl+P handling before other base shortcuts."`
+- `00:05:10`: crabcode marked the stream complete:
+  - `outcome=Exhausted`
+  - `effective_outcome=Finished`
+  - `stop_reason=Some(Finish)`
+
+Important separation from the user's cancelled `Continue`:
+
+- `00:05:15`: a new stream started for the same session with `input_messages=97`.
+- `00:05:17`: that new stream was cancelled by the user.
+- `00:05:26+`: tool calls `call_65` and later continued after cancellation, with `ui_send_failed`. These belong to the cancelled `Continue` stream, not the original premature-complete stream.
+
+### Reference Parity Check
+
+Codex reference behavior in `.devrefs/references/openai/codex/codex-rs/core/src/session/turn.rs` is still structurally similar to crabcode's current loop:
+
+- A sampling request follows up when completed output includes tool work or `response.completed end_turn == Some(false)`.
+- A closed stream before `response.completed` is an error.
+- A non-commentary assistant message with no tool call and no `end_turn=false` is treated as a completed model turn.
+
+opencode reference behavior is also structurally similar:
+
+- `packages/opencode/src/session/processor.ts` drains the AI SDK `fullStream`, records tool parts, and marks the assistant message completed in cleanup.
+- `packages/opencode/src/session/prompt.ts` keeps looping when the last assistant finish is `tool-calls` or when assistant parts still include unresolved non-provider-executed tool calls.
+- It does not inspect assistant prose or todo/plan wording to decide whether a turn is complete.
+
+This means a runtime guard based on text like "I'll ..." or on plan item status would diverge from both references. Requiring `end_turn=true` instead of accepting `None` would also diverge from Codex-style handling, which only treats `Some(false)` as a structured follow-up signal.
+
+### Current Working Theory
+
+This recurrence is not the prior "post-completion tools from the same primary stream" suspicion. The new diagnostics show the original primary stream ended cleanly at `00:05:10` on a provider step that had no tool call and no structured follow-up signal.
+
+The recurrence is best explained as a prompt/protocol parity gap:
+
+1. The model emitted a progress/preamble sentence as `final_answer`.
+2. The provider gave `end_turn=None`, not `false`.
+3. Crabcode followed the same structured completion rules as Codex/opencode and finished the turn.
+4. The active crabcode Codex prompt is much weaker than the upstream Codex prompt. In particular, upstream Codex's GPT-5.2 prompt explicitly requires persistence until the task is fully handled, maintaining plan status, not leaving the plan stale, and finishing with all plan items complete or explicitly canceled/deferred before ending. Crabcode's local `src/prompt/mod.rs` only has a short "only terminate when solved" / "use final answers only when complete" version.
+
+### Separate Cancellation Finding
+
+The cancelled `Continue` run exposed a different issue: cancelling the relay stops UI consumption, but the underlying AISDK tool loop can still execute tools afterward. Evidence is `00:05:26+` tool calls with `ui_send_failed` after `[STREAM_CANCELLED]`.
+
+That is not the premature-complete recurrence the user asked to ignore, but it should probably become a separate cancellation-abort bug.
+
+### Next Debugging Targets
+
+1. Bring `src/prompt/mod.rs` Codex prompt closer to upstream `gpt_5_2_prompt.md`, especially persistence, plan-status, and final-answer criteria.
+2. Keep runtime completion gates reference-shaped: tool calls, tool results needing follow-up, `end_turn=false`, commentary phase, and terminal-event enforcement.
+3. Do not add natural-language final-answer heuristics or `update_plan` completion gates unless intentionally choosing to diverge from Codex/opencode.
+4. Track the cancellation issue separately: cancellation should abort `stream_with_tools` and any in-flight tool execution rather than merely closing the UI sender.
+
+## 2026-05-22 Plan Loop Regression
+
+### User-Visible Symptom
+
+After the premature-completion prompt/protocol fix, crabcode was asked to add syntax highlighting during `Edited` tool calls. Instead of inspecting files, it repeatedly emitted preambles like:
+
+> I’ll activate the plan and inspect edited-call rendering paths.
+
+and repeatedly called `update_plan` with the same plan:
+
+- `Locate edited tool-call rendering path` as `in_progress`
+- remaining items as `pending`
+
+The visible tool result rendered every item as unchecked, so the transcript looked like the active plan never took effect.
+
+### `app.log` Evidence
+
+Primary session id: `f8m29e6gfpx6rmj3ydxzdajb`.
+
+Relevant sequence:
+
+- `00:28:13`: stream started for the syntax-highlighting request.
+- `00:28:18`: the model called `skill ratatui` once.
+- `00:28:24` through `00:30:58`: steps 2-23 repeatedly called `update_plan` with the same `in_progress` item and no file-search/read/edit tools.
+- `00:31:00`: user cancelled the stream.
+- `00:31:07+`: the underlying tool loop still executed additional `update_plan` calls with `ui_send_failed`, matching the separate cancellation-abort issue.
+
+### Root Cause
+
+The previous prompt fix made active-plan state more important, but `src/tools/update_plan.rs` returned the same plain-text marker for `in_progress` and `pending`:
+
+- `in_progress` -> `□`
+- `pending` -> `□`
+
+The model only receives the tool output text, not the UI color styling. It therefore saw its `in_progress` update echoed back as still unchecked, then tried to activate the plan again. The TUI had the same problem in transcript/plain-text captures because active plan rows differed only by color.
+
+### Fix Applied
+
+- `src/tools/update_plan.rs`
+  - Tool output now uses distinct markers:
+    - `in_progress` -> `[•]`
+    - `pending` -> `[ ]`
+    - `completed` -> `[x]`
+  - Added `format_plan_output_preserves_in_progress_status`.
+- `src/ui/components/chat.rs`
+  - Plan rendering now shows `•` for active rows, so plain-text transcripts preserve active status.
+  - Added `test_updated_plan_renders_in_progress_distinctly`.
+- `src/prompt/mod.rs`
+  - Added a planning rule that after `update_plan` succeeds, the model should proceed with concrete tool work and not repeat the same plan unless content or statuses changed.
+
+Validation:
+
+- `cargo test -q format_plan_output_preserves_in_progress_status`
+- `cargo test -q test_updated_plan_renders_in_progress_distinctly`
+- `cargo test -q codex_prompt_separates_progress_from_final_answers`
+
+### Follow-up
+
+The cancellation-abort issue remains separate: after `[STREAM_CANCELLED]`, `stream_with_tools` can still execute tool calls whose UI sender is already closed.

@@ -223,6 +223,7 @@ Planning:
 - Mark steps completed before moving forward
 - Maintain exactly one in_progress item at a time until all active work is done
 - Do not let the plan go stale while coding
+- After update_plan succeeds, proceed with the next concrete tool call; do not call update_plan again unless the plan content or statuses changed
 - Do not end the turn while any active plan item remains pending or in_progress unless the user pauses, redirects, or you are blocked and explain why
 
 File Handling:
@@ -375,6 +376,7 @@ mod tests {
         assert!(prompt.contains("keep using tools instead of sending a final answer"));
         assert!(prompt.contains("Persist until the task is fully handled end-to-end"));
         assert!(prompt.contains("Do not let the plan go stale while coding"));
+        assert!(prompt.contains("do not call update_plan again unless the plan content"));
         assert!(prompt.contains("Do not end the turn while any active plan item remains pending"));
     }
 }

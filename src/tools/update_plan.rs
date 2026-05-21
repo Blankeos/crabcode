@@ -240,6 +240,30 @@ fn validate_plan_items(plan: &[PlanItem]) -> Result<(), ToolError> {
     Ok(())
 }
 
+fn output_marker_for_status(status: &str) -> &'static str {
+    match status {
+        "completed" => "[x]",
+        "in_progress" => "[•]",
+        _ => "[ ]",
+    }
+}
+
+fn format_plan_update_output(update: &PlanUpdate) -> String {
+    let mut output = String::new();
+    if let Some(explanation) = update.explanation.as_deref() {
+        output.push_str(explanation);
+        output.push('\n');
+    }
+    for item in &update.plan {
+        output.push_str(&format!(
+            "{} {}\n",
+            output_marker_for_status(&item.status),
+            item.step
+        ));
+    }
+    output
+}
+
 #[async_trait]
 impl ToolHandler for UpdatePlanTool {
     fn definition(&self) -> Tool {
@@ -269,20 +293,7 @@ impl ToolHandler for UpdatePlanTool {
 
     async fn execute(&self, params: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let update = parse_update_plan(&params)?;
-
-        let mut output = String::new();
-        if let Some(explanation) = update.explanation.as_deref() {
-            output.push_str(explanation);
-            output.push('\n');
-        }
-        for item in &update.plan {
-            let marker = match item.status.as_str() {
-                "completed" => "✔",
-                "in_progress" => "□",
-                _ => "□",
-            };
-            output.push_str(&format!("{} {}\n", marker, item.step));
-        }
+        let output = format_plan_update_output(&update);
 
         Ok(ToolResult::new("Plan updated", output)
             .with_metadata("explanation", serde_json::json!(update.explanation))
@@ -342,5 +353,21 @@ mod tests {
         assert_eq!(update.plan[0].status, "pending");
         assert_eq!(update.plan[1].status, "in_progress");
         assert_eq!(update.plan[2].status, "completed");
+    }
+
+    #[test]
+    fn format_plan_output_preserves_in_progress_status() {
+        let params = json!({
+            "plan": [
+                {"step": "Locate renderer", "status": "in_progress"},
+                {"step": "Validate", "status": "pending"},
+                {"step": "Ship fix", "status": "completed"}
+            ]
+        });
+
+        let update = parse_update_plan(&params).unwrap();
+        let output = format_plan_update_output(&update);
+
+        assert_eq!(output, "[•] Locate renderer\n[ ] Validate\n[x] Ship fix\n");
     }
 }

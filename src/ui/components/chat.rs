@@ -404,6 +404,8 @@ fn parse_plan_checkbox_line(line: &str) -> Option<PlanStep> {
         (PlanStepStatus::Completed, rest)
     } else if let Some(rest) = line.strip_prefix("[•]") {
         (PlanStepStatus::InProgress, rest)
+    } else if let Some(rest) = line.strip_prefix("•") {
+        (PlanStepStatus::InProgress, rest)
     } else if let Some(rest) = line.strip_prefix("□") {
         (PlanStepStatus::Pending, rest)
     } else {
@@ -2318,7 +2320,7 @@ impl Chat {
                             .add_modifier(Modifier::DIM | Modifier::CROSSED_OUT),
                     ),
                     PlanStepStatus::InProgress => (
-                        "□ ",
+                        "• ",
                         Style::default()
                             .fg(colors.accent)
                             .add_modifier(Modifier::BOLD),
@@ -3690,6 +3692,33 @@ mod tests {
                 "  └ □ Define table data",
                 "    □ Choose rendering file",
                 "    □ Implement rendering",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_updated_plan_renders_in_progress_distinctly() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "update_plan",
+            "status": "ok",
+            "output_preview": "[ ] Locate renderer\n[•] Implement highlighting\n[x] Validate\n",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "⬢ Updated Plan",
+                "  └ □ Locate renderer",
+                "    • Implement highlighting",
+                "    ✔ Validate",
                 "",
             ]
         );
