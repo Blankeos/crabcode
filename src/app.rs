@@ -1,4 +1,6 @@
-use ratatui::crossterm::event::{self, KeyCode, KeyEvent, MouseEvent};
+use ratatui::crossterm::event::{
+    self, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::autocomplete::AutoComplete;
 use crate::command::handlers::register_all_commands;
@@ -214,6 +216,8 @@ pub struct App {
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
     pub message_actions_index: Option<usize>,
     pub message_actions_dialog: Option<crate::ui::components::dialog::Dialog>,
+    message_actions_return_focus: OverlayFocus,
+    pending_chat_message_click: Option<usize>,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     openai_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<OpenAIOAuthTaskMessage>>,
     openai_oauth_in_progress: bool,
@@ -421,11 +425,13 @@ impl App {
             permission_dialog_state,
             question_dialog_state,
             skills_dialog_state,
+            command_palette_state,
             which_key_state,
             timeline_dialog_state,
-            command_palette_state,
             message_actions_index: None,
             message_actions_dialog: None,
+            message_actions_return_focus: OverlayFocus::TimelineDialog,
+            pending_chat_message_click: None,
             api_key_input,
             openai_oauth_receiver: None,
             openai_oauth_in_progress: false,
@@ -1206,6 +1212,46 @@ impl App {
         }
     }
 
+    fn current_chat_area(&self) -> ratatui::layout::Rect {
+        let size = self.last_frame_size;
+        let main_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints(
+                [
+                    ratatui::layout::Constraint::Min(0),
+                    ratatui::layout::Constraint::Length(1),
+                ]
+                .as_ref(),
+            )
+            .split(size);
+        let input_height = if self.is_subagent_session_active() {
+            SUBAGENT_FOOTER_HEIGHT
+        } else {
+            self.input.get_height_for_width(size.width)
+        };
+        let help_height = if self.is_subagent_session_active() {
+            0
+        } else {
+            1
+        };
+        let above_status_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints(
+                [
+                    ratatui::layout::Constraint::Length(0),
+                    ratatui::layout::Constraint::Min(0),
+                    ratatui::layout::Constraint::Length(0),
+                    ratatui::layout::Constraint::Length(input_height),
+                    ratatui::layout::Constraint::Length(help_height),
+                    ratatui::layout::Constraint::Length(1),
+                ]
+                .as_ref(),
+            )
+            .split(main_chunks[0]);
+
+        above_status_chunks[1]
+    }
+
     pub fn handle_keys(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Char('p')
             && key.modifiers == event::KeyModifiers::CONTROL
@@ -1725,7 +1771,7 @@ impl App {
                     crate::views::timeline_dialog::TimelineDialogAction::Select(idx) => {
                         self.chat_state.chat.scroll_to_message_index(idx);
                         self.chat_state.chat.set_highlighted_message(Some(idx));
-                        self.show_message_actions(idx);
+                        self.show_message_actions_from(idx, OverlayFocus::TimelineDialog);
                         true
                     }
                     crate::views::timeline_dialog::TimelineDialogAction::Navigate(idx) => {
@@ -2082,6 +2128,7 @@ impl App {
         {
             self.copy_chat_selection();
             self.chat_state.chat.selection.clear();
+            self.pending_chat_message_click = None;
             return;
         }
 
@@ -2312,7 +2359,7 @@ impl App {
                 crate::views::timeline_dialog::TimelineDialogAction::Select(idx) => {
                     self.chat_state.chat.scroll_to_message_index(idx);
                     self.chat_state.chat.set_highlighted_message(Some(idx));
-                    self.show_message_actions(idx);
+                    self.show_message_actions_from(idx, OverlayFocus::TimelineDialog);
                 }
                 crate::views::timeline_dialog::TimelineDialogAction::Navigate(idx) => {
                     self.chat_state.chat.scroll_to_message_index(idx);
@@ -2327,8 +2374,13 @@ impl App {
             }
         } else if self.overlay_focus == OverlayFocus::MessageActions {
             let maybe_action = if let Some(ref mut dialog) = self.message_actions_dialog {
+                let clicked_item = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    dialog.item_index_at_position(mouse.column, mouse.row)
+                } else {
+                    None
+                };
                 let handled = dialog.handle_mouse_event(mouse);
-                if handled {
+                if handled && clicked_item.is_some() {
                     dialog.get_selected().map(|s| s.provider_id.clone())
                 } else {
                     None
@@ -2384,96 +2436,84 @@ impl App {
         } else if self.overlay_focus == OverlayFocus::None {
             // If chat has a selection and user clicks outside chat area, clear it
             if self.chat_state.chat.has_selection() && self.base_focus == BaseFocus::Chat {
-                let size = self.last_frame_size;
-                let main_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(size);
-                let input_height = self.input.get_height_for_width(size.width);
-                let input_height = if self.is_subagent_session_active() {
-                    SUBAGENT_FOOTER_HEIGHT
-                } else {
-                    input_height
-                };
-                let help_height = if self.is_subagent_session_active() {
-                    0
-                } else {
-                    1
-                };
-                let above_status_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Length(0), // Reserved subagent header removed
-                            ratatui::layout::Constraint::Min(0),    // Chat content
-                            ratatui::layout::Constraint::Length(0), // Bottom padding
-                            ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(help_height), // Help bar
-                            ratatui::layout::Constraint::Length(1),           // Blank
-                        ]
-                        .as_ref(),
-                    )
-                    .split(main_chunks[0]);
-                let chat_area = above_status_chunks[1];
+                let chat_area = self.current_chat_area();
 
                 let point = ratatui::layout::Position::new(mouse.column, mouse.row);
                 if !chat_area.contains(point) {
                     // Click outside chat area, copy selection before clearing
                     self.copy_chat_selection();
                     self.chat_state.chat.selection.clear();
+                    self.pending_chat_message_click = None;
                 }
             }
 
             // Handle mouse events for chat scrolling/selection when in chat mode
             if self.base_focus == BaseFocus::Chat {
-                let size = self.last_frame_size;
-                let main_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(size);
-                let input_height = self.input.get_height_for_width(size.width);
-                let input_height = if self.is_subagent_session_active() {
-                    SUBAGENT_FOOTER_HEIGHT
-                } else {
-                    input_height
-                };
-                let help_height = if self.is_subagent_session_active() {
-                    0
-                } else {
-                    1
-                };
-                let above_status_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Length(0), // Reserved subagent header removed
-                            ratatui::layout::Constraint::Min(0),    // Chat content
-                            ratatui::layout::Constraint::Length(0), // Bottom padding
-                            ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(help_height), // Help bar
-                            ratatui::layout::Constraint::Length(1),           // Blank
-                        ]
-                        .as_ref(),
-                    )
-                    .split(main_chunks[0]);
-                let chat_area = above_status_chunks[1];
+                let chat_area = self.current_chat_area();
+
+                match mouse.kind {
+                    MouseEventKind::Moved
+                        if !self.chat_state.chat.has_selection()
+                            && !self.chat_state.chat.selection.is_dragging =>
+                    {
+                        let hovered = self
+                            .chat_state
+                            .chat
+                            .message_index_at_position(mouse, chat_area);
+                        self.chat_state.chat.set_highlighted_message(hovered);
+                        if hovered.is_some() {
+                            return;
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if mouse.modifiers.is_empty()
+                            && !self.chat_state.chat.has_selection()
+                            && !self.chat_state.chat.selection.is_dragging =>
+                    {
+                        self.pending_chat_message_click = self
+                            .chat_state
+                            .chat
+                            .message_index_at_position(mouse, chat_area);
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        self.pending_chat_message_click = None;
+                    }
+                    _ => {}
+                }
 
                 let had_selection = self.chat_state.chat.has_selection();
                 let was_dragging = self.chat_state.chat.selection.is_dragging;
+                let released_pending_message =
+                    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                        && !mouse.modifiers.contains(KeyModifiers::SHIFT)
+                    {
+                        self.pending_chat_message_click.and_then(|idx| {
+                            (self
+                                .chat_state
+                                .chat
+                                .message_index_at_position(mouse, chat_area)
+                                == Some(idx))
+                            .then_some(idx)
+                        })
+                    } else {
+                        None
+                    };
 
                 if self.chat_state.chat.handle_mouse_event(mouse, chat_area) {
+                    if let Some(idx) = released_pending_message {
+                        if !self.chat_state.chat.has_selection() {
+                            self.pending_chat_message_click = None;
+                            self.chat_state.chat.scroll_to_message_index(idx);
+                            self.chat_state.chat.set_highlighted_message(Some(idx));
+                            self.show_message_actions_from(idx, OverlayFocus::None);
+                            return;
+                        }
+                    }
+
+                    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+                        self.pending_chat_message_click = None;
+                    }
+
                     // Auto-copy when selection is finalized (mouse up after drag)
                     if !had_selection && self.chat_state.chat.has_selection() {
                         // New selection just started, don't copy yet
@@ -3506,10 +3546,20 @@ impl App {
     }
 
     fn show_message_actions(&mut self, idx: usize) {
+        let return_focus = if self.overlay_focus == OverlayFocus::TimelineDialog {
+            OverlayFocus::TimelineDialog
+        } else {
+            OverlayFocus::None
+        };
+        self.show_message_actions_from(idx, return_focus);
+    }
+
+    fn show_message_actions_from(&mut self, idx: usize, return_focus: OverlayFocus) {
         use crate::ui::components::dialog::{Dialog, DialogItem};
 
         let can_undo = self.selected_message_can_undo(idx);
         self.message_actions_index = Some(idx);
+        self.message_actions_return_focus = return_focus;
 
         let mut items = vec![
             DialogItem {
@@ -3675,7 +3725,12 @@ impl App {
     fn close_message_actions(&mut self) {
         self.message_actions_index = None;
         self.message_actions_dialog = None;
-        self.overlay_focus = OverlayFocus::TimelineDialog;
+        let return_focus = self.message_actions_return_focus;
+        self.message_actions_return_focus = OverlayFocus::TimelineDialog;
+        if return_focus == OverlayFocus::None {
+            self.chat_state.chat.clear_highlighted_message();
+        }
+        self.overlay_focus = return_focus;
     }
 
     fn refresh_models_dialog(&mut self) {
@@ -5504,6 +5559,8 @@ mod tests {
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
             message_actions_index: None,
             message_actions_dialog: None,
+            message_actions_return_focus: OverlayFocus::TimelineDialog,
+            pending_chat_message_click: None,
             api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
             openai_oauth_receiver: None,
             openai_oauth_in_progress: false,
@@ -5549,6 +5606,81 @@ mod tests {
             .as_ref()
             .map(|dialog| dialog.items.iter().map(|item| item.name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    #[test]
+    fn clicking_chat_message_opens_message_actions() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let _session_id = app.create_new_session(Some("Chat click".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let message = crate::session::types::Message::user("click me");
+        app.chat_state.chat.add_message(message.clone());
+        app.session_manager
+            .add_message_to_current_session(&message)
+            .unwrap();
+        let colors = app.get_current_theme_colors();
+        let positions = app
+            .chat_state
+            .chat
+            .get_message_line_positions(78, &app.model, &colors);
+        app.chat_state.chat.message_line_positions = positions;
+        app.chat_state.chat.content_height = 4;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+        assert_eq!(
+            app.chat_state.chat.message_index_at_position(
+                mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+                app.current_chat_area(),
+            ),
+            Some(0)
+        );
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), 1, 1));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::MessageActions);
+        assert_eq!(app.message_actions_index, Some(0));
+        assert!(message_action_names(&app).contains(&"Undo".to_string()));
+    }
+
+    #[test]
+    fn closing_direct_chat_message_actions_returns_to_chat() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let _session_id = app.create_new_session(Some("Chat click".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let message = crate::session::types::Message::user("click me");
+        app.chat_state.chat.add_message(message.clone());
+        app.session_manager
+            .add_message_to_current_session(&message)
+            .unwrap();
+        let colors = app.get_current_theme_colors();
+        let positions = app
+            .chat_state
+            .chat
+            .get_message_line_positions(78, &app.model, &colors);
+        app.chat_state.chat.message_line_positions = positions;
+        app.chat_state.chat.content_height = 4;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), 1, 1));
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert_eq!(app.message_actions_index, None);
+        assert_eq!(app.chat_state.chat.highlighted_message_index, None);
     }
 
     #[test]

@@ -1141,6 +1141,79 @@ impl Chat {
         self.highlighted_message_index = None;
     }
 
+    pub fn message_index_at_position(&self, event: MouseEvent, area: Rect) -> Option<usize> {
+        use ratatui::layout::Position;
+
+        let point = Position::new(event.column, event.row);
+        let content_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width.saturating_sub(2),
+            height: area.height,
+        };
+
+        if !content_area.contains(point) || self.message_line_positions.is_empty() {
+            return None;
+        }
+
+        let content_line =
+            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_height = self.content_height.max(
+            self.message_line_positions
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+        );
+        self.message_index_at_content_line(content_line, content_height)
+    }
+
+    fn message_index_at_content_line(
+        &self,
+        content_line: usize,
+        content_height: usize,
+    ) -> Option<usize> {
+        if content_line >= content_height {
+            return None;
+        }
+
+        for (idx, message) in self.messages.iter().enumerate() {
+            if !matches!(message.role, MessageRole::User | MessageRole::Assistant)
+                || crate::session::compaction::is_compaction_summary(message)
+            {
+                continue;
+            }
+
+            let Some(&start) = self.message_line_positions.get(idx) else {
+                continue;
+            };
+            let mut end = self
+                .message_line_positions
+                .iter()
+                .copied()
+                .skip(idx + 1)
+                .find(|&next_start| next_start > start)
+                .unwrap_or(content_height);
+
+            while end > start
+                && self
+                    .cached_lines
+                    .get(end - 1)
+                    .map(line_is_blank)
+                    .unwrap_or(false)
+            {
+                end -= 1;
+            }
+
+            if content_line >= start && content_line < end {
+                return Some(idx);
+            }
+        }
+
+        None
+    }
+
     fn update_scrollbar(&mut self) {
         let max_offset = self.content_height.saturating_sub(self.viewport_height);
         let content_length = max_offset.saturating_add(1).max(1);
@@ -3187,6 +3260,42 @@ mod tests {
         chat.append_to_last_assistant(" assistant");
         assert_eq!(chat.messages.len(), 3);
         assert_eq!(chat.messages[2].content, " assistant");
+    }
+
+    #[test]
+    fn click_hit_test_maps_visible_row_to_message_index() {
+        let mut chat = Chat::with_messages(vec![Message::user("hello"), Message::assistant("hi")]);
+        let colors = test_colors();
+        let positions = chat.get_message_line_positions(40, "model", &colors);
+        chat.message_line_positions = positions;
+        chat.content_height = chat.build_all_lines(40, "model", &colors).len();
+        chat.viewport_height = 8;
+        chat.scroll_offset = 0;
+
+        assert_eq!(
+            chat.message_index_at_position(
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    1,
+                    1,
+                    KeyModifiers::empty()
+                ),
+                Rect::new(0, 0, 40, 8),
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            chat.message_index_at_position(
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    1,
+                    4,
+                    KeyModifiers::empty()
+                ),
+                Rect::new(0, 0, 40, 8),
+            ),
+            Some(1)
+        );
     }
 
     #[test]

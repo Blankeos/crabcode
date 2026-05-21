@@ -96,6 +96,12 @@
 
 - [x] better timeline highlighting of each "message"
 
+- [ ] Timeline highlighting of each message is not very accurate. It's accurate for "my messages". but for the ai responses, ai can seem to only highlight, even via `ctrl+x g`, the first few messages before a tool call happens. This is the same with the mouse hover effects. Expectations:
+  - I hover/timelinehighlight my message, it encapsulates the entire message box (met)
+  - I hover/timelinehighlight an ai response's message, it encapsulates the entire block, including tool calls, including the thinking, etc. (not met).
+  - Essentially, I was imagining kinda the same as having a 'copy' button under each "message" record in the "messages: []" array in vercel ai sdk. That's kinda the point here. But for the limitations of TUIs, I want to just use a click on the entire message block (mine or the AI response, and open a dialog -- which is mostly the current behavior now)
+  - UI bonus: the hover/timelinehighlight on ai response messages are more subtle, shouldnt use the primary color -- it looks TOO strong.
+
 - [x] IN /models, can we use the ❤︎ icon, but colored pink. instead of the long heart + favorite indicator.
 
 - [x] Reasoning effort adjustment in /models. Or a hotkey? In opencode it's ctrl-t.
@@ -163,3 +169,5 @@ I get
 ```
 I want - [x] To do this But I dont want to do this
 ```
+
+- [ ] Make the "bash" permission parity to codex. Also I currently dont see the command that it wants to run, so I'm kinda blind on what to run here.
