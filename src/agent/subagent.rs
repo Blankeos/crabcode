@@ -154,7 +154,7 @@ pub async fn run_subagent(
         sender.clone(),
         "build".to_string(),
         permissions,
-        Some(session_id),
+        Some(session_id.clone()),
         None,
     )
     .await;
@@ -171,6 +171,16 @@ pub async fn run_subagent(
     ];
 
     let headers = HashMap::new();
+    let stream_started_at = std::time::Instant::now();
+    let _ = crate::logging::log(&format!(
+        "[SUBAGENT] stream_start session_id={} subagent_type={} tools={} description_bytes={} prompt_bytes={} sender_present={}",
+        session_id,
+        subagent_type.name(),
+        aisdk_tools.len(),
+        description.len(),
+        prompt.len(),
+        sender.is_some()
+    ));
 
     let mut response: StreamTextResponse = match session.provider_kind {
         ProviderKind::OpenAICompatible => {
@@ -250,6 +260,13 @@ pub async fn run_subagent(
                 tool_call_count = tool_call_count.saturating_add(calls);
             }
             ChunkType::Failed(err) => {
+                let _ = crate::logging::log(&format!(
+                    "[SUBAGENT] stream_failed session_id={} subagent_type={} duration_ms={} error={}",
+                    session_id,
+                    subagent_type.name(),
+                    stream_started_at.elapsed().as_millis(),
+                    err
+                ));
                 if let Some(sender) = sender.as_ref() {
                     let _ = sender.send(crate::llm::ChunkMessage::Failed(err.clone()));
                 }
@@ -261,9 +278,28 @@ pub async fn run_subagent(
             ChunkType::ResponseCompleted { .. } => {
                 break;
             }
+            ChunkType::Metadata(message) => {
+                let _ = crate::logging::log(&format!(
+                    "[SUBAGENT_METADATA] session_id={} subagent_type={} {}",
+                    session_id,
+                    subagent_type.name(),
+                    message
+                ));
+            }
             _ => {}
         }
     }
+
+    let stop_reason = response.stop_reason().await;
+    let _ = crate::logging::log(&format!(
+        "[SUBAGENT] stream_finish session_id={} subagent_type={} duration_ms={} stop_reason={:?} text_bytes={} tool_call_count={}",
+        session_id,
+        subagent_type.name(),
+        stream_started_at.elapsed().as_millis(),
+        stop_reason,
+        collected_text.len(),
+        tool_call_count
+    ));
 
     Ok(SubAgentRunResult {
         output: normalize_subagent_output(collected_text),

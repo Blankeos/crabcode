@@ -365,7 +365,15 @@ pub async fn stream_llm_with_cancellation(
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
 ) -> Result<(), DynError> {
-    let _ = log("GOING TO STREAM");
+    let _ = log(&format!(
+        "GOING TO STREAM session_id={} provider={} model={} agent_mode={} agent_max_steps={:?} input_messages={}",
+        session_id,
+        provider_name,
+        model,
+        agent_mode,
+        agent_max_steps,
+        messages.len()
+    ));
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &sender).await?;
 
@@ -394,7 +402,7 @@ pub async fn stream_llm_with_cancellation(
         Some(sender.clone()),
         agent_mode,
         tool_permissions,
-        Some(session_id),
+        Some(session_id.clone()),
         None,
     )
     .await;
@@ -452,7 +460,7 @@ pub async fn stream_llm_with_cancellation(
     let stream_outcome = relay_result.outcome;
     let primary_outcome_label = stream_outcome_label(stream_outcome, stop_reason.as_ref());
     let _ = log(&format!(
-        "Stream completed: outcome={stream_outcome:?}, effective_outcome={primary_outcome_label}, stop_reason={stop_reason:?}, agent_max_steps={agent_max_steps:?}",
+        "Stream completed: session_id={session_id} outcome={stream_outcome:?}, effective_outcome={primary_outcome_label}, stop_reason={stop_reason:?}, agent_max_steps={agent_max_steps:?}",
     ));
     log_stream_summary(
         primary_log_context,

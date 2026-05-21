@@ -250,10 +250,9 @@ impl ToolPermissions {
         action: PermissionAction,
         path: Option<&Path>,
     ) -> Option<PermissionReasonKind> {
-        if matches!(
-            action,
-            PermissionAction::Read | PermissionAction::Write | PermissionAction::Edit
-        ) {
+        // Read/search tools are sandbox-style discovery operations; only mutating
+        // filesystem tools require approval for protected path classes.
+        if matches!(action, PermissionAction::Write | PermissionAction::Edit) {
             if let Some(path) = path {
                 if is_sensitive_path(path) {
                     return Some(PermissionReasonKind::SensitivePath);
@@ -261,15 +260,7 @@ impl ToolPermissions {
             }
         }
 
-        if matches!(
-            action,
-            PermissionAction::Read
-                | PermissionAction::Write
-                | PermissionAction::Edit
-                | PermissionAction::List
-                | PermissionAction::Glob
-                | PermissionAction::Grep
-        ) {
+        if matches!(action, PermissionAction::Write | PermissionAction::Edit) {
             if let Some(path) = path {
                 if is_outside_workdir(path, &self.workdir) {
                     return Some(PermissionReasonKind::ExternalPath);
@@ -478,7 +469,7 @@ mod tests {
         let tx_for_task = tx.clone();
         let first = tokio::spawn(async move {
             perms_for_task
-                .preflight("build", "read", &params_for_task, Some(&tx_for_task))
+                .preflight("build", "write", &params_for_task, Some(&tx_for_task))
                 .await
         });
 
@@ -491,8 +482,29 @@ mod tests {
         let first_result = first.await.expect("task should complete");
         assert!(first_result.is_ok());
 
-        let second = perms.preflight("build", "read", &params, Some(&tx)).await;
+        let second = perms.preflight("build", "write", &params, Some(&tx)).await;
         assert!(second.is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn read_and_search_tools_do_not_prompt_for_sensitive_or_external_paths() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sensitive = serde_json::json!({ "file_path": "/tmp/workspace/.env" });
+        let external = serde_json::json!({ "path": "/tmp/elsewhere" });
+
+        let read_result = perms
+            .preflight("build", "read", &sensitive, Some(&tx))
+            .await;
+        let list_result = perms.preflight("build", "list", &external, Some(&tx)).await;
+        let glob_result = perms.preflight("build", "glob", &external, Some(&tx)).await;
+        let grep_result = perms.preflight("build", "grep", &external, Some(&tx)).await;
+
+        assert!(read_result.is_ok());
+        assert!(list_result.is_ok());
+        assert!(glob_result.is_ok());
+        assert!(grep_result.is_ok());
         assert!(rx.try_recv().is_err());
     }
 
@@ -502,7 +514,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let params = serde_json::json!({ "file_path": "/tmp/workspace/.env" });
 
-        let result = perms.preflight("build", "read", &params, Some(&tx)).await;
+        let result = perms.preflight("build", "write", &params, Some(&tx)).await;
 
         assert!(result.is_ok());
         assert!(rx.try_recv().is_err());

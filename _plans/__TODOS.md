@@ -140,6 +140,6 @@ Replaced at line 239
 
 - [ ] The footer note for the current cwd/workspace. It trims out the very start. i.e. `...ects/_gamedev/my-game:main`. Instead of this, please show the "between" truncation ?? Just maybe, but maybe not.
 
-- [ ] Make tool calls be AS PERMISSIVE, as codex. Meaning won't have to ask me to "read" sometimes.
+- [x] Make tool calls be AS PERMISSIVE, as codex. Meaning won't have to ask me to "read" sometimes.
 
 - [ ] Mouse hover on "chat messages". So that when I click it, it opens the "timeline view" > enter option kinda thing. So it shows either the "Copy", "Fork", "Undo" actions, just like opencode.
