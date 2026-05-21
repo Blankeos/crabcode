@@ -10,28 +10,13 @@ use ratatui::crossterm::event::{
 };
 use ratatui::prelude::{Rect, Style};
 use ratatui::symbols::border;
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::ops::Range;
 use std::path::PathBuf;
 use tui_textarea::{CursorMove, Input as TuiInput, TextArea};
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
-
-/// Convert a display-column position to a byte offset within a string.
-/// Handles multi-byte and wide characters (emoji, CJK, etc.)
-fn display_col_to_byte_offset(line: &str, display_col: usize) -> usize {
-    let mut current_display = 0;
-
-    for (byte_idx, c) in line.char_indices() {
-        let char_width = UnicodeWidthChar::width(c).unwrap_or(1);
-        if display_col < current_display + char_width {
-            return byte_idx;
-        }
-        current_display += char_width;
-    }
-
-    line.len()
-}
 
 /// Clamp a byte offset to the nearest valid UTF-8 character boundary in `s`.
 fn char_boundary_before(s: &str, byte_idx: usize) -> usize {
@@ -55,13 +40,21 @@ fn char_kind(c: char) -> u8 {
 }
 
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+const MAX_TEXTAREA_HEIGHT: usize = 6;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VisualLine {
+    source_row: usize,
+    start_col: usize,
+    end_col: usize,
+}
 
 pub struct Input {
     textarea: TextArea<'static>,
     pub autocomplete: Option<AutoComplete>,
     textarea_area: Option<Rect>,
     viewport_top: usize,
-    viewport_left: usize,
+    preferred_visual_col: Option<usize>,
     prompt_history: Option<PromptHistoryCache>,
     draft_text: Option<String>,
     local_images: Vec<LocalImageAttachment>,
@@ -102,7 +95,7 @@ impl Input {
             autocomplete: None,
             textarea_area: None,
             viewport_top: 0,
-            viewport_left: 0,
+            preferred_visual_col: None,
             prompt_history,
             draft_text: None,
             local_images: Vec::new(),
@@ -147,9 +140,6 @@ impl Input {
         let bg = Block::default().style(Style::default().bg(colors.background_element));
         frame.render_widget(bg, bg_area);
 
-        let line_count = self.textarea.lines().len().max(1);
-        let textarea_height = line_count.min(6) as u16;
-
         let h_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Horizontal)
             .constraints([
@@ -158,6 +148,9 @@ impl Input {
                 ratatui::layout::Constraint::Length(2),
             ])
             .split(inner_area);
+
+        let wrap_width = h_chunks[1].width as usize;
+        let textarea_height = self.textarea_height(wrap_width) as u16;
 
         let v_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
@@ -181,11 +174,8 @@ impl Input {
         );
 
         let visible_lines = v_chunks[1].height as usize;
-        let visible_cols = v_chunks[1].width as usize;
-        self.update_viewport(visible_lines, visible_cols);
-
-        frame.render_widget(&self.textarea, v_chunks[1]);
-        self.style_placeholder_ranges(frame.buffer_mut(), v_chunks[1], colors);
+        self.update_viewport(visible_lines, wrap_width);
+        self.render_wrapped_textarea(frame, v_chunks[1], colors);
 
         let mut info_spans = vec![
             ratatui::text::Span::styled(agent.to_string(), Style::default().fg(agent_color)),
@@ -229,9 +219,16 @@ impl Input {
     }
 
     pub fn get_height(&self) -> u16 {
+        // The exact wrap width is only known during render; keep the existing
+        // compact default so layout can reserve space before the first draw.
         let line_count = self.textarea.lines().len().max(1);
-        let textarea_height = line_count.min(6) as u16;
+        let textarea_height = line_count.min(MAX_TEXTAREA_HEIGHT) as u16;
         textarea_height + 4
+    }
+
+    pub fn get_height_for_width(&self, area_width: u16) -> u16 {
+        let wrap_width = area_width.saturating_sub(5).max(1) as usize;
+        self.textarea_height(wrap_width) as u16 + 4
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
@@ -268,8 +265,11 @@ impl Input {
         // Handle Up arrow for prompt history navigation
         // Trigger when cursor is on first line
         if event.code == KeyCode::Up && event.modifiers == KeyModifiers::NONE {
-            let (cursor_row, _) = self.textarea.cursor();
-            if cursor_row == 0 {
+            if self.move_cursor_visual(-1) {
+                return true;
+            }
+
+            if self.is_cursor_on_first_visual_line() {
                 let current_text = self.get_text();
                 if let Some(ref mut history) = self.prompt_history {
                     if let Some(prompt) = history.navigate_up(&current_text) {
@@ -286,9 +286,11 @@ impl Input {
 
         // Handle Down arrow for prompt history navigation
         if event.code == KeyCode::Down && event.modifiers == KeyModifiers::NONE {
-            let line_count = self.textarea.lines().len();
-            let (cursor_row, _) = self.textarea.cursor();
-            if cursor_row == line_count.saturating_sub(1) {
+            if self.move_cursor_visual(1) {
+                return true;
+            }
+
+            if self.is_cursor_on_last_visual_line() {
                 let current_text = self.get_text();
                 let should_reset = if let Some(ref mut history) = self.prompt_history {
                     if let Some(prompt) = history.navigate_down(&current_text) {
@@ -329,6 +331,7 @@ impl Input {
 
         match event.code {
             KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => {
+                self.preferred_visual_col = None;
                 self.textarea.insert_newline();
                 self.sync_image_placeholders();
                 self.sync_pending_pastes();
@@ -336,6 +339,7 @@ impl Input {
             }
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
             KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
+                self.preferred_visual_col = None;
                 let (cursor_row, cursor_col) = self.textarea.cursor();
                 if let Some(line) = self.textarea.lines().get(cursor_row) {
                     // Clamp to valid char boundary to avoid panics on multi-byte emoji
@@ -354,6 +358,7 @@ impl Input {
             KeyCode::Backspace if self.remove_placeholder_at_cursor(false) => true,
             KeyCode::Delete if self.remove_placeholder_at_cursor(true) => true,
             KeyCode::Backspace if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.preferred_visual_col = None;
                 // Handle Alt+Backspace (word-delete) ourselves to avoid
                 // tui-textarea's buggy word boundary with multi-byte emoji
                 self.delete_word_backward();
@@ -362,6 +367,7 @@ impl Input {
                 true
             }
             _ => {
+                self.preferred_visual_col = None;
                 self.textarea.input(input);
                 self.sync_image_placeholders();
                 self.sync_pending_pastes();
@@ -391,47 +397,21 @@ impl Input {
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                let line_count = self.textarea.lines().len();
-                let visible_lines = textarea_area.height as usize;
-
-                if line_count > visible_lines {
-                    let max_viewport_top = line_count.saturating_sub(visible_lines);
-                    if self.viewport_top < max_viewport_top {
-                        self.viewport_top += 1;
-                        let target_row = self.viewport_top + visible_lines - 1;
-                        let (_, cursor_col) = self.textarea.cursor();
-                        self.textarea
-                            .move_cursor(CursorMove::Jump(target_row as u16, cursor_col as u16));
-                    }
-                }
+                self.move_cursor_visual(1);
                 true
             }
             MouseEventKind::ScrollUp => {
-                let line_count = self.textarea.lines().len();
-                let visible_lines = textarea_area.height as usize;
-
-                if line_count > visible_lines {
-                    if self.viewport_top > 0 {
-                        self.viewport_top -= 1;
-                        let target_row = self.viewport_top;
-                        let (_, cursor_col) = self.textarea.cursor();
-                        self.textarea
-                            .move_cursor(CursorMove::Jump(target_row as u16, cursor_col as u16));
-                    }
-                }
+                self.move_cursor_visual(-1);
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                self.preferred_visual_col = None;
                 let relative_x = mouse_x.saturating_sub(textarea_area.x);
                 let relative_y = mouse_y.saturating_sub(textarea_area.y);
 
-                let lines = self.textarea.lines();
-                let target_row = self.viewport_top + relative_y as usize;
-
-                if target_row < lines.len() {
-                    let line = &lines[target_row];
-                    let target_col =
-                        display_col_to_byte_offset(line, self.viewport_left + relative_x as usize);
+                if let Some((target_row, target_col)) =
+                    self.cursor_for_screen_position(textarea_area, relative_x, relative_y)
+                {
                     let offset = self.flat_offset_for_position(target_row, target_col);
                     if let Some(image) = self.image_at_offset(offset) {
                         match image_attachment::open_path(&image.path) {
@@ -453,8 +433,9 @@ impl Input {
                         .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
                     self.textarea.start_selection();
                 } else {
+                    let lines = self.textarea.lines();
                     let last_row = lines.len().saturating_sub(1);
-                    let last_col = lines[last_row].len();
+                    let last_col = lines[last_row].chars().count();
                     self.textarea
                         .move_cursor(CursorMove::Jump(last_row as u16, last_col as u16));
                     self.textarea.start_selection();
@@ -462,17 +443,14 @@ impl Input {
                 true
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                self.preferred_visual_col = None;
                 // Extend the ongoing selection
                 let relative_x = mouse_x.saturating_sub(textarea_area.x);
                 let relative_y = mouse_y.saturating_sub(textarea_area.y);
 
-                let lines = self.textarea.lines();
-                let target_row = self.viewport_top + relative_y as usize;
-
-                if target_row < lines.len() {
-                    let line = &lines[target_row];
-                    let target_col =
-                        display_col_to_byte_offset(line, self.viewport_left + relative_x as usize);
+                if let Some((target_row, target_col)) =
+                    self.cursor_for_screen_position(textarea_area, relative_x, relative_y)
+                {
                     // Since start_selection() was called and is_selecting() is true,
                     // move_cursor extends the selection
                     self.textarea
@@ -638,6 +616,41 @@ impl Input {
         Some(text.trim_start_matches('/').to_string())
     }
 
+    fn char_col_to_byte_offset(line: &str, col: usize) -> usize {
+        line.char_indices()
+            .nth(col)
+            .map(|(idx, _)| idx)
+            .unwrap_or(line.len())
+    }
+
+    fn line_char_slice(line: &str, start_col: usize, end_col: usize) -> &str {
+        let start = Self::char_col_to_byte_offset(line, start_col);
+        let end = Self::char_col_to_byte_offset(line, end_col);
+        &line[start..end]
+    }
+
+    fn display_col_to_char_col(
+        line: &str,
+        start_col: usize,
+        end_col: usize,
+        display_col: usize,
+    ) -> usize {
+        let mut current_display = 0;
+
+        for (offset, ch) in Self::line_char_slice(line, start_col, end_col)
+            .chars()
+            .enumerate()
+        {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1);
+            if display_col < current_display + char_width {
+                return start_col + offset;
+            }
+            current_display += char_width;
+        }
+
+        end_col
+    }
+
     fn flat_cursor_offset(&self) -> usize {
         let (row, col) = self.textarea.cursor();
         let lines = self.textarea.lines();
@@ -645,7 +658,11 @@ impl Input {
         for line in lines.iter().take(row) {
             offset += line.len() + 1;
         }
-        offset + col.min(lines.get(row).map(|line| line.len()).unwrap_or(0))
+        offset
+            + lines
+                .get(row)
+                .map(|line| Self::char_col_to_byte_offset(line, col))
+                .unwrap_or(0)
     }
 
     fn flat_offset_for_position(&self, row: usize, col: usize) -> usize {
@@ -654,7 +671,11 @@ impl Input {
         for line in lines.iter().take(row) {
             offset += line.len() + 1;
         }
-        offset + col.min(lines.get(row).map(|line| line.len()).unwrap_or(0))
+        offset
+            + lines
+                .get(row)
+                .map(|line| Self::char_col_to_byte_offset(line, col))
+                .unwrap_or(0)
     }
 
     fn cursor_for_flat_offset(text: &str, mut offset: usize) -> (usize, usize) {
@@ -663,12 +684,15 @@ impl Input {
         for (row, line) in text.split('\n').enumerate() {
             let line_end = consumed + line.len();
             if offset <= line_end {
-                return (row, offset - consumed);
+                return (row, line[..offset - consumed].chars().count());
             }
             consumed = line_end + 1;
         }
         let last_line = text.rsplit('\n').next().unwrap_or("");
-        (text.lines().count().saturating_sub(1), last_line.len())
+        (
+            text.lines().count().saturating_sub(1),
+            last_line.chars().count(),
+        )
     }
 
     fn reset_textarea(&mut self) {
@@ -689,7 +713,7 @@ impl Input {
         self.textarea
             .move_cursor(CursorMove::Jump(row as u16, col as u16));
         self.viewport_top = 0;
-        self.viewport_left = 0;
+        self.preferred_visual_col = None;
     }
 
     fn image_placeholder(number: usize) -> String {
@@ -709,18 +733,308 @@ impl Input {
         }
     }
 
-    fn update_viewport(&mut self, visible_lines: usize, visible_cols: usize) {
-        let (cursor_row, cursor_col) = self.textarea.cursor();
-        let line_count = self.textarea.lines().len();
-        let max_viewport_top = line_count.saturating_sub(visible_lines);
-
-        self.viewport_top = self.viewport_top.min(max_viewport_top);
-        self.viewport_top = Self::next_scroll_offset(self.viewport_top, cursor_row, visible_lines)
-            .min(max_viewport_top);
-        self.viewport_left = Self::next_scroll_offset(self.viewport_left, cursor_col, visible_cols);
+    fn textarea_height(&self, wrap_width: usize) -> usize {
+        self.visual_lines(wrap_width)
+            .len()
+            .max(1)
+            .min(MAX_TEXTAREA_HEIGHT)
     }
 
-    fn style_placeholder_ranges(&self, buffer: &mut Buffer, area: Rect, colors: &ThemeColors) {
+    fn visual_lines(&self, wrap_width: usize) -> Vec<VisualLine> {
+        let wrap_width = wrap_width.max(1);
+        let mut visual_lines = Vec::new();
+
+        for (source_row, line) in self.textarea.lines().iter().enumerate() {
+            let line_len = line.chars().count();
+            if line_len == 0 {
+                visual_lines.push(VisualLine {
+                    source_row,
+                    start_col: 0,
+                    end_col: 0,
+                });
+                continue;
+            }
+
+            let mut start_col = 0;
+            while start_col < line_len {
+                let mut end_col = start_col;
+                let mut width = 0;
+
+                for ch in line.chars().skip(start_col) {
+                    let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if end_col > start_col && width + ch_width > wrap_width {
+                        break;
+                    }
+                    width += ch_width;
+                    end_col += 1;
+                    if width >= wrap_width {
+                        break;
+                    }
+                }
+
+                if end_col == start_col {
+                    end_col += 1;
+                }
+
+                visual_lines.push(VisualLine {
+                    source_row,
+                    start_col,
+                    end_col,
+                });
+                start_col = end_col;
+            }
+        }
+
+        visual_lines
+    }
+
+    fn cursor_visual_row(&self, visual_lines: &[VisualLine]) -> Option<usize> {
+        let (cursor_row, cursor_col) = self.textarea.cursor();
+        let line_len = self
+            .textarea
+            .lines()
+            .get(cursor_row)
+            .map(|line| line.chars().count())
+            .unwrap_or(0);
+
+        visual_lines
+            .iter()
+            .enumerate()
+            .find_map(|(idx, visual_line)| {
+                if visual_line.source_row != cursor_row {
+                    return None;
+                }
+
+                let contains_cursor = cursor_col >= visual_line.start_col
+                    && (cursor_col < visual_line.end_col
+                        || (cursor_col == visual_line.end_col && cursor_col == line_len));
+
+                contains_cursor.then_some(idx)
+            })
+    }
+
+    fn cursor_display_col(&self, visual_line: &VisualLine) -> usize {
+        let (_, cursor_col) = self.textarea.cursor();
+        let Some(line) = self.textarea.lines().get(visual_line.source_row) else {
+            return 0;
+        };
+        let cursor_col = cursor_col.clamp(visual_line.start_col, visual_line.end_col);
+        UnicodeWidthStr::width(Self::line_char_slice(
+            line,
+            visual_line.start_col,
+            cursor_col,
+        ))
+    }
+
+    fn move_cursor_visual(&mut self, direction: isize) -> bool {
+        let Some(area) = self.textarea_area else {
+            return false;
+        };
+        if area.width == 0 {
+            return false;
+        }
+
+        let visual_lines = self.visual_lines(area.width as usize);
+        let Some(current_idx) = self.cursor_visual_row(&visual_lines) else {
+            return false;
+        };
+
+        let target_idx = if direction < 0 {
+            match current_idx.checked_sub(1) {
+                Some(idx) => idx,
+                None => return false,
+            }
+        } else {
+            let idx = current_idx + 1;
+            if idx >= visual_lines.len() {
+                return false;
+            }
+            idx
+        };
+
+        let preferred_col = self
+            .preferred_visual_col
+            .unwrap_or_else(|| self.cursor_display_col(&visual_lines[current_idx]));
+        let target = &visual_lines[target_idx];
+        let Some(line) = self.textarea.lines().get(target.source_row) else {
+            return false;
+        };
+        let target_col =
+            Self::display_col_to_char_col(line, target.start_col, target.end_col, preferred_col);
+
+        self.textarea.move_cursor(CursorMove::Jump(
+            target.source_row as u16,
+            target_col as u16,
+        ));
+        self.preferred_visual_col = Some(preferred_col);
+        true
+    }
+
+    fn is_cursor_on_first_visual_line(&self) -> bool {
+        let Some(area) = self.textarea_area else {
+            return self.textarea.cursor().0 == 0;
+        };
+        let visual_lines = self.visual_lines(area.width as usize);
+        self.cursor_visual_row(&visual_lines) == Some(0)
+    }
+
+    fn is_cursor_on_last_visual_line(&self) -> bool {
+        let Some(area) = self.textarea_area else {
+            return self.textarea.cursor().0 == self.textarea.lines().len().saturating_sub(1);
+        };
+        let visual_lines = self.visual_lines(area.width as usize);
+        self.cursor_visual_row(&visual_lines) == visual_lines.len().checked_sub(1)
+    }
+
+    fn cursor_for_screen_position(
+        &self,
+        area: Rect,
+        relative_x: u16,
+        relative_y: u16,
+    ) -> Option<(usize, usize)> {
+        let visual_lines = self.visual_lines(area.width as usize);
+        let visual_idx = self.viewport_top + relative_y as usize;
+        let visual_line = visual_lines.get(visual_idx)?;
+        let line = self.textarea.lines().get(visual_line.source_row)?;
+        let target_col = Self::display_col_to_char_col(
+            line,
+            visual_line.start_col,
+            visual_line.end_col,
+            relative_x as usize,
+        );
+
+        Some((visual_line.source_row, target_col))
+    }
+
+    fn render_wrapped_textarea(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        colors: &ThemeColors,
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let text_style = self.textarea.style();
+        let cursor_style = self.textarea.cursor_style();
+        let selection_style = self.textarea.selection_style();
+        let selection_range = self.textarea.selection_range();
+        let cursor = self.textarea.cursor();
+        let visual_lines = self.visual_lines(area.width as usize);
+
+        let text = if self.is_empty() && !self.textarea.placeholder_text().is_empty() {
+            let placeholder_style = self
+                .textarea
+                .placeholder_style()
+                .unwrap_or_else(|| Style::default().fg(colors.text_weak));
+            Text::from(Line::from(vec![
+                Span::styled(" ", cursor_style),
+                Span::styled(
+                    self.textarea.placeholder_text().to_string(),
+                    placeholder_style,
+                ),
+            ]))
+        } else {
+            let lines = self.textarea.lines();
+            let rendered = visual_lines
+                .iter()
+                .skip(self.viewport_top)
+                .take(area.height as usize)
+                .filter_map(|visual_line| {
+                    let line = lines.get(visual_line.source_row)?;
+                    Some(Self::render_visual_line(
+                        line,
+                        visual_line,
+                        text_style,
+                        cursor_style,
+                        selection_style,
+                        selection_range,
+                        cursor,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            Text::from(rendered)
+        };
+
+        frame.render_widget(Paragraph::new(text).style(text_style), area);
+        self.style_placeholder_ranges(frame.buffer_mut(), area, colors, &visual_lines);
+    }
+
+    fn render_visual_line(
+        line: &str,
+        visual_line: &VisualLine,
+        text_style: Style,
+        cursor_style: Style,
+        selection_style: Style,
+        selection_range: Option<((usize, usize), (usize, usize))>,
+        cursor: (usize, usize),
+    ) -> Line<'static> {
+        let line_len = line.chars().count();
+        let mut spans = Vec::new();
+
+        if visual_line.start_col == visual_line.end_col {
+            if cursor == (visual_line.source_row, visual_line.start_col) {
+                spans.push(Span::styled(" ", cursor_style));
+            }
+            return Line::from(spans);
+        }
+
+        for (idx, ch) in Self::line_char_slice(line, visual_line.start_col, visual_line.end_col)
+            .chars()
+            .enumerate()
+        {
+            let col = visual_line.start_col + idx;
+            let mut style = text_style;
+
+            if Self::position_in_selection(selection_range, visual_line.source_row, col) {
+                style = selection_style;
+            }
+            if cursor == (visual_line.source_row, col) {
+                style = cursor_style;
+            }
+
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+
+        if cursor == (visual_line.source_row, visual_line.end_col)
+            && visual_line.end_col == line_len
+        {
+            spans.push(Span::styled(" ", cursor_style));
+        }
+
+        Line::from(spans)
+    }
+
+    fn position_in_selection(
+        selection_range: Option<((usize, usize), (usize, usize))>,
+        row: usize,
+        col: usize,
+    ) -> bool {
+        let Some((start, end)) = selection_range else {
+            return false;
+        };
+        (row, col) >= start && (row, col) < end
+    }
+
+    fn update_viewport(&mut self, visible_lines: usize, wrap_width: usize) {
+        let visual_lines = self.visual_lines(wrap_width);
+        let cursor_visual_row = self.cursor_visual_row(&visual_lines).unwrap_or(0);
+        let max_viewport_top = visual_lines.len().saturating_sub(visible_lines);
+
+        self.viewport_top = self.viewport_top.min(max_viewport_top);
+        self.viewport_top =
+            Self::next_scroll_offset(self.viewport_top, cursor_visual_row, visible_lines)
+                .min(max_viewport_top);
+    }
+
+    fn style_placeholder_ranges(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        colors: &ThemeColors,
+        visual_lines: &[VisualLine],
+    ) {
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -728,13 +1042,16 @@ impl Input {
         let placeholder_style = Style::default().fg(colors.markdown_image);
         let lines = self.textarea.lines();
 
-        for (line_idx, line) in lines
+        for (screen_row, visual_line) in visual_lines
             .iter()
-            .enumerate()
             .skip(self.viewport_top)
             .take(area.height as usize)
+            .enumerate()
         {
-            let y = area.y + (line_idx - self.viewport_top) as u16;
+            let Some(line) = lines.get(visual_line.source_row) else {
+                continue;
+            };
+            let y = area.y + screen_row as u16;
 
             for image in &self.local_images {
                 for (start, _) in line.match_indices(&image.placeholder) {
@@ -744,7 +1061,7 @@ impl Input {
                         y,
                         line,
                         start..start + image.placeholder.len(),
-                        self.viewport_left,
+                        visual_line,
                         placeholder_style,
                     );
                 }
@@ -758,7 +1075,7 @@ impl Input {
                         y,
                         line,
                         start..start + paste.placeholder.len(),
-                        self.viewport_left,
+                        visual_line,
                         placeholder_style,
                     );
                 }
@@ -772,7 +1089,7 @@ impl Input {
         y: u16,
         line: &str,
         range: Range<usize>,
-        viewport_left: usize,
+        visual_line: &VisualLine,
         style: Style,
     ) {
         if range.start > range.end
@@ -783,16 +1100,27 @@ impl Input {
             return;
         }
 
-        let start_col = UnicodeWidthStr::width(&line[..range.start]);
-        let end_col = start_col + UnicodeWidthStr::width(&line[range]);
-        let visible_start = start_col.max(viewport_left);
-        let visible_end = end_col.min(viewport_left + area.width as usize);
+        let range_start_col = line[..range.start].chars().count();
+        let range_end_col = range_start_col + line[range].chars().count();
+        let visible_start = range_start_col.max(visual_line.start_col);
+        let visible_end = range_end_col.min(visual_line.end_col);
 
-        for col in visible_start..visible_end {
-            let x = area.x + (col - viewport_left) as u16;
+        if visible_start >= visible_end {
+            return;
+        }
+
+        let prefix = Self::line_char_slice(line, visual_line.start_col, visible_start);
+        let mut x_offset = UnicodeWidthStr::width(prefix);
+
+        for ch in Self::line_char_slice(line, visible_start, visible_end).chars() {
+            if x_offset >= area.width as usize {
+                break;
+            }
+            let x = area.x + x_offset as u16;
             if let Some(cell) = buffer.cell_mut((x, y)) {
                 cell.set_style(style);
             }
+            x_offset += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
     }
 
@@ -978,6 +1306,7 @@ impl Input {
 
     pub fn attach_image(&mut self, path: PathBuf) {
         let placeholder = Self::image_placeholder(self.local_images.len() + 1);
+        self.preferred_visual_col = None;
         self.textarea.insert_str(&placeholder);
         self.local_images
             .push(LocalImageAttachment { placeholder, path });
@@ -1103,7 +1432,7 @@ impl Input {
     pub fn clear(&mut self) {
         self.reset_textarea();
         self.viewport_top = 0;
-        self.viewport_left = 0;
+        self.preferred_visual_col = None;
         self.draft_text = None;
         self.local_images.clear();
         self.pending_pastes.clear();
@@ -1133,18 +1462,20 @@ impl Input {
         self.reset_textarea();
         self.textarea.insert_str(text);
         self.viewport_top = 0;
-        self.viewport_left = 0;
+        self.preferred_visual_col = None;
         self.local_images.clear();
         self.pending_pastes.clear();
     }
 
     pub fn insert_char(&mut self, c: char) {
+        self.preferred_visual_col = None;
         self.textarea.insert_str(c.to_string().as_str());
         self.sync_image_placeholders();
         self.sync_pending_pastes();
     }
 
     pub fn insert_str(&mut self, text: &str) {
+        self.preferred_visual_col = None;
         self.textarea.insert_str(text);
         self.sync_image_placeholders();
         self.sync_pending_pastes();
@@ -1157,6 +1488,7 @@ impl Input {
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             self.sync_pending_pastes();
             let placeholder = self.next_large_paste_placeholder(char_count);
+            self.preferred_visual_col = None;
             self.textarea.insert_str(&placeholder);
             self.pending_pastes.push(PendingPaste {
                 placeholder,
@@ -1242,6 +1574,33 @@ mod tests {
             modifiers: KeyModifiers::empty(),
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
+        }
+    }
+
+    fn key_event(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn modified_key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn mouse_event(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
         }
     }
 
@@ -1442,6 +1801,87 @@ mod tests {
         assert!(handled);
         assert_eq!(input.get_text(), "");
         assert_eq!(input.submission_text(), "");
+    }
+
+    #[test]
+    fn test_long_unbroken_input_wraps_instead_of_scrolling() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        input.insert_str("0123456789ABCDEF");
+
+        let colors = test_colors();
+        let backend = TestBackend::new(20, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 20, 10),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let first_input_row = buffer_row_text(buffer, 20, 1);
+        let second_input_row = buffer_row_text(buffer, 20, 2);
+
+        assert!(first_input_row.contains("0123456789ABCDE"));
+        assert!(!first_input_row.contains('F'));
+        assert!(second_input_row.contains('F'));
+    }
+
+    #[test]
+    fn test_wrapped_input_and_paste_increase_height_like_newlines() {
+        let mut newline_input = Input::new();
+        newline_input.insert_str("a");
+        assert!(newline_input.handle_event(modified_key_event(KeyCode::Enter, KeyModifiers::SHIFT)));
+        newline_input.insert_str("b");
+
+        let mut wrapped_input = Input::new();
+        wrapped_input.insert_str("0123456789ABCDEF");
+
+        let mut pasted_input = Input::new();
+        pasted_input.insert_paste("0123456789ABCDEF");
+
+        assert_eq!(newline_input.get_height_for_width(20), 6);
+        assert_eq!(wrapped_input.get_height_for_width(20), 6);
+        assert_eq!(pasted_input.get_height_for_width(20), 6);
+    }
+
+    #[test]
+    fn test_up_down_move_across_wrapped_visual_lines() {
+        let mut input = Input::new();
+        input.insert_str("0123456789ABCDEF");
+        input.textarea_area = Some(Rect::new(0, 0, 15, 6));
+
+        input.textarea.move_cursor(CursorMove::Jump(0, 0));
+        assert!(input.handle_event(key_event(KeyCode::Down)));
+        assert_eq!(input.textarea.cursor(), (0, 15));
+        assert_eq!(input.get_text(), "0123456789ABCDEF");
+
+        assert!(input.handle_event(key_event(KeyCode::Up)));
+        assert_eq!(input.textarea.cursor(), (0, 0));
+        assert_eq!(input.get_text(), "0123456789ABCDEF");
+    }
+
+    #[test]
+    fn test_mouse_scroll_moves_across_wrapped_visual_lines() {
+        let mut input = Input::new();
+        input.insert_str("0123456789ABCDEF");
+        input.textarea_area = Some(Rect::new(0, 0, 15, 6));
+        input.textarea.move_cursor(CursorMove::Jump(0, 0));
+
+        assert!(input.handle_mouse_event(mouse_event(MouseEventKind::ScrollDown)));
+        assert_eq!(input.textarea.cursor(), (0, 15));
+
+        assert!(input.handle_mouse_event(mouse_event(MouseEventKind::ScrollUp)));
+        assert_eq!(input.textarea.cursor(), (0, 0));
     }
 
     #[test]

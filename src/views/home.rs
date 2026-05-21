@@ -86,7 +86,7 @@ pub fn render_home(
         .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
         .split(size);
 
-    let input_height = input.get_height();
+    let input_height = input.get_height_for_width(size.width);
     let home_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(

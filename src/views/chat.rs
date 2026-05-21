@@ -93,7 +93,7 @@ pub fn render_chat(
     let input_height = if is_subagent_view {
         SUBAGENT_FOOTER_HEIGHT
     } else {
-        input.get_height()
+        input.get_height_for_width(size.width)
     };
     let help_height = if is_subagent_view { 0 } else { 1 };
     let above_status_chunks = Layout::default()
