@@ -100,11 +100,13 @@ pub async fn stream_with_tools<P: Provider>(
                 }
             }
 
+            let step_summary = provider_step_log_summary(&current_messages, &tools);
             let _ = tx_loop.send(ChunkType::Metadata(format!(
-                "provider_step_start step={} messages={} tools={}",
+                "provider_step_start step={} messages={} tools={} {}",
                 step_idx,
                 current_messages.len(),
-                tools.len()
+                tools.len(),
+                step_summary
             )));
 
             let stream_result = provider_clone
@@ -115,10 +117,11 @@ pub async fn stream_with_tools<P: Provider>(
                 Ok(s) => s,
                 Err(e) => {
                     let err = format!(
-                        "provider_step_error step={} messages={} tools={} error={}",
+                        "provider_step_error step={} messages={} tools={} {} error={}",
                         step_idx,
                         current_messages.len(),
                         tools.len(),
+                        step_summary,
                         e
                     );
                     let _ = tx_loop.send(ChunkType::Failed(err.clone()));
@@ -257,7 +260,7 @@ pub async fn stream_with_tools<P: Provider>(
                 }
             };
 
-            let mut successful_tool_results = Vec::new();
+            let mut tool_results_to_observe = Vec::new();
             let mut tool_calls_to_run = Vec::new();
 
             for (call_id, tool_name, args) in tool_calls_to_execute {
@@ -267,7 +270,7 @@ pub async fn stream_with_tools<P: Provider>(
                     .and_then(|key| cached_repeatable_tool_results.get(key))
                     .cloned()
                 {
-                    successful_tool_results.push(ToolExecutionResult {
+                    tool_results_to_observe.push(ToolExecutionResult {
                         call_id,
                         tool_name,
                         output: format!(
@@ -275,6 +278,7 @@ pub async fn stream_with_tools<P: Provider>(
                             cached_output
                         ),
                         cache_key: None,
+                        is_error: false,
                     });
                 } else {
                     tool_calls_to_run.push((call_id, tool_name, args, cache_key));
@@ -287,18 +291,29 @@ pub async fn stream_with_tools<P: Provider>(
 
                     async move {
                         match tool {
-                            Some(t) => t
-                                .execute
-                                .call(args)
-                                .await
-                                .map(|output| ToolExecutionResult {
+                            Some(t) => match t.execute.call(args).await {
+                                Ok(output) => ToolExecutionResult {
                                     call_id,
                                     tool_name: tool_name.clone(),
                                     output,
                                     cache_key,
-                                })
-                                .map_err(|e| format!("Tool '{}' error: {}", tool_name, e)),
-                            None => Err(format!("Tool not found: {}", tool_name)),
+                                    is_error: false,
+                                },
+                                Err(err) => ToolExecutionResult {
+                                    call_id,
+                                    tool_name: tool_name.clone(),
+                                    output: format!("Tool '{}' error: {}", tool_name, err),
+                                    cache_key: None,
+                                    is_error: true,
+                                },
+                            },
+                            None => ToolExecutionResult {
+                                call_id,
+                                tool_name: tool_name.clone(),
+                                output: format!("Tool not found: {}", tool_name),
+                                cache_key: None,
+                                is_error: true,
+                            },
                         }
                     }
                 },
@@ -306,31 +321,32 @@ pub async fn stream_with_tools<P: Provider>(
             .await;
 
             for result in tool_results {
-                match result {
-                    Ok(result) => {
-                        if let Some(cache_key) = result.cache_key.as_ref() {
-                            cached_repeatable_tool_results
-                                .insert(cache_key.clone(), result.output.clone());
-                        }
-                        successful_tool_results.push(result);
-                    }
-                    Err(err) => {
-                        let _ = tx_loop.send(ChunkType::Failed(err));
-                    }
+                if result.is_error {
+                    let _ = tx_loop.send(ChunkType::Metadata(format!(
+                        "tool_result_error tool={} call_id={} output_chars={}",
+                        result.tool_name,
+                        result.call_id,
+                        result.output.len()
+                    )));
+                } else if let Some(cache_key) = result.cache_key.as_ref() {
+                    cached_repeatable_tool_results.insert(cache_key.clone(), result.output.clone());
                 }
+                tool_results_to_observe.push(result);
             }
 
-            if !successful_tool_results.is_empty() {
-                let observation = format_tool_observation(&successful_tool_results);
-                let tool_names = successful_tool_results
+            if !tool_results_to_observe.is_empty() {
+                let observation = format_tool_observation(&tool_results_to_observe);
+                let tool_names = tool_results_to_observe
                     .iter()
                     .map(|result| result.tool_name.as_str())
                     .collect::<Vec<_>>()
                     .join(",");
+                let tool_result_summary = tool_results_log_summary(&tool_results_to_observe);
                 let _ = tx_loop.send(ChunkType::Metadata(format!(
-                    "tool_results_added count={} names={} observation_chars={} next_messages={}",
-                    successful_tool_results.len(),
+                    "tool_results_added count={} names={} {} observation_chars={} next_messages={}",
+                    tool_results_to_observe.len(),
                     tool_names,
+                    tool_result_summary,
                     observation.len(),
                     current_messages.len() + 1
                 )));
@@ -342,6 +358,143 @@ pub async fn stream_with_tools<P: Provider>(
 
     response.add_handle(handle);
     Ok(response)
+}
+
+#[derive(Debug, Default)]
+struct MessageLogSummary {
+    system_messages: usize,
+    user_messages: usize,
+    assistant_messages: usize,
+    text_bytes: usize,
+    image_count: usize,
+    max_message_role: &'static str,
+    max_message_bytes: usize,
+    last_message_role: &'static str,
+    last_message_bytes: usize,
+    last_message_images: usize,
+}
+
+fn provider_step_log_summary(messages: &[Message], tools: &[Tool]) -> String {
+    let messages = message_log_summary(messages);
+    let tools = tool_log_summary(tools);
+
+    format!(
+        "message_roles[system={},user={},assistant={}] message_text_bytes={} images={} max_message[role={},bytes={}] last_message[role={},bytes={},images={}] {}",
+        messages.system_messages,
+        messages.user_messages,
+        messages.assistant_messages,
+        messages.text_bytes,
+        messages.image_count,
+        messages.max_message_role,
+        messages.max_message_bytes,
+        messages.last_message_role,
+        messages.last_message_bytes,
+        messages.last_message_images,
+        tools,
+    )
+}
+
+fn message_log_summary(messages: &[Message]) -> MessageLogSummary {
+    let mut summary = MessageLogSummary {
+        max_message_role: "none",
+        last_message_role: "none",
+        ..MessageLogSummary::default()
+    };
+
+    for message in messages {
+        let role = message_role(message);
+        let (text_bytes, image_count) = message_size(message);
+
+        match message {
+            Message::System(_) => summary.system_messages += 1,
+            Message::User(_) => summary.user_messages += 1,
+            Message::Assistant(_) => summary.assistant_messages += 1,
+        }
+
+        summary.text_bytes += text_bytes;
+        summary.image_count += image_count;
+        summary.last_message_role = role;
+        summary.last_message_bytes = text_bytes;
+        summary.last_message_images = image_count;
+
+        if text_bytes > summary.max_message_bytes {
+            summary.max_message_role = role;
+            summary.max_message_bytes = text_bytes;
+        }
+    }
+
+    summary
+}
+
+fn message_role(message: &Message) -> &'static str {
+    match message {
+        Message::System(_) => "system",
+        Message::User(_) => "user",
+        Message::Assistant(_) => "assistant",
+    }
+}
+
+fn message_size(message: &Message) -> (usize, usize) {
+    match message {
+        Message::System(message) => (message.content.len(), 0),
+        Message::User(message) => (message.content.len(), message.images.len()),
+        Message::Assistant(message) => (message.content.len(), 0),
+    }
+}
+
+fn tool_log_summary(tools: &[Tool]) -> String {
+    let schema_bytes = tools
+        .iter()
+        .filter_map(|tool| serde_json::to_vec(&tool.input_schema).ok())
+        .map(|schema| schema.len())
+        .sum::<usize>();
+    let description_bytes = tools
+        .iter()
+        .map(|tool| tool.description.len())
+        .sum::<usize>();
+    let tool_names = compact_tool_names(tools);
+
+    format!(
+        "tool_names=[{}] tool_schema_bytes={} tool_description_bytes={}",
+        tool_names, schema_bytes, description_bytes,
+    )
+}
+
+fn compact_tool_names(tools: &[Tool]) -> String {
+    const MAX_TOOL_NAMES: usize = 16;
+
+    let mut names = tools
+        .iter()
+        .take(MAX_TOOL_NAMES)
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    if tools.len() > MAX_TOOL_NAMES {
+        if !names.is_empty() {
+            names.push(',');
+        }
+        names.push_str(&format!("+{}", tools.len() - MAX_TOOL_NAMES));
+    }
+
+    names
+}
+
+fn tool_results_log_summary(results: &[ToolExecutionResult]) -> String {
+    let output_bytes = results
+        .iter()
+        .map(|result| result.output.len())
+        .sum::<usize>();
+    let error_results = results.iter().filter(|result| result.is_error).count();
+    let max_output = results.iter().max_by_key(|result| result.output.len());
+    let (max_tool, max_bytes) = max_output
+        .map(|result| (result.tool_name.as_str(), result.output.len()))
+        .unwrap_or(("none", 0));
+
+    format!(
+        "output_bytes={} error_results={} max_output[tool={},bytes={}]",
+        output_bytes, error_results, max_tool, max_bytes,
+    )
 }
 
 #[derive(Debug, Default)]
@@ -365,6 +518,7 @@ struct ToolExecutionResult {
     tool_name: String,
     output: String,
     cache_key: Option<String>,
+    is_error: bool,
 }
 
 fn repeatable_tool_cache_key(tool_name: &str, args: &serde_json::Value) -> Option<String> {
@@ -403,20 +557,30 @@ fn canonical_json(value: &serde_json::Value) -> String {
 
 fn format_tool_observation(results: &[ToolExecutionResult]) -> String {
     if let [result] = results {
+        if result.is_error {
+            return format!(
+                "Tool `{}` failed:\n{}\n\nUse this tool error to adjust the next step. Do not repeat the same tool call unchanged unless the underlying file or input has changed.",
+                result.tool_name, result.output
+            );
+        }
+
         return format!("Tool `{}` result:\n{}", result.tool_name, result.output);
     }
 
+    let failed = results.iter().filter(|result| result.is_error).count();
     let mut observation = format!(
-        "Tool batch results: {} tool calls completed. Use these results to answer the user's request. Do not repeat the same tool calls unless the results are missing or insufficient.",
-        results.len()
+        "Tool batch results: {} tool calls returned, {} failed. Use these results to answer the user's request or adjust the next step. Do not repeat the same failing tool calls unchanged.",
+        results.len(),
+        failed
     );
 
     for (idx, result) in results.iter().enumerate() {
         observation.push_str(&format!(
-            "\n\n<tool_result index=\"{}\" tool=\"{}\" call_id=\"{}\">\n{}\n</tool_result>",
+            "\n\n<tool_result index=\"{}\" tool=\"{}\" call_id=\"{}\" status=\"{}\">\n{}\n</tool_result>",
             idx + 1,
             result.tool_name,
             result.call_id,
+            if result.is_error { "error" } else { "ok" },
             result.output
         ));
     }
@@ -615,7 +779,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
     use std::time::Duration;
     use tokio::sync::Barrier;
@@ -636,6 +800,12 @@ mod tests {
     #[derive(Debug, Clone)]
     struct FollowUpProvider {
         requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecoveringToolFailureProvider {
+        requests: Arc<AtomicUsize>,
+        observed_follow_up: Arc<Mutex<Option<String>>>,
     }
 
     #[async_trait]
@@ -767,6 +937,51 @@ mod tests {
                     Ok(ChunkType::ResponseCompleted {
                         end_turn: Some(true),
                     }),
+                ]
+            };
+
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RecoveringToolFailureProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let chunks = if request == 0 {
+                vec![
+                    Ok(ChunkType::ToolCall(
+                        r#"[{"index":0,"id":"call_edit","type":"function","function":{"name":"edit","arguments":"{\"file_path\":\"src/lib.rs\",\"old_string\":\"missing\",\"new_string\":\"replacement\"}"}}]"#
+                            .to_string(),
+                    )),
+                    Ok(ChunkType::End(String::new())),
+                ]
+            } else {
+                let follow_up = messages
+                    .last()
+                    .and_then(|message| match message {
+                        Message::User(user) => Some(user.content.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                *self.observed_follow_up.lock().unwrap() = Some(follow_up);
+
+                vec![
+                    Ok(ChunkType::Text("recovered".to_string())),
+                    Ok(ChunkType::End(String::new())),
                 ]
             };
 
@@ -956,6 +1171,60 @@ mod tests {
         assert_eq!(text, "I'll inspect that next.Done.");
         assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
         assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+    }
+
+    #[tokio::test]
+    async fn tool_execution_error_is_returned_to_model_without_failing_stream() {
+        let observed_follow_up = Arc::new(Mutex::new(None));
+        let provider = RecoveringToolFailureProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+            observed_follow_up: observed_follow_up.clone(),
+        };
+
+        let edit_tool = Tool::builder()
+            .name("edit")
+            .description("edit files")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(move |_input| async move {
+                Err("Execution error: Not found: Could not find text to replace".to_string())
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("make the edit")],
+            vec![edit_tool],
+            Some(3),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let mut text = String::new();
+        let mut failed_chunks = Vec::new();
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::Text(delta) => text.push_str(&delta),
+                ChunkType::Failed(err) => failed_chunks.push(err),
+                _ => {}
+            }
+        }
+
+        assert_eq!(text, "recovered");
+        assert!(failed_chunks.is_empty());
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+
+        let follow_up = observed_follow_up
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("provider should receive failed tool observation");
+        assert!(follow_up.contains("Tool `edit` failed"));
+        assert!(follow_up.contains("Could not find text to replace"));
+        assert!(follow_up.contains("Do not repeat the same tool call unchanged"));
     }
 
     #[test]

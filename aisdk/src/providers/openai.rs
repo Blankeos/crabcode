@@ -251,6 +251,9 @@ impl Provider for OpenAI {
             body["reasoning"] = serde_json::json!({ "effort": effort });
         }
 
+        let request_diagnostics =
+            openai_request_diagnostics(self, &input, tools, &body, &request_headers);
+
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(
                 OPENAI_STREAM_REQUEST_TIMEOUT_SECS,
@@ -263,7 +266,14 @@ impl Provider for OpenAI {
             .json(&body)
             .send()
             .await
-            .map_err(|err| Error::Provider(format_openai_request_error("send", &url, &err)))?;
+            .map_err(|err| {
+                Error::Provider(format_openai_request_error(
+                    "send",
+                    &url,
+                    &err,
+                    Some(&request_diagnostics),
+                ))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -315,13 +325,188 @@ fn format_openai_sse_error(err: &EventStreamError<reqwest::Error>) -> String {
     }
 }
 
-fn format_openai_request_error(stage: &str, request_url: &str, err: &reqwest::Error) -> String {
+fn format_openai_request_error(
+    stage: &str,
+    request_url: &str,
+    err: &reqwest::Error,
+    request_diagnostics: Option<&str>,
+) -> String {
+    let request_diagnostics = request_diagnostics
+        .map(|diagnostics| format!(" request_diagnostics={}", diagnostics))
+        .unwrap_or_default();
+
     format!(
-        "OpenAI request error: request_timeout_secs={} request_url={} {}",
+        "OpenAI request error: request_timeout_secs={} request_url={} {}{}",
         OPENAI_STREAM_REQUEST_TIMEOUT_SECS,
         sanitized_url_str(request_url),
         format_reqwest_error(stage, err),
+        request_diagnostics,
     )
+}
+
+#[derive(Debug, Default)]
+struct OpenAIInputLogSummary {
+    system_items: usize,
+    user_items: usize,
+    assistant_items: usize,
+    unknown_items: usize,
+    text_bytes: usize,
+    image_count: usize,
+    max_item_role: &'static str,
+    max_item_bytes: usize,
+    last_item_role: &'static str,
+    last_item_bytes: usize,
+    last_item_images: usize,
+}
+
+fn openai_request_diagnostics(
+    provider: &OpenAI,
+    input: &[serde_json::Value],
+    tools: &[Tool],
+    body: &serde_json::Value,
+    headers: &reqwest::header::HeaderMap,
+) -> String {
+    let input_summary = summarize_openai_input(input);
+    let input_json_bytes = json_bytes(input);
+    let tool_json_bytes = body.get("tools").map(json_bytes).unwrap_or(0);
+    let body_json_bytes = json_bytes(body);
+    let instructions_bytes = provider
+        .default_instructions
+        .as_ref()
+        .map(|instructions| instructions.len())
+        .unwrap_or(0);
+    let store = provider
+        .store_override
+        .map(|store| store.to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let reasoning_effort = provider.reasoning_effort.as_deref().unwrap_or("none");
+
+    format!(
+        "model={} responses_path={} stream=true store={} reasoning_effort={} instructions_bytes={} input_items={} input_roles[system={},user={},assistant={},unknown={}] input_text_bytes={} input_images={} input_json_bytes={} max_input[role={},bytes={}] last_input[role={},bytes={},images={}] tools={} tool_names=[{}] tool_json_bytes={} body_json_bytes={} header_names=[{}]",
+        provider.model_name,
+        provider.responses_path,
+        store,
+        reasoning_effort,
+        instructions_bytes,
+        input.len(),
+        input_summary.system_items,
+        input_summary.user_items,
+        input_summary.assistant_items,
+        input_summary.unknown_items,
+        input_summary.text_bytes,
+        input_summary.image_count,
+        input_json_bytes,
+        input_summary.max_item_role,
+        input_summary.max_item_bytes,
+        input_summary.last_item_role,
+        input_summary.last_item_bytes,
+        input_summary.last_item_images,
+        tools.len(),
+        compact_tool_names(tools),
+        tool_json_bytes,
+        body_json_bytes,
+        header_names(headers),
+    )
+}
+
+fn summarize_openai_input(input: &[serde_json::Value]) -> OpenAIInputLogSummary {
+    let mut summary = OpenAIInputLogSummary {
+        max_item_role: "none",
+        last_item_role: "none",
+        ..OpenAIInputLogSummary::default()
+    };
+
+    for item in input {
+        let role = input_role(item);
+        let (text_bytes, image_count) = input_content_size(item.get("content"));
+
+        match role {
+            "system" => summary.system_items += 1,
+            "user" => summary.user_items += 1,
+            "assistant" => summary.assistant_items += 1,
+            _ => summary.unknown_items += 1,
+        }
+
+        summary.text_bytes += text_bytes;
+        summary.image_count += image_count;
+        summary.last_item_role = role;
+        summary.last_item_bytes = text_bytes;
+        summary.last_item_images = image_count;
+
+        if text_bytes > summary.max_item_bytes {
+            summary.max_item_role = role;
+            summary.max_item_bytes = text_bytes;
+        }
+    }
+
+    summary
+}
+
+fn input_role(item: &serde_json::Value) -> &'static str {
+    match item.get("role").and_then(|role| role.as_str()) {
+        Some("system") => "system",
+        Some("user") => "user",
+        Some("assistant") => "assistant",
+        _ => "unknown",
+    }
+}
+
+fn input_content_size(content: Option<&serde_json::Value>) -> (usize, usize) {
+    match content {
+        Some(serde_json::Value::String(text)) => (text.len(), 0),
+        Some(serde_json::Value::Array(parts)) => parts.iter().fold((0, 0), |mut acc, part| {
+            match part.get("type").and_then(|value| value.as_str()) {
+                Some("input_text") => {
+                    acc.0 += part
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .map(|text| text.len())
+                        .unwrap_or(0);
+                }
+                Some("input_image") => acc.1 += 1,
+                _ => acc.0 += json_bytes(part),
+            }
+            acc
+        }),
+        Some(value) => (json_bytes(value), 0),
+        None => (0, 0),
+    }
+}
+
+fn json_bytes<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
+}
+
+fn compact_tool_names(tools: &[Tool]) -> String {
+    const MAX_TOOL_NAMES: usize = 16;
+
+    let mut names = tools
+        .iter()
+        .take(MAX_TOOL_NAMES)
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    if tools.len() > MAX_TOOL_NAMES {
+        if !names.is_empty() {
+            names.push(',');
+        }
+        names.push_str(&format!("+{}", tools.len() - MAX_TOOL_NAMES));
+    }
+
+    names
+}
+
+fn header_names(headers: &reqwest::header::HeaderMap) -> String {
+    let mut names = headers
+        .keys()
+        .map(|name| name.as_str().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    names.join(",")
 }
 
 fn format_reqwest_error(stage: &str, err: &reqwest::Error) -> String {

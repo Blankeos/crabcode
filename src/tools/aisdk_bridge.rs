@@ -78,16 +78,41 @@ pub async fn convert_to_aisdk_tools(
                 let handler = registry
                     .get(&tool_id_for_exec)
                     .await
-                    .ok_or_else(|| format!("Tool '{}' not found", tool_id_for_exec))?;
+                    .ok_or_else(|| format!("Tool '{}' not found", tool_id_for_exec));
+                let handler = match handler {
+                    Ok(handler) => handler,
+                    Err(err) => {
+                        send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
+                        let _ = crate::logging::log(&format!(
+                            "[AISDK_TOOL] error {} {}",
+                            tool_id_for_exec, err
+                        ));
+                        return Err(err);
+                    }
+                };
 
                 if let Err(e) = handler.validate(&input) {
-                    return Err(format!("Validation error: {}", e));
+                    let err = format!("Validation error: {}", e);
+                    send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
+                    let _ = crate::logging::log(&format!(
+                        "[AISDK_TOOL] error {} {}",
+                        tool_id_for_exec, err
+                    ));
+                    return Err(err);
                 }
 
-                permissions
+                if let Err(e) = permissions
                     .preflight(&agent_mode, &tool_id_for_exec, &input, sender.as_ref())
                     .await
-                    .map_err(|e| format!("{}", e))?;
+                {
+                    let err = format!("{}", e);
+                    send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
+                    let _ = crate::logging::log(&format!(
+                        "[AISDK_TOOL] error {} {}",
+                        tool_id_for_exec, err
+                    ));
+                    return Err(err);
+                }
 
                 let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
                 let ctx = ToolContext::new(
@@ -101,7 +126,18 @@ pub async fn convert_to_aisdk_tools(
                 let tool_result = handler
                     .execute(input, &ctx)
                     .await
-                    .map_err(|e| format!("Execution error: {}", e))?;
+                    .map_err(|e| format!("Execution error: {}", e));
+                let tool_result = match tool_result {
+                    Ok(tool_result) => tool_result,
+                    Err(err) => {
+                        send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
+                        let _ = crate::logging::log(&format!(
+                            "[AISDK_TOOL] error {} {}",
+                            tool_id_for_exec, err
+                        ));
+                        return Err(err);
+                    }
+                };
 
                 let _ = crate::logging::log(&format!(
                     "[AISDK_TOOL] result {} bytes={}",
@@ -209,6 +245,38 @@ fn truncate_tool_output(output: &str, limit: usize) -> String {
     truncated
 }
 
+fn send_tool_error_result(
+    sender: Option<&ChunkSender>,
+    call_id: &str,
+    tool_name: &str,
+    error: &str,
+) {
+    let Some(sender) = sender else {
+        return;
+    };
+
+    let preview = truncate_tool_output(error, TOOL_UI_PREVIEW_LIMIT);
+    let payload = serde_json::json!({
+        "status": "error",
+        "title": "Tool failed",
+        "output_preview": preview,
+        "line_count": error.lines().count().max(1),
+        "metadata": {
+            "error": error,
+        },
+    })
+    .to_string();
+
+    let _ = sender.send(crate::llm::ChunkMessage::ToolResult(
+        crate::llm::ToolCallResult {
+            tool_call_id: call_id.to_string(),
+            role: "tool".to_string(),
+            name: tool_name.to_string(),
+            content: payload,
+        },
+    ));
+}
+
 fn param_to_json_schema(param_type: &crate::tools::ParameterType) -> serde_json::Value {
     use crate::tools::ParameterType;
 
@@ -237,7 +305,7 @@ fn param_to_json_schema(param_type: &crate::tools::ParameterType) -> serde_json:
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_tool_output;
+    use super::{send_tool_error_result, truncate_tool_output};
 
     #[test]
     fn truncate_tool_output_bounds_large_results() {
@@ -254,5 +322,34 @@ mod tests {
         let output = "small result";
 
         assert_eq!(truncate_tool_output(output, 60_000), output);
+    }
+
+    #[test]
+    fn send_tool_error_result_emits_error_payload() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        send_tool_error_result(
+            Some(&tx),
+            "call_1",
+            "edit",
+            "Execution error: Could not find text to replace",
+        );
+
+        let message = rx.try_recv().expect("expected tool result");
+        let crate::llm::ChunkMessage::ToolResult(result) = message else {
+            panic!("expected tool result message");
+        };
+
+        assert_eq!(result.tool_call_id, "call_1");
+        assert_eq!(result.name, "edit");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content).expect("payload should be json");
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["title"], "Tool failed");
+        assert_eq!(
+            payload["output_preview"],
+            "Execution error: Could not find text to replace"
+        );
     }
 }
