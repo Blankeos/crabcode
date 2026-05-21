@@ -127,4 +127,4 @@ Replaced at line 239
 
 - [ ] Don't log to app.log with logging.rs in the future, but in the future, add a custom env build flag so that when I `cargo install --path` with this flag, I include the "development release build" - so I can use the fast compiled version while having logs. And the normal cargo install --path, will still just be like a production build.
 
-- [ ] Don't prevent scroll when there's a permission required dialog.
+- [x] Don't prevent scroll when there's a permission required dialog.

@@ -2079,7 +2079,54 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
             }
         } else if self.overlay_focus == OverlayFocus::PermissionDialog {
-            let _ = handle_permission_dialog_mouse_event(&mut self.permission_dialog_state, mouse);
+            let handled = handle_permission_dialog_mouse_event(&mut self.permission_dialog_state, mouse);
+            if !handled
+                && matches!(
+                    mouse.kind,
+                    ratatui::crossterm::event::MouseEventKind::ScrollDown
+                        | ratatui::crossterm::event::MouseEventKind::ScrollUp
+                )
+                && self.base_focus == BaseFocus::Chat
+            {
+                let size = self.last_frame_size;
+                let main_chunks = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints(
+                        [
+                            ratatui::layout::Constraint::Min(0),
+                            ratatui::layout::Constraint::Length(1),
+                        ]
+                        .as_ref(),
+                    )
+                    .split(size);
+                let input_height = self.input.get_height() as u16;
+                let input_height = if self.is_subagent_session_active() {
+                    SUBAGENT_FOOTER_HEIGHT
+                } else {
+                    input_height
+                };
+                let help_height = if self.is_subagent_session_active() {
+                    0
+                } else {
+                    1
+                };
+                let above_status_chunks = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints(
+                        [
+                            ratatui::layout::Constraint::Length(0),
+                            ratatui::layout::Constraint::Min(0),
+                            ratatui::layout::Constraint::Length(0),
+                            ratatui::layout::Constraint::Length(input_height),
+                            ratatui::layout::Constraint::Length(help_height),
+                            ratatui::layout::Constraint::Length(1),
+                        ]
+                        .as_ref(),
+                    )
+                    .split(main_chunks[0]);
+                let chat_area = above_status_chunks[1];
+                let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
+            }
         } else if self.overlay_focus == OverlayFocus::QuestionDialog {
             let _ = handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse);
         } else if self.overlay_focus == OverlayFocus::ThemesDialog {
