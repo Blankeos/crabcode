@@ -1,12 +1,16 @@
-use crate::chunk::ChunkType;
+use crate::chunk::{ChunkType, MessagePhase};
 use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
 use crate::tool::Tool;
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
+use eventsource_stream::{EventStreamError, Eventsource};
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::error::Error as StdError;
+
+const OPENAI_STREAM_REQUEST_TIMEOUT_SECS: u64 = 30;
+const OPENAI_ERROR_BODY_MAX_CHARS: usize = 2048;
 
 #[derive(Debug, Clone)]
 pub struct OpenAI {
@@ -248,7 +252,9 @@ impl Provider for OpenAI {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(
+                OPENAI_STREAM_REQUEST_TIMEOUT_SECS,
+            ))
             .build()
             .map_err(|e| Error::Provider(format!("Failed to build client: {}", e)))?;
         let response = client
@@ -256,14 +262,22 @@ impl Provider for OpenAI {
             .headers(request_headers)
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|err| Error::Provider(format_openai_request_error("send", &url, &err)))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let response_url = sanitized_url(response.url());
+            let text = match response.text().await {
+                Ok(text) => truncate_log_value(&text, OPENAI_ERROR_BODY_MAX_CHARS),
+                Err(err) => format!(
+                    "<failed to read error body: {}>",
+                    format_reqwest_error("read_error_body", &err)
+                ),
+            };
             return Err(Error::Provider(format!(
-                "OpenAI API error {}: {}",
-                status, text
+                "OpenAI API error: status={} url={} body={}",
+                status, response_url, text
             )));
         }
 
@@ -273,13 +287,106 @@ impl Provider for OpenAI {
             .filter_map(|ev| match ev {
                 Ok(event) => futures::future::ready(response_sse_data_to_chunk(&event.data)),
                 Err(e) => {
-                    let err = format!("SSE error: {}; debug={:?}", e, e);
+                    let err = format_openai_sse_error(&e);
                     futures::future::ready(Some(Ok(ChunkType::Failed(err))))
                 }
             })
             .boxed();
 
         Ok(stream)
+    }
+}
+
+fn format_openai_sse_error(err: &EventStreamError<reqwest::Error>) -> String {
+    match err {
+        EventStreamError::Transport(source) => {
+            format!(
+                "SSE transport error: request_timeout_secs={} {}",
+                OPENAI_STREAM_REQUEST_TIMEOUT_SECS,
+                format_reqwest_error("stream_body", source),
+            )
+        }
+        EventStreamError::Parser(source) => {
+            format!("SSE parser error: source={} debug={:?}", source, source)
+        }
+        EventStreamError::Utf8(source) => {
+            format!("SSE UTF-8 error: source={} debug={:?}", source, source)
+        }
+    }
+}
+
+fn format_openai_request_error(stage: &str, request_url: &str, err: &reqwest::Error) -> String {
+    format!(
+        "OpenAI request error: request_timeout_secs={} request_url={} {}",
+        OPENAI_STREAM_REQUEST_TIMEOUT_SECS,
+        sanitized_url_str(request_url),
+        format_reqwest_error(stage, err),
+    )
+}
+
+fn format_reqwest_error(stage: &str, err: &reqwest::Error) -> String {
+    format!(
+        "stage={} is_timeout={} is_connect={} is_request={} is_body={} is_decode={} status={} url={} source_chain={} debug={:?}",
+        stage,
+        err.is_timeout(),
+        err.is_connect(),
+        err.is_request(),
+        err.is_body(),
+        err.is_decode(),
+        err.status()
+            .map(|status| status.as_u16().to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        sanitized_reqwest_error_url(err),
+        error_source_chain(err),
+        err,
+    )
+}
+
+fn sanitized_reqwest_error_url(err: &reqwest::Error) -> String {
+    err.url()
+        .map(sanitized_url)
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn sanitized_url_str(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .map(|url| sanitized_url(&url))
+        .unwrap_or_else(|_| "<invalid-url>".to_string())
+}
+
+fn sanitized_url(url: &reqwest::Url) -> String {
+    let mut url = url.clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn truncate_log_value(value: &str, max_chars: usize) -> String {
+    let single_line = value
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+
+    if single_line.chars().count() <= max_chars {
+        single_line
+    } else {
+        let truncated = single_line.chars().take(max_chars).collect::<String>();
+        format!("{}...<truncated>", truncated)
+    }
+}
+
+fn error_source_chain(err: &(dyn StdError + 'static)) -> String {
+    let mut parts = Vec::new();
+    let mut source = err.source();
+    while let Some(err) = source {
+        parts.push(err.to_string());
+        source = err.source();
+    }
+
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" <- ")
     }
 }
 
@@ -315,12 +422,16 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
                     return Some(Ok(ChunkType::Failed(code.to_string())));
                 }
             }
-            Some(Ok(ChunkType::End(String::new())))
+            Some(Ok(ChunkType::ResponseCompleted {
+                end_turn: resp.get("end_turn").and_then(|value| value.as_bool()),
+            }))
         }
         "response.incomplete" => Some(Ok(ChunkType::Incomplete("Response incomplete".to_string()))),
         "response.failed" => Some(Ok(ChunkType::Failed("Response failed".to_string()))),
         _ => {
-            if let Some(tool_call) = responses_function_call_chunk(&value) {
+            if let Some(message_phase) = responses_assistant_message_phase_chunk(&value) {
+                Some(Ok(message_phase))
+            } else if let Some(tool_call) = responses_function_call_chunk(&value) {
                 Some(Ok(ChunkType::ToolCall(tool_call)))
             } else if event_type.contains("tool_call") {
                 Some(Ok(ChunkType::ToolCall(data.to_string())))
@@ -328,6 +439,38 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
                 None
             }
         }
+    }
+}
+
+fn responses_assistant_message_phase_chunk(value: &serde_json::Value) -> Option<ChunkType> {
+    let event_type = value.get("type").and_then(|v| v.as_str())?;
+    if !matches!(
+        event_type,
+        "response.output_item.added" | "response.output_item.done"
+    ) {
+        return None;
+    }
+
+    let item = value.get("item")?;
+    if item.get("type").and_then(|v| v.as_str())? != "message"
+        || item.get("role").and_then(|v| v.as_str()) != Some("assistant")
+    {
+        return None;
+    }
+
+    Some(ChunkType::AssistantMessagePhase {
+        phase: item
+            .get("phase")
+            .and_then(|phase| phase.as_str())
+            .and_then(parse_message_phase),
+    })
+}
+
+fn parse_message_phase(phase: &str) -> Option<MessagePhase> {
+    match phase {
+        "commentary" => Some(MessagePhase::Commentary),
+        "final_answer" => Some(MessagePhase::FinalAnswer),
+        _ => None,
     }
 }
 
@@ -503,7 +646,7 @@ fn openai_responses_user_content(user: &crate::message::UserMessage) -> serde_js
 #[cfg(test)]
 mod tests {
     use super::{response_sse_data_to_chunk, responses_function_call_chunk};
-    use crate::chunk::ChunkType;
+    use crate::chunk::{ChunkType, MessagePhase};
 
     #[test]
     fn done_marker_emits_terminal_chunk() {
@@ -515,11 +658,31 @@ mod tests {
     #[test]
     fn response_completed_emits_terminal_chunk() {
         let chunk = response_sse_data_to_chunk(
-            r#"{"type":"response.completed","response":{"id":"resp_123"}}"#,
+            r#"{"type":"response.completed","response":{"id":"resp_123","end_turn":false}}"#,
         )
         .expect("expected terminal chunk");
 
-        assert!(matches!(chunk, Ok(ChunkType::End(_))));
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::ResponseCompleted {
+                end_turn: Some(false)
+            })
+        ));
+    }
+
+    #[test]
+    fn maps_responses_assistant_message_phase() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"commentary"}}"#,
+        )
+        .expect("expected message phase chunk");
+
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::AssistantMessagePhase {
+                phase: Some(MessagePhase::Commentary)
+            })
+        ));
     }
 
     #[test]

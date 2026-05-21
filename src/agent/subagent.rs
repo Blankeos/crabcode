@@ -258,6 +258,9 @@ pub async fn run_subagent(
             ChunkType::End(_) => {
                 break;
             }
+            ChunkType::ResponseCompleted { .. } => {
+                break;
+            }
             _ => {}
         }
     }

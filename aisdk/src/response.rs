@@ -1,4 +1,4 @@
-use crate::chunk::ChunkType;
+use crate::chunk::{ChunkType, MessagePhase};
 use crate::error::Result;
 use crate::message::Message;
 use crate::provider::Provider;
@@ -100,6 +100,13 @@ pub async fn stream_with_tools<P: Provider>(
                 }
             }
 
+            let _ = tx_loop.send(ChunkType::Metadata(format!(
+                "provider_step_start step={} messages={} tools={}",
+                step_idx,
+                current_messages.len(),
+                tools.len()
+            )));
+
             let stream_result = provider_clone
                 .stream_text(&current_messages, &tools, &headers)
                 .await;
@@ -107,8 +114,15 @@ pub async fn stream_with_tools<P: Provider>(
             let mut stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx_loop.send(ChunkType::Failed(e.to_string()));
-                    *stop_reason_arc.lock().await = Some(StopReason::Error(e.to_string()));
+                    let err = format!(
+                        "provider_step_error step={} messages={} tools={} error={}",
+                        step_idx,
+                        current_messages.len(),
+                        tools.len(),
+                        e
+                    );
+                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
                     break;
                 }
             };
@@ -117,10 +131,33 @@ pub async fn stream_with_tools<P: Provider>(
             let mut tool_call_accumulator = ToolCallAccumulator::default();
             let mut accumulated_text = String::new();
             let mut saw_terminal_event = false;
+            let mut response_end_turn = None;
+            let mut last_assistant_message_phase = None;
+            let mut current_assistant_message_phase = None;
 
             while let Some(chunk) = stream.next().await {
                 match chunk {
+                    Ok(ChunkType::AssistantMessagePhase { phase }) => {
+                        current_assistant_message_phase = phase;
+                        last_assistant_message_phase = phase;
+                        let label = match phase {
+                            Some(MessagePhase::Commentary) => "commentary",
+                            Some(MessagePhase::FinalAnswer) => "final_answer",
+                            None => "unknown",
+                        };
+                        let _ = tx_loop.send(ChunkType::Metadata(format!(
+                            "assistant_message_phase={label}"
+                        )));
+                    }
+                    Ok(ChunkType::ResponseCompleted { end_turn }) => {
+                        saw_terminal_event = true;
+                        response_end_turn = end_turn;
+                        let _ = tx_loop.send(ChunkType::Metadata(format!(
+                            "response.completed end_turn={end_turn:?}"
+                        )));
+                    }
                     Ok(ChunkType::Text(text)) => {
+                        last_assistant_message_phase = current_assistant_message_phase;
                         accumulated_text.push_str(&text);
                         let _ = tx_loop.send(ChunkType::Text(text));
                     }
@@ -142,6 +179,9 @@ pub async fn stream_with_tools<P: Provider>(
                         // to return Ended prematurely, dropping the channel
                         // before tool execution / subsequent steps.
                         saw_terminal_event = true;
+                    }
+                    Ok(ChunkType::Metadata(msg)) => {
+                        let _ = tx_loop.send(ChunkType::Metadata(msg));
                     }
                     Ok(ChunkType::Incomplete(msg)) => {
                         let err = format!("Provider response incomplete: {}", msg);
@@ -185,6 +225,19 @@ pub async fn stream_with_tools<P: Provider>(
             }
 
             if !has_tool_call {
+                let needs_follow_up = matches!(response_end_turn, Some(false))
+                    || matches!(last_assistant_message_phase, Some(MessagePhase::Commentary));
+                if needs_follow_up {
+                    let reason = if matches!(response_end_turn, Some(false)) {
+                        "end_turn=false"
+                    } else {
+                        "assistant_message_phase=commentary"
+                    };
+                    let _ = tx_loop.send(ChunkType::Metadata(format!(
+                        "continuing model turn after non-final assistant output ({reason})"
+                    )));
+                    continue;
+                }
                 *stop_reason_arc.lock().await = Some(StopReason::Finish);
                 break;
             }
@@ -269,6 +322,18 @@ pub async fn stream_with_tools<P: Provider>(
 
             if !successful_tool_results.is_empty() {
                 let observation = format_tool_observation(&successful_tool_results);
+                let tool_names = successful_tool_results
+                    .iter()
+                    .map(|result| result.tool_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let _ = tx_loop.send(ChunkType::Metadata(format!(
+                    "tool_results_added count={} names={} observation_chars={} next_messages={}",
+                    successful_tool_results.len(),
+                    tool_names,
+                    observation.len(),
+                    current_messages.len() + 1
+                )));
                 current_messages.push(Message::user(observation.clone()));
                 messages_arc.lock().await.push(Message::user(observation));
             }
@@ -539,7 +604,7 @@ fn tool_call_key(item: &serde_json::Value, array_index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{stream_with_tools, ToolCallAccumulator};
-    use crate::chunk::ChunkType;
+    use crate::chunk::{ChunkType, MessagePhase};
     use crate::message::Message;
     use crate::provider::{Provider, ProviderStream};
     use crate::stop::StopReason;
@@ -567,6 +632,11 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct UnterminatedProvider;
+
+    #[derive(Debug, Clone)]
+    struct FollowUpProvider {
+        requests: Arc<AtomicUsize>,
+    }
 
     #[async_trait]
     impl Provider for TwoToolCallProvider {
@@ -658,6 +728,49 @@ mod tests {
             Ok(Box::pin(futures::stream::iter(vec![Ok(ChunkType::Text(
                 "still working".to_string(),
             ))])))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for FollowUpProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let chunks = if request == 0 {
+                vec![
+                    Ok(ChunkType::AssistantMessagePhase {
+                        phase: Some(MessagePhase::Commentary),
+                    }),
+                    Ok(ChunkType::Text("I'll inspect that next.".to_string())),
+                    Ok(ChunkType::ResponseCompleted {
+                        end_turn: Some(false),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(ChunkType::AssistantMessagePhase {
+                        phase: Some(MessagePhase::FinalAnswer),
+                    }),
+                    Ok(ChunkType::Text("Done.".to_string())),
+                    Ok(ChunkType::ResponseCompleted {
+                        end_turn: Some(true),
+                    }),
+                ]
+            };
+
+            Ok(Box::pin(futures::stream::iter(chunks)))
         }
     }
 
@@ -814,6 +927,35 @@ mod tests {
             Some(StopReason::Error(message))
                 if message.contains("without a terminal completion event")
         ));
+    }
+
+    #[tokio::test]
+    async fn continues_when_provider_marks_response_as_non_final() {
+        let provider = FollowUpProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("finish the task")],
+            Vec::new(),
+            Some(3),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let mut text = String::new();
+        while let Some(chunk) = response.stream.next().await {
+            if let ChunkType::Text(delta) = chunk {
+                text.push_str(&delta);
+            }
+        }
+
+        assert_eq!(text, "I'll inspect that next.Done.");
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
     }
 
     #[test]

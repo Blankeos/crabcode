@@ -1,5 +1,5 @@
 use aisdk::core::{
-    chunk::ChunkType,
+    chunk::{ChunkType, MessagePhase},
     response::{stream_with_tools, LanguageModelStream, StreamTextResponse},
     stop::{step_count_is, StopReason},
     Message as AisdkMessage, Tool,
@@ -133,30 +133,206 @@ struct RelayStats {
     text_chunks: usize,
     reasoning_chunks: usize,
     tool_call_chunks: usize,
+    assistant_phase_chunks: usize,
+    metadata_chunks: usize,
+    response_completed_chunks: usize,
+    failed_chunks: usize,
     incomplete_chunks: usize,
     not_supported_chunks: usize,
     text_chars: usize,
+    commentary_text_chars: usize,
+    final_answer_text_chars: usize,
+    unphased_text_chars: usize,
     reasoning_chars: usize,
     tool_call_bytes: usize,
+    tool_call_argument_chars: usize,
+    tool_call_arguments_done_chars: usize,
     last_chunk: Option<&'static str>,
+    last_progress_chunk: Option<&'static str>,
+    current_assistant_phase: Option<&'static str>,
+    last_metadata: Option<String>,
+    last_tool_call_names: Option<String>,
+    first_chunk_elapsed_ms: Option<u128>,
+    last_progress_elapsed_ms: Option<u128>,
+    last_text_elapsed_ms: Option<u128>,
+    last_tool_call_elapsed_ms: Option<u128>,
 }
 
 impl RelayStats {
-    fn describe(&self) -> String {
+    fn record_chunk(&mut self, name: &'static str, elapsed_ms: u128) {
+        if self.first_chunk_elapsed_ms.is_none() {
+            self.first_chunk_elapsed_ms = Some(elapsed_ms);
+        }
+        self.last_chunk = Some(name);
+        self.last_progress_chunk = Some(name);
+        self.last_progress_elapsed_ms = Some(elapsed_ms);
+    }
+
+    fn record_failed_chunk(&mut self) {
+        self.failed_chunks += 1;
+        self.last_chunk = Some("Failed");
+    }
+
+    fn record_text(&mut self, len: usize, elapsed_ms: u128) {
+        self.last_text_elapsed_ms = Some(elapsed_ms);
+        match self.current_assistant_phase {
+            Some("commentary") => self.commentary_text_chars += len,
+            Some("final_answer") => self.final_answer_text_chars += len,
+            _ => self.unphased_text_chars += len,
+        }
+    }
+
+    fn record_assistant_phase(&mut self, phase: Option<MessagePhase>) {
+        self.assistant_phase_chunks += 1;
+        self.current_assistant_phase = Some(message_phase_label(phase));
+    }
+
+    fn record_metadata(&mut self, message: &str) {
+        self.metadata_chunks += 1;
+        self.last_metadata = Some(truncate_log_value(message, 120));
+
+        if let Some(phase) = message.strip_prefix("assistant_message_phase=") {
+            self.current_assistant_phase = Some(match phase {
+                "commentary" => "commentary",
+                "final_answer" => "final_answer",
+                _ => "unknown",
+            });
+        }
+    }
+
+    fn record_tool_call(&mut self, info: &ToolCallLogInfo, elapsed_ms: u128) {
+        self.last_tool_call_elapsed_ms = Some(elapsed_ms);
+        self.tool_call_argument_chars += info.argument_chars;
+        self.tool_call_arguments_done_chars += info.arguments_done_chars;
+        if !info.names.is_empty() {
+            self.last_tool_call_names = Some(info.names.join(","));
+        }
+    }
+
+    fn describe_at(&self, elapsed_ms: Option<u128>) -> String {
+        let idle_since_progress_ms = elapsed_ms
+            .zip(self.last_progress_elapsed_ms)
+            .map(|(now, last)| now.saturating_sub(last));
         format!(
-            "chunks[start={}, text={} text_chars={}, reasoning={} reasoning_chars={}, tool_calls={} tool_call_bytes={}, incomplete={}, not_supported={}, last={}]",
+            "chunks[start={}, text={} text_chars={} text_by_phase[commentary={}, final_answer={}, unphased={}], reasoning={} reasoning_chars={}, tool_calls={} tool_call_bytes={} tool_arg_chars={} tool_arg_done_chars={}, assistant_phase={}, metadata={}, response_completed={}, failed={}, incomplete={}, not_supported={}, last={}, last_progress={}] timing[first_chunk_ms={}, last_progress_ms={}, idle_since_progress_ms={}, last_text_ms={}, last_tool_call_ms={}] current_phase={} last_tool_names={} last_metadata={}",
             self.start_chunks,
             self.text_chunks,
             self.text_chars,
+            self.commentary_text_chars,
+            self.final_answer_text_chars,
+            self.unphased_text_chars,
             self.reasoning_chunks,
             self.reasoning_chars,
             self.tool_call_chunks,
             self.tool_call_bytes,
+            self.tool_call_argument_chars,
+            self.tool_call_arguments_done_chars,
+            self.assistant_phase_chunks,
+            self.metadata_chunks,
+            self.response_completed_chunks,
+            self.failed_chunks,
             self.incomplete_chunks,
             self.not_supported_chunks,
             self.last_chunk.unwrap_or("none"),
+            self.last_progress_chunk.unwrap_or("none"),
+            optional_u128(self.first_chunk_elapsed_ms),
+            optional_u128(self.last_progress_elapsed_ms),
+            optional_u128(idle_since_progress_ms),
+            optional_u128(self.last_text_elapsed_ms),
+            optional_u128(self.last_tool_call_elapsed_ms),
+            self.current_assistant_phase.unwrap_or("none"),
+            self.last_tool_call_names.as_deref().unwrap_or("none"),
+            self.last_metadata.as_deref().unwrap_or("none"),
         )
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ToolCallLogInfo {
+    names: Vec<String>,
+    ids: Vec<String>,
+    argument_chars: usize,
+    arguments_done_chars: usize,
+}
+
+impl ToolCallLogInfo {
+    fn names_label(&self) -> String {
+        if self.names.is_empty() {
+            "unknown".to_string()
+        } else {
+            self.names.join(",")
+        }
+    }
+
+    fn ids_label(&self) -> String {
+        if self.ids.is_empty() {
+            "unknown".to_string()
+        } else {
+            self.ids.join(",")
+        }
+    }
+}
+
+fn tool_call_log_info(tool_call: &str) -> ToolCallLogInfo {
+    let mut info = ToolCallLogInfo::default();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(tool_call) else {
+        return info;
+    };
+
+    let Some(items) = value.as_array() else {
+        return info;
+    };
+
+    for item in items {
+        if let Some(id) = item.get("id").and_then(|id| id.as_str()) {
+            info.ids.push(id.to_string());
+        }
+
+        let Some(function) = item.get("function") else {
+            continue;
+        };
+
+        if let Some(name) = function.get("name").and_then(|name| name.as_str()) {
+            info.names.push(name.to_string());
+        }
+        if let Some(arguments) = function.get("arguments").and_then(|args| args.as_str()) {
+            info.argument_chars += arguments.len();
+        }
+        if let Some(arguments_done) = function
+            .get("arguments_done")
+            .and_then(|args| args.as_str())
+        {
+            info.arguments_done_chars += arguments_done.len();
+        }
+    }
+
+    info
+}
+
+fn message_phase_label(phase: Option<MessagePhase>) -> &'static str {
+    match phase {
+        Some(MessagePhase::Commentary) => "commentary",
+        Some(MessagePhase::FinalAnswer) => "final_answer",
+        None => "unknown",
+    }
+}
+
+fn optional_u128(value: Option<u128>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn truncate_log_value(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index >= max_chars {
+            output.push_str("...");
+            return output;
+        }
+        output.push(ch);
+    }
+    output
 }
 
 #[derive(Clone, Debug)]
@@ -376,6 +552,9 @@ pub async fn summarize_for_compaction(
             ChunkType::Reasoning(_)
             | ChunkType::ToolCall(_)
             | ChunkType::End(_)
+            | ChunkType::AssistantMessagePhase { .. }
+            | ChunkType::ResponseCompleted { .. }
+            | ChunkType::Metadata(_)
             | ChunkType::Start
             | ChunkType::Incomplete(_) => {}
         }
@@ -702,7 +881,7 @@ fn log_stream_summary(
     error: Option<&str>,
 ) {
     let stats = stats
-        .map(RelayStats::describe)
+        .map(|stats| stats.describe_at(Some(elapsed_ms)))
         .unwrap_or_else(|| "chunks=unavailable".to_string());
     let error = error
         .map(|err| format!(" error={}", err))
@@ -719,12 +898,17 @@ fn log_stream_summary(
     ));
 }
 
-fn is_sse_transport_error(err: &str) -> bool {
+fn is_transport_or_request_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
-    lower.contains("sse error")
+    ((lower.contains("sse error") || lower.contains("sse transport error"))
         && (lower.contains("transport")
             || lower.contains("decoding response body")
-            || lower.contains("body"))
+            || lower.contains("body")))
+        || (lower.contains("request error")
+            && (lower.contains("is_timeout=true")
+                || lower.contains("is_connect=true")
+                || lower.contains("error sending request")))
+        || lower.contains("http error: error sending request")
 }
 
 async fn relay_stream_to_sender(
@@ -743,13 +927,14 @@ async fn relay_stream_to_sender(
     loop {
         let chunk = tokio::select! {
             _ = cancel_token.cancelled() => {
+                let elapsed_ms = start_time.elapsed().as_millis();
                 let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
                 let _ = log(&format!(
                     "[STREAM_CANCELLED] {} elapsed_ms={} token_estimate={} {}",
                     context.describe(),
-                    start_time.elapsed().as_millis(),
+                    elapsed_ms,
                     *token_count,
-                    stats.describe(),
+                    stats.describe_at(Some(elapsed_ms)),
                 ));
                 return Err(anyhow::anyhow!("Streaming cancelled by user").into());
             }
@@ -763,17 +948,20 @@ async fn relay_stream_to_sender(
 
         match chunk {
             ChunkType::Text(text) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("Text", elapsed_ms);
                 stats.text_chunks += 1;
                 stats.text_chars += text.len();
-                stats.last_chunk = Some("Text");
+                stats.record_text(text.len(), elapsed_ms);
                 *token_count += estimate_tokens(&text);
                 let _ = log(&format!("[RELAY] Text chunk ({} chars)", text.len()));
                 let _ = sender.send(crate::llm::ChunkMessage::Text(text));
             }
             ChunkType::Reasoning(reasoning) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("Reasoning", elapsed_ms);
                 stats.reasoning_chunks += 1;
                 stats.reasoning_chars += reasoning.len();
-                stats.last_chunk = Some("Reasoning");
                 *token_count += estimate_tokens(&reasoning);
                 let _ = log(&format!(
                     "[RELAY] Reasoning chunk ({} chars)",
@@ -782,36 +970,29 @@ async fn relay_stream_to_sender(
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
             ChunkType::ToolCall(tool_call) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("ToolCall", elapsed_ms);
                 stats.tool_call_chunks += 1;
                 stats.tool_call_bytes += tool_call.len();
-                stats.last_chunk = Some("ToolCall");
-                let names = serde_json::from_str::<serde_json::Value>(&tool_call)
-                    .ok()
-                    .and_then(|value| {
-                        value.as_array().map(|items| {
-                            items
-                                .iter()
-                                .filter_map(|item| {
-                                    item.get("function")
-                                        .and_then(|function| function.get("name"))
-                                        .and_then(|name| name.as_str())
-                                })
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        })
-                    })
-                    .filter(|names| !names.is_empty())
-                    .unwrap_or_else(|| "unknown".to_string());
+                let info = tool_call_log_info(&tool_call);
+                stats.record_tool_call(&info, elapsed_ms);
                 let _ = log(&format!(
-                    "[RELAY] ToolCall chunk received names={} bytes={}",
-                    names,
-                    tool_call.len()
+                    "[RELAY] ToolCall chunk received names={} ids={} arg_chars={} arg_done_chars={} bytes={}",
+                    info.names_label(),
+                    info.ids_label(),
+                    info.argument_chars,
+                    info.arguments_done_chars,
+                    tool_call.len(),
                 ));
             }
             ChunkType::End(_msg) => {
-                stats.last_chunk = Some("End");
-                let _ = log("[RELAY] End chunk — returning Ended");
-                let duration_ms = start_time.elapsed().as_millis() as u64;
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("End", elapsed_ms);
+                let _ = log(&format!(
+                    "[RELAY] End chunk — returning Ended {}",
+                    stats.describe_at(Some(elapsed_ms))
+                ));
+                let duration_ms = elapsed_ms as u64;
                 let _ = sender.send(crate::llm::ChunkMessage::Metrics {
                     token_count: *token_count,
                     duration_ms,
@@ -822,46 +1003,84 @@ async fn relay_stream_to_sender(
                     stats,
                 });
             }
+            ChunkType::ResponseCompleted { end_turn } => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("ResponseCompleted", elapsed_ms);
+                stats.response_completed_chunks += 1;
+                let _ = log(&format!(
+                    "[RELAY] ResponseCompleted chunk end_turn={end_turn:?} — returning Ended {}",
+                    stats.describe_at(Some(elapsed_ms))
+                ));
+                let duration_ms = elapsed_ms as u64;
+                let _ = sender.send(crate::llm::ChunkMessage::Metrics {
+                    token_count: *token_count,
+                    duration_ms,
+                });
+                let _ = sender.send(crate::llm::ChunkMessage::End);
+                return Ok(StreamRelayResult {
+                    outcome: StreamRelayOutcome::Ended,
+                    stats,
+                });
+            }
+            ChunkType::AssistantMessagePhase { phase } => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("AssistantMessagePhase", elapsed_ms);
+                stats.record_assistant_phase(phase);
+                let _ = log(&format!(
+                    "[RELAY] AssistantMessagePhase chunk phase={phase:?}"
+                ));
+            }
+            ChunkType::Metadata(message) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("Metadata", elapsed_ms);
+                stats.record_metadata(&message);
+                let _ = log(&format!("[RELAY] Metadata {}", message));
+            }
             ChunkType::Start => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("Start", elapsed_ms);
                 stats.start_chunks += 1;
-                stats.last_chunk = Some("Start");
                 let _ = log("[RELAY] Start chunk received");
             }
             ChunkType::Failed(err) => {
-                stats.last_chunk = Some("Failed");
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_failed_chunk();
                 let _ = sender.send(crate::llm::ChunkMessage::Failed(err.clone()));
                 let _ = log(&format!("Stream Chunk Failed {}", err));
                 let _ = log(&format!(
                     "[STREAM_ERROR] {} elapsed_ms={} token_estimate={} {} error={}",
                     context.describe(),
-                    start_time.elapsed().as_millis(),
+                    elapsed_ms,
                     *token_count,
-                    stats.describe(),
+                    stats.describe_at(Some(elapsed_ms)),
                     err,
                 ));
-                if is_sse_transport_error(&err) {
-                    let _ = log("[STREAM_ERROR_HINT] SSE transport/body decode failure. This happened below the model layer while reading the response stream; if it repeats, compare network/proxy/VPN state and provider status with the request context above.");
+                if is_transport_or_request_error(&err) {
+                    let _ = log("[STREAM_ERROR_HINT] Request/stream transport failure. This happened below the model layer while sending or reading provider HTTP data; if it repeats, compare network/proxy/VPN state and provider status with the request and provider_step context above.");
                 }
                 return Err(anyhow::anyhow!("Streaming failed: {}", err).into());
             }
             ChunkType::Incomplete(msg) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("Incomplete", elapsed_ms);
                 stats.incomplete_chunks += 1;
-                stats.last_chunk = Some("Incomplete");
                 let _ = log(&format!("[RELAY] Incomplete chunk received: {}", msg));
             }
             ChunkType::NotSupported(msg) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("NotSupported", elapsed_ms);
                 stats.not_supported_chunks += 1;
-                stats.last_chunk = Some("NotSupported");
                 let _ = log(&format!("[RELAY] NotSupported chunk received: {}", msg));
             }
         }
     }
 
+    let elapsed_ms = start_time.elapsed().as_millis();
     let _ = log(&format!(
         "[RELAY] stream exhausted — returning Exhausted {} token_estimate={} {}",
         context.describe(),
         *token_count,
-        stats.describe(),
+        stats.describe_at(Some(elapsed_ms)),
     ));
     Ok(StreamRelayResult {
         outcome: StreamRelayOutcome::Exhausted,
