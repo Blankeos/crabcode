@@ -1869,12 +1869,18 @@ impl Chat {
                     ])
                 };
 
-                let styled_content = Line::from(spans_with_image_placeholders(
-                    &content,
-                    text_style,
-                    image_style,
-                ));
-                let wrapped_lines = wrap_styled_line(&styled_content, WrapOptions::new(wrap_width));
+                let wrapped_lines = content
+                    .split('\n')
+                    .flat_map(|content_line| {
+                        let content_line = content_line.strip_suffix('\r').unwrap_or(content_line);
+                        let styled_content = Line::from(spans_with_image_placeholders(
+                            content_line,
+                            text_style,
+                            image_style,
+                        ));
+                        wrap_styled_line(&styled_content, WrapOptions::new(wrap_width))
+                    })
+                    .collect::<Vec<_>>();
 
                 lines.push(padding_line());
 
@@ -3477,6 +3483,25 @@ mod tests {
             rendered,
             vec!["⬢ Added src/new.rs (+1 -0)", "    1 +fn main() {}"]
         );
+    }
+
+    #[test]
+    fn test_user_message_preserves_explicit_linebreaks() {
+        let chat = Chat::new();
+        let msg = Message::user("I want\n- [ ] To do this\n\nBut I dont want to do this.");
+        let colors = test_colors();
+
+        let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("I want")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("- [ ] To do this")));
+        assert!(rendered.iter().any(|line| line.trim().is_empty()));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("But I dont want to do this.")));
     }
 
     #[test]

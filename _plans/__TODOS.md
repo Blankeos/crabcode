@@ -148,3 +148,18 @@ Replaced at line 239
 
 - [x] Like opencode, let's make a command palette via `ctrl+p`.
   - [x] Additionally, since the bottom area takes up too much space with `/ commands ctrl+x shortcuts tab agents ctrl+cc quit`. Let's reduce it to just `ctrl+p`?.
+
+- [x] linebreaks aren't really reserved when I finally send the message in the chat UI. For instance I send,
+
+```
+I want
+- [x] To do this
+
+But I dont want to do this.
+```
+
+I get
+
+```
+I want - [x] To do this But I dont want to do this
+```
