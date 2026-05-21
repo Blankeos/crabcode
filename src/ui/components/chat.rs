@@ -1423,7 +1423,14 @@ impl Chat {
         let content_height = all_lines.len();
         let viewport = self.viewport_height;
         let max_offset = content_height.saturating_sub(viewport);
-        let clamped_scroll = self.scroll_offset.min(max_offset);
+        let was_pinned_to_bottom = self.scroll_offset == usize::MAX
+            || (self.scroll_offset >= self.content_height.saturating_sub(self.viewport_height)
+                && !self.user_scrolled_up);
+        let clamped_scroll = if was_pinned_to_bottom {
+            max_offset
+        } else {
+            self.scroll_offset.min(max_offset)
+        };
         let visible_start = clamped_scroll.min(content_height);
         let visible_end = content_height.min(clamped_scroll.saturating_add(viewport));
 

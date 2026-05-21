@@ -121,7 +121,7 @@
 Replaced at line 239
 ```
 
-- [ ] Not scrolling down consistently when new stream data comes down.
+- [x] Fix issue where it's not scrolling down consistently when new stream data comes down.
 
 - [ ] During delete in "sessions dialog" can we color the current "to-be-deleted" list item with red instead of the primary color. And since we're showing "Confirm ctrl+d" after pressing ctrl+d the first time, can we also "esc" to cancel (instead of close the session dialog?)
 
