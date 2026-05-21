@@ -17,6 +17,10 @@ use crate::utils::git;
 use crate::views::chat::{
     agent_color_for_tab, init_chat, render_chat, SubagentTab, SubagentTabs, SUBAGENT_FOOTER_HEIGHT,
 };
+use crate::views::command_palette::{
+    handle_command_palette_key_event, handle_command_palette_mouse_event, init_command_palette,
+    render_command_palette, CommandPaletteAction, CommandPaletteAppAction,
+};
 use crate::views::connect_dialog::{
     get_pending_selection, handle_connect_dialog_key_event, handle_connect_dialog_mouse_event,
     init_connect_dialog, render_connect_dialog,
@@ -102,6 +106,7 @@ pub enum OverlayFocus {
     SkillsDialog,
     TimelineDialog,
     MessageActions,
+    CommandPalette,
     WhichKey,
 }
 
@@ -204,6 +209,7 @@ pub struct App {
     pub permission_dialog_state: PermissionDialogState,
     pub question_dialog_state: QuestionDialogState,
     pub skills_dialog_state: crate::views::SkillsDialogState,
+    pub command_palette_state: crate::views::command_palette::CommandPaletteState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
     pub message_actions_index: Option<usize>,
@@ -277,6 +283,7 @@ impl App {
         let skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
         let which_key_state = crate::views::which_key::init_which_key();
         let timeline_dialog_state = crate::views::timeline_dialog::init_timeline_dialog();
+        let command_palette_state = init_command_palette();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
         let session_manager = SessionManager::new()
@@ -416,6 +423,7 @@ impl App {
             skills_dialog_state,
             which_key_state,
             timeline_dialog_state,
+            command_palette_state,
             message_actions_index: None,
             message_actions_dialog: None,
             api_key_input,
@@ -1199,6 +1207,17 @@ impl App {
     }
 
     pub fn handle_keys(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('p')
+            && key.modifiers == event::KeyModifiers::CONTROL
+            && matches!(
+                self.overlay_focus,
+                OverlayFocus::None | OverlayFocus::SuggestionsPopup | OverlayFocus::CommandPalette
+            )
+        {
+            self.open_command_palette();
+            return;
+        }
+
         match key.code {
             KeyCode::Char('v') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                 if self.is_subagent_session_active()
@@ -1738,6 +1757,16 @@ impl App {
                     false
                 }
             }
+            OverlayFocus::CommandPalette => {
+                let action = handle_command_palette_key_event(&mut self.command_palette_state, key);
+                self.handle_command_palette_action(action);
+                if !self.command_palette_state.dialog.is_visible()
+                    && self.overlay_focus == OverlayFocus::CommandPalette
+                {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
             OverlayFocus::WhichKey => {
                 let action = self.which_key_state.handle_key_event(key);
                 match action {
@@ -1867,15 +1896,7 @@ impl App {
                 self.switch_to_parent_session()
             }
             KeyCode::Tab => {
-                if self.agent == "Plan" {
-                    self.agent = "Build".to_string();
-                } else {
-                    self.agent = "Plan".to_string();
-                }
-
-                let colors = self.get_current_theme_colors();
-                let agent_color = crate::theme::agent_color(&self.agent, &colors);
-                self.chat_state.wave_spinner.set_color(agent_color);
+                self.toggle_agent_mode();
                 true
             }
             KeyCode::Esc => {
@@ -1906,6 +1927,18 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn toggle_agent_mode(&mut self) {
+        if self.agent == "Plan" {
+            self.agent = "Build".to_string();
+        } else {
+            self.agent = "Plan".to_string();
+        }
+
+        let colors = self.get_current_theme_colors();
+        let agent_color = crate::theme::agent_color(&self.agent, &colors);
+        self.chat_state.wave_spinner.set_color(agent_color);
     }
 
     fn handle_input_and_app_keys(&mut self, key: KeyEvent) {
@@ -2314,6 +2347,14 @@ impl App {
             {
                 self.close_message_actions();
             }
+        } else if self.overlay_focus == OverlayFocus::CommandPalette {
+            let action = handle_command_palette_mouse_event(&mut self.command_palette_state, mouse);
+            self.handle_command_palette_action(action);
+            if !self.command_palette_state.dialog.is_visible()
+                && self.overlay_focus == OverlayFocus::CommandPalette
+            {
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::SuggestionsPopup {
             let anchor_area = self.suggestions_popup_anchor_area();
             let action = handle_suggestions_popup_mouse_event(
@@ -2633,6 +2674,20 @@ impl App {
                 );
                 self.skills_dialog_state.dialog.selected_index = 0;
             }
+            (_, OverlayFocus::CommandPalette) => {
+                self.command_palette_state
+                    .dialog
+                    .search_textarea
+                    .insert_str(&text);
+                self.command_palette_state.dialog.set_search_query(
+                    self.command_palette_state
+                        .dialog
+                        .search_textarea
+                        .lines()
+                        .join(""),
+                );
+                self.command_palette_state.dialog.selected_index = 0;
+            }
             (_, OverlayFocus::SessionRenameDialog) => {
                 self.session_rename_dialog_state
                     .input_textarea
@@ -2680,6 +2735,50 @@ impl App {
             }
         }
         self.clear_suggestions_and_blur();
+    }
+
+    fn open_command_palette(&mut self) {
+        if self.overlay_focus == OverlayFocus::CommandPalette
+            && self.command_palette_state.dialog.is_visible()
+        {
+            self.command_palette_state.dialog.hide();
+            self.overlay_focus = OverlayFocus::None;
+            return;
+        }
+
+        clear_suggestions(&mut self.suggestions_popup_state);
+        self.command_palette_state
+            .refresh_items(&self.command_registry, self.base_focus == BaseFocus::Chat);
+        self.command_palette_state.show();
+        self.overlay_focus = OverlayFocus::CommandPalette;
+    }
+
+    fn handle_command_palette_action(&mut self, action: CommandPaletteAction) {
+        match action {
+            CommandPaletteAction::RunCommand(command) => {
+                self.overlay_focus = OverlayFocus::None;
+                let command = format!("/{}", command);
+
+                tokio::task::block_in_place(|| {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(self.process_input(&command));
+                });
+
+                self.input.clear();
+                self.clear_suggestions_and_blur();
+            }
+            CommandPaletteAction::RunAppAction(action) => {
+                self.overlay_focus = OverlayFocus::None;
+                match action {
+                    CommandPaletteAppAction::ToggleAgentMode => self.toggle_agent_mode(),
+                    CommandPaletteAppAction::CycleReasoningEffort => {
+                        let _ = self.cycle_active_reasoning_effort();
+                    }
+                }
+                self.clear_suggestions_and_blur();
+            }
+            CommandPaletteAction::None => {}
+        }
     }
 
     fn clear_suggestions_and_blur(&mut self) {
@@ -5303,6 +5402,12 @@ impl App {
             render_question_dialog(f, &mut self.question_dialog_state, size, colors);
         }
 
+        if self.overlay_focus == OverlayFocus::CommandPalette
+            && self.command_palette_state.dialog.is_visible()
+        {
+            render_command_palette(f, &mut self.command_palette_state, size, colors);
+        }
+
         if self.overlay_focus == OverlayFocus::WhichKey {
             crate::views::which_key::render_which_key(f, &self.which_key_state, &colors);
         }
@@ -5388,6 +5493,7 @@ mod tests {
             permission_dialog_state: init_permission_dialog(),
             question_dialog_state: init_question_dialog(),
             skills_dialog_state: crate::views::skills_dialog::init_skills_dialog("Skills", vec![]),
+            command_palette_state: init_command_palette(),
             which_key_state: crate::views::which_key::init_which_key(),
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
             message_actions_index: None,

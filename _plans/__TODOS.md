@@ -146,5 +146,5 @@ Replaced at line 239
 
 - [ ] I have a "complete", "error", "question" (use this in both 'question' and 'permission') sounds. I'd love for them to be bundled in, or at least downloaded by default via fetching from github raw link if it doesnt exist yet.
 
-- [ ] Like opencode, let's make a command palette via `ctrl+p`.
-  - [ ] Additionally, since the bottom area takes up too much space with `/ commands ctrl+x shortcuts tab agents ctrl+cc quit`. Let's reduce it to just `ctrl+p`?.
+- [x] Like opencode, let's make a command palette via `ctrl+p`.
+  - [x] Additionally, since the bottom area takes up too much space with `/ commands ctrl+x shortcuts tab agents ctrl+cc quit`. Let's reduce it to just `ctrl+p`?.

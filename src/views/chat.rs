@@ -150,14 +150,8 @@ pub fn render_chat(
     }
 
     let help_text = vec![
-        Span::styled("/", Style::default().fg(colors.info)),
-        Span::raw(" commands  "),
-        Span::styled("ctrl+x", Style::default().fg(colors.info)),
-        Span::raw(" shortcuts  "),
-        Span::styled("tab", Style::default().fg(colors.info)),
-        Span::raw(" agents  "),
-        Span::styled("ctrl+cc", Style::default().fg(colors.info)),
-        Span::raw(" quit "),
+        Span::styled("ctrl+p", Style::default().fg(colors.info)),
+        Span::raw(" commands"),
     ];
     let help_line = Line::from(help_text);
     let help_width = help_line.width() as u16;

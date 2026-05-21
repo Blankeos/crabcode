@@ -1,4 +1,5 @@
 pub mod chat;
+pub mod command_palette;
 pub mod connect_dialog;
 pub mod home;
 pub mod models_dialog;

@@ -83,6 +83,10 @@ impl Registry {
         self.custom_commands.contains_key(name)
     }
 
+    pub fn custom_command(&self, name: &str) -> Option<&crate::command::custom::CustomCommand> {
+        self.custom_commands.get(name)
+    }
+
     pub fn get(&self, name: &str) -> Option<&Command> {
         if let Some(cmd) = self.commands.get(name) {
             return Some(cmd);
