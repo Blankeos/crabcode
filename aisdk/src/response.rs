@@ -143,11 +143,7 @@ pub async fn stream_with_tools<P: Provider>(
                     Ok(ChunkType::AssistantMessagePhase { phase }) => {
                         current_assistant_message_phase = phase;
                         last_assistant_message_phase = phase;
-                        let label = match phase {
-                            Some(MessagePhase::Commentary) => "commentary",
-                            Some(MessagePhase::FinalAnswer) => "final_answer",
-                            None => "unknown",
-                        };
+                        let label = message_phase_label(phase);
                         let _ = tx_loop.send(ChunkType::Metadata(format!(
                             "assistant_message_phase={label}"
                         )));
@@ -228,16 +224,34 @@ pub async fn stream_with_tools<P: Provider>(
             }
 
             if !has_tool_call {
-                let needs_follow_up = matches!(response_end_turn, Some(false))
-                    || matches!(last_assistant_message_phase, Some(MessagePhase::Commentary));
+                let end_turn_requires_follow_up = matches!(response_end_turn, Some(false));
+                let commentary_requires_follow_up =
+                    matches!(last_assistant_message_phase, Some(MessagePhase::Commentary));
+                let needs_follow_up = end_turn_requires_follow_up || commentary_requires_follow_up;
+                let action = if needs_follow_up {
+                    "continue"
+                } else {
+                    "finish"
+                };
+                let _ = tx_loop.send(ChunkType::Metadata(format!(
+                    "provider_step_finish step={} has_tool_call=false end_turn={:?} last_phase={} assistant_text_chars={} action={} preview={:?}",
+                    step_idx,
+                    response_end_turn,
+                    message_phase_label(last_assistant_message_phase),
+                    assistant_text.len(),
+                    action,
+                    log_preview(&assistant_text, 160)
+                )));
+
                 if needs_follow_up {
-                    let reason = if matches!(response_end_turn, Some(false)) {
+                    let reason = if end_turn_requires_follow_up {
                         "end_turn=false"
                     } else {
                         "assistant_message_phase=commentary"
                     };
                     let _ = tx_loop.send(ChunkType::Metadata(format!(
-                        "continuing model turn after non-final assistant output ({reason})"
+                        "continuing model turn after non-final assistant output step={} reason={}",
+                        step_idx, reason
                     )));
                     continue;
                 }
@@ -495,6 +509,41 @@ fn tool_results_log_summary(results: &[ToolExecutionResult]) -> String {
         "output_bytes={} error_results={} max_output[tool={},bytes={}]",
         output_bytes, error_results, max_tool, max_bytes,
     )
+}
+
+fn message_phase_label(phase: Option<MessagePhase>) -> &'static str {
+    match phase {
+        Some(MessagePhase::Commentary) => "commentary",
+        Some(MessagePhase::FinalAnswer) => "final_answer",
+        None => "unknown",
+    }
+}
+
+fn log_preview(text: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    let mut chars = 0usize;
+    let mut previous_was_whitespace = false;
+
+    for ch in text.trim().chars() {
+        if chars >= max_chars {
+            preview.push_str("...");
+            break;
+        }
+
+        if ch.is_whitespace() {
+            if !previous_was_whitespace && !preview.is_empty() {
+                preview.push(' ');
+                chars += 1;
+            }
+            previous_was_whitespace = true;
+        } else {
+            preview.push(ch);
+            chars += 1;
+            previous_was_whitespace = false;
+        }
+    }
+
+    preview
 }
 
 #[derive(Debug, Default)]
@@ -1171,6 +1220,39 @@ mod tests {
         assert_eq!(text, "I'll inspect that next.Done.");
         assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
         assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+    }
+
+    #[tokio::test]
+    async fn max_steps_allows_exact_configured_step_count() {
+        let provider = FollowUpProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("finish the task")],
+            Vec::new(),
+            Some(1),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let mut text = String::new();
+        let mut incomplete = Vec::new();
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::Text(delta) => text.push_str(&delta),
+                ChunkType::Incomplete(message) => incomplete.push(message),
+                _ => {}
+            }
+        }
+
+        assert_eq!(text, "I'll inspect that next.");
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(incomplete, vec!["Max steps reached".to_string()]);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Hook));
     }
 
     #[tokio::test]

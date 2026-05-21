@@ -1,7 +1,7 @@
 use aisdk::core::{
     chunk::{ChunkType, MessagePhase},
     response::{stream_with_tools, LanguageModelStream, StreamTextResponse},
-    stop::{step_count_is, StopReason},
+    stop::StopReason,
     Message as AisdkMessage, Tool,
 };
 use aisdk::message::ImageContent;
@@ -78,6 +78,18 @@ impl ProviderRequestConfig {
 enum StreamRelayOutcome {
     Ended,
     Exhausted,
+}
+
+fn stream_outcome_label(
+    outcome: StreamRelayOutcome,
+    stop_reason: Option<&StopReason>,
+) -> &'static str {
+    match (outcome, stop_reason) {
+        (StreamRelayOutcome::Ended, _) => "Ended",
+        (StreamRelayOutcome::Exhausted, Some(StopReason::Finish)) => "Finished",
+        (StreamRelayOutcome::Exhausted, Some(StopReason::Hook)) => "StepLimit",
+        (StreamRelayOutcome::Exhausted, _) => "Exhausted",
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -438,15 +450,13 @@ pub async fn stream_llm_with_cancellation(
 
     let stop_reason = response.stop_reason().await;
     let stream_outcome = relay_result.outcome;
+    let primary_outcome_label = stream_outcome_label(stream_outcome, stop_reason.as_ref());
     let _ = log(&format!(
-        "Stream completed: outcome={stream_outcome:?}, stop_reason={stop_reason:?}, agent_max_steps={agent_max_steps:?}",
+        "Stream completed: outcome={stream_outcome:?}, effective_outcome={primary_outcome_label}, stop_reason={stop_reason:?}, agent_max_steps={agent_max_steps:?}",
     ));
     log_stream_summary(
         primary_log_context,
-        match stream_outcome {
-            StreamRelayOutcome::Ended => "Ended",
-            StreamRelayOutcome::Exhausted => "Exhausted",
-        },
+        primary_outcome_label,
         stop_reason.as_ref(),
         token_count,
         start_time.elapsed().as_millis(),
@@ -498,10 +508,7 @@ pub async fn stream_llm_with_cancellation(
             let stop_reason = summary_response.stop_reason().await;
             log_stream_summary(
                 summary_log_context,
-                match result.outcome {
-                    StreamRelayOutcome::Ended => "Ended",
-                    StreamRelayOutcome::Exhausted => "Exhausted",
-                },
+                stream_outcome_label(result.outcome, stop_reason.as_ref()),
                 stop_reason.as_ref(),
                 token_count,
                 start_time.elapsed().as_millis(),
@@ -741,7 +748,6 @@ async fn stream_provider_request(
     tools: Vec<Tool>,
     max_steps: Option<usize>,
 ) -> Result<StreamTextResponse, DynError> {
-    let stop_when = max_steps.map(|s| step_count_is(s));
     let headers = HashMap::new();
 
     match config.kind {
@@ -757,7 +763,7 @@ async fn stream_provider_request(
                 builder = builder.api_key(key);
             }
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
-            stream_with_tools(provider, messages, tools, max_steps, stop_when, headers)
+            stream_with_tools(provider, messages, tools, max_steps, None, headers)
                 .await
                 .map_err(|e| Box::new(e) as DynError)
         }
@@ -773,7 +779,7 @@ async fn stream_provider_request(
                 builder = builder.api_key(key);
             }
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
-            stream_with_tools(provider, messages, tools, max_steps, stop_when, headers)
+            stream_with_tools(provider, messages, tools, max_steps, None, headers)
                 .await
                 .map_err(|e| Box::new(e) as DynError)
         }
@@ -811,7 +817,7 @@ async fn stream_provider_request(
             }
 
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
-            stream_with_tools(provider, messages, tools, max_steps, stop_when, headers)
+            stream_with_tools(provider, messages, tools, max_steps, None, headers)
                 .await
                 .map_err(|e| Box::new(e) as DynError)
         }
