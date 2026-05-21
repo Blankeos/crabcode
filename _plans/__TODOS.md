@@ -142,4 +142,9 @@ Replaced at line 239
 
 - [x] Make tool calls be AS PERMISSIVE, as codex. Meaning won't have to ask me to "read" sometimes.
 
-- [ ] Mouse hover on "chat messages". So that when I click it, it opens the "timeline view" > enter option kinda thing. So it shows either the "Copy", "Fork", "Undo" actions, just like opencode.
+- [x] Mouse hover on "chat messages". So that when I click it, it opens the "timeline view" > enter option kinda thing. So it shows either the "Copy", "Fork", "Undo" actions, just like opencode.
+
+- [ ] I have a "complete", "error", "question" (use this in both 'question' and 'permission') sounds. I'd love for them to be bundled in, or at least downloaded by default via fetching from github raw link if it doesnt exist yet.
+
+- [ ] Like opencode, let's make a command palette via `ctrl+p`.
+  - [ ] Additionally, since the bottom area takes up too much space with `/ commands ctrl+x shortcuts tab agents ctrl+cc quit`. Let's reduce it to just `ctrl+p`?.

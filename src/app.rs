@@ -157,6 +157,7 @@ struct ExternalStreamState {
 struct ToolCallViewState {
     tool_call_message_indices: std::collections::HashMap<String, usize>,
     tool_call_order: Vec<String>,
+    deferred_finish: bool,
 }
 
 #[derive(Debug)]
@@ -810,6 +811,16 @@ impl App {
             self.session_view_states
                 .get_mut(session_id)
                 .map(|state| &mut state.chat)
+        }
+    }
+
+    fn chat_for_session(&self, session_id: &str) -> Option<&Chat> {
+        if self.is_active_session(session_id) {
+            Some(&self.chat_state.chat)
+        } else {
+            self.session_view_states
+                .get(session_id)
+                .map(|state| &state.chat)
         }
     }
 
@@ -4285,6 +4296,7 @@ impl App {
         if let Some(state) = self.session_view_states.get_mut(session_id) {
             state.stream = None;
             state.external_stream = None;
+            state.tool_calls.deferred_finish = false;
         }
 
         if was_active {
@@ -4534,6 +4546,10 @@ impl App {
     }
 
     fn finish_streaming_session(&mut self, session_id: &str) {
+        if self.defer_finish_if_tools_are_running(session_id) {
+            return;
+        }
+
         let Some(completion_stats) = self.finalize_and_persist_streamed_messages(session_id, None)
         else {
             return;
@@ -4557,6 +4573,69 @@ impl App {
             completion_stats.as_deref(),
         );
         self.notify_terminal_complete();
+    }
+
+    fn defer_finish_if_tools_are_running(&mut self, session_id: &str) -> bool {
+        if !self.session_has_running_tool_messages(session_id) {
+            return false;
+        }
+
+        if let Some(state) = self.session_view_states.get_mut(session_id) {
+            state.tool_calls.deferred_finish = true;
+        }
+
+        let _ = crate::logging::log(&format!(
+            "[STREAM_DEFERRED] session_id={} reason=running_tool_messages",
+            session_id
+        ));
+        true
+    }
+
+    fn finish_deferred_streaming_session_if_ready(&mut self, session_id: &str) {
+        let deferred = self
+            .session_view_states
+            .get(session_id)
+            .is_some_and(|state| state.tool_calls.deferred_finish);
+
+        if !deferred || self.session_has_running_tool_messages(session_id) {
+            return;
+        }
+
+        if let Some(state) = self.session_view_states.get_mut(session_id) {
+            state.tool_calls.deferred_finish = false;
+        }
+
+        self.finish_streaming_session(session_id);
+    }
+
+    fn session_has_running_tool_messages(&self, session_id: &str) -> bool {
+        let Some((start, _, _)) = self.streaming_boundary_for_session(session_id) else {
+            return false;
+        };
+        let Some(chat) = self.chat_for_session(session_id) else {
+            return false;
+        };
+
+        chat.messages
+            .iter()
+            .skip(start)
+            .any(Self::is_running_tool_message)
+    }
+
+    fn is_running_tool_message(message: &crate::session::types::Message) -> bool {
+        if message.role != crate::session::types::MessageRole::Tool {
+            return false;
+        }
+
+        serde_json::from_str::<serde_json::Value>(&message.content)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("status")
+                    .and_then(|status| status.as_str())
+                    .map(|status| status == "running")
+            })
+            .unwrap_or(true)
     }
 
     fn finalize_and_persist_streamed_messages(
@@ -4737,6 +4816,8 @@ impl App {
                 .copied()
         });
 
+        let mut handled = false;
+
         if let Some(chat) = self.chat_for_session_mut(session_id) {
             if let Some(idx) = target_idx {
                 if let Some(msg) = chat.messages.get_mut(idx) {
@@ -4787,19 +4868,23 @@ impl App {
 
                     msg.content = v.to_string();
                     chat.mark_render_dirty();
-                    return;
+                    handled = true;
                 }
             }
 
-            let content = serde_json::json!({
-                "id": result.tool_call_id,
-                "name": result.name,
-                "status": "ok",
-                "output_preview": result.content,
-            })
-            .to_string();
-            chat.add_message(crate::session::types::Message::tool(content));
+            if !handled {
+                let content = serde_json::json!({
+                    "id": result.tool_call_id,
+                    "name": result.name,
+                    "status": "ok",
+                    "output_preview": result.content,
+                })
+                .to_string();
+                chat.add_message(crate::session::types::Message::tool(content));
+            }
         }
+
+        self.finish_deferred_streaming_session_if_ready(session_id);
     }
 
     fn start_llm_streaming(
@@ -5474,6 +5559,95 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn stream_finish_waits_for_running_tool_result() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Deferred".to_string()));
+
+        let user_message = crate::session::types::Message::user("Prompt");
+        app.chat_state.chat.add_message(user_message.clone());
+        app.session_manager
+            .add_message_to_current_session(&user_message)
+            .unwrap();
+
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Checking."));
+        app.chat_state.chat.begin_streaming_turn();
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::tool(
+                serde_json::json!({
+                    "id": "call_1",
+                    "name": "read",
+                    "status": "running",
+                    "args": { "path": "Cargo.toml" },
+                })
+                .to_string(),
+            ));
+
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState {
+            chunk_receiver: receiver,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            streaming_model: Some("test-model".to_string()),
+            streaming_provider: Some("test-provider".to_string()),
+            chat_len_before_assistant: 1,
+        });
+        state
+            .tool_calls
+            .tool_call_message_indices
+            .insert("call_1".to_string(), 2);
+        state.tool_calls.tool_call_order.push("call_1".to_string());
+        app.is_streaming = true;
+
+        app.finish_streaming_session(&session_id);
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert!(state.stream.is_some());
+        assert!(state.tool_calls.deferred_finish);
+        assert!(!app.chat_state.chat.messages[1].is_complete);
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+
+        app.add_tool_result_to_session(
+            &session_id,
+            crate::llm::ToolCallResult {
+                tool_call_id: "call_1".to_string(),
+                role: "tool".to_string(),
+                name: "read".to_string(),
+                content: serde_json::json!({
+                    "status": "ok",
+                    "title": "Read",
+                    "output_preview": "contents"
+                })
+                .to_string(),
+            },
+        );
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert!(state.stream.is_none());
+        assert!(!state.tool_calls.deferred_finish);
+        assert!(app.chat_state.chat.messages[1].is_complete);
+
+        let session_messages = &app
+            .session_manager
+            .get_session_ref(&session_id)
+            .unwrap()
+            .messages;
+        assert_eq!(session_messages.len(), 3);
+        let tool_payload: serde_json::Value =
+            serde_json::from_str(&session_messages[2].content).unwrap();
+        assert_eq!(tool_payload["status"], "ok");
     }
 
     #[test]

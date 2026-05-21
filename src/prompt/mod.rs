@@ -203,6 +203,9 @@ Output Philosophy:
 - Keep tone light, friendly, curious
 - Exception: Skip preambles for trivial single-file reads
 - Minimal markdown formatting
+- Treat preambles and progress updates as interim commentary before tool calls
+- Use final answers only when the requested work is complete
+- If work remains, keep using tools instead of sending a final answer
 
 Planning:
 - Use update_plan for non-trivial, multi-phase work
@@ -349,5 +352,15 @@ mod tests {
             ProviderType::from_model_id("unknown"),
             ProviderType::Generic
         );
+    }
+
+    #[test]
+    fn codex_prompt_separates_progress_from_final_answers() {
+        let composer = SystemPromptComposer::new("gpt-5", ".", true, "test");
+        let prompt = composer.get_codex_prompt();
+
+        assert!(prompt.contains("preambles and progress updates as interim commentary"));
+        assert!(prompt.contains("Use final answers only when the requested work is complete"));
+        assert!(prompt.contains("keep using tools instead of sending a final answer"));
     }
 }

@@ -55,6 +55,29 @@ Codex reference behavior in `.devrefs/references/openai/codex/codex-rs/core/src/
 
 ## Changes Made So Far
 
+### Runtime Fix Applied 2026-05-21
+
+The attempted `update_plan`-state guard was rejected in favor of stricter reference parity.
+
+- Codex continues from structured stream/tool lifecycle state: tool output needing follow-up, pending input, and `response.completed end_turn == Some(false)`.
+- opencode exits from persisted assistant finish state only when there are no unresolved tool-call parts; it does not inspect assistant prose or todo/plan wording.
+- Neither reference uses `update_plan` or natural-language progress phrasing as a completion gate.
+
+Applied two reference-shaped fixes:
+
+- `src/app.rs` now defers session completion if an `End` arrives while tool messages from the current streaming boundary are still `running`. Completion resumes after the pending tool result resolves. This mirrors opencode's unresolved tool-part exit condition and Codex's in-flight tool drain boundary.
+- `src/prompt/mod.rs` now tells Codex-style models to treat preambles/progress updates as interim commentary and reserve final answers for completed work. This is a prompt/protocol correction, not an assistant-text keyword matcher.
+
+AISDK remains limited to reference-style stream signals: tool calls, `end_turn=false`, phase/lifecycle events, terminal-event enforcement, and bounded max-step handling. It still does not special-case `update_plan` inside argument parsing.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo test -p aisdk`
+- `cargo test stream_finish_waits_for_running_tool_result`
+- `cargo test codex_prompt_separates_progress_from_final_answers`
+- `cargo check`
+
 ### Permission-Policy Changes From Dogfooding Run
 
 These were already modified by crabcode before the premature completion:
@@ -94,27 +117,24 @@ Added narrow lifecycle logging to make the next recurrence attributable.
 
 ## Verification State
 
-- `cargo fmt --check` currently reports a formatting diff in `src/tools/permission.rs` around the newly added permissive-read test. That file was already dirty from the dogfooding run.
-- `cargo check` initially failed with `E0382` in `src/agent/subagent.rs` because `session_id` was moved into tool conversion and later reused. A clone fix was applied. Rerun is still pending.
-- Earlier dogfooding history showed `cargo test permission::tests` passing after the permission changes, but that was before the later diagnostic edits and before the current formatting issue was resolved.
+- `cargo fmt --check` passes as of the runtime fix.
+- `cargo test -p aisdk` passes for the existing reference-style AISDK lifecycle behavior.
+- `cargo test stream_finish_waits_for_running_tool_result` passes.
+- `cargo test codex_prompt_separates_progress_from_final_answers` passes.
+- `cargo check` passes with existing warnings. The permission-policy and diagnostic edits from the earlier dogfooding run remain separate dirty work and should be validated before landing.
 
 ## Next Debugging Targets
 
-1. Run `cargo fmt` or minimally format `src/tools/permission.rs`, then rerun `cargo check`.
-2. Dogfood the same class of task again and inspect new log fields:
+1. Dogfood the same class of task again and inspect new log fields:
    - Match `[AISDK_TOOL] call/result/error` by `session_id` and `call_id`.
    - Check whether any tool call occurs after `Stream completed` for the same `session_id`.
    - Check `[TASK]` and `[SUBAGENT]` lines to identify child-session activity.
-3. If the same session emits post-completion tools, fix the stream/task lifecycle so completion waits for all owned work or cancels orphan work.
-4. If the provider marks progress text as `final_answer`, consider a guard that continues instead of finishing when:
-   - final text is short,
-   - there is an active/incomplete plan,
-   - recent text looks like a progress update,
-   - or the last tool/result indicates more work remains.
+2. If the same session still emits post-completion tools, check whether those events bypass `ToolCallViewState` and need a lower-level in-flight counter.
+3. If provider output still misclassifies progress as `final_answer`, inspect the raw Responses events and prompt text to verify whether the updated final/commentary contract is being sent.
 
 ## Open Questions
 
 - Were the post-`21:50:58` tool calls from the same primary stream, a subagent, or another concurrent/background stream?
 - Does the UI mark a turn complete solely when the relay exhausts, even if task/subagent senders still exist?
 - Should `final_answer + end_turn=None` be trusted for ChatGPT OAuth/Codex transport, or should `end_turn=true` be required for final completion when tools are enabled?
-- Should active plan state influence whether a final-looking response is allowed to complete the turn?
+- What should be the canonical crabcode pending-work signal that can keep the turn alive without inspecting assistant prose or plan/todo text?
