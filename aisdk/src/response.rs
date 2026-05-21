@@ -276,8 +276,14 @@ pub async fn stream_with_tools<P: Provider>(
 
             let mut tool_results_to_observe = Vec::new();
             let mut tool_calls_to_run = Vec::new();
+            let mut tool_call_messages = Vec::new();
 
             for (call_id, tool_name, args) in tool_calls_to_execute {
+                let tool_call_message =
+                    Message::tool_call(call_id.clone(), tool_name.clone(), canonical_json(&args));
+                current_messages.push(tool_call_message.clone());
+                tool_call_messages.push(tool_call_message);
+
                 let cache_key = repeatable_tool_cache_key(&tool_name, &args);
                 if let Some(cached_output) = cache_key
                     .as_ref()
@@ -297,6 +303,10 @@ pub async fn stream_with_tools<P: Provider>(
                 } else {
                     tool_calls_to_run.push((call_id, tool_name, args, cache_key));
                 }
+            }
+
+            if !tool_call_messages.is_empty() {
+                messages_arc.lock().await.extend(tool_call_messages);
             }
 
             let tool_results = join_all(tool_calls_to_run.into_iter().map(
@@ -349,7 +359,6 @@ pub async fn stream_with_tools<P: Provider>(
             }
 
             if !tool_results_to_observe.is_empty() {
-                let observation = format_tool_observation(&tool_results_to_observe);
                 let tool_names = tool_results_to_observe
                     .iter()
                     .map(|result| result.tool_name.as_str())
@@ -357,15 +366,25 @@ pub async fn stream_with_tools<P: Provider>(
                     .join(",");
                 let tool_result_summary = tool_results_log_summary(&tool_results_to_observe);
                 let _ = tx_loop.send(ChunkType::Metadata(format!(
-                    "tool_results_added count={} names={} {} observation_chars={} next_messages={}",
+                    "tool_results_added count={} names={} {} next_messages={}",
                     tool_results_to_observe.len(),
                     tool_names,
                     tool_result_summary,
-                    observation.len(),
-                    current_messages.len() + 1
+                    current_messages.len() + tool_results_to_observe.len()
                 )));
-                current_messages.push(Message::user(observation.clone()));
-                messages_arc.lock().await.push(Message::user(observation));
+                let tool_output_messages = tool_results_to_observe
+                    .into_iter()
+                    .map(|result| {
+                        Message::tool_output(
+                            result.call_id,
+                            result.tool_name,
+                            result.output,
+                            result.is_error,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                current_messages.extend(tool_output_messages.clone());
+                messages_arc.lock().await.extend(tool_output_messages);
             }
         }
     });
@@ -423,6 +442,7 @@ fn message_log_summary(messages: &[Message]) -> MessageLogSummary {
             Message::System(_) => summary.system_messages += 1,
             Message::User(_) => summary.user_messages += 1,
             Message::Assistant(_) => summary.assistant_messages += 1,
+            Message::ToolCall(_) | Message::ToolOutput(_) => {}
         }
 
         summary.text_bytes += text_bytes;
@@ -445,6 +465,8 @@ fn message_role(message: &Message) -> &'static str {
         Message::System(_) => "system",
         Message::User(_) => "user",
         Message::Assistant(_) => "assistant",
+        Message::ToolCall(_) => "tool_call",
+        Message::ToolOutput(_) => "tool_output",
     }
 }
 
@@ -453,6 +475,8 @@ fn message_size(message: &Message) -> (usize, usize) {
         Message::System(message) => (message.content.len(), 0),
         Message::User(message) => (message.content.len(), message.images.len()),
         Message::Assistant(message) => (message.content.len(), 0),
+        Message::ToolCall(message) => (message.arguments.len(), 0),
+        Message::ToolOutput(message) => (message.output.len(), 0),
     }
 }
 
@@ -555,6 +579,7 @@ struct ToolCallAccumulator {
 struct PendingToolCall {
     key: String,
     id: Option<String>,
+    call_id: Option<String>,
     name: Option<String>,
     arguments: String,
     final_arguments: Option<String>,
@@ -604,39 +629,6 @@ fn canonical_json(value: &serde_json::Value) -> String {
     }
 }
 
-fn format_tool_observation(results: &[ToolExecutionResult]) -> String {
-    if let [result] = results {
-        if result.is_error {
-            return format!(
-                "Tool `{}` failed:\n{}\n\nUse this tool error to adjust the next step. Do not repeat the same tool call unchanged unless the underlying file or input has changed.",
-                result.tool_name, result.output
-            );
-        }
-
-        return format!("Tool `{}` result:\n{}", result.tool_name, result.output);
-    }
-
-    let failed = results.iter().filter(|result| result.is_error).count();
-    let mut observation = format!(
-        "Tool batch results: {} tool calls returned, {} failed. Use these results to answer the user's request or adjust the next step. Do not repeat the same failing tool calls unchanged.",
-        results.len(),
-        failed
-    );
-
-    for (idx, result) in results.iter().enumerate() {
-        observation.push_str(&format!(
-            "\n\n<tool_result index=\"{}\" tool=\"{}\" call_id=\"{}\" status=\"{}\">\n{}\n</tool_result>",
-            idx + 1,
-            result.tool_name,
-            result.call_id,
-            if result.is_error { "error" } else { "ok" },
-            result.output
-        ));
-    }
-
-    observation
-}
-
 impl ToolCallAccumulator {
     fn ingest(&mut self, json_str: &str) -> std::result::Result<(), String> {
         let parsed: serde_json::Value = serde_json::from_str(json_str)
@@ -662,7 +654,8 @@ impl ToolCallAccumulator {
                 .filter(|name| !name.is_empty())
                 .ok_or_else(|| format!("Tool call '{}' missing function name", call.key))?;
 
-            let id = call.id.unwrap_or(call.key);
+            let item_id = call.id.unwrap_or_else(|| call.key.clone());
+            let id = call.call_id.unwrap_or(item_id);
             let args = parse_tool_arguments(&id, &call.arguments, call.final_arguments.as_deref())?;
 
             results.push((id, name, args));
@@ -682,6 +675,13 @@ impl ToolCallAccumulator {
         if pending.id.is_none() {
             pending.id = item
                 .get("id")
+                .and_then(|value| value.as_str())
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string);
+        }
+        if pending.call_id.is_none() {
+            pending.call_id = item
+                .get("call_id")
                 .and_then(|value| value.as_str())
                 .filter(|id| !id.is_empty())
                 .map(ToString::to_string);
@@ -741,6 +741,7 @@ impl ToolCallAccumulator {
         self.calls.push(PendingToolCall {
             key,
             id: None,
+            call_id: None,
             name: None,
             arguments: String::new(),
             final_arguments: None,
@@ -1022,7 +1023,7 @@ mod tests {
                 let follow_up = messages
                     .last()
                     .and_then(|message| match message {
-                        Message::User(user) => Some(user.content.clone()),
+                        Message::ToolOutput(output) => Some(output.output.clone()),
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -1095,15 +1096,13 @@ mod tests {
             .await
             .into_iter()
             .filter_map(|message| match message {
-                Message::User(user) if user.content.starts_with("Tool batch results:") => {
-                    Some(user.content)
-                }
+                Message::ToolOutput(output) if output.name == "wait" => Some(output),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(observations.len(), 1);
-        assert!(observations[0].contains("call_1"));
-        assert!(observations[0].contains("call_2"));
+        assert_eq!(observations.len(), 2);
+        assert!(observations.iter().any(|output| output.call_id == "call_1"));
+        assert!(observations.iter().any(|output| output.call_id == "call_2"));
     }
 
     #[tokio::test]
@@ -1154,8 +1153,10 @@ mod tests {
             .await
             .into_iter()
             .filter_map(|message| match message {
-                Message::User(user) if user.content.contains("Duplicate task call skipped") => {
-                    Some(user.content)
+                Message::ToolOutput(output)
+                    if output.output.contains("Duplicate task call skipped") =>
+                {
+                    Some(output.output)
                 }
                 _ => None,
             })
@@ -1304,9 +1305,8 @@ mod tests {
             .unwrap()
             .clone()
             .expect("provider should receive failed tool observation");
-        assert!(follow_up.contains("Tool `edit` failed"));
+        assert!(follow_up.contains("Tool 'edit' error"));
         assert!(follow_up.contains("Could not find text to replace"));
-        assert!(follow_up.contains("Do not repeat the same tool call unchanged"));
     }
 
     #[test]
@@ -1328,6 +1328,27 @@ mod tests {
         assert_eq!(calls[0].0, "call_1");
         assert_eq!(calls[0].1, "bash");
         assert_eq!(calls[0].2["command"], "ls -la");
+    }
+
+    #[test]
+    fn uses_responses_call_id_for_tool_output_correlation() {
+        let mut accumulator = ToolCallAccumulator::default();
+
+        accumulator
+            .ingest(
+                r#"[{"index":0,"id":"fc_1","call_id":"call_1","type":"function","function":{"name":"read","arguments":""}}]"#,
+            )
+            .unwrap();
+        accumulator
+            .ingest(r#"[{"index":0,"id":"fc_1","function":{"arguments_done":"{\"file_path\":\"Cargo.toml\"}"}}]"#)
+            .unwrap();
+
+        let calls = accumulator.finish().unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "call_1");
+        assert_eq!(calls[0].1, "read");
+        assert_eq!(calls[0].2["file_path"], "Cargo.toml");
     }
 
     #[test]

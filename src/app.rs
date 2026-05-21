@@ -2820,8 +2820,14 @@ impl App {
                         if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
                             transcript.push_str(&format!("**Tool:** {}\n", name));
                         }
+                        if let Some(args) = v.get("args") {
+                            let args = serde_json::to_string_pretty(args)
+                                .unwrap_or_else(|_| args.to_string());
+                            transcript
+                                .push_str(&format!("**Arguments:**\n```json\n{}\n```\n", args));
+                        }
                         if let Some(preview) = v.get("output_preview").and_then(|p| p.as_str()) {
-                            transcript.push_str(&format!("```\n{}\n```\n", preview));
+                            transcript.push_str(&format!("**Output:**\n```\n{}\n```\n", preview));
                         }
                     }
                     transcript.push_str("\n---\n\n");

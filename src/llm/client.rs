@@ -30,6 +30,8 @@ Response must include:
 
 Any attempt to use tools is a critical violation. Respond with text ONLY."#;
 
+const TOOL_HISTORY_ARGUMENTS_MAX_CHARS: usize = 60_000;
+
 type DynError = Box<dyn std::error::Error>;
 
 #[derive(Clone, Debug, Default)]
@@ -1155,12 +1157,47 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
                 aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));
             }
             crate::session::types::MessageRole::Tool => {
-                aisdk_messages.push(AisdkMessage::user(tool_message_observation(&msg.content)));
+                if let Some(tool_messages) = tool_messages_for_model(&msg.content) {
+                    aisdk_messages.extend(tool_messages);
+                } else {
+                    aisdk_messages.push(AisdkMessage::user(tool_message_observation(&msg.content)));
+                }
             }
         }
     }
 
     aisdk_messages
+}
+
+fn tool_messages_for_model(content: &str) -> Option<Vec<AisdkMessage>> {
+    let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    let obj = value.as_object()?;
+
+    let call_id = obj
+        .get("id")
+        .or_else(|| obj.get("call_id"))
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())?;
+    let name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())?;
+    let output = obj
+        .get("output_preview")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())?;
+
+    let arguments = obj
+        .get("args")
+        .map(|args| serde_json::to_string(args).unwrap_or_else(|_| args.to_string()))
+        .unwrap_or_else(|| "{}".to_string());
+    let status = obj.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
+    let is_error = status.eq_ignore_ascii_case("error");
+
+    Some(vec![
+        AisdkMessage::tool_call(call_id, name, arguments),
+        AisdkMessage::tool_output(call_id, name, output, is_error),
+    ])
 }
 
 fn tool_message_observation(content: &str) -> String {
@@ -1185,12 +1222,34 @@ fn tool_message_observation(content: &str) -> String {
     if let Some(title) = title {
         observation.push_str(&format!(": {}", title));
     }
+    if let Some(args) = obj.get("args") {
+        push_tool_arguments_for_observation(&mut observation, args);
+    }
     if !output.is_empty() {
-        observation.push_str("\n");
+        observation.push_str("\n\nTool output:\n");
         observation.push_str(output);
     }
 
     observation
+}
+
+fn push_tool_arguments_for_observation(out: &mut String, args: &serde_json::Value) {
+    out.push_str("\n\nTool call arguments:\n```json\n");
+    out.push_str(&truncate_for_tool_observation(
+        &serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string()),
+        TOOL_HISTORY_ARGUMENTS_MAX_CHARS,
+    ));
+    out.push_str("\n```");
+}
+
+fn truncate_for_tool_observation(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}\n[truncated]", truncated)
+    } else {
+        truncated
+    }
 }
 
 fn is_openai_oauth_model_allowed(model: &str) -> bool {
@@ -1250,7 +1309,7 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_openai_oauth_model_allowed, openai_request_instructions, AisdkMessage,
+        convert_messages, is_openai_oauth_model_allowed, openai_request_instructions, AisdkMessage,
         OpenAIRequestOptions,
     };
 
@@ -1305,5 +1364,46 @@ mod tests {
     fn openai_oauth_rejects_known_non_codex_chat_models() {
         assert!(!is_openai_oauth_model_allowed("gpt-5-chat-latest"));
         assert!(!is_openai_oauth_model_allowed("gpt-4o"));
+    }
+
+    #[test]
+    fn tool_history_replays_structured_tool_call_and_output() {
+        let tool_message = crate::session::types::Message::tool(
+            serde_json::json!({
+                "name": "edit",
+                "status": "ok",
+                "id": "call_edit",
+                "title": "Edit: src/lib.rs",
+                "args": {
+                    "file_path": "src/lib.rs",
+                    "old_string": "old line",
+                    "new_string": "new line"
+                },
+                "output_preview": "Replaced at line 7"
+            })
+            .to_string(),
+        );
+
+        let messages = convert_messages(&[tool_message]);
+
+        assert_eq!(messages.len(), 2);
+        match &messages[0] {
+            AisdkMessage::ToolCall(call) => {
+                assert_eq!(call.call_id, "call_edit");
+                assert_eq!(call.name, "edit");
+                assert!(call.arguments.contains("\"old_string\":\"old line\""));
+                assert!(call.arguments.contains("\"new_string\":\"new line\""));
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+        match &messages[1] {
+            AisdkMessage::ToolOutput(output) => {
+                assert_eq!(output.call_id, "call_edit");
+                assert_eq!(output.name, "edit");
+                assert_eq!(output.output, "Replaced at line 7");
+                assert!(!output.is_error);
+            }
+            other => panic!("expected tool output, got {other:?}"),
+        }
     }
 }

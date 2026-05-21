@@ -9,6 +9,10 @@ pub enum Message {
     User(UserMessage),
     #[serde(rename = "assistant")]
     Assistant(AssistantMessage),
+    #[serde(rename = "tool_call")]
+    ToolCall(ToolCallMessage),
+    #[serde(rename = "tool_output")]
+    ToolOutput(ToolOutputMessage),
 }
 
 impl Message {
@@ -37,6 +41,32 @@ impl Message {
             content: content.into(),
         })
     }
+
+    pub fn tool_call(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self::ToolCall(ToolCallMessage {
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        })
+    }
+
+    pub fn tool_output(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        output: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        Self::ToolOutput(ToolOutputMessage {
+            call_id: call_id.into(),
+            name: name.into(),
+            output: output.into(),
+            is_error,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +90,22 @@ pub struct ImageContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallMessage {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolOutputMessage {
+    pub call_id: String,
+    pub name: String,
+    pub output: String,
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 impl From<String> for SystemMessage {

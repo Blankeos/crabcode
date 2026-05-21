@@ -273,3 +273,96 @@ Validation:
 ### Follow-up
 
 The cancellation-abort issue remains separate: after `[STREAM_CANCELLED]`, `stream_with_tools` can still execute tool calls whose UI sender is already closed.
+
+## 2026-05-22 Active Plan Premature Final Recurrence
+
+### User-Visible Symptom
+
+Crabcode was asked whether Codex-style `update_plan` preamble rendering was relevant and whether crabcode should support it. It found the relevant renderer path and made one partial edit, then ended the turn with another progress-update-shaped final answer:
+
+> Now I’ll add regression coverage for the preamble case.
+
+The task was visibly incomplete: the regression test had not been added, validation had not run, and the active plan still had unfinished items.
+
+The partial UI/parser change from that interrupted task was removed from `src/ui/components/chat.rs` during this follow-up because it was unrelated to the premature-completion fix and had not been wired into rendering.
+
+### `app.log` Evidence
+
+Primary session id: `q5vx4soz1d46hnliwovqord7`.
+
+Relevant sequence:
+
+- `00:43:43`: the model called `update_plan` with one `in_progress` item and pending validation.
+- `00:44:38`: the model updated the plan to two completed items, one `in_progress` implementation item, and one pending validation item.
+- `00:45:01`: `edit` call `call_19` succeeded in `src/ui/components/chat.rs`.
+- `00:45:01`: provider step 11 started after the edit result.
+- `00:45:02`: metadata said `assistant_message_phase=final_answer`.
+- `00:45:02`: metadata said `response.completed end_turn=None`.
+- `00:45:02`: AISDK logged `provider_step_finish step=11 has_tool_call=false end_turn=None last_phase=final_answer assistant_text_chars=57 action=finish preview="Now I’ll add regression coverage for the preamble case."`
+- `00:45:02`: crabcode marked the stream complete with `stop_reason=Some(Finish)`.
+
+Unlike the earlier cancellation finding, this recurrence had no late same-stream tool execution after completion. The model simply emitted a preamble as final output and the runtime accepted it.
+
+### Root Cause
+
+The provider emitted a normal final-answer phase with no tool call, so crabcode finished the turn. The Codex reference loop similarly does not use `update_plan` state as a completion gate; it relies on model instructions plus structured stream/tool lifecycle signals. That means the non-parity fix is not to special-case active plan items in AISDK.
+
+The more direct parity gap found during this follow-up was tool history fidelity. Crabcode stores tool-call arguments in the chat message JSON, but both live follow-up observations and persisted-session replay collapsed tool messages to only the tool result text. For tools like `edit`, the model could see `Replaced at line N` without seeing the original `old_string` / `new_string` it had requested.
+
+### Superseded Runtime Fix
+
+An `aisdk/src/response.rs` guard was briefly added to keep the turn alive when the latest `update_plan` / `todowrite` state still had `in_progress` or `pending` items. That prevented this symptom but diverged from the Codex reference loop, which does not use plan status as completion control. The guard and its regression test were removed.
+
+### Prompt-Parity Fix Applied
+
+- `src/prompt/mod.rs`
+  - Reworked the Codex prompt toward the reference prompt shape: Personality, Autonomy and Persistence, Progress Updates and Final Answers, Planning, Task Execution, and Validation.
+  - Strengthened model-facing instructions to persist through implementation, verification, and outcome reporting.
+  - Kept the completion semantics in prompt/protocol space instead of runtime plan-state gating.
+
+### Structured Tool-History Parity Fix Applied
+
+The follow-up fix moved crabcode toward the Codex reference behavior instead of relying on flattened observation text. Codex keeps function calls and function-call outputs as structured conversation items, including call ids and arguments; crabcode now preserves that shape at the AISDK boundary and when replaying persisted tool history.
+
+- `aisdk/src/message.rs`
+  - Added structured `ToolCall` and `ToolOutput` message variants.
+- `aisdk/src/response.rs`
+  - Live tool execution now appends a structured tool-call message before execution and a structured tool-output message after execution.
+  - OpenAI Responses tool-call accumulation now preserves the Responses `call_id` separately from the response item id, so function-call outputs correlate with the correct call id.
+- `aisdk/src/providers/openai.rs`
+  - Serializes structured tool history as Responses `function_call` and `function_call_output` input items.
+- `aisdk/src/providers/compatible.rs`
+  - Serializes structured tool history as Chat Completions assistant `tool_calls` and `tool` messages.
+- `aisdk/src/providers/anthropic.rs`
+  - Serializes structured tool history as Anthropic `tool_use` and `tool_result` content blocks.
+- `src/llm/client.rs`
+  - Persisted crabcode tool messages now replay to the model as structured tool-call plus tool-output pairs when the stored JSON has call id, name, args, and output.
+  - The older text observation path remains only as a fallback for malformed or legacy tool records.
+- `src/tools/update_plan.rs`
+  - `update_plan` now returns Codex-style model output text: `Plan updated`.
+  - The explanation and plan remain available as structured metadata for crabcode's UI.
+- `src/session/compaction.rs`
+  - Compaction is still text-based in crabcode, so it includes tool-call arguments explicitly to avoid losing edit/write context during summary generation.
+- `src/app.rs`
+  - `/copy` transcripts now include tool arguments and label tool output explicitly. This is export/UI fidelity, not agent-loop completion control.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo test -q -p aisdk`
+- `cargo test -q -p aisdk uses_responses_call_id_for_tool_output_correlation`
+- `cargo test -q -p aisdk maps_responses_function_call_item_to_tool_call_shape`
+- `cargo test -q -p aisdk serializes_structured_tool_history_for_responses_input`
+- `cargo test -q -p aisdk tool_execution_error_is_returned_to_model_without_failing_stream`
+- `cargo test -q tool_history_replays_structured_tool_call_and_output`
+- `cargo test -q parse_update_plan_accepts_codex_shape`
+- `cargo test -q execute_returns_codex_style_ack_with_structured_metadata`
+- `cargo check`
+- `cargo test -q compaction_prompt_preserves_tool_call_arguments`
+- `cargo test -q -p aisdk continues_when_provider_marks_response_as_non_final`
+- `cargo test -q -p aisdk`
+- `cargo check`
+
+### Follow-up
+
+The cancellation-abort issue remains separate and still needs a dedicated fix: cancelling a stream can leave the underlying AISDK tool loop running after the UI receiver closes.

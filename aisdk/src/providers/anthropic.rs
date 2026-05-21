@@ -117,6 +117,25 @@ impl Provider for Anthropic {
                     "role": "assistant",
                     "content": a.content,
                 })),
+                Message::ToolCall(t) => Some(serde_json::json!({
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": t.call_id,
+                        "name": t.name,
+                        "input": serde_json::from_str::<serde_json::Value>(&t.arguments)
+                            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+                    }],
+                })),
+                Message::ToolOutput(t) => Some(serde_json::json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": t.call_id,
+                        "content": t.output,
+                        "is_error": t.is_error,
+                    }],
+                })),
                 _ => None,
             })
             .collect();

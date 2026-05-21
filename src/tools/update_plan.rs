@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+const PLAN_UPDATED_MESSAGE: &str = "Plan updated";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct PlanItem {
     step: String,
@@ -240,30 +242,6 @@ fn validate_plan_items(plan: &[PlanItem]) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn output_marker_for_status(status: &str) -> &'static str {
-    match status {
-        "completed" => "[x]",
-        "in_progress" => "[•]",
-        _ => "[ ]",
-    }
-}
-
-fn format_plan_update_output(update: &PlanUpdate) -> String {
-    let mut output = String::new();
-    if let Some(explanation) = update.explanation.as_deref() {
-        output.push_str(explanation);
-        output.push('\n');
-    }
-    for item in &update.plan {
-        output.push_str(&format!(
-            "{} {}\n",
-            output_marker_for_status(&item.status),
-            item.step
-        ));
-    }
-    output
-}
-
 #[async_trait]
 impl ToolHandler for UpdatePlanTool {
     fn definition(&self) -> Tool {
@@ -293,9 +271,8 @@ impl ToolHandler for UpdatePlanTool {
 
     async fn execute(&self, params: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let update = parse_update_plan(&params)?;
-        let output = format_plan_update_output(&update);
 
-        Ok(ToolResult::new("Plan updated", output)
+        Ok(ToolResult::new("Plan updated", PLAN_UPDATED_MESSAGE)
             .with_metadata("explanation", serde_json::json!(update.explanation))
             .with_metadata("plan", serde_json::json!(update.plan)))
     }
@@ -355,19 +332,23 @@ mod tests {
         assert_eq!(update.plan[2].status, "completed");
     }
 
-    #[test]
-    fn format_plan_output_preserves_in_progress_status() {
+    #[tokio::test]
+    async fn execute_returns_codex_style_ack_with_structured_metadata() {
         let params = json!({
+            "explanation": "Now implementing.",
             "plan": [
-                {"step": "Locate renderer", "status": "in_progress"},
-                {"step": "Validate", "status": "pending"},
-                {"step": "Ship fix", "status": "completed"}
+                {"step": "Implement rendering", "status": "in_progress"},
+                {"step": "Validate", "status": "pending"}
             ]
         });
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let ctx = ToolContext::new("session", "message", "Build", rx);
 
-        let update = parse_update_plan(&params).unwrap();
-        let output = format_plan_update_output(&update);
+        let result = UpdatePlanTool::new().execute(params, &ctx).await.unwrap();
 
-        assert_eq!(output, "[•] Locate renderer\n[ ] Validate\n[x] Ship fix\n");
+        assert_eq!(result.title, "Plan updated");
+        assert_eq!(result.output, PLAN_UPDATED_MESSAGE);
+        assert!(result.metadata.contains_key("plan"));
+        assert!(result.metadata.contains_key("explanation"));
     }
 }

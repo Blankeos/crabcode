@@ -769,6 +769,13 @@ fn response_function_call_chunk_base_with_item(
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     let mut chunk = response_function_call_chunk_base(value, function)?;
 
+    if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
+        chunk.insert(
+            "call_id".to_string(),
+            serde_json::Value::String(call_id.to_string()),
+        );
+    }
+
     if !chunk.contains_key("id") {
         if let Some(id) = item
             .get("id")
@@ -804,6 +811,17 @@ fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_
                     "role": "assistant",
                     "content": a.content,
                 })),
+                Message::ToolCall(t) => Some(serde_json::json!({
+                    "type": "function_call",
+                    "call_id": t.call_id,
+                    "name": t.name,
+                    "arguments": t.arguments,
+                })),
+                Message::ToolOutput(t) => Some(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": t.call_id,
+                    "output": t.output,
+                })),
             }
         })
         .collect()
@@ -832,8 +850,9 @@ fn openai_responses_user_content(user: &crate::message::UserMessage) -> serde_js
 
 #[cfg(test)]
 mod tests {
-    use super::{response_sse_data_to_chunk, responses_function_call_chunk};
+    use super::{build_openai_messages, response_sse_data_to_chunk, responses_function_call_chunk};
     use crate::chunk::{ChunkType, MessagePhase};
+    use crate::message::Message;
 
     #[test]
     fn done_marker_emits_terminal_chunk() {
@@ -891,6 +910,7 @@ mod tests {
 
         assert_eq!(parsed[0]["index"], 0);
         assert_eq!(parsed[0]["id"], "fc_123");
+        assert_eq!(parsed[0]["call_id"], "call_123");
         assert_eq!(parsed[0]["function"]["name"], "read");
     }
 
@@ -912,5 +932,24 @@ mod tests {
             parsed[0]["function"]["arguments"],
             "{\"file_path\":\"Cargo.toml\"}"
         );
+    }
+
+    #[test]
+    fn serializes_structured_tool_history_for_responses_input() {
+        let input = build_openai_messages(
+            &[
+                Message::tool_call("call_edit", "edit", "{\"file_path\":\"src/lib.rs\"}"),
+                Message::tool_output("call_edit", "edit", "Replaced at line 7", false),
+            ],
+            false,
+        );
+
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], "call_edit");
+        assert_eq!(input[0]["name"], "edit");
+        assert_eq!(input[0]["arguments"], "{\"file_path\":\"src/lib.rs\"}");
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], "call_edit");
+        assert_eq!(input[1]["output"], "Replaced at line 7");
     }
 }

@@ -115,6 +115,24 @@ impl Provider for OpenAICompatible {
                     "role": "assistant",
                     "content": a.content,
                 }),
+                Message::ToolCall(t) => serde_json::json!({
+                    "role": "assistant",
+                    "content": serde_json::Value::Null,
+                    "tool_calls": [{
+                        "id": t.call_id,
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "arguments": t.arguments,
+                        }
+                    }],
+                }),
+                Message::ToolOutput(t) => serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": t.call_id,
+                    "name": t.name,
+                    "content": t.output,
+                }),
             })
             .collect();
 

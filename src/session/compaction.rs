@@ -217,12 +217,19 @@ fn tool_content_for_prompt(content: &str) -> String {
         out.push_str(title);
     }
 
+    if let Some(args) = obj.get("args") {
+        out.push_str("\n\nTool call arguments:\n```json\n");
+        let args = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
+        out.push_str(&truncate_chars(&args, TOOL_OUTPUT_MAX_CHARS));
+        out.push_str("\n```");
+    }
+
     if let Some(preview) = obj
         .get("output_preview")
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
     {
-        out.push('\n');
+        out.push_str("\n\nTool output:\n");
         out.push_str(&truncate_chars(preview, TOOL_OUTPUT_MAX_CHARS));
     }
 
@@ -314,5 +321,29 @@ mod tests {
         assert_eq!(stats.saved_tokens(), 11_640);
         assert_eq!(stats.reduction_percent(), 97);
         assert_eq!(format_compaction_stats(stats), "12.0K -> 360, saved 97%");
+    }
+
+    #[test]
+    fn compaction_prompt_preserves_tool_call_arguments() {
+        let tool = Message::tool(
+            serde_json::json!({
+                "name": "edit",
+                "status": "ok",
+                "args": {
+                    "file_path": "src/lib.rs",
+                    "old_string": "before",
+                    "new_string": "after"
+                },
+                "output_preview": "Replaced at line 4"
+            })
+            .to_string(),
+        );
+
+        let prompt = build_prompt(&[tool]);
+
+        assert!(prompt.contains("Tool call arguments:"));
+        assert!(prompt.contains("\"old_string\": \"before\""));
+        assert!(prompt.contains("\"new_string\": \"after\""));
+        assert!(prompt.contains("Tool output:\nReplaced at line 4"));
     }
 }
