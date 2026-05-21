@@ -123,8 +123,10 @@ Replaced at line 239
 
 - [x] Fix issue where it's not scrolling down consistently when new stream data comes down.
 
-- [ ] During delete in "sessions dialog" can we color the current "to-be-deleted" list item with red instead of the primary color. And since we're showing "Confirm ctrl+d" after pressing ctrl+d the first time, can we also "esc" to cancel (instead of close the session dialog?)
+- [x] During delete in "sessions dialog" can we color the current "to-be-deleted" list item with red instead of the primary color. And since we're showing "Confirm ctrl+d" after pressing ctrl+d the first time, can we also "esc" to cancel (instead of close the session dialog?)
 
 - [ ] Don't log to app.log with logging.rs in the future, but in the future, add a custom env build flag so that when I `cargo install --path` with this flag, I include the "development release build" - so I can use the fast compiled version while having logs. And the normal cargo install --path, will still just be like a production build.
 
 - [x] Don't prevent scroll when there's a permission required dialog.
+
+- [ ] Proper textwrapping of input for the input chatbox. I can paste a long string (that doesnt compact), or type a long sentence, and it won't wrap to the next line. It just has horizontal scrolling. I dont want horizontal scrolling.

@@ -209,6 +209,11 @@ pub fn handle_sessions_dialog_key_event(
         }
     }
 
+    if event.code == KeyCode::Esc && dialog_state.pending_delete.is_some() {
+        dialog_state.pending_delete = None;
+        return SessionsDialogAction::Handled;
+    }
+
     if event.code == KeyCode::Char('r') && event.modifiers == KeyModifiers::CONTROL {
         if let Some(selected) = dialog_state.dialog.get_selected() {
             let title = if selected.provider_id.is_empty() {
@@ -351,10 +356,16 @@ fn with_sessions_actions(
     confirm_delete: bool,
 ) -> Dialog {
     if confirm_delete {
-        return dialog.with_actions(vec![FooterAction {
-            label: "confirm".to_string(),
-            key: "ctrl+d".to_string(),
-        }]);
+        return dialog.with_actions(vec![
+            FooterAction {
+                label: "Confirm".to_string(),
+                key: "ctrl+d".to_string(),
+            },
+            FooterAction {
+                label: "Cancel".to_string(),
+                key: "esc".to_string(),
+            },
+        ]);
     }
 
     dialog.with_actions(vec![
@@ -450,6 +461,48 @@ mod tests {
         );
 
         assert_eq!(action, SessionsDialogAction::NewSession);
+    }
+
+    #[test]
+    fn esc_cancels_pending_delete_without_closing_sessions_dialog() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            action,
+            SessionsDialogAction::PendingDelete("session-1".to_string())
+        );
+        assert_eq!(state.pending_delete.as_deref(), Some("session-1"));
+        assert!(state.dialog.is_visible());
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert_eq!(state.pending_delete, None);
+        assert!(state.dialog.is_visible());
+    }
+
+    #[test]
+    fn esc_closes_sessions_dialog_without_pending_delete() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+
+        assert_eq!(action, SessionsDialogAction::Close);
+        assert!(!state.dialog.is_visible());
     }
 
     #[test]

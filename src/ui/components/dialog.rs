@@ -1576,18 +1576,18 @@ impl Dialog {
                     let mut spans =
                         Self::item_spans_for_width(item, list_area_width as usize, colors);
 
-                    if is_selected {
-                        let fg = contrast_text(colors.primary);
-                        for span in &mut spans {
-                            let mut style = span.style.clone();
-                            style = style.fg(fg).bg(colors.primary);
-                            span.style = style;
-                        }
-                    } else if is_pending_delete {
+                    if is_pending_delete {
                         let fg = contrast_text(colors.error);
                         for span in &mut spans {
                             let mut style = span.style.clone();
                             style = style.fg(fg).bg(colors.error);
+                            span.style = style;
+                        }
+                    } else if is_selected {
+                        let fg = contrast_text(colors.primary);
+                        for span in &mut spans {
+                            let mut style = span.style.clone();
+                            style = style.fg(fg).bg(colors.primary);
                             span.style = style;
                         }
                     }
