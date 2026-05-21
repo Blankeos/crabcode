@@ -108,7 +108,7 @@
 
 - [ ] Compaction logic is a little broken. I did /compact, and the context compacted is ALWAYS at the bottom. instead of just at the part where it tried to compact the messages. Can we study how codex and opencode do it?
 
-- [ ] When a message is sent, the [Image #1] or [Image #2] tags, become just white, not the unique color we have for them in the chat input box.
+- [x] When a message is sent, the [Image #1] or [Image #2] tags, become just white, not the unique color we have for them in the chat input box.
 
 - [ ] Syntax highlighting during "Edited" tool calls. Check how Codex does it, because it has syntax highlighting for some reason--It's very clean.
 
@@ -124,3 +124,7 @@ Replaced at line 239
 - [ ] Not scrolling down consistently when new stream data comes down.
 
 - [ ] During delete in "sessions dialog" can we color the current "to-be-deleted" list item with red instead of the primary color. And since we're showing "Confirm ctrl+d" after pressing ctrl+d the first time, can we also "esc" to cancel (instead of close the session dialog?)
+
+- [ ] Don't log to app.log with logging.rs in the future, but in the future, add a custom env build flag so that when I `cargo install --path` with this flag, I include the "development release build" - so I can use the fast compiled version while having logs. And the normal cargo install --path, will still just be like a production build.
+
+- [ ] Don't prevent scroll when there's a permission required dialog.

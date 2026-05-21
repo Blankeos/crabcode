@@ -1845,6 +1845,7 @@ impl Chat {
                 let border_style = Style::default().fg(border_color);
                 let pad_style = Style::default().bg(bg);
                 let text_style = Style::default().fg(colors.text).bg(bg);
+                let image_style = Style::default().fg(colors.markdown_image).bg(bg);
                 let content = message.content.clone();
                 let horizontal_padding = 2usize;
                 let right_padding = 2usize;
@@ -1859,22 +1860,26 @@ impl Chat {
                     ])
                 };
 
-                // Wrap content to fit within max_width - padding
-                let wrapped_lines = textwrap::wrap(&content, wrap_width);
+                let styled_content = Line::from(spans_with_image_placeholders(
+                    &content,
+                    text_style,
+                    image_style,
+                ));
+                let wrapped_lines = wrap_styled_line(&styled_content, WrapOptions::new(wrap_width));
 
                 lines.push(padding_line());
 
-                for line in wrapped_lines.iter() {
-                    let line_width = UnicodeWidthStr::width(line.as_ref());
+                for line in wrapped_lines {
+                    let line_width = line.width();
                     let trailing_padding =
                         " ".repeat(max_width.saturating_sub(1 + horizontal_padding + line_width));
+                    let mut spans = Vec::with_capacity(line.spans.len() + 3);
+                    spans.push(Span::styled("▌", border_style));
+                    spans.push(Span::styled(" ".repeat(horizontal_padding), pad_style));
+                    spans.extend(line.spans);
+                    spans.push(Span::styled(trailing_padding, pad_style));
 
-                    lines.push(Line::from(vec![
-                        Span::styled("▌", border_style),
-                        Span::styled(" ".repeat(horizontal_padding), pad_style),
-                        Span::styled(line.to_string(), text_style),
-                        Span::styled(trailing_padding, pad_style),
-                    ]));
+                    lines.push(Line::from(spans));
                 }
 
                 lines.push(padding_line());
@@ -2963,6 +2968,46 @@ fn line_uses_background(line: &Line<'_>, bg: Color) -> bool {
     line.spans.iter().any(|span| span.style.bg == Some(bg))
 }
 
+fn spans_with_image_placeholders(
+    text: &str,
+    text_style: Style,
+    image_style: Style,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("[Image #") {
+        if start > 0 {
+            spans.push(Span::styled(remaining[..start].to_string(), text_style));
+        }
+
+        let placeholder_start = &remaining[start..];
+        let Some(end_offset) = placeholder_start.find(']') else {
+            spans.push(Span::styled(placeholder_start.to_string(), text_style));
+            return spans;
+        };
+        let end = start + end_offset + 1;
+        let placeholder = &remaining[start..end];
+
+        if placeholder["[Image #".len()..placeholder.len() - 1]
+            .chars()
+            .all(|ch| ch.is_ascii_digit())
+        {
+            spans.push(Span::styled(placeholder.to_string(), image_style));
+        } else {
+            spans.push(Span::styled(placeholder.to_string(), text_style));
+        }
+
+        remaining = &remaining[end..];
+    }
+
+    if !remaining.is_empty() || spans.is_empty() {
+        spans.push(Span::styled(remaining.to_string(), text_style));
+    }
+
+    spans
+}
+
 fn line_to_static(line: Line<'_>) -> Line<'static> {
     Line {
         spans: line
@@ -3423,6 +3468,35 @@ mod tests {
             rendered,
             vec!["⬢ Added src/new.rs (+1 -0)", "    1 +fn main() {}"]
         );
+    }
+
+    #[test]
+    fn test_user_message_image_placeholders_use_markdown_image_color() {
+        let chat = Chat::new();
+        let msg = Message::user("see [Image #1] and [Image #2]");
+        let mut colors = test_colors();
+        colors.text = Color::White;
+        colors.background_element = Color::Rgb(10, 10, 10);
+        colors.markdown_image = Color::Rgb(0, 200, 255);
+
+        let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
+        let content_line = lines
+            .iter()
+            .find(|line| line_text(line).contains("[Image #1]"))
+            .expect("rendered image placeholders");
+
+        let image_spans = content_line
+            .spans
+            .iter()
+            .filter(|span| span.content.starts_with("[Image #"))
+            .collect::<Vec<_>>();
+        assert_eq!(image_spans.len(), 2);
+        assert!(image_spans
+            .iter()
+            .all(|span| span.style.fg == Some(colors.markdown_image)));
+        assert!(image_spans
+            .iter()
+            .all(|span| span.style.bg == Some(colors.background_element)));
     }
 
     #[test]
