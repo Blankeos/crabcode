@@ -8,6 +8,8 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use std::collections::HashMap;
 
+const ANTHROPIC_STREAM_CONNECT_TIMEOUT_SECS: u64 = 30;
+
 #[derive(Debug, Clone)]
 pub struct Anthropic {
     base_url: String,
@@ -159,7 +161,9 @@ impl Provider for Anthropic {
         request_headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(
+                ANTHROPIC_STREAM_CONNECT_TIMEOUT_SECS,
+            ))
             .build()
             .map_err(|e| Error::Provider(format!("Failed to build client: {}", e)))?;
         let response = client

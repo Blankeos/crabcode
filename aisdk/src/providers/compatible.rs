@@ -8,6 +8,8 @@ use futures::stream;
 use futures::StreamExt;
 use std::collections::HashMap;
 
+const COMPATIBLE_STREAM_CONNECT_TIMEOUT_SECS: u64 = 30;
+
 #[derive(Debug, Clone)]
 pub struct OpenAICompatible {
     base_url: String,
@@ -159,7 +161,9 @@ impl Provider for OpenAICompatible {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(
+                COMPATIBLE_STREAM_CONNECT_TIMEOUT_SECS,
+            ))
             .build()
             .map_err(|e| Error::Provider(format!("Failed to build client: {}", e)))?;
         let response = client

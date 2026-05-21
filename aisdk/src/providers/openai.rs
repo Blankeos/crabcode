@@ -9,7 +9,7 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 
-const OPENAI_STREAM_REQUEST_TIMEOUT_SECS: u64 = 30;
+const OPENAI_STREAM_CONNECT_TIMEOUT_SECS: u64 = 30;
 const OPENAI_ERROR_BODY_MAX_CHARS: usize = 2048;
 
 #[derive(Debug, Clone)]
@@ -255,8 +255,8 @@ impl Provider for OpenAI {
             openai_request_diagnostics(self, &input, tools, &body, &request_headers);
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                OPENAI_STREAM_REQUEST_TIMEOUT_SECS,
+            .connect_timeout(std::time::Duration::from_secs(
+                OPENAI_STREAM_CONNECT_TIMEOUT_SECS,
             ))
             .build()
             .map_err(|e| Error::Provider(format!("Failed to build client: {}", e)))?;
@@ -291,13 +291,14 @@ impl Provider for OpenAI {
             )));
         }
 
+        let request_url = url.clone();
         let stream = response
             .bytes_stream()
             .eventsource()
-            .filter_map(|ev| match ev {
+            .filter_map(move |ev| match ev {
                 Ok(event) => futures::future::ready(response_sse_data_to_chunk(&event.data)),
                 Err(e) => {
-                    let err = format_openai_sse_error(&e);
+                    let err = format_openai_sse_error(&e, &request_url);
                     futures::future::ready(Some(Ok(ChunkType::Failed(err))))
                 }
             })
@@ -307,12 +308,13 @@ impl Provider for OpenAI {
     }
 }
 
-fn format_openai_sse_error(err: &EventStreamError<reqwest::Error>) -> String {
+fn format_openai_sse_error(err: &EventStreamError<reqwest::Error>, request_url: &str) -> String {
     match err {
         EventStreamError::Transport(source) => {
             format!(
-                "SSE transport error: request_timeout_secs={} {}",
-                OPENAI_STREAM_REQUEST_TIMEOUT_SECS,
+                "SSE transport error: stream_connect_timeout_secs={} stream_body_timeout=disabled request_url={} {}",
+                OPENAI_STREAM_CONNECT_TIMEOUT_SECS,
+                sanitized_url_str(request_url),
                 format_reqwest_error("stream_body", source),
             )
         }
@@ -336,8 +338,8 @@ fn format_openai_request_error(
         .unwrap_or_default();
 
     format!(
-        "OpenAI request error: request_timeout_secs={} request_url={} {}{}",
-        OPENAI_STREAM_REQUEST_TIMEOUT_SECS,
+        "OpenAI request error: stream_connect_timeout_secs={} stream_body_timeout=disabled request_url={} {}{}",
+        OPENAI_STREAM_CONNECT_TIMEOUT_SECS,
         sanitized_url_str(request_url),
         format_reqwest_error(stage, err),
         request_diagnostics,
