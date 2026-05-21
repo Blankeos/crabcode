@@ -129,7 +129,7 @@ Replaced at line 239
 
 - [x] Don't prevent scroll when there's a permission required dialog.
 
-- [ ] Proper textwrapping of input for the input chatbox. I can paste a long string (that doesnt compact), or type a long sentence, and it won't wrap to the next line. It just has horizontal scrolling. I dont want horizontal scrolling.
+- [x] Proper textwrapping of input for the input chatbox. I can paste a long string (that doesnt compact), or type a long sentence, and it won't wrap to the next line. It just has horizontal scrolling. I dont want horizontal scrolling.
 
 - [ ] Codex's "update plan" tool sometimes has a weird premble before the actual checklist shows... Is this relevant for crabcode? Should we update our tool? Can we do it too?
 
@@ -139,3 +139,7 @@ Replaced at line 239
   - Uncollapse
 
 - [ ] The footer note for the current cwd/workspace. It trims out the very start. i.e. `...ects/_gamedev/my-game:main`. Instead of this, please show the "between" truncation ?? Just maybe, but maybe not.
+
+- [ ] Make tool calls be AS PERMISSIVE, as codex. Meaning won't have to ask me to "read" sometimes.
+
+- [ ] Mouse hover on "chat messages". So that when I click it, it opens the "timeline view" > enter option kinda thing. So it shows either the "Copy", "Fork", "Undo" actions, just like opencode.

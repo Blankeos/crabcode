@@ -82,6 +82,59 @@
         }
       },
       "type": "object"
+    },
+    "TerminalNotificationMode": {
+      "anyOf": [
+        {
+          "enum": [
+            "auto",
+            "enabled",
+            "disabled",
+            "on",
+            "off",
+            "true",
+            "false"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        }
+      ]
+    },
+    "TerminalNotificationsConfigFile": {
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "$ref": "#/$defs/TerminalNotificationMode",
+          "default": "auto"
+        },
+        "condition": {
+          "default": "unfocused",
+          "enum": [
+            "unfocused",
+            "always"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "NotificationsConfigFile": {
+      "additionalProperties": false,
+      "properties": {
+        "terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalNotificationsConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
     }
   },
   "$id": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json",
@@ -107,6 +160,16 @@
       "type": [
         "string",
         "null"
+      ]
+    },
+    "notifications": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NotificationsConfigFile"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "permission": true,

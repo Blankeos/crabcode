@@ -171,6 +171,39 @@ impl Default for SoundsConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalNotificationMode {
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalNotificationCondition {
+    Unfocused,
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalNotificationsConfig {
+    pub complete: TerminalNotificationMode,
+    pub condition: TerminalNotificationCondition,
+}
+
+impl Default for TerminalNotificationsConfig {
+    fn default() -> Self {
+        Self {
+            complete: TerminalNotificationMode::Auto,
+            condition: TerminalNotificationCondition::Unfocused,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NotificationsConfig {
+    pub terminal: TerminalNotificationsConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderTimeout {
     Millis(u64),
     Disabled,
@@ -186,6 +219,7 @@ pub struct MergedConfig {
     pub agent_steps: HashMap<String, usize>,
     pub provider_timeouts: HashMap<String, ProviderTimeout>,
     pub sounds: SoundsConfig,
+    pub notifications: NotificationsConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -680,6 +714,7 @@ fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     let mut out = opencode_allowed_keys();
     out.insert("theme");
     out.insert("sounds");
+    out.insert("notifications");
     out
 }
 
@@ -928,6 +963,7 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     out.provider_timeouts = parse_provider_timeouts(obj.get("provider"), diagnostics);
 
     out.sounds = parse_sounds(obj.get("sounds"), diagnostics);
+    out.notifications = parse_notifications(obj.get("notifications"), diagnostics);
 
     out
 }
@@ -998,14 +1034,7 @@ fn parse_agent_steps(
             continue;
         };
 
-        if agent_obj.contains_key("maxSteps") {
-            diagnostics.warnings.push(format!(
-                "agent.{}.maxSteps is not supported by crabcode; use agent.{}.steps instead",
-                name, name
-            ));
-        }
-
-        let Some(raw) = agent_obj.get("steps") else {
+        let Some(raw) = agent_obj.get("steps").or_else(|| agent_obj.get("maxSteps")) else {
             continue;
         };
 
@@ -1186,6 +1215,98 @@ fn apply_sound_event(
     }
 }
 
+fn parse_notifications(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+) -> NotificationsConfig {
+    let mut notifications = NotificationsConfig::default();
+    let Some(Value::Object(map)) = value else {
+        return notifications;
+    };
+
+    let Some(terminal) = map.get("terminal") else {
+        return notifications;
+    };
+
+    let Value::Object(terminal_map) = terminal else {
+        diagnostics
+            .warnings
+            .push("notifications.terminal must be an object".to_string());
+        return notifications;
+    };
+
+    if let Some(complete) = terminal_map.get("complete") {
+        notifications.terminal.complete = parse_terminal_notification_mode(
+            complete,
+            "notifications.terminal.complete",
+            diagnostics,
+        );
+    }
+
+    if let Some(condition) = terminal_map.get("condition") {
+        notifications.terminal.condition = parse_terminal_notification_condition(
+            condition,
+            "notifications.terminal.condition",
+            diagnostics,
+        );
+    }
+
+    notifications
+}
+
+fn parse_terminal_notification_mode(
+    value: &Value,
+    key: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> TerminalNotificationMode {
+    match value {
+        Value::Bool(true) => TerminalNotificationMode::Enabled,
+        Value::Bool(false) => TerminalNotificationMode::Disabled,
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => TerminalNotificationMode::Auto,
+            "enabled" | "on" | "true" => TerminalNotificationMode::Enabled,
+            "disabled" | "off" | "false" => TerminalNotificationMode::Disabled,
+            _ => {
+                diagnostics.warnings.push(format!(
+                    "{}: expected auto, enabled, disabled, true, or false",
+                    key
+                ));
+                TerminalNotificationMode::Auto
+            }
+        },
+        _ => {
+            diagnostics
+                .warnings
+                .push(format!("{}: expected string or boolean", key));
+            TerminalNotificationMode::Auto
+        }
+    }
+}
+
+fn parse_terminal_notification_condition(
+    value: &Value,
+    key: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> TerminalNotificationCondition {
+    let Some(s) = value.as_str() else {
+        diagnostics
+            .warnings
+            .push(format!("{}: expected unfocused or always", key));
+        return TerminalNotificationCondition::Unfocused;
+    };
+
+    match s.trim().to_ascii_lowercase().as_str() {
+        "unfocused" => TerminalNotificationCondition::Unfocused,
+        "always" => TerminalNotificationCondition::Always,
+        _ => {
+            diagnostics
+                .warnings
+                .push(format!("{}: expected unfocused or always", key));
+            TerminalNotificationCondition::Unfocused
+        }
+    }
+}
+
 fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
     let Some(obj) = merged.as_object() else {
         return Vec::new();
@@ -1200,6 +1321,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "command",
         "agent",
         "provider",
+        "notifications",
     ]
     .into_iter()
     .collect();
@@ -1216,4 +1338,89 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
     }
     keys.sort();
     keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_terminal_notifications() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "notifications": {
+                    "terminal": {
+                        "complete": "enabled",
+                        "condition": "always"
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.notifications.terminal.complete,
+            TerminalNotificationMode::Enabled
+        );
+        assert_eq!(
+            config.notifications.terminal.condition,
+            TerminalNotificationCondition::Always
+        );
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn terminal_notifications_default_to_auto_unfocused() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(&json!({}), &mut diagnostics);
+
+        assert_eq!(
+            config.notifications.terminal.complete,
+            TerminalNotificationMode::Auto
+        );
+        assert_eq!(
+            config.notifications.terminal.condition,
+            TerminalNotificationCondition::Unfocused
+        );
+    }
+
+    #[test]
+    fn terminal_notification_boolean_complete_is_supported() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "notifications": {
+                    "terminal": {
+                        "complete": false
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.notifications.terminal.complete,
+            TerminalNotificationMode::Disabled
+        );
+    }
+
+    #[test]
+    fn agent_max_steps_alias_is_supported() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "agent": {
+                    "build": {
+                        "maxSteps": 42
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.agent_steps.get("build"), Some(&42));
+        assert!(diagnostics.warnings.is_empty());
+    }
 }

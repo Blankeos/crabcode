@@ -227,6 +227,8 @@ pub struct App {
     pub current_theme_index: usize,
     pub dark_mode: bool,
     pub sounds: crate::sound::ResolvedSoundsConfig,
+    pub notifications: crate::config::NotificationsConfig,
+    terminal_focused: bool,
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
     pub is_streaming: bool,
@@ -435,6 +437,8 @@ impl App {
             current_theme_index,
             dark_mode: true,
             sounds: resolved_sounds,
+            notifications: loaded_config.merged_config.notifications,
+            terminal_focused: true,
             tool_permissions,
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
             // Note: skills_dirs is legacy; skill loading is now handled by src/skill/mod.rs
@@ -458,6 +462,10 @@ impl App {
         self.play_sound_event_with_notification_detail(event, None);
     }
 
+    pub fn set_terminal_focused(&mut self, focused: bool) {
+        self.terminal_focused = focused;
+    }
+
     fn play_sound_event_with_notification_detail(
         &self,
         event: crate::sound::SoundEvent,
@@ -469,6 +477,25 @@ impl App {
 
         if self.sounds.notify_for_event(event) {
             crate::notify::notify_event(event, detail);
+        }
+    }
+
+    fn notify_terminal_complete(&self) {
+        use crate::config::{TerminalNotificationCondition, TerminalNotificationMode};
+
+        let terminal = self.notifications.terminal;
+        if terminal.condition == TerminalNotificationCondition::Unfocused && self.terminal_focused {
+            return;
+        }
+
+        let should_emit = match terminal.complete {
+            TerminalNotificationMode::Auto => crate::notify::terminal_bell_supported(),
+            TerminalNotificationMode::Enabled => true,
+            TerminalNotificationMode::Disabled => false,
+        };
+
+        if should_emit {
+            crate::notify::notify_terminal_bell();
         }
     }
 
@@ -1948,7 +1975,7 @@ impl App {
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
             .split(self.last_frame_size);
-        let input_height = self.input.get_height();
+        let input_height = self.input.get_height_for_width(self.last_frame_size.width);
         let input_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints(
@@ -2079,7 +2106,8 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
             }
         } else if self.overlay_focus == OverlayFocus::PermissionDialog {
-            let handled = handle_permission_dialog_mouse_event(&mut self.permission_dialog_state, mouse);
+            let handled =
+                handle_permission_dialog_mouse_event(&mut self.permission_dialog_state, mouse);
             if !handled
                 && matches!(
                     mouse.kind,
@@ -2099,7 +2127,7 @@ impl App {
                         .as_ref(),
                     )
                     .split(size);
-                let input_height = self.input.get_height() as u16;
+                let input_height = self.input.get_height_for_width(size.width);
                 let input_height = if self.is_subagent_session_active() {
                     SUBAGENT_FOOTER_HEIGHT
                 } else {
@@ -2315,7 +2343,7 @@ impl App {
                         .as_ref(),
                     )
                     .split(size);
-                let input_height = self.input.get_height() as u16;
+                let input_height = self.input.get_height_for_width(size.width);
                 let input_height = if self.is_subagent_session_active() {
                     SUBAGENT_FOOTER_HEIGHT
                 } else {
@@ -2363,7 +2391,7 @@ impl App {
                         .as_ref(),
                     )
                     .split(size);
-                let input_height = self.input.get_height() as u16;
+                let input_height = self.input.get_height_for_width(size.width);
                 let input_height = if self.is_subagent_session_active() {
                     SUBAGENT_FOOTER_HEIGHT
                 } else {
@@ -4528,6 +4556,7 @@ impl App {
             crate::sound::SoundEvent::Complete,
             completion_stats.as_deref(),
         );
+        self.notify_terminal_complete();
     }
 
     fn finalize_and_persist_streamed_messages(
@@ -5298,6 +5327,8 @@ mod tests {
             current_theme_index: 0,
             dark_mode: true,
             sounds: crate::sound::ResolvedSoundsConfig::default(),
+            notifications: crate::config::NotificationsConfig::default(),
+            terminal_focused: true,
             tool_permissions: crate::tools::ToolPermissions::new(".".to_string()),
             skills_dirs: Vec::new(),
             is_streaming: false,

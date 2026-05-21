@@ -1,0 +1,36 @@
+---
+title: Terminal Notifications
+description: Configure terminal-level completion signals for editors such as Zed.
+---
+
+# Completion Signals
+
+Terminal notifications are crabcode-specific and apply only to `crabcode` config files. They are separate from `sounds.<event>.notify`, which sends desktop notifications.
+
+```jsonc title="crabcode.jsonc"
+{
+  "notifications": {
+    "terminal": {
+      "complete": "auto",
+      "condition": "unfocused",
+    },
+  },
+}
+```
+
+`notifications.terminal.complete` controls whether crabcode emits a terminal BEL (`\x07`) when an assistant response finishes.
+
+| Value | Behavior |
+| --- | --- |
+| `"auto"` | Emit BEL only in supported terminals. Currently this targets Zed via `ZED_TERM=true` or `TERM_PROGRAM=zed`. |
+| `"enabled"` / `true` | Emit BEL in any terminal. |
+| `"disabled"` / `false` | Do not emit terminal completion notifications. |
+
+`notifications.terminal.condition` controls when the signal is emitted.
+
+| Value | Behavior |
+| --- | --- |
+| `"unfocused"` | Emit only after the terminal reports focus loss. This is the default. |
+| `"always"` | Emit even while the terminal is focused. |
+
+In Zed, BEL marks the terminal as notified, which lets Zed render the accent dot on the terminal tab or terminal thread entry. Other terminals may play an audible bell, so use `"enabled"` only when you want that behavior outside supported terminals.

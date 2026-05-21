@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
 pub fn is_supported() -> bool {
@@ -74,6 +75,22 @@ pub fn notify_event(event: crate::sound::SoundEvent, detail: Option<&str>) {
     {
         let _ = (title, subtitle, body);
     }
+}
+
+pub fn notify_terminal_bell() {
+    let mut stdout = io::stdout();
+    let _ = stdout.write_all(b"\x07");
+    let _ = stdout.flush();
+}
+
+pub fn terminal_bell_supported() -> bool {
+    env_eq("ZED_TERM", "true") || env_eq("TERM_PROGRAM", "zed")
+}
+
+fn env_eq(key: &str, expected: &str) -> bool {
+    std::env::var(key)
+        .map(|value| value.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
 }
 
 fn notification_content(

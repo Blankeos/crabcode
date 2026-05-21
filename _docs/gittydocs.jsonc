@@ -25,6 +25,7 @@
       "items": [
         { "label": "Overview", "path": "/config" },
         { "label": "OpenCode Compatibility", "path": "/config/opencode-compatibility" },
+        { "label": "Terminal Notifications", "path": "/config/notifications" },
         { "label": "Sounds", "path": "/config/sounds" },
         { "label": "Theme", "path": "/config/theme" },
       ],

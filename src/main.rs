@@ -29,8 +29,9 @@ use app::App;
 use clap::Parser;
 use ratatui::crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -44,7 +45,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const POST_CLOSE_LOGO: &str = include_str!("../crabcode-logo.txt");
-const DEFAULT_PRINT_MODE_AGENT_MAX_STEPS: usize = 16;
 
 lazy_static::lazy_static! {
     static ref STARTUP_DIAGNOSTICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -168,8 +168,7 @@ async fn run_print_mode(
         .merged_config
         .agent_steps
         .get(&agent_mode.to_ascii_lowercase())
-        .copied()
-        .or(Some(DEFAULT_PRINT_MODE_AGENT_MAX_STEPS));
+        .copied();
 
     let provider_name_clone = provider_name.clone();
     let model_clone = model_id.clone();
@@ -315,6 +314,7 @@ async fn main() -> Result<()> {
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
+            EnableFocusChange,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
             EnableBracketedPaste
         )?;
@@ -323,6 +323,7 @@ async fn main() -> Result<()> {
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
+            EnableFocusChange,
             EnableBracketedPaste
         )?;
     }
@@ -353,6 +354,7 @@ async fn main() -> Result<()> {
             terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture,
+            DisableFocusChange,
             PopKeyboardEnhancementFlags,
             DisableBracketedPaste
         )?;
@@ -361,6 +363,7 @@ async fn main() -> Result<()> {
             terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture,
+            DisableFocusChange,
             DisableBracketedPaste
         )?;
     }
@@ -463,6 +466,12 @@ async fn run_event_loop(
                                 event::Event::Paste(text) => {
                                     app.handle_paste(text);
                                 }
+                                event::Event::FocusGained => {
+                                    app.set_terminal_focused(true);
+                                }
+                                event::Event::FocusLost => {
+                                    app.set_terminal_focused(false);
+                                }
                                 _ => {}
                             }
                         }
@@ -483,6 +492,12 @@ async fn run_event_loop(
                 event::Event::Paste(text) => {
                     app.handle_paste(text);
                     needs_redraw = true;
+                }
+                event::Event::FocusGained => {
+                    app.set_terminal_focused(true);
+                }
+                event::Event::FocusLost => {
+                    app.set_terminal_focused(false);
                 }
                 _ => {}
             }
