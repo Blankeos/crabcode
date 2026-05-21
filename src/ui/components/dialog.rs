@@ -816,6 +816,23 @@ impl Dialog {
         self.update_scrollbar();
     }
 
+    fn content_padding(&self) -> (u16, u16) {
+        match self.position {
+            DialogPosition::Center => (3, 2),
+            DialogPosition::Left | DialogPosition::Right => (1, 1),
+        }
+    }
+
+    fn padded_content_area(&self) -> Rect {
+        let (padding_x, padding_y) = self.content_padding();
+        Rect {
+            x: self.dialog_area.x + padding_x,
+            y: self.dialog_area.y + padding_y,
+            width: self.dialog_area.width.saturating_sub(padding_x * 2),
+            height: self.dialog_area.height.saturating_sub(padding_y * 2),
+        }
+    }
+
     fn get_visible_row_count(&self) -> usize {
         if self.visible_row_count > 0 {
             self.visible_row_count
@@ -824,11 +841,8 @@ impl Dialog {
 
             let footer_height = self.footer_height();
             let total_fixed_height = 1 + 1 + SEARCH_AREA_HEIGHT + 1 + footer_height;
-            let padding = match self.position {
-                DialogPosition::Center => 3u16,
-                DialogPosition::Left | DialogPosition::Right => 1u16,
-            };
-            let padding_total = padding * 2;
+            let (_, padding_y) = self.content_padding();
+            let padding_total = padding_y * 2;
 
             match self.position {
                 DialogPosition::Center => {
@@ -1095,16 +1109,7 @@ impl Dialog {
         use ratatui::layout::Position;
         let point = Position::new(event.column, event.row);
 
-        let padding = match self.position {
-            DialogPosition::Center => 3u16,
-            DialogPosition::Left | DialogPosition::Right => 1u16,
-        };
-        let content_area = Rect {
-            x: self.dialog_area.x + padding,
-            y: self.dialog_area.y + padding,
-            width: self.dialog_area.width.saturating_sub(padding * 2),
-            height: self.dialog_area.height.saturating_sub(padding * 2),
-        };
+        let content_area = self.padded_content_area();
 
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
@@ -1240,16 +1245,7 @@ impl Dialog {
             return None;
         }
 
-        let padding = match self.position {
-            DialogPosition::Center => 3u16,
-            DialogPosition::Left | DialogPosition::Right => 1u16,
-        };
-        let content_area = Rect {
-            x: self.dialog_area.x + padding,
-            y: self.dialog_area.y + padding,
-            width: self.dialog_area.width.saturating_sub(padding * 2),
-            height: self.dialog_area.height.saturating_sub(padding * 2),
-        };
+        let content_area = self.padded_content_area();
 
         if !content_area.contains(point) {
             return None;
@@ -1287,16 +1283,7 @@ impl Dialog {
             return None;
         }
 
-        let padding = match self.position {
-            DialogPosition::Center => 3u16,
-            DialogPosition::Left | DialogPosition::Right => 1u16,
-        };
-        let content_area = Rect {
-            x: self.dialog_area.x + padding,
-            y: self.dialog_area.y + padding,
-            width: self.dialog_area.width.saturating_sub(padding * 2),
-            height: self.dialog_area.height.saturating_sub(padding * 2),
-        };
+        let content_area = self.padded_content_area();
 
         if !content_area.contains(point) {
             return None;
@@ -1467,16 +1454,7 @@ impl Dialog {
 
         frame.render_widget(Clear, self.dialog_area);
 
-        let padding = match self.position {
-            DialogPosition::Center => 3u16,
-            DialogPosition::Left | DialogPosition::Right => 1u16,
-        };
-        self.content_area = Rect {
-            x: self.dialog_area.x + padding,
-            y: self.dialog_area.y + padding,
-            width: self.dialog_area.width.saturating_sub(padding * 2),
-            height: self.dialog_area.height.saturating_sub(padding * 2),
-        };
+        self.content_area = self.padded_content_area();
 
         frame.render_widget(
             ratatui::widgets::Paragraph::new("")

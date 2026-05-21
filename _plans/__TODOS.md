@@ -105,3 +105,22 @@
 - [x] Read my <> (ask for permission), deny. The chat doesn't get persisted, just gone. Please save everything before errors. So we can easily say "continue"
 
 - [ ] wysiwyg double escape to G
+
+- [ ] Compaction logic is a little broken. I did /compact, and the context compacted is ALWAYS at the bottom. instead of just at the part where it tried to compact the messages. Can we study how codex and opencode do it?
+
+- [ ] When a message is sent, the [Image #1] or [Image #2] tags, become just white, not the unique color we have for them in the chat input box.
+
+- [ ] Syntax highlighting during "Edited" tool calls. Check how Codex does it, because it has syntax highlighting for some reason--It's very clean.
+
+- [ ] I also think the /copy transcript should show "Edit" tool call results no? Right now it looks as simple as:
+      **Tool Result**
+
+**Tool:** edit
+
+```
+Replaced at line 239
+```
+
+- [ ] Not scrolling down consistently when new stream data comes down.
+
+- [ ] During delete in "sessions dialog" can we color the current "to-be-deleted" list item with red instead of the primary color. And since we're showing "Confirm ctrl+d" after pressing ctrl+d the first time, can we also "esc" to cancel (instead of close the session dialog?)

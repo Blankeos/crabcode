@@ -236,7 +236,7 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
     const POPUP_WIDTH: u16 = 58;
 
     let popup_width = area.width.min(POPUP_WIDTH);
-    let popup_height = area.height.min((bindings_count + 10) as u16);
+    let popup_height = area.height.min((bindings_count + 7) as u16);
 
     let popup_area = Rect {
         x: area.x + (area.width.saturating_sub(popup_width)) / 2,
@@ -253,12 +253,13 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
     );
 
     // Content area with padding (matching Dialog component)
-    const PADDING: u16 = 3;
+    const PADDING_X: u16 = 3;
+    const PADDING_Y: u16 = 1;
     let content_area = Rect {
-        x: popup_area.x + PADDING,
-        y: popup_area.y + PADDING,
-        width: popup_area.width.saturating_sub(PADDING * 2),
-        height: popup_area.height.saturating_sub(PADDING * 2),
+        x: popup_area.x + PADDING_X,
+        y: popup_area.y + PADDING_Y,
+        width: popup_area.width.saturating_sub(PADDING_X * 2),
+        height: popup_area.height.saturating_sub(PADDING_Y * 2),
     };
 
     let chunks = Layout::default()
