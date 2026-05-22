@@ -2107,7 +2107,7 @@ impl App {
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
-            let _ = crate::logging::log(&format!(
+            crate::emit_log!(
                 "Handle mouse: kind={:?} modifiers={:?} col={} row={} base={:?} overlay={:?}",
                 mouse.kind,
                 mouse.modifiers,
@@ -2115,7 +2115,7 @@ impl App {
                 mouse.row,
                 self.base_focus,
                 self.overlay_focus
-            ));
+            );
         }
 
         // If text is selected and user clicks on an overlay, clear selection instead
@@ -4744,10 +4744,10 @@ impl App {
             state.tool_calls.deferred_finish = true;
         }
 
-        let _ = crate::logging::log(&format!(
+        crate::emit_log!(
             "[STREAM_DEFERRED] session_id={} reason=running_tool_messages",
             session_id
-        ));
+        );
         true
     }
 

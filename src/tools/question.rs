@@ -370,10 +370,10 @@ impl ToolHandler for QuestionTool {
         let questions = parse_questions_param(&params)?;
         let generated_count = generated_options_count(&questions);
         if generated_count > 0 {
-            let _ = crate::logging::log(&format!(
+            crate::emit_log!(
                 "[QUESTION_TOOL] added fallback options to {} optionless question(s)",
                 generated_count
-            ));
+            );
         }
 
         let sender = self.sender.as_ref().ok_or_else(|| {

@@ -93,7 +93,7 @@ impl ToolHandler for TaskTool {
             subagent_type.name()
         );
 
-        let _ = crate::logging::log(&format!(
+        crate::emit_log!(
             "[TASK] start parent_session_id={} child_session_id={} subagent_type={} title={:?} description_bytes={} prompt_bytes={} sender_present={}",
             ctx.session_id,
             child_session_id,
@@ -102,7 +102,7 @@ impl ToolHandler for TaskTool {
             description.len(),
             prompt.len(),
             self.sender.is_some()
-        ));
+        );
 
         let child_sender = self.start_child_session_stream(
             ctx.session_id.clone(),
@@ -126,14 +126,14 @@ impl ToolHandler for TaskTool {
         {
             Ok(result) => result,
             Err(e) => {
-                let _ = crate::logging::log(&format!(
+                crate::emit_log!(
                     "[TASK] error parent_session_id={} child_session_id={} subagent_type={} duration_ms={} error={}",
                     ctx.session_id,
                     child_session_id,
                     subagent_type.name(),
                     started_at.elapsed().as_millis(),
                     e
-                ));
+                );
                 if let Some(sender) = child_sender.as_ref() {
                     let _ = sender.send(crate::llm::ChunkMessage::Failed(e.clone()));
                 }
@@ -146,7 +146,7 @@ impl ToolHandler for TaskTool {
         }
         let duration_ms = started_at.elapsed().as_millis() as u64;
 
-        let _ = crate::logging::log(&format!(
+        crate::emit_log!(
             "[TASK] finish parent_session_id={} child_session_id={} subagent_type={} duration_ms={} output_bytes={} child_tool_call_count={}",
             ctx.session_id,
             child_session_id,
@@ -154,7 +154,7 @@ impl ToolHandler for TaskTool {
             duration_ms,
             result.output.len(),
             result.tool_call_count
-        ));
+        );
 
         Ok(ToolResult::new(
             format!("Subagent ({}) result", subagent_type.name()),
@@ -194,20 +194,14 @@ impl TaskTool {
         });
 
         tokio::spawn(async move {
-            let _ = crate::logging::log(&format!(
-                "[TASK] child_forwarder_start session_id={}",
-                session_id
-            ));
+            crate::emit_log!("[TASK] child_forwarder_start session_id={}", session_id);
             while let Some(chunk) = child_rx.recv().await {
                 let _ = ui_sender.send(crate::llm::ChunkMessage::SubagentChunk {
                     session_id: session_id.clone(),
                     chunk: Box::new(chunk),
                 });
             }
-            let _ = crate::logging::log(&format!(
-                "[TASK] child_forwarder_closed session_id={}",
-                session_id
-            ));
+            crate::emit_log!("[TASK] child_forwarder_closed session_id={}", session_id);
         });
 
         Some(child_tx)

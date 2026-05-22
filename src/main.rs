@@ -268,6 +268,9 @@ struct Args {
     #[arg(long = "dangerously-skip-permissions")]
     dangerously_skip_permissions: bool,
 
+    #[arg(long = "emit-logs", hide = true)]
+    emit_logs: bool,
+
     /// The prompt to run (positional, used in print mode)
     prompt: Vec<String>,
 }
@@ -275,6 +278,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    crate::logging::set_enabled(args.emit_logs);
 
     if args.print_mode {
         let prompt = args.prompt.join(" ");
@@ -420,7 +424,7 @@ async fn run_event_loop(
 
             if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
                 if let event::Event::Mouse(mouse) = &event {
-                    let _ = crate::logging::log(&format!("Mouse event: {:?}", mouse));
+                    crate::emit_log!("Mouse event: {:?}", mouse);
                 }
             }
 

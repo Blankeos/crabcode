@@ -10,7 +10,6 @@ use futures::StreamExt;
 use std::{collections::HashMap, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::logging::log;
 use crate::tools::aisdk_bridge::convert_to_aisdk_tools;
 
 const MAX_STEPS_REACHED_PROMPT: &str = r#"CRITICAL - MAXIMUM STEPS REACHED
@@ -367,7 +366,7 @@ pub async fn stream_llm_with_cancellation(
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
 ) -> Result<(), DynError> {
-    let _ = log(&format!(
+    crate::emit_log!(
         "GOING TO STREAM session_id={} provider={} model={} agent_mode={} agent_max_steps={:?} input_messages={}",
         session_id,
         provider_name,
@@ -375,7 +374,7 @@ pub async fn stream_llm_with_cancellation(
         agent_mode,
         agent_max_steps,
         messages.len()
-    ));
+    );
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &sender).await?;
 
@@ -461,9 +460,9 @@ pub async fn stream_llm_with_cancellation(
     let stop_reason = response.stop_reason().await;
     let stream_outcome = relay_result.outcome;
     let primary_outcome_label = stream_outcome_label(stream_outcome, stop_reason.as_ref());
-    let _ = log(&format!(
+    crate::emit_log!(
         "Stream completed: session_id={session_id} outcome={stream_outcome:?}, effective_outcome={primary_outcome_label}, stop_reason={stop_reason:?}, agent_max_steps={agent_max_steps:?}",
-    ));
+    );
     log_stream_summary(
         primary_log_context,
         primary_outcome_label,
@@ -630,10 +629,13 @@ async fn prepare_request_config(
         );
     }
 
-    let _ = log(&format!(
+    crate::emit_log!(
         "Provider: {}, NPM: {}, Base URL: {}, Model: {}",
-        provider_name, provider.npm, request_config.base_url, request_config.model_name
-    ));
+        provider_name,
+        provider.npm,
+        request_config.base_url,
+        request_config.model_name
+    );
 
     Ok(request_config)
 }
@@ -733,7 +735,7 @@ async fn maybe_apply_openai_oauth_overrides(
             .insert("ChatGPT-Account-Id".to_string(), account_id);
     }
 
-    let _ = log("Configured OpenAI OAuth Codex transport");
+    crate::emit_log!("Configured OpenAI OAuth Codex transport");
 
     if !is_openai_oauth_model_allowed(&request_config.model_name) {
         let fallback_model = "gpt-5.3-codex".to_string();
@@ -864,6 +866,10 @@ fn openai_request_instructions(
 }
 
 fn log_stream_request(context: StreamLogContext<'_>, config: &ProviderRequestConfig) {
+    if !crate::logging::enabled() {
+        return;
+    }
+
     let reasoning_effort = config
         .reasoning_effort
         .map(|effort| effort.as_str())
@@ -875,7 +881,7 @@ fn log_stream_request(context: StreamLogContext<'_>, config: &ProviderRequestCon
         .map(String::as_str)
         .collect::<Vec<_>>();
     header_names.sort_unstable();
-    let _ = log(&format!(
+    crate::emit_log!(
         "[STREAM_REQUEST] {} reasoning_effort={} responses_path={:?} force_store_false={} disallow_system_messages={} force_tool_strict_false={} extra_header_names=[{}]",
         context.describe(),
         reasoning_effort,
@@ -884,7 +890,7 @@ fn log_stream_request(context: StreamLogContext<'_>, config: &ProviderRequestCon
         config.openai_options.disallow_system_messages,
         config.openai_options.force_tool_strict_false,
         header_names.join(","),
-    ));
+    );
 }
 
 fn log_stream_summary(
@@ -896,13 +902,17 @@ fn log_stream_summary(
     stats: Option<&RelayStats>,
     error: Option<&str>,
 ) {
+    if !crate::logging::enabled() {
+        return;
+    }
+
     let stats = stats
         .map(|stats| stats.describe_at(Some(elapsed_ms)))
         .unwrap_or_else(|| "chunks=unavailable".to_string());
     let error = error
         .map(|err| format!(" error={}", err))
         .unwrap_or_default();
-    let _ = log(&format!(
+    crate::emit_log!(
         "[STREAM_SUMMARY] {} relay_result={} stop_reason={:?} token_estimate={} elapsed_ms={} {}{}",
         context.describe(),
         relay_result,
@@ -911,7 +921,7 @@ fn log_stream_summary(
         elapsed_ms,
         stats,
         error,
-    ));
+    );
 }
 
 fn is_transport_or_request_error(err: &str) -> bool {
@@ -936,22 +946,22 @@ async fn relay_stream_to_sender(
     context: StreamLogContext<'_>,
 ) -> Result<StreamRelayResult, DynError> {
     let mut stats = RelayStats::default();
-    let _ = log(&format!(
+    crate::emit_log!(
         "[RELAY] relay_stream_to_sender started {}",
         context.describe()
-    ));
+    );
     loop {
         let chunk = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
-                let _ = log(&format!(
+                crate::emit_log!(
                     "[STREAM_CANCELLED] {} elapsed_ms={} token_estimate={} {}",
                     context.describe(),
                     elapsed_ms,
                     *token_count,
                     stats.describe_at(Some(elapsed_ms)),
-                ));
+                );
                 return Err(anyhow::anyhow!("Streaming cancelled by user").into());
             }
             chunk = stream.next() => chunk,
@@ -970,7 +980,7 @@ async fn relay_stream_to_sender(
                 stats.text_chars += text.len();
                 stats.record_text(text.len(), elapsed_ms);
                 *token_count += estimate_tokens(&text);
-                let _ = log(&format!("[RELAY] Text chunk ({} chars)", text.len()));
+                crate::emit_log!("[RELAY] Text chunk ({} chars)", text.len());
                 let _ = sender.send(crate::llm::ChunkMessage::Text(text));
             }
             ChunkType::Reasoning(reasoning) => {
@@ -979,10 +989,7 @@ async fn relay_stream_to_sender(
                 stats.reasoning_chunks += 1;
                 stats.reasoning_chars += reasoning.len();
                 *token_count += estimate_tokens(&reasoning);
-                let _ = log(&format!(
-                    "[RELAY] Reasoning chunk ({} chars)",
-                    reasoning.len()
-                ));
+                crate::emit_log!("[RELAY] Reasoning chunk ({} chars)", reasoning.len());
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
             ChunkType::ToolCall(tool_call) => {
@@ -992,22 +999,22 @@ async fn relay_stream_to_sender(
                 stats.tool_call_bytes += tool_call.len();
                 let info = tool_call_log_info(&tool_call);
                 stats.record_tool_call(&info, elapsed_ms);
-                let _ = log(&format!(
+                crate::emit_log!(
                     "[RELAY] ToolCall chunk received names={} ids={} arg_chars={} arg_done_chars={} bytes={}",
                     info.names_label(),
                     info.ids_label(),
                     info.argument_chars,
                     info.arguments_done_chars,
                     tool_call.len(),
-                ));
+                );
             }
             ChunkType::End(_msg) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("End", elapsed_ms);
-                let _ = log(&format!(
+                crate::emit_log!(
                     "[RELAY] End chunk — returning Ended {}",
                     stats.describe_at(Some(elapsed_ms))
-                ));
+                );
                 let duration_ms = elapsed_ms as u64;
                 let _ = sender.send(crate::llm::ChunkMessage::Metrics {
                     token_count: *token_count,
@@ -1023,10 +1030,10 @@ async fn relay_stream_to_sender(
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("ResponseCompleted", elapsed_ms);
                 stats.response_completed_chunks += 1;
-                let _ = log(&format!(
+                crate::emit_log!(
                     "[RELAY] ResponseCompleted chunk end_turn={end_turn:?} — returning Ended {}",
                     stats.describe_at(Some(elapsed_ms))
-                ));
+                );
                 let duration_ms = elapsed_ms as u64;
                 let _ = sender.send(crate::llm::ChunkMessage::Metrics {
                     token_count: *token_count,
@@ -1042,37 +1049,35 @@ async fn relay_stream_to_sender(
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("AssistantMessagePhase", elapsed_ms);
                 stats.record_assistant_phase(phase);
-                let _ = log(&format!(
-                    "[RELAY] AssistantMessagePhase chunk phase={phase:?}"
-                ));
+                crate::emit_log!("[RELAY] AssistantMessagePhase chunk phase={phase:?}");
             }
             ChunkType::Metadata(message) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("Metadata", elapsed_ms);
                 stats.record_metadata(&message);
-                let _ = log(&format!("[RELAY] Metadata {}", message));
+                crate::emit_log!("[RELAY] Metadata {}", message);
             }
             ChunkType::Start => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("Start", elapsed_ms);
                 stats.start_chunks += 1;
-                let _ = log("[RELAY] Start chunk received");
+                crate::emit_log!("[RELAY] Start chunk received");
             }
             ChunkType::Failed(err) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_failed_chunk();
                 let _ = sender.send(crate::llm::ChunkMessage::Failed(err.clone()));
-                let _ = log(&format!("Stream Chunk Failed {}", err));
-                let _ = log(&format!(
+                crate::emit_log!("Stream Chunk Failed {}", err);
+                crate::emit_log!(
                     "[STREAM_ERROR] {} elapsed_ms={} token_estimate={} {} error={}",
                     context.describe(),
                     elapsed_ms,
                     *token_count,
                     stats.describe_at(Some(elapsed_ms)),
                     err,
-                ));
+                );
                 if is_transport_or_request_error(&err) {
-                    let _ = log("[STREAM_ERROR_HINT] Request/stream transport failure. This happened below the model layer while sending or reading provider HTTP data; if it repeats, compare network/proxy/VPN state and provider status with the request and provider_step context above.");
+                    crate::emit_log!("[STREAM_ERROR_HINT] Request/stream transport failure. This happened below the model layer while sending or reading provider HTTP data; if it repeats, compare network/proxy/VPN state and provider status with the request and provider_step context above.");
                 }
                 return Err(anyhow::anyhow!("Streaming failed: {}", err).into());
             }
@@ -1080,24 +1085,24 @@ async fn relay_stream_to_sender(
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("Incomplete", elapsed_ms);
                 stats.incomplete_chunks += 1;
-                let _ = log(&format!("[RELAY] Incomplete chunk received: {}", msg));
+                crate::emit_log!("[RELAY] Incomplete chunk received: {}", msg);
             }
             ChunkType::NotSupported(msg) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("NotSupported", elapsed_ms);
                 stats.not_supported_chunks += 1;
-                let _ = log(&format!("[RELAY] NotSupported chunk received: {}", msg));
+                crate::emit_log!("[RELAY] NotSupported chunk received: {}", msg);
             }
         }
     }
 
     let elapsed_ms = start_time.elapsed().as_millis();
-    let _ = log(&format!(
+    crate::emit_log!(
         "[RELAY] stream exhausted — returning Exhausted {} token_estimate={} {}",
         context.describe(),
         *token_count,
         stats.describe_at(Some(elapsed_ms)),
-    ));
+    );
     Ok(StreamRelayResult {
         outcome: StreamRelayOutcome::Exhausted,
         stats,
@@ -1135,11 +1140,11 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
                                 .to_string(),
                             }),
                             Err(err) => {
-                                let _ = log(&format!(
+                                crate::emit_log!(
                                     "failed to attach image {}: {}",
                                     path.display(),
                                     err
-                                ));
+                                );
                                 None
                             }
                         }

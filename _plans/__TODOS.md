@@ -131,7 +131,7 @@ Replaced at line 239
 
 - [x] During delete in "sessions dialog" can we color the current "to-be-deleted" list item with red instead of the primary color. And since we're showing "Confirm ctrl+d" after pressing ctrl+d the first time, can we also "esc" to cancel (instead of close the session dialog?)
 
-- [ ] Don't log to app.log with logging.rs in the future, but in the future, add a custom env build flag so that when I `cargo install --path` with this flag, I include the "development release build" - so I can use the fast compiled version while having logs. And the normal cargo install --path, will still just be like a production build.
+- [x] Don't log to app.log with logging.rs in the future, but in the future, add a custom env build flag so that when I `cargo install --path` with this flag, I include the "development release build" - so I can use the fast compiled version while having logs. And the normal cargo install --path, will still just be like a production build.
 
 - [x] Don't prevent scroll when there's a permission required dialog.
 
@@ -171,3 +171,8 @@ I want - [x] To do this But I dont want to do this
 ```
 
 - [ ] Make the "bash" permission parity to codex. Also I currently dont see the command that it wants to run, so I'm kinda blind on what to run here.
+
+- [ ] When pasting images and it creates this [Image #1] tag, make it hoverable (just change the color, not the background), then once clicked, goes to the preferred editor of the user.
+  - Multiple paths here:
+    - Should it be configurable?
+    - Autodetected depending on the tool used: i.e. if Wezterm, other terminals "open w/ Finder on mac, or native image opener". If inside Zed, open image with Zed. If inside VSCode/Cursor, open with that IDE. (Ambitious but idk if possible)

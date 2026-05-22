@@ -26,10 +26,11 @@ pub async fn convert_to_aisdk_tools(
 
     for tool_def in tools {
         if !permissions.is_tool_allowed_for_agent(&agent_mode, &tool_def.id) {
-            let _ = crate::logging::log(&format!(
+            crate::emit_log!(
                 "[AISDK_TOOLS] Skipping '{}': not allowed in {} mode",
-                tool_def.id, agent_mode
-            ));
+                tool_def.id,
+                agent_mode
+            );
             continue;
         }
 
@@ -76,14 +77,14 @@ pub async fn convert_to_aisdk_tools(
                         ]))
                         .is_err()
                     {
-                        let _ = crate::logging::log(&format!(
+                        crate::emit_log!(
                             "[AISDK_TOOL] ui_send_failed phase=tool_call tool={} call_id={} session_id={} message_id={} agent_mode={}",
                             tool_id, call_id, session_id_label, message_id_label, agent_mode
-                        ));
+                        );
                     }
                 }
 
-                let _ = crate::logging::log(&format!(
+                crate::emit_log!(
                     "[AISDK_TOOL] call tool={} call_id={} session_id={} message_id={} agent_mode={} sender_present={} args={}",
                     tool_id_for_exec,
                     call_id,
@@ -92,7 +93,7 @@ pub async fn convert_to_aisdk_tools(
                     agent_mode,
                     sender_present,
                     input
-                ));
+                );
 
                 let handler = registry
                     .get(&tool_id_for_exec)
@@ -102,7 +103,7 @@ pub async fn convert_to_aisdk_tools(
                     Ok(handler) => handler,
                     Err(err) => {
                         send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
-                        let _ = crate::logging::log(&format!(
+                        crate::emit_log!(
                             "[AISDK_TOOL] error tool={} call_id={} session_id={} message_id={} agent_mode={} duration_ms={} error={}",
                             tool_id_for_exec,
                             call_id,
@@ -111,7 +112,7 @@ pub async fn convert_to_aisdk_tools(
                             agent_mode,
                             started_at.elapsed().as_millis(),
                             err
-                        ));
+                        );
                         return Err(err);
                     }
                 };
@@ -119,7 +120,7 @@ pub async fn convert_to_aisdk_tools(
                 if let Err(e) = handler.validate(&input) {
                     let err = format!("Validation error: {}", e);
                     send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
-                    let _ = crate::logging::log(&format!(
+                    crate::emit_log!(
                         "[AISDK_TOOL] error tool={} call_id={} session_id={} message_id={} agent_mode={} duration_ms={} error={}",
                         tool_id_for_exec,
                         call_id,
@@ -128,7 +129,7 @@ pub async fn convert_to_aisdk_tools(
                         agent_mode,
                         started_at.elapsed().as_millis(),
                         err
-                    ));
+                    );
                     return Err(err);
                 }
 
@@ -138,7 +139,7 @@ pub async fn convert_to_aisdk_tools(
                 {
                     let err = format!("{}", e);
                     send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
-                    let _ = crate::logging::log(&format!(
+                    crate::emit_log!(
                         "[AISDK_TOOL] error tool={} call_id={} session_id={} message_id={} agent_mode={} duration_ms={} error={}",
                         tool_id_for_exec,
                         call_id,
@@ -147,7 +148,7 @@ pub async fn convert_to_aisdk_tools(
                         agent_mode,
                         started_at.elapsed().as_millis(),
                         err
-                    ));
+                    );
                     return Err(err);
                 }
 
@@ -168,7 +169,7 @@ pub async fn convert_to_aisdk_tools(
                     Ok(tool_result) => tool_result,
                     Err(err) => {
                         send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
-                        let _ = crate::logging::log(&format!(
+                        crate::emit_log!(
                             "[AISDK_TOOL] error tool={} call_id={} session_id={} message_id={} agent_mode={} duration_ms={} error={}",
                             tool_id_for_exec,
                             call_id,
@@ -177,12 +178,12 @@ pub async fn convert_to_aisdk_tools(
                             agent_mode,
                             started_at.elapsed().as_millis(),
                             err
-                        ));
+                        );
                         return Err(err);
                     }
                 };
 
-                let _ = crate::logging::log(&format!(
+                crate::emit_log!(
                     "[AISDK_TOOL] result tool={} call_id={} session_id={} message_id={} agent_mode={} duration_ms={} output_bytes={}",
                     tool_id_for_exec,
                     call_id,
@@ -191,7 +192,7 @@ pub async fn convert_to_aisdk_tools(
                     agent_mode,
                     started_at.elapsed().as_millis(),
                     tool_result.output.len()
-                ));
+                );
 
                 let model_output =
                     truncate_tool_output(&tool_result.output, TOOL_MODEL_OUTPUT_LIMIT);
@@ -227,10 +228,10 @@ pub async fn convert_to_aisdk_tools(
                         ))
                         .is_err()
                     {
-                        let _ = crate::logging::log(&format!(
+                        crate::emit_log!(
                             "[AISDK_TOOL] ui_send_failed phase=tool_result tool={} call_id={} session_id={} message_id={} agent_mode={}",
                             tool_id_for_ui, call_id, session_id_label, message_id_label, agent_mode
-                        ));
+                        );
                     }
                 }
 
@@ -259,10 +260,11 @@ pub async fn convert_to_aisdk_tools(
         let schema: Schema = match serde_json::from_value(input_schema_json) {
             Ok(s) => s,
             Err(e) => {
-                let _ = crate::logging::log(&format!(
+                crate::emit_log!(
                     "Error creating schema for tool {}: {} (falling back to any schema)",
-                    tool_def.id, e
-                ));
+                    tool_def.id,
+                    e
+                );
                 Schema::from(true)
             }
         };
@@ -276,7 +278,7 @@ pub async fn convert_to_aisdk_tools(
         {
             Ok(t) => t,
             Err(e) => {
-                let _ = crate::logging::log(&format!("Error building tool {}: {}", tool_def.id, e));
+                crate::emit_log!("Error building tool {}: {}", tool_def.id, e);
                 continue;
             }
         };
