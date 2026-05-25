@@ -316,7 +316,9 @@ fn convert_line(line: ratatui_core::text::Line<'_>) -> Line<'static> {
         })
         .collect();
 
-    Line::from(spans)
+    let mut line = Line::from(spans);
+    line.style = line_style;
+    line
 }
 
 /// Convert ratatui-core Style to our ratatui Style

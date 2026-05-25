@@ -2038,10 +2038,12 @@ impl Chat {
                     .max(1);
 
                 let padding_line = || {
-                    Line::from(vec![
+                    let mut line = Line::from(vec![
                         Span::styled("▌", border_style),
                         Span::styled(" ".repeat(max_width.saturating_sub(1)), pad_style),
-                    ])
+                    ]);
+                    line.style = Style::default().bg(bg);
+                    line
                 };
 
                 let wrapped_lines = content
@@ -2069,7 +2071,9 @@ impl Chat {
                     spans.extend(line.spans);
                     spans.push(Span::styled(trailing_padding, pad_style));
 
-                    lines.push(Line::from(spans));
+                    let mut panel_line = Line::from(spans);
+                    panel_line.style = Style::default().bg(bg);
+                    lines.push(panel_line);
                 }
 
                 lines.push(padding_line());
@@ -2639,6 +2643,7 @@ impl Chat {
             panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
             for line in &mut panel_lines {
                 line.spans.insert(0, Span::styled(" ", pad_style));
+                line.style = Style::default().bg(bg);
             }
 
             out.extend(panel_lines);
@@ -3191,7 +3196,7 @@ fn render_background_run(
 }
 
 fn line_uses_background(line: &Line<'_>, bg: Color) -> bool {
-    line.spans.iter().any(|span| span.style.bg == Some(bg))
+    line.style.bg == Some(bg)
 }
 
 fn spans_with_image_placeholders<F>(
@@ -3291,7 +3296,7 @@ fn line_to_static(line: Line<'_>) -> Line<'static> {
                 style: span.style,
             })
             .collect(),
-        style: Style::default(),
+        style: line.style,
         alignment: line.alignment,
     }
 }
@@ -4217,6 +4222,41 @@ mod tests {
         assert_eq!(buffer[(1, 1)].bg, colors.background_element);
         assert_eq!(buffer[(1, 2)].bg, colors.background_element);
         assert_ne!(buffer[(1, 3)].bg, colors.background_element);
+    }
+
+    #[test]
+    fn test_inline_code_background_does_not_fill_full_row() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut colors = test_colors();
+        colors.background_element = Color::Indexed(236);
+        colors.markdown_text = Color::White;
+        colors.markdown_code = Color::Green;
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("before `ThemeColors` after");
+
+        let backend = TestBackend::new(50, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| chat.render(f, Rect::new(0, 0, 50, 8), "Plan", "model", &colors))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let (y, row) = (0..8)
+            .map(|y| (y, buffer_row_text(buffer, 48, y)))
+            .find(|(_, row)| row.contains("ThemeColors"))
+            .expect("rendered inline code row");
+        let before_start = row.find("before").expect("rendered leading text") as u16;
+        let code_start = row.find("ThemeColors").expect("rendered inline code") as u16;
+        let code_end = code_start + "ThemeColors".len() as u16;
+        let after_start = row.find("after").expect("rendered trailing text") as u16;
+
+        assert_ne!(buffer[(before_start, y)].bg, colors.background_element);
+        assert_eq!(buffer[(code_start, y)].bg, colors.background_element);
+        assert_eq!(buffer[(code_end - 1, y)].bg, colors.background_element);
+        assert_ne!(buffer[(after_start, y)].bg, colors.background_element);
+        assert_ne!(buffer[(47, y)].bg, colors.background_element);
     }
 
     #[test]
