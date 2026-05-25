@@ -116,7 +116,7 @@
 
 - [x] When a message is sent, the [Image #1] or [Image #2] tags, become just white, not the unique color we have for them in the chat input box.
 
-- [ ] Syntax highlighting during "Edited" tool calls for diffs. Check how Codex does it, because it has syntax highlighting for some reason--It's very clean.
+- [x] Syntax highlighting during "Edited" tool calls for diffs. Check how Codex does it, because it has syntax highlighting for some reason--It's very clean.
 
 - [ ] I also think the /copy transcript should show "Edit" tool call results no? Right now it looks as simple as:
       **Tool Result**

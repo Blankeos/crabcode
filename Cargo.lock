@@ -522,6 +522,7 @@ dependencies = [
  "tokio-util",
  "tui-markdown",
  "tui-textarea",
+ "two-face",
  "unicode-width 0.1.14",
  "url",
 ]
@@ -3606,6 +3607,17 @@ dependencies = [
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
+]
+
+[[package]]
+name = "two-face"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b285c51f8a6ade109ed4566d33ac4fb289fb5d6cf87ed70908a5eaf65e948e34"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "syntect",
 ]
 
 [[package]]

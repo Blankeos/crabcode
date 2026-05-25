@@ -7,6 +7,8 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+const DOOM_LOOP_THRESHOLD: usize = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PermissionAction {
     Read,
@@ -46,6 +48,8 @@ pub struct PermissionPrompt {
     pub tool_id: String,
     pub action: PermissionAction,
     pub target: Option<String>,
+    pub command: Option<String>,
+    pub workdir: Option<String>,
     pub reason: String,
     pub response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
 }
@@ -54,8 +58,7 @@ pub struct PermissionPrompt {
 enum PermissionReasonKind {
     SensitivePath,
     ExternalPath,
-    GitignoredWrite,
-    BashCommand,
+    DoomLoop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -65,6 +68,12 @@ struct PermissionFingerprint {
     target: Option<String>,
     command: Option<String>,
     reason: PermissionReasonKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ToolCallFingerprint {
+    tool_id: String,
+    params: String,
 }
 
 #[derive(Debug, Clone)]
@@ -107,8 +116,9 @@ impl AgentToolPolicies {
         }
 
         if mode == "plan" {
-            // Plan mode: deny file modifications and bash; allow everything else (read, search, web, etc.)
-            return !matches!(tool.as_str(), "write" | "edit" | "bash");
+            // OpenCode plan mode denies file modifications, but keeps other
+            // tools available under the normal permission policy.
+            return !matches!(tool.as_str(), "write" | "edit");
         }
 
         if mode == "build" {
@@ -130,6 +140,7 @@ impl Default for AgentToolPolicies {
 pub struct ToolPermissions {
     workdir: PathBuf,
     always_grants: Arc<RwLock<HashSet<PermissionFingerprint>>>,
+    call_counts: Arc<RwLock<HashMap<ToolCallFingerprint, usize>>>,
     agent_policies: Arc<AgentToolPolicies>,
     dangerously_skip_permissions: bool,
 }
@@ -139,6 +150,7 @@ impl ToolPermissions {
         Self {
             workdir: normalize_path(&workdir.into()),
             always_grants: Arc::new(RwLock::new(HashSet::new())),
+            call_counts: Arc::new(RwLock::new(HashMap::new())),
             agent_policies: Arc::new(AgentToolPolicies::default()),
             dangerously_skip_permissions: false,
         }
@@ -189,6 +201,10 @@ impl ToolPermissions {
         };
 
         let reason = self.evaluate_reason(action, path.as_deref());
+        let reason = match reason {
+            Some(reason) => Some(reason),
+            None => self.evaluate_doom_loop(tool_id, params).await,
+        };
 
         let Some(reason_kind) = reason else {
             return Ok(());
@@ -198,12 +214,22 @@ impl ToolPermissions {
             .as_ref()
             .map(|p| p.display().to_string())
             .or_else(|| command.clone());
+        let prompt_target = if action == PermissionAction::Bash {
+            command.clone().or_else(|| target.clone())
+        } else {
+            target.clone()
+        };
+        let workdir = if action == PermissionAction::Bash {
+            path.as_ref().map(|p| p.display().to_string())
+        } else {
+            None
+        };
 
         let fingerprint = PermissionFingerprint {
             tool_id: tool_id.to_string(),
             action,
             target: target.clone(),
-            command,
+            command: command.clone(),
             reason: reason_kind,
         };
 
@@ -221,7 +247,9 @@ impl ToolPermissions {
         let prompt = PermissionPrompt {
             tool_id: tool_id.to_string(),
             action,
-            target,
+            target: prompt_target,
+            command,
+            workdir,
             reason: reason_text,
             response_tx,
         };
@@ -250,9 +278,7 @@ impl ToolPermissions {
         action: PermissionAction,
         path: Option<&Path>,
     ) -> Option<PermissionReasonKind> {
-        // Read/search tools are sandbox-style discovery operations; only mutating
-        // filesystem tools require approval for protected path classes.
-        if matches!(action, PermissionAction::Write | PermissionAction::Edit) {
+        if action == PermissionAction::Read {
             if let Some(path) = path {
                 if is_sensitive_path(path) {
                     return Some(PermissionReasonKind::SensitivePath);
@@ -260,7 +286,16 @@ impl ToolPermissions {
             }
         }
 
-        if matches!(action, PermissionAction::Write | PermissionAction::Edit) {
+        if matches!(
+            action,
+            PermissionAction::Read
+                | PermissionAction::Write
+                | PermissionAction::Edit
+                | PermissionAction::List
+                | PermissionAction::Glob
+                | PermissionAction::Grep
+                | PermissionAction::Bash
+        ) {
             if let Some(path) = path {
                 if is_outside_workdir(path, &self.workdir) {
                     return Some(PermissionReasonKind::ExternalPath);
@@ -268,19 +303,28 @@ impl ToolPermissions {
             }
         }
 
-        if matches!(action, PermissionAction::Write | PermissionAction::Edit) {
-            if let Some(path) = path {
-                if is_gitignored(path, &self.workdir) {
-                    return Some(PermissionReasonKind::GitignoredWrite);
-                }
-            }
-        }
-
-        if action == PermissionAction::Bash {
-            return Some(PermissionReasonKind::BashCommand);
-        }
-
         None
+    }
+
+    async fn evaluate_doom_loop(
+        &self,
+        tool_id: &str,
+        params: &Value,
+    ) -> Option<PermissionReasonKind> {
+        let key = ToolCallFingerprint {
+            tool_id: tool_id.to_string(),
+            params: serde_json::to_string(params).unwrap_or_else(|_| params.to_string()),
+        };
+
+        let mut call_counts = self.call_counts.write().await;
+        let count = call_counts.entry(key).or_insert(0);
+        *count += 1;
+
+        if *count >= DOOM_LOOP_THRESHOLD {
+            Some(PermissionReasonKind::DoomLoop)
+        } else {
+            None
+        }
     }
 }
 
@@ -306,16 +350,16 @@ fn reason_text(reason: PermissionReasonKind, tool_id: &str, target: Option<&str>
                 tool_id
             ),
         },
-        PermissionReasonKind::GitignoredWrite => match target {
+        PermissionReasonKind::DoomLoop => match target {
             Some(target) => format!(
-                "Tool '{}' wants to modify gitignored path: {}",
+                "Tool '{}' repeated the same request for {}; explicit approval required",
                 tool_id, target
             ),
-            None => format!("Tool '{}' wants to modify a gitignored path", tool_id),
+            None => format!(
+                "Tool '{}' repeated the same request; explicit approval required",
+                tool_id
+            ),
         },
-        PermissionReasonKind::BashCommand => {
-            "Bash command execution requires permission".to_string()
-        }
     }
 }
 
@@ -421,9 +465,9 @@ mod tests {
         let policies = AgentToolPolicies::default();
         assert!(policies.is_allowed("plan", "read"));
         assert!(policies.is_allowed("plan", "glob"));
+        assert!(policies.is_allowed("plan", "bash"));
         assert!(!policies.is_allowed("plan", "write"));
         assert!(!policies.is_allowed("plan", "edit"));
-        assert!(!policies.is_allowed("plan", "bash"));
     }
 
     #[test]
@@ -462,14 +506,14 @@ mod tests {
     async fn allow_always_persists_for_same_request_fingerprint() {
         let perms = ToolPermissions::new("/tmp/workspace");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let params = serde_json::json!({ "file_path": "/tmp/workspace/.env" });
+        let params = serde_json::json!({ "file_path": "/tmp/elsewhere/file.txt" });
 
         let perms_for_task = perms.clone();
         let params_for_task = params.clone();
         let tx_for_task = tx.clone();
         let first = tokio::spawn(async move {
             perms_for_task
-                .preflight("build", "write", &params_for_task, Some(&tx_for_task))
+                .preflight("build", "read", &params_for_task, Some(&tx_for_task))
                 .await
         });
 
@@ -482,39 +526,184 @@ mod tests {
         let first_result = first.await.expect("task should complete");
         assert!(first_result.is_ok());
 
-        let second = perms.preflight("build", "write", &params, Some(&tx)).await;
+        let second = perms.preflight("build", "read", &params, Some(&tx)).await;
         assert!(second.is_ok());
         assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
-    async fn read_and_search_tools_do_not_prompt_for_sensitive_or_external_paths() {
+    async fn sensitive_writes_are_allowed_by_default() {
         let perms = ToolPermissions::new("/tmp/workspace");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sensitive = serde_json::json!({ "file_path": "/tmp/workspace/.env" });
+        let params = serde_json::json!({ "file_path": "/tmp/workspace/.env" });
+
+        let write_result = perms.preflight("build", "write", &params, Some(&tx)).await;
+        let edit_result = perms.preflight("build", "edit", &params, Some(&tx)).await;
+
+        assert!(write_result.is_ok());
+        assert!(edit_result.is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn read_tool_prompts_for_sensitive_path() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({ "file_path": "/tmp/workspace/.env" });
+
+        let pending = tokio::spawn({
+            let perms = perms.clone();
+            let params = params.clone();
+            let tx = tx.clone();
+            async move { perms.preflight("build", "read", &params, Some(&tx)).await }
+        });
+
+        let prompt = match rx.recv().await {
+            Some(ChunkMessage::PermissionRequest(prompt)) => prompt,
+            _ => panic!("Expected permission prompt"),
+        };
+
+        assert_eq!(prompt.tool_id, "read");
+        assert_eq!(prompt.action, PermissionAction::Read);
+        assert_eq!(prompt.target.as_deref(), Some("/tmp/workspace/.env"));
+        assert!(prompt.reason.contains("sensitive file"));
+
+        let _ = prompt.response_tx.send(PermissionResponse::Deny);
+        let result = pending.await.expect("preflight task should complete");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_tool_prompts_for_external_path() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({ "file_path": "/tmp/elsewhere/file.txt" });
+
+        let pending = tokio::spawn({
+            let perms = perms.clone();
+            let params = params.clone();
+            let tx = tx.clone();
+            async move { perms.preflight("build", "read", &params, Some(&tx)).await }
+        });
+
+        let prompt = match rx.recv().await {
+            Some(ChunkMessage::PermissionRequest(prompt)) => prompt,
+            _ => panic!("Expected permission prompt"),
+        };
+
+        assert_eq!(prompt.tool_id, "read");
+        assert_eq!(prompt.action, PermissionAction::Read);
+        assert_eq!(prompt.target.as_deref(), Some("/tmp/elsewhere/file.txt"));
+        assert!(prompt.reason.contains("outside working directory"));
+
+        let _ = prompt.response_tx.send(PermissionResponse::Deny);
+        let result = pending.await.expect("preflight task should complete");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn search_tools_prompt_for_external_paths() {
+        let perms = ToolPermissions::new("/tmp/workspace");
         let external = serde_json::json!({ "path": "/tmp/elsewhere" });
 
-        let read_result = perms
-            .preflight("build", "read", &sensitive, Some(&tx))
-            .await;
-        let list_result = perms.preflight("build", "list", &external, Some(&tx)).await;
-        let glob_result = perms.preflight("build", "glob", &external, Some(&tx)).await;
-        let grep_result = perms.preflight("build", "grep", &external, Some(&tx)).await;
+        let list_result = perms.preflight("build", "list", &external, None).await;
+        let glob_result = perms.preflight("build", "glob", &external, None).await;
+        let grep_result = perms.preflight("build", "grep", &external, None).await;
 
-        assert!(read_result.is_ok());
-        assert!(list_result.is_ok());
-        assert!(glob_result.is_ok());
-        assert!(grep_result.is_ok());
+        assert!(list_result.is_err());
+        assert!(glob_result.is_err());
+        assert!(grep_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn bash_is_allowed_by_default_inside_workspace() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({
+            "command": "pwd",
+            "workdir": "/tmp/workspace",
+        });
+
+        let result = perms.preflight("build", "bash", &params, Some(&tx)).await;
+
+        assert!(result.is_ok());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn bash_external_workdir_prompt_separates_command_from_workdir() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({
+            "command": "pwd",
+            "workdir": "/tmp/elsewhere",
+        });
+
+        let pending = tokio::spawn({
+            let perms = perms.clone();
+            let params = params.clone();
+            let tx = tx.clone();
+            async move { perms.preflight("build", "bash", &params, Some(&tx)).await }
+        });
+
+        let prompt = match rx.recv().await {
+            Some(ChunkMessage::PermissionRequest(prompt)) => prompt,
+            _ => panic!("Expected permission prompt"),
+        };
+
+        assert_eq!(prompt.target.as_deref(), Some("pwd"));
+        assert_eq!(prompt.command.as_deref(), Some("pwd"));
+        assert_eq!(prompt.workdir.as_deref(), Some("/tmp/elsewhere"));
+        assert!(prompt.reason.contains("outside working directory"));
+
+        let _ = prompt.response_tx.send(PermissionResponse::Deny);
+        let _ = pending.await.expect("preflight task should complete");
+    }
+
+    #[tokio::test]
+    async fn repeated_allowed_call_prompts_for_doom_loop() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({
+            "command": "pwd",
+            "workdir": "/tmp/workspace",
+        });
+
+        let first = perms.preflight("build", "bash", &params, Some(&tx)).await;
+        let second = perms.preflight("build", "bash", &params, Some(&tx)).await;
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        assert!(rx.try_recv().is_err());
+
+        let pending = tokio::spawn({
+            let perms = perms.clone();
+            let params = params.clone();
+            let tx = tx.clone();
+            async move { perms.preflight("build", "bash", &params, Some(&tx)).await }
+        });
+
+        let prompt = match rx.recv().await {
+            Some(ChunkMessage::PermissionRequest(prompt)) => prompt,
+            _ => panic!("Expected permission prompt"),
+        };
+
+        assert_eq!(prompt.tool_id, "bash");
+        assert_eq!(prompt.action, PermissionAction::Bash);
+        assert_eq!(prompt.target.as_deref(), Some("pwd"));
+        assert!(prompt.reason.contains("repeated the same request"));
+
+        let _ = prompt.response_tx.send(PermissionResponse::Deny);
+        let result = pending.await.expect("preflight task should complete");
+        assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn dangerous_skip_bypasses_permission_prompts() {
         let perms = ToolPermissions::new("/tmp/workspace").dangerously_skip_permissions(true);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let params = serde_json::json!({ "file_path": "/tmp/workspace/.env" });
+        let params = serde_json::json!({ "file_path": "/tmp/elsewhere/file.txt" });
 
-        let result = perms.preflight("build", "write", &params, Some(&tx)).await;
+        let result = perms.preflight("build", "read", &params, Some(&tx)).await;
 
         assert!(result.is_ok());
         assert!(rx.try_recv().is_err());

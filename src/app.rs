@@ -52,6 +52,10 @@ use crate::views::sessions_dialog::{
     handle_sessions_dialog_key_event, handle_sessions_dialog_mouse_event, init_sessions_dialog,
     render_sessions_dialog, SessionsDialogAction, SessionsDialogFilter,
 };
+use crate::views::storage_dialog::{
+    handle_storage_dialog_key_event, handle_storage_dialog_mouse_event, init_storage_dialog,
+    render_storage_dialog, StorageDialogAction,
+};
 use crate::views::suggestions_popup::{
     clear_suggestions, get_selected_suggestion, handle_suggestions_popup_key_event,
     handle_suggestions_popup_mouse_event, init_suggestions_popup, is_suggestions_visible,
@@ -64,7 +68,7 @@ use crate::views::themes_dialog::{
 use crate::views::{
     ChatState, ConnectDialogState, HomeState, ModelsDialogState, OpenAIOAuthFlowState,
     PermissionDialogState, QuestionDialogState, SessionRenameDialogState, SessionsDialogState,
-    SuggestionsPopupState, ThemesDialogState,
+    StorageDialogState, SuggestionsPopupState, ThemesDialogState,
 };
 
 use crate::{
@@ -109,6 +113,7 @@ pub enum OverlayFocus {
     TimelineDialog,
     MessageActions,
     CommandPalette,
+    StorageDialog,
     WhichKey,
 }
 
@@ -136,6 +141,11 @@ enum CompactionTaskMessage {
         session_id: String,
         error: String,
     },
+}
+
+#[derive(Debug)]
+enum StorageTaskMessage {
+    Loaded(crate::utils::storage::StorageReport),
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +222,7 @@ pub struct App {
     pub question_dialog_state: QuestionDialogState,
     pub skills_dialog_state: crate::views::SkillsDialogState,
     pub command_palette_state: crate::views::command_palette::CommandPaletteState,
+    pub storage_dialog_state: StorageDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
     pub message_actions_index: Option<usize>,
@@ -223,6 +234,7 @@ pub struct App {
     openai_oauth_in_progress: bool,
     compaction_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<CompactionTaskMessage>>,
     compaction_pending: Option<CompactionPending>,
+    storage_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<StorageTaskMessage>>,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
     pub agent_steps: std::collections::HashMap<String, usize>,
@@ -289,6 +301,7 @@ impl App {
         let which_key_state = crate::views::which_key::init_which_key();
         let timeline_dialog_state = crate::views::timeline_dialog::init_timeline_dialog();
         let command_palette_state = init_command_palette();
+        let storage_dialog_state = init_storage_dialog();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
         let session_manager = SessionManager::new()
@@ -428,6 +441,7 @@ impl App {
             question_dialog_state,
             skills_dialog_state,
             command_palette_state,
+            storage_dialog_state,
             which_key_state,
             timeline_dialog_state,
             message_actions_index: None,
@@ -439,6 +453,7 @@ impl App {
             openai_oauth_in_progress: false,
             compaction_receiver: None,
             compaction_pending: None,
+            storage_receiver: None,
             prefs_dao,
             agent,
             agent_steps,
@@ -1816,6 +1831,16 @@ impl App {
                 }
                 true
             }
+            OverlayFocus::StorageDialog => {
+                let action = handle_storage_dialog_key_event(&mut self.storage_dialog_state, key);
+                self.handle_storage_dialog_action(action);
+                if !self.storage_dialog_state.is_visible()
+                    && self.overlay_focus == OverlayFocus::StorageDialog
+                {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
             OverlayFocus::WhichKey => {
                 let action = self.which_key_state.handle_key_event(key);
                 match action {
@@ -2460,6 +2485,14 @@ impl App {
             {
                 self.overlay_focus = OverlayFocus::None;
             }
+        } else if self.overlay_focus == OverlayFocus::StorageDialog {
+            let action = handle_storage_dialog_mouse_event(&mut self.storage_dialog_state, mouse);
+            self.handle_storage_dialog_action(action);
+            if !self.storage_dialog_state.is_visible()
+                && self.overlay_focus == OverlayFocus::StorageDialog
+            {
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::SuggestionsPopup {
             let anchor_area = self.suggestions_popup_anchor_area();
             let action = handle_suggestions_popup_mouse_event(
@@ -2861,6 +2894,70 @@ impl App {
         self.overlay_focus = OverlayFocus::CommandPalette;
     }
 
+    fn open_storage_dialog(&mut self) {
+        clear_suggestions(&mut self.suggestions_popup_state);
+        self.storage_dialog_state.show();
+        self.overlay_focus = OverlayFocus::StorageDialog;
+
+        if !self.storage_dialog_state.has_report() && !self.storage_dialog_state.is_checking() {
+            self.start_storage_refresh();
+        }
+    }
+
+    fn start_storage_refresh(&mut self) {
+        if self.storage_receiver.is_some() {
+            return;
+        }
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<StorageTaskMessage>();
+        self.storage_receiver = Some(receiver);
+        self.storage_dialog_state.start_checking();
+
+        tokio::task::spawn_blocking(move || {
+            let report = crate::utils::storage::collect_storage_report();
+            let _ = sender.send(StorageTaskMessage::Loaded(report));
+        });
+    }
+
+    fn handle_storage_dialog_action(&mut self, action: StorageDialogAction) {
+        match action {
+            StorageDialogAction::None => {}
+            StorageDialogAction::Close => {
+                self.overlay_focus = OverlayFocus::None;
+            }
+            StorageDialogAction::Refresh => {
+                self.start_storage_refresh();
+            }
+            StorageDialogAction::Open(category) => {
+                self.open_storage_category(category);
+            }
+        }
+    }
+
+    fn open_storage_category(&mut self, category: crate::utils::storage::StorageCategory) {
+        let Some(path) = self.storage_dialog_state.open_path_for(category) else {
+            push_toast(Toast::new(
+                "Storage location is not available yet",
+                ToastLevel::Warning,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        };
+
+        match crate::utils::storage::open_folder(&path) {
+            Ok(()) => push_toast(Toast::new(
+                format!("Opened {}", path.display()),
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            )),
+            Err(err) => push_toast(Toast::new(
+                format!("Failed to open storage folder: {}", err),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            )),
+        }
+    }
+
     fn handle_command_palette_action(&mut self, action: CommandPaletteAction) {
         match action {
             CommandPaletteAction::RunCommand(command) => {
@@ -2882,6 +2979,7 @@ impl App {
                     CommandPaletteAppAction::CycleReasoningEffort => {
                         let _ = self.cycle_active_reasoning_effort();
                     }
+                    CommandPaletteAppAction::OpenStorage => self.open_storage_dialog(),
                 }
                 self.clear_suggestions_and_blur();
             }
@@ -4512,6 +4610,42 @@ impl App {
         self.sync_active_streaming_flag();
     }
 
+    fn process_storage_events(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+
+        if let Some(receiver) = &mut self.storage_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected || !events.is_empty() {
+            self.storage_receiver = None;
+        }
+
+        if disconnected && events.is_empty() {
+            self.storage_dialog_state
+                .set_error("storage check ended before returning results");
+            return;
+        }
+
+        for event in events {
+            match event {
+                StorageTaskMessage::Loaded(report) => {
+                    self.storage_dialog_state.set_report(report);
+                }
+            }
+        }
+    }
+
     fn cleanup_streaming(&mut self) {
         if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
             self.cleanup_streaming_for_session(&session_id);
@@ -4574,6 +4708,7 @@ impl App {
             || self.is_streaming
             || self.chat_state.chat.has_active_tool_messages()
             || self.compaction_receiver.is_some()
+            || self.storage_receiver.is_some()
             || self
                 .session_view_states
                 .values()
@@ -4585,6 +4720,7 @@ impl App {
     pub fn process_streaming_chunks(&mut self) {
         self.process_openai_oauth_events();
         self.process_compaction_events();
+        self.process_storage_events();
 
         let streaming_ids: Vec<String> = self
             .session_view_states
@@ -5575,6 +5711,12 @@ impl App {
             render_command_palette(f, &mut self.command_palette_state, size, colors);
         }
 
+        if self.overlay_focus == OverlayFocus::StorageDialog
+            && self.storage_dialog_state.is_visible()
+        {
+            render_storage_dialog(f, &mut self.storage_dialog_state, size, colors);
+        }
+
         if self.overlay_focus == OverlayFocus::WhichKey {
             crate::views::which_key::render_which_key(f, &self.which_key_state, &colors);
         }
@@ -5665,6 +5807,7 @@ mod tests {
             question_dialog_state: init_question_dialog(),
             skills_dialog_state: crate::views::skills_dialog::init_skills_dialog("Skills", vec![]),
             command_palette_state: init_command_palette(),
+            storage_dialog_state: init_storage_dialog(),
             which_key_state: crate::views::which_key::init_which_key(),
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
             message_actions_index: None,
@@ -5676,6 +5819,7 @@ mod tests {
             openai_oauth_in_progress: false,
             compaction_receiver: None,
             compaction_pending: None,
+            storage_receiver: None,
             prefs_dao: None,
             agent: "Build".to_string(),
             agent_steps: std::collections::HashMap::new(),

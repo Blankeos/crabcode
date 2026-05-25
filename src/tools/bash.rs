@@ -1,6 +1,6 @@
 use crate::tools::{
-    get_bool_param, get_integer_param, get_string_param, validate_required, ParameterSchema,
-    ParameterType, Tool, ToolContext, ToolError, ToolHandler, ToolResult,
+    get_integer_param, get_string_param, validate_required, ParameterSchema, ParameterType, Tool,
+    ToolContext, ToolError, ToolHandler, ToolResult,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -18,26 +18,6 @@ pub struct BashTool;
 impl BashTool {
     pub fn new() -> Self {
         Self
-    }
-
-    fn is_dangerous(command: &str) -> Option<String> {
-        let dangerous_patterns = [
-            "rm -rf /",
-            "rm -rf /*",
-            ":(){ :|: & };:",
-            "> /dev/sda",
-            "mkfs",
-            "dd if=/dev/zero",
-            "chmod -R 777 /",
-        ];
-
-        for pattern in &dangerous_patterns {
-            if command.contains(pattern) {
-                return Some(format!("Command contains dangerous pattern: {}", pattern));
-            }
-        }
-
-        None
     }
 }
 
@@ -99,10 +79,6 @@ impl ToolHandler for BashTool {
 
         let description =
             get_string_param(&params, "description").unwrap_or_else(|| command_str.clone());
-
-        if let Some(reason) = Self::is_dangerous(&command_str) {
-            return Err(ToolError::Permission(reason));
-        }
 
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(&command_str);

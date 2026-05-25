@@ -4,5 +4,6 @@ pub mod frecency;
 pub mod git;
 pub mod ignore;
 pub mod image_attachment;
+pub mod storage;
 pub mod time;
 pub mod token_counter;

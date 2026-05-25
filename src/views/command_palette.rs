@@ -19,6 +19,7 @@ pub enum CommandPaletteAction {
 pub enum CommandPaletteAppAction {
     ToggleAgentMode,
     CycleReasoningEffort,
+    OpenStorage,
 }
 
 #[derive(Debug)]
@@ -163,6 +164,9 @@ fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
             "cycle-reasoning-effort" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::CycleReasoningEffort)
             }
+            "open-storage" => {
+                CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenStorage)
+            }
             _ => CommandPaletteAction::None,
         };
     }
@@ -271,6 +275,20 @@ fn core_palette_items(registry: &Registry, is_chat: bool) -> Vec<DialogItem> {
             "Model",
             "Switch reasoning effort for the active model",
             Some("ctrl+t"),
+        ),
+    );
+
+    items.insert(
+        items
+            .iter()
+            .position(|item| item.group == "Application")
+            .unwrap_or(items.len()),
+        app_action_item(
+            "open-storage",
+            "Storage",
+            "Application",
+            "Inspect Crabcode disk usage",
+            None,
         ),
     );
 

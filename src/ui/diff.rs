@@ -1,11 +1,12 @@
 use crate::theme::ThemeColors;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MAX_DIFF_LINES: usize = 40;
 const CONTEXT_LINES: usize = 3;
 const TAB_WIDTH: usize = 4;
+const GUTTER_DIFF_BG_ALPHA: f32 = 0.55;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffLineType {
@@ -195,13 +196,14 @@ fn render_unified_diff_with_indent_and_syntax(
             DiffLineType::Add => ('+', colors.diff_add, colors.diff_add_bg),
             DiffLineType::Context => (' ', colors.text_weak, colors.background),
         };
+        let gutter_bg = diff_gutter_bg(diff_line.line_type, bg, colors.background);
 
-        let indent_style = Style::default().bg(bg);
+        let indent_style = Style::default().bg(gutter_bg);
         let gutter_style = Style::default()
             .fg(colors.diff_gutter)
-            .bg(bg)
+            .bg(gutter_bg)
             .add_modifier(Modifier::DIM);
-        let sign_style = Style::default().fg(fg).bg(bg);
+        let sign_style = Style::default().fg(fg).bg(gutter_bg);
         let content_style = Style::default().fg(fg).bg(bg);
         let pad_style = Style::default().bg(bg);
 
@@ -240,7 +242,10 @@ fn render_unified_diff_with_indent_and_syntax(
             let styled = spans
                 .iter()
                 .map(|span| {
-                    let mut style = content_style.patch(span.style);
+                    let mut style = span.style.bg(bg);
+                    if style.fg.is_none() {
+                        style = style.fg(colors.text);
+                    }
                     if matches!(diff_line.line_type, DiffLineType::Remove) {
                         style = style.add_modifier(Modifier::DIM);
                     }
@@ -298,6 +303,29 @@ fn render_unified_diff_with_indent_and_syntax(
     }
 
     lines
+}
+
+fn diff_gutter_bg(line_type: DiffLineType, diff_bg: Color, base_bg: Color) -> Color {
+    match line_type {
+        DiffLineType::Add | DiffLineType::Remove => {
+            blend_colors(diff_bg, base_bg, GUTTER_DIFF_BG_ALPHA)
+        }
+        DiffLineType::Context => diff_bg,
+    }
+}
+
+fn blend_colors(foreground: Color, background: Color, alpha: f32) -> Color {
+    let (Color::Rgb(fr, fg, fb), Color::Rgb(br, bg, bb)) = (foreground, background) else {
+        return foreground;
+    };
+
+    let mix = |front: u8, back: u8| {
+        (front as f32 * alpha + back as f32 * (1.0 - alpha))
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+
+    Color::Rgb(mix(fr, br), mix(fg, bg), mix(fb, bb))
 }
 
 fn syntax_spans_for_diff_line<'a>(
@@ -565,5 +593,89 @@ mod tests {
             }),
             "expected syntax-colored Rust keyword span"
         );
+    }
+
+    #[test]
+    fn test_render_unified_diff_keeps_syntax_foreground_after_diff_signs() {
+        let colors = test_colors();
+        let old = "let value = false;\n";
+        let new = "let value = true;\n";
+
+        let lines =
+            format_edit_diff_for_path_with_start(old, new, 1, 80, &colors, "", "src/lib.rs");
+        let removed_line = lines
+            .iter()
+            .find(|line| line_text(line).contains("-let value"))
+            .expect("expected removed line");
+        let added_line = lines
+            .iter()
+            .find(|line| line_text(line).contains("+let value"))
+            .expect("expected added line");
+
+        let removed_identifier = removed_line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref().contains("value"))
+            .expect("expected removed identifier span");
+        let added_identifier = added_line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref().contains("value"))
+            .expect("expected added identifier span");
+
+        assert_ne!(removed_identifier.style.fg, Some(colors.diff_remove));
+        assert_eq!(removed_identifier.style.bg, Some(colors.diff_remove_bg));
+        assert!(removed_identifier
+            .style
+            .add_modifier
+            .contains(Modifier::DIM));
+        assert_ne!(added_identifier.style.fg, Some(colors.diff_add));
+        assert_eq!(added_identifier.style.bg, Some(colors.diff_add_bg));
+    }
+
+    #[test]
+    fn test_render_unified_diff_highlights_typescript_additions() {
+        let colors = test_colors();
+        let new = "import { argv } from 'node:process'\n\nconsole.log(`hello ${argv[2]}`)\n";
+
+        let lines =
+            format_edit_diff_for_path_with_start("", new, 1, 100, &colors, "", "scripts/script.ts");
+        let import_line = lines
+            .iter()
+            .find(|line| line_text(line).contains("+import"))
+            .expect("expected TypeScript import line");
+        let import_span = import_line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref().contains("import"))
+            .expect("expected import content span");
+
+        assert_ne!(import_span.style.fg, Some(colors.diff_add));
+        assert_eq!(import_span.style.bg, Some(colors.diff_add_bg));
+    }
+
+    #[test]
+    fn test_render_unified_diff_uses_softer_gutter_background_for_changes() {
+        let mut colors = test_colors();
+        colors.background = Color::Rgb(10, 10, 10);
+        colors.diff_add_bg = Color::Rgb(10, 70, 20);
+
+        let lines = format_edit_diff_for_path_with_start(
+            "",
+            "let value = true;\n",
+            1,
+            80,
+            &colors,
+            "",
+            "src/lib.rs",
+        );
+        let added_line = lines
+            .iter()
+            .find(|line| line_text(line).contains("+let value"))
+            .expect("expected added line");
+
+        assert_eq!(added_line.spans[1].style.bg, Some(Color::Rgb(10, 43, 16)));
+        assert_eq!(added_line.spans[2].style.bg, Some(Color::Rgb(10, 43, 16)));
+        assert_eq!(added_line.spans[3].style.bg, Some(colors.diff_add_bg));
     }
 }
