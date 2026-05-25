@@ -2783,7 +2783,7 @@ impl Chat {
                     Span::raw(" "),
                     Span::styled(verb.to_string(), title_style),
                     Span::raw(" "),
-                    Span::styled(file_path, target_style),
+                    Span::styled(file_path.clone(), target_style),
                     Span::raw(" ("),
                     Span::styled(format!("+{}", stats.added), add_style),
                     Span::raw(" "),
@@ -2800,8 +2800,8 @@ impl Chat {
                     .unwrap_or(1);
 
             if !old_str.is_empty() || !new_str.is_empty() {
-                let diff_lines = crate::ui::diff::format_edit_diff_with_start(
-                    old_str, new_str, start_line, max_width, colors, "    ",
+                let diff_lines = crate::ui::diff::format_edit_diff_for_path_with_start(
+                    old_str, new_str, start_line, max_width, colors, "    ", &file_path,
                 );
                 out.extend(diff_lines);
             }

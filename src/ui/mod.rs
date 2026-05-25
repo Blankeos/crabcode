@@ -4,4 +4,5 @@ pub mod layout;
 pub mod markdown;
 pub mod scrollbar;
 pub mod selection;
+pub mod syntax;
 pub mod wrapping;

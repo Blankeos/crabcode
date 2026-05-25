@@ -512,6 +512,7 @@ dependencies = [
  "sha2",
  "shlex",
  "strsim",
+ "syntect",
  "tempfile",
  "textwrap",
  "thiserror 1.0.69",

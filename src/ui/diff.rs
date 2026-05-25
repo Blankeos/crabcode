@@ -1,10 +1,11 @@
 use crate::theme::ThemeColors;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MAX_DIFF_LINES: usize = 40;
 const CONTEXT_LINES: usize = 3;
+const TAB_WIDTH: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffLineType {
@@ -160,6 +161,18 @@ pub fn render_unified_diff_with_indent(
     colors: &ThemeColors,
     indent: &str,
 ) -> Vec<Line<'static>> {
+    render_unified_diff_with_indent_and_syntax(diff_lines, max_width, colors, indent, None, None, 1)
+}
+
+fn render_unified_diff_with_indent_and_syntax(
+    diff_lines: &[DiffLine],
+    max_width: usize,
+    colors: &ThemeColors,
+    indent: &str,
+    old_syntax_lines: Option<&[Vec<Span<'static>>]>,
+    new_syntax_lines: Option<&[Vec<Span<'static>>]>,
+    start_line: usize,
+) -> Vec<Line<'static>> {
     let max_line_number = diff_lines
         .iter()
         .filter_map(|line| line.line_number)
@@ -221,9 +234,31 @@ pub fn render_unified_diff_with_indent(
             continue;
         }
 
-        // Wrap content if needed
-        let wrapped = textwrap::wrap(&diff_line.text, content_width);
-        for (chunk_idx, chunk) in wrapped.iter().enumerate() {
+        let syntax_spans =
+            syntax_spans_for_diff_line(diff_line, start_line, old_syntax_lines, new_syntax_lines);
+        let wrapped_syntax_spans = syntax_spans.map(|spans| {
+            let styled = spans
+                .iter()
+                .map(|span| {
+                    let mut style = content_style.patch(span.style);
+                    if matches!(diff_line.line_type, DiffLineType::Remove) {
+                        style = style.add_modifier(Modifier::DIM);
+                    }
+                    Span::styled(span.content.clone().into_owned(), style)
+                })
+                .collect::<Vec<_>>();
+            wrap_styled_spans(&styled, content_width)
+        });
+        let wrapped_plain = wrapped_syntax_spans
+            .is_none()
+            .then(|| textwrap::wrap(&diff_line.text, content_width));
+        let chunk_count = wrapped_syntax_spans
+            .as_ref()
+            .map(|chunks| chunks.len())
+            .or_else(|| wrapped_plain.as_ref().map(|chunks| chunks.len()))
+            .unwrap_or(0);
+
+        for chunk_idx in 0..chunk_count {
             let number_text = if chunk_idx == 0 {
                 diff_line
                     .line_number
@@ -241,8 +276,12 @@ pub fn render_unified_diff_with_indent(
                 Span::styled(indent.to_string(), indent_style),
                 Span::styled(number_text, gutter_style),
                 Span::styled(sign_text, sign_style),
-                Span::styled(chunk.to_string(), content_style),
             ];
+            if let Some(chunks) = wrapped_syntax_spans.as_ref() {
+                spans.extend(chunks[chunk_idx].clone());
+            } else if let Some(chunks) = wrapped_plain.as_ref() {
+                spans.push(Span::styled(chunks[chunk_idx].to_string(), content_style));
+            }
             // Pad to full width so the background spans the entire row
             let visible_width: usize = spans
                 .iter()
@@ -259,6 +298,78 @@ pub fn render_unified_diff_with_indent(
     }
 
     lines
+}
+
+fn syntax_spans_for_diff_line<'a>(
+    diff_line: &DiffLine,
+    start_line: usize,
+    old_syntax_lines: Option<&'a [Vec<Span<'static>>]>,
+    new_syntax_lines: Option<&'a [Vec<Span<'static>>]>,
+) -> Option<&'a [Span<'static>]> {
+    let line_number = diff_line.line_number?;
+    let index = line_number.checked_sub(start_line)?;
+    match diff_line.line_type {
+        DiffLineType::Remove => old_syntax_lines,
+        DiffLineType::Add | DiffLineType::Context => new_syntax_lines,
+    }
+    .and_then(|lines| lines.get(index))
+    .map(Vec::as_slice)
+}
+
+fn wrap_styled_spans(spans: &[Span<'static>], max_cols: usize) -> Vec<Vec<Span<'static>>> {
+    let mut result: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current_line: Vec<Span<'static>> = Vec::new();
+    let mut col: usize = 0;
+
+    for span in spans {
+        let style = span.style;
+        let mut remaining = span.content.as_ref();
+
+        while !remaining.is_empty() {
+            let mut byte_end = 0;
+            let mut chars_col = 0;
+
+            for ch in remaining.chars() {
+                let width = ch.width().unwrap_or(if ch == '\t' { TAB_WIDTH } else { 0 });
+                if col + chars_col + width > max_cols {
+                    break;
+                }
+                byte_end += ch.len_utf8();
+                chars_col += width;
+            }
+
+            if byte_end == 0 {
+                if !current_line.is_empty() {
+                    result.push(std::mem::take(&mut current_line));
+                    col = 0;
+                }
+                let Some(ch) = remaining.chars().next() else {
+                    break;
+                };
+                let ch_len = ch.len_utf8();
+                current_line.push(Span::styled(remaining[..ch_len].to_string(), style));
+                col = ch.width().unwrap_or(if ch == '\t' { TAB_WIDTH } else { 1 });
+                remaining = &remaining[ch_len..];
+                continue;
+            }
+
+            let (chunk, rest) = remaining.split_at(byte_end);
+            current_line.push(Span::styled(chunk.to_string(), style));
+            col += chars_col;
+            remaining = rest;
+
+            if col >= max_cols {
+                result.push(std::mem::take(&mut current_line));
+                col = 0;
+            }
+        }
+    }
+
+    if !current_line.is_empty() || result.is_empty() {
+        result.push(current_line);
+    }
+
+    result
 }
 
 /// Convenience: compute and render a unified diff in one call.
@@ -284,10 +395,41 @@ pub fn format_edit_diff_with_start(
     render_unified_diff_with_indent(&diff_lines, max_width, colors, indent)
 }
 
+pub fn format_edit_diff_for_path_with_start(
+    old_string: &str,
+    new_string: &str,
+    start_line: usize,
+    max_width: usize,
+    colors: &ThemeColors,
+    indent: &str,
+    path: &str,
+) -> Vec<Line<'static>> {
+    let diff_lines =
+        compute_unified_diff_with_start(old_string, new_string, start_line, start_line);
+    let old_syntax_lines = crate::ui::syntax::highlight_code_for_path(old_string, path, colors);
+    let new_syntax_lines = crate::ui::syntax::highlight_code_for_path(new_string, path, colors);
+    render_unified_diff_with_indent_and_syntax(
+        &diff_lines,
+        max_width,
+        colors,
+        indent,
+        old_syntax_lines.as_deref(),
+        new_syntax_lines.as_deref(),
+        start_line,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
 
     fn test_colors() -> ThemeColors {
         ThemeColors {
@@ -400,5 +542,28 @@ mod tests {
         // Should still produce lines (width >= 4 is needed)
         // With width 3, returns empty
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_render_unified_diff_highlights_known_file_extension() {
+        let colors = test_colors();
+        let old = "fn value() -> u8 {\n    1\n}";
+        let new = "fn value() -> u8 {\n    2\n}";
+
+        let lines =
+            format_edit_diff_for_path_with_start(old, new, 1, 80, &colors, "", "src/lib.rs");
+
+        let context_line = lines
+            .iter()
+            .find(|line| line_text(line).contains("fn value"))
+            .expect("expected context line");
+        assert!(
+            context_line.spans.iter().any(|span| {
+                span.content.as_ref().contains("fn")
+                    && span.style.fg.is_some()
+                    && span.style.fg != Some(colors.text_weak)
+            }),
+            "expected syntax-colored Rust keyword span"
+        );
     }
 }
