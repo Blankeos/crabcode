@@ -3,6 +3,7 @@ src/themes/
 !src/theme.json
 !src/theme.json
 app.log
+aisdk_debug.log
 sounds/complete.wav
 
 _dev_reference1
