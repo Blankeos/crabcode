@@ -1,12 +1,20 @@
 {
   "$schema": "crabcode.schema.json",
   // Crabcode theme id (see src/generated_themes/carbonfox.json)
-  // "theme": "vercel",
+  "theme": "vercel",
   "sounds": {
     "complete": {
       "enabled": true,
       "notify": true,
       "file": "/Users/carlo/Desktop/Projects/crabcode/sounds/complete.wav",
+    },
+    "permission": {
+      "enabled": true,
+      "file": "/Users/carlo/Desktop/Projects/crabcode/sounds/question.mp3",
+    },
+    "error": {
+      "enabled": true,
+      "file": "/Users/carlo/Desktop/Projects/crabcode/sounds/error.mp3",
     },
   },
 }

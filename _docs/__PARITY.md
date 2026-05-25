@@ -84,7 +84,7 @@ Scope: core harness behavior only: agent loop, system prompt, subagents, tool ca
    - Add discovery for `.opencode/commands/<name>.md`, frontmatter parsing for `description`, `agent`, `model`, and `subtask`, template expansion for `$ARGUMENTS` and positional args, command-substitution injection with permission checks, file-reference expansion, and Task routing for subtask commands.
 
 3. Permission system is not OpenCode-compatible.
-   - Files: `src/tools/permission.rs`, `src/config/configuration.rs`, `crabcode.schema.json`, `_docs/config.mdx`.
+   - Files: `src/tools/permission.rs`, `src/config/configuration.rs`, `crabcode.schema.json`, `_docs/config/index.mdx`.
    - Add config-driven `allow`, `deny`, and `ask` rules; wildcard tool matching; ordered bash command patterns; per-agent override merging; task permissions; skill permissions; and durable approvals where appropriate.
 
 4. First-class agent registry/config is missing.
@@ -124,7 +124,7 @@ Scope: core harness behavior only: agent loop, system prompt, subagents, tool ca
    - Wire the top-level cancellation token into the per-tool abort channel so bash, webfetch, and subagent execution stop promptly on user interruption.
 
 4. Max-step compatibility should accept OpenCode aliases.
-   - Files: `src/config/configuration.rs`, `crabcode.schema.json`, `_docs/config.mdx`.
+   - Files: `src/config/configuration.rs`, `crabcode.schema.json`, `_docs/config/index.mdx`.
    - Accept `max_steps` and deprecated `maxSteps` as aliases for `steps`, with a warning only if necessary.
 
 ### LOW
