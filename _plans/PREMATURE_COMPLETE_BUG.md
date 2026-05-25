@@ -366,3 +366,52 @@ Validation:
 ### Follow-up
 
 The cancellation-abort issue remains separate and still needs a dedicated fix: cancelling a stream can leave the underlying AISDK tool loop running after the UI receiver closes.
+
+## 2026-05-25 Long-Running Turn Cost / Websocket Idle Finding
+
+### User-Visible Symptom
+
+While dogfooding an image-tag opener feature, the turn ran for a long time after a delayed permission approval. The user saw high token/cost usage and then a stream failure:
+
+> websocket closed before response.completed
+
+This was not a premature-completion recurrence. It was a long-running turn / transport recovery problem.
+
+### `app.log` Evidence
+
+Primary session id: `npa3foyel6u2co8n721sxtwv`.
+
+Relevant sequence:
+
+- `19:28:16`: the primary stream failed with `websocket closed before response.completed`.
+- The failed stream had `elapsed_ms=1552634`, `response_completed=0`, and `agent_max_steps=None`.
+- The last metadata included `openai_transport=responses_websocket previous_response_id=false input_items=277`, indicating a full-history websocket request rather than a compact delta.
+- `19:28:23`: the follow-up stream restarted with `input_messages=156`, `messages=279`, and `previous_response_id=false input_items=278`.
+
+### Root Cause
+
+Two issues amplified the cost:
+
+1. Crabcode reused cached websocket connections without considering long idle gaps between provider steps. A permission prompt or long tool execution can leave the physical websocket stale before the next request.
+2. The websocket delta cache missed append-only continuations too often. Provider response message items use Responses API shapes such as `{"type":"message","role":"assistant","content":[...]}`, while crabcode's local history serializes assistant messages as `{"role":"assistant","content":"..."}`. Prefix comparison treated these equivalent assistant messages as different and fell back to sending full input. It also rejected empty deltas even though Codex allows them when `previous_response_id` is available.
+
+### Fix Applied
+
+- `aisdk/src/providers/openai.rs`
+  - Track when a cached websocket was last successfully used.
+  - Discard idle cached websocket connections before sending another request, while preserving `last_response` history so `previous_response_id` can still be used on a fresh socket.
+  - If sending on a reused websocket fails, clear the cached connection, reconnect once, and resend the same request on the fresh websocket.
+  - Clear cached physical websocket state on runtime close/error before `response.completed`.
+  - Normalize Responses assistant message items to crabcode's local assistant message shape during prefix comparison.
+  - Allow empty websocket deltas with `previous_response_id`, matching Codex's `allow_empty_delta` behavior.
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test -p aisdk websocket`
+- `cargo test -p aisdk`
+- `cargo check`
+
+### Follow-up
+
+This does not yet add a full Codex-style sampling retry loop around partially streamed websocket failures. The next cost-control target is a bounded stream retry/fallback policy plus sane default `agent_max_steps` for normal Build turns.

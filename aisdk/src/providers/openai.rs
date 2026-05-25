@@ -9,6 +9,7 @@ use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::connect_async;
@@ -20,6 +21,7 @@ const OPENAI_STREAM_CONNECT_TIMEOUT_SECS: u64 = 30;
 const OPENAI_ERROR_BODY_MAX_CHARS: usize = 2048;
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
+const OPENAI_WEBSOCKET_IDLE_MAX: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct OpenAI {
@@ -164,8 +166,27 @@ impl OpenAIBuilder {
 struct OpenAIWebsocketState {
     disabled: bool,
     connection: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+    last_used_at: Option<Instant>,
     last_request: Option<OpenAIRequestSnapshot>,
     last_response: Option<OpenAIResponseSnapshot>,
+}
+
+impl OpenAIWebsocketState {
+    fn discard_idle_connection(&mut self) {
+        let is_idle = self
+            .last_used_at
+            .map(|last_used_at| last_used_at.elapsed() > OPENAI_WEBSOCKET_IDLE_MAX)
+            .unwrap_or(false);
+        if is_idle {
+            self.connection = None;
+            self.last_used_at = None;
+        }
+    }
+
+    fn clear_connection(&mut self) {
+        self.connection = None;
+        self.last_used_at = None;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -386,26 +407,42 @@ impl OpenAI {
         headers: &reqwest::header::HeaderMap,
     ) -> Result<ProviderStream> {
         let ws_url = websocket_url(self.base_url.trim_end_matches('/'), &self.responses_path)?;
-        let (request_body, mut ws) = {
+        let (request_body, mut ws, reused_connection) = {
             let mut state = self.websocket_state.lock().await;
             if state.disabled {
                 return Err(Error::Provider("websocket transport disabled".to_string()));
             }
+            state.discard_idle_connection();
             let request_body = websocket_request_body_from_state(&state, &full_body);
             if let Some(ws) = state.connection.take() {
-                (request_body, ws)
+                state.last_used_at = None;
+                (request_body, ws, true)
             } else {
                 drop(state);
-                let ws = connect_openai_websocket(ws_url, headers).await?;
-                (request_body, ws)
+                let ws = connect_openai_websocket(ws_url.clone(), headers).await?;
+                (request_body, ws, false)
             }
         };
 
         let request_text = serde_json::to_string(&request_body)
             .map_err(|err| Error::Provider(format!("failed to encode websocket request: {err}")))?;
-        ws.send(WsMessage::Text(request_text))
-            .await
-            .map_err(|err| Error::Provider(format!("websocket send failed: {err}")))?;
+        if let Err(err) = ws.send(WsMessage::Text(request_text.clone())).await {
+            if !reused_connection {
+                return Err(Error::Provider(format!("websocket send failed: {err}")));
+            }
+
+            {
+                let mut state = self.websocket_state.lock().await;
+                state.clear_connection();
+            }
+
+            let mut fresh_ws = connect_openai_websocket(ws_url, headers).await?;
+            fresh_ws
+                .send(WsMessage::Text(request_text))
+                .await
+                .map_err(|err| Error::Provider(format!("websocket send failed: {err}")))?;
+            ws = fresh_ws;
+        }
 
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(Ok(ChunkType::Metadata(format!(
@@ -437,6 +474,7 @@ impl OpenAI {
                                 if let Some(response_id) = response_id {
                                     let mut state = websocket_state.lock().await;
                                     state.connection = Some(ws);
+                                    state.last_used_at = Some(Instant::now());
                                     state.last_request = Some(request_snapshot);
                                     state.last_response = Some(OpenAIResponseSnapshot {
                                         response_id,
@@ -449,6 +487,7 @@ impl OpenAI {
                     }
                     Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {}
                     Ok(WsMessage::Close(_)) => {
+                        websocket_state.lock().await.clear_connection();
                         let _ = tx.send(Ok(ChunkType::Failed(
                             "websocket closed before response.completed".to_string(),
                         )));
@@ -456,6 +495,7 @@ impl OpenAI {
                     }
                     Ok(WsMessage::Binary(_)) | Ok(WsMessage::Frame(_)) => {}
                     Err(err) => {
+                        websocket_state.lock().await.clear_connection();
                         let _ = tx.send(Ok(ChunkType::Failed(format!(
                             "websocket stream error: {}",
                             err
@@ -465,6 +505,7 @@ impl OpenAI {
                 }
             }
 
+            websocket_state.lock().await.clear_connection();
             let _ = tx.send(Ok(ChunkType::Failed(
                 "websocket stream ended before response.completed".to_string(),
             )));
@@ -557,7 +598,7 @@ fn websocket_request_body_from_state(
 
             let mut baseline = last_request.input.clone();
             baseline.extend(last_response.items_added.clone());
-            if input_starts_with(&input, &baseline) && baseline.len() < input.len() {
+            if input_starts_with(&input, &baseline) {
                 Some((
                     last_response.response_id.clone(),
                     input[baseline.len()..].to_vec(),
@@ -610,14 +651,47 @@ fn input_items_equivalent(left: &serde_json::Value, right: &serde_json::Value) -
 }
 
 fn normalize_input_item_for_prefix(item: &serde_json::Value) -> serde_json::Value {
-    let mut item = item.clone();
-    if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
-        if let Some(obj) = item.as_object_mut() {
+    if item.get("type").and_then(|value| value.as_str()) == Some("message") {
+        if let Some(role) = item.get("role").and_then(|value| value.as_str()) {
+            if let Some(content) = response_message_content_as_text(item.get("content")) {
+                return serde_json::json!({
+                    "role": role,
+                    "content": content,
+                });
+            }
+        }
+    }
+
+    let mut normalized = item.clone();
+    if normalized.get("type").and_then(|value| value.as_str()) == Some("function_call") {
+        if let Some(obj) = normalized.as_object_mut() {
             obj.remove("id");
             obj.remove("status");
         }
     }
-    item
+    normalized
+}
+
+fn response_message_content_as_text(content: Option<&serde_json::Value>) -> Option<String> {
+    match content? {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(parts) => {
+            let mut text = String::new();
+            for part in parts {
+                let part_type = part.get("type").and_then(|value| value.as_str());
+                if matches!(
+                    part_type,
+                    Some("output_text") | Some("text") | Some("input_text")
+                ) {
+                    if let Some(part_text) = part.get("text").and_then(|value| value.as_str()) {
+                        text.push_str(part_text);
+                    }
+                }
+            }
+            Some(text)
+        }
+        _ => None,
+    }
 }
 
 fn collect_websocket_response_state(
@@ -1190,10 +1264,11 @@ mod tests {
     use super::{
         build_openai_messages, request_snapshot_from_body, response_sse_data_to_chunk,
         responses_function_call_chunk, websocket_request_body_from_state, OpenAI,
-        OpenAIResponseSnapshot,
+        OpenAIResponseSnapshot, OpenAIWebsocketState,
     };
     use crate::chunk::{ChunkType, MessagePhase};
     use crate::message::Message;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn done_marker_emits_terminal_chunk() {
@@ -1346,6 +1421,75 @@ mod tests {
         assert_eq!(ws_body["type"], "response.create");
         assert_eq!(ws_body["previous_response_id"], "resp_1");
         assert_eq!(ws_body["input"], serde_json::json!([function_output]));
+    }
+
+    #[tokio::test]
+    async fn websocket_request_uses_previous_response_id_for_assistant_message_shape_delta() {
+        let provider = OpenAI::builder()
+            .base_url("https://chatgpt.com")
+            .api_key("")
+            .model_name("gpt-test")
+            .build()
+            .unwrap();
+        let previous_input = vec![serde_json::json!({
+            "role": "user",
+            "content": "inspect the code"
+        })];
+        let previous_body = provider.build_responses_body(previous_input.clone(), &[]);
+        let response_assistant_message = serde_json::json!({
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                { "type": "output_text", "text": "I'll inspect the code." }
+            ]
+        });
+
+        {
+            let mut state = provider.websocket_state.lock().await;
+            state.last_request = Some(request_snapshot_from_body(&previous_body));
+            state.last_response = Some(OpenAIResponseSnapshot {
+                response_id: "resp_1".to_string(),
+                items_added: vec![response_assistant_message],
+            });
+        }
+
+        let mut next_input = previous_input;
+        next_input.push(serde_json::json!({
+            "role": "assistant",
+            "content": "I'll inspect the code."
+        }));
+        let next_body = provider.build_responses_body(next_input, &[]);
+
+        let state = provider.websocket_state.lock().await;
+        let ws_body = websocket_request_body_from_state(&state, &next_body);
+
+        assert_eq!(ws_body["previous_response_id"], "resp_1");
+        assert_eq!(ws_body["input"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn websocket_connection_clear_preserves_response_history() {
+        let mut state = OpenAIWebsocketState {
+            last_used_at: Some(Instant::now() - Duration::from_secs(120)),
+            last_response: Some(OpenAIResponseSnapshot {
+                response_id: "resp_1".to_string(),
+                items_added: vec![],
+            }),
+            ..OpenAIWebsocketState::default()
+        };
+
+        state.clear_connection();
+
+        assert!(state.last_used_at.is_none());
+        assert_eq!(
+            state
+                .last_response
+                .as_ref()
+                .map(|response| response.response_id.as_str()),
+            Some("resp_1")
+        );
     }
 
     #[tokio::test]

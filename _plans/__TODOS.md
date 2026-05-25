@@ -116,7 +116,7 @@
 
 - [x] When a message is sent, the [Image #1] or [Image #2] tags, become just white, not the unique color we have for them in the chat input box.
 
-- [ ] Syntax highlighting during "Edited" tool calls. Check how Codex does it, because it has syntax highlighting for some reason--It's very clean.
+- [ ] Syntax highlighting during "Edited" tool calls for diffs. Check how Codex does it, because it has syntax highlighting for some reason--It's very clean.
 
 - [ ] I also think the /copy transcript should show "Edit" tool call results no? Right now it looks as simple as:
       **Tool Result**
@@ -172,7 +172,7 @@ I want - [x] To do this But I dont want to do this
 
 - [x] Make the "bash" permission parity to codex. Also I currently dont see the command that it wants to run, so I'm kinda blind on what to run here.
 
-- [ ] When pasting images and it creates this [Image #1] tag, make it hoverable (just change the color, not the background), then once clicked, goes to the preferred editor of the user.
+- [x] When pasting images and it creates this [Image #1] tag, make it hoverable (just change the color, not the background), then once clicked, goes to the preferred editor of the user.
   - Multiple paths here:
     - Should it be configurable?
     - Autodetected depending on the tool used: i.e. if Wezterm, other terminals "open w/ Finder on mac, or native image opener". If inside Zed, open image with Zed. If inside VSCode/Cursor, open with that IDE. (Ambitious but idk if possible)
