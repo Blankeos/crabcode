@@ -184,4 +184,8 @@ I want - [x] To do this But I dont want to do this
 
 - [ ] When in another workspace and there are existing sessions in there and I opened /sessions, make that "workspace" the focus especially since the first page is at home.rs.
 
-- [ ] I want to make a SPECIAL integration w/ ollama, specifically the local ollama cli. Maybe `ollama ls` can be cached at runtime? and refreshed with refreshmodels? And a special provider place where I can do /connect on it. And it won't require any API keys? I wanna put it somewhere clean though... So that it doesn't really bother with the models.dev stuff, but just fits in cleanly. A /connect provider called 'Ollama (Local)' would be cool.
+- [x] I want to make a SPECIAL integration w/ ollama, specifically the local ollama cli. Maybe `ollama ls` can be cached at runtime? and refreshed with refreshmodels? And a special provider place where I can do /connect on it. And it won't require any API keys? I wanna put it somewhere clean though... So that it doesn't really bother with the models.dev stuff, but just fits in cleanly. A /connect provider called 'Ollama (Local)' would be cool. API key-less should be possible too!
+
+- [ ] When clicking, it opens message actions.. Special case for UX: don't change the scroll value when it comes from "clicking a message".. But the other /timeline and ctrl+x g paths should be just fine.
+
+- [ ] Zed alert circle thing when asking permission or question, please emit it. Currently it's only on completions by default I think.

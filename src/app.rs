@@ -2351,6 +2351,7 @@ impl App {
 
         if matches!(mouse.kind, MouseEventKind::Moved) && self.base_focus != BaseFocus::Chat {
             self.chat_state.chat.clear_hovered_image();
+            self.chat_state.chat.clear_hovered_hyperlink();
         }
 
         // If text is selected and user clicks on an overlay, clear selection instead
@@ -2732,11 +2733,21 @@ impl App {
                     {
                         let hovered_image =
                             self.chat_state.chat.image_at_position(mouse, chat_area);
+                        let hovered_hyperlink = if hovered_image.is_none() {
+                            self.chat_state
+                                .chat
+                                .hyperlink_hover_at_position(mouse, chat_area)
+                        } else {
+                            None
+                        };
                         let hovered_message = self
                             .chat_state
                             .chat
                             .message_index_at_position(mouse, chat_area);
                         self.chat_state.chat.set_hovered_image(hovered_image);
+                        self.chat_state
+                            .chat
+                            .set_hovered_hyperlink(hovered_hyperlink);
                         if hovered_message.is_some() {
                             return;
                         }
@@ -2824,6 +2835,7 @@ impl App {
 
             // Handle mouse events for the main input when no overlay is focused
             self.chat_state.chat.clear_hovered_image();
+            self.chat_state.chat.clear_hovered_hyperlink();
             self.handle_input_mouse_event(mouse);
         }
     }
@@ -3560,19 +3572,7 @@ impl App {
                             self.connect_dialog_state.dialog.show();
                             self.overlay_focus = OverlayFocus::ConnectDialog;
                         } else if title == "Sessions" {
-                            let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
-                                items
-                                    .into_iter()
-                                    .map(|item| crate::ui::components::dialog::DialogItem {
-                                        id: item.id,
-                                        name: item.name,
-                                        group: item.group,
-                                        description: item.description,
-                                        tip: item.tip,
-                                        provider_id: item.provider_id.clone(),
-                                    })
-                                    .collect();
-                            self.show_sessions_dialog(title, dialog_items);
+                            self.open_sessions_dialog();
                         } else {
                             let dialog_items: Vec<crate::ui::components::dialog::DialogItem> =
                                 items
@@ -3761,18 +3761,7 @@ impl App {
                     self.connect_dialog_state.dialog.show();
                     self.overlay_focus = OverlayFocus::ConnectDialog;
                 } else if title == "Sessions" {
-                    let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
-                        .into_iter()
-                        .map(|item| crate::ui::components::dialog::DialogItem {
-                            id: item.id,
-                            name: item.name,
-                            group: item.group,
-                            description: item.description,
-                            tip: item.tip,
-                            provider_id: item.provider_id.clone(),
-                        })
-                        .collect();
-                    self.show_sessions_dialog(title, dialog_items);
+                    self.open_sessions_dialog();
                 } else {
                     let dialog_items: Vec<crate::ui::components::dialog::DialogItem> = items
                         .into_iter()
@@ -4126,21 +4115,59 @@ impl App {
             Err(_) => return,
         };
 
-        if connected_providers.is_empty() {
+        let include_ollama = connected_providers.contains_key(crate::model::ollama::PROVIDER_ID)
+            || self.provider_name == crate::model::ollama::PROVIDER_ID
+            || self
+                .models_dialog_state
+                .dialog
+                .items
+                .iter()
+                .any(|item| item.provider_id == crate::model::ollama::PROVIDER_ID);
+
+        if connected_providers.is_empty() && !include_ollama {
             return;
         }
 
-        let discovery = match Discovery::new() {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let has_non_ollama = connected_providers
+            .keys()
+            .any(|provider_id| !crate::model::ollama::is_ollama_provider(provider_id));
 
-        let models = match tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(discovery.fetch_models())
-        }) {
-            Ok(models) => models,
-            Err(_) => return,
+        let models = if has_non_ollama {
+            match Discovery::new() {
+                Ok(discovery) => match tokio::task::block_in_place(|| {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(discovery.fetch_models())
+                }) {
+                    Ok(models) => models,
+                    Err(err) if include_ollama => {
+                        let ollama_models = tokio::task::block_in_place(|| {
+                            let rt = tokio::runtime::Handle::current();
+                            rt.block_on(crate::model::ollama::models_for_dialog_cached_or_empty())
+                        });
+                        if ollama_models.is_empty() {
+                            push_toast(Toast::new(
+                                format!("Failed to refresh models: {}", err),
+                                ToastLevel::Warning,
+                                Some(std::time::Duration::from_secs(3)),
+                            ));
+                        }
+                        ollama_models
+                    }
+                    Err(_) => return,
+                },
+                Err(_) if include_ollama => tokio::task::block_in_place(|| {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(crate::model::ollama::models_for_dialog_cached_or_empty())
+                }),
+                Err(_) => return,
+            }
+        } else if include_ollama {
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(crate::model::ollama::models_for_dialog_cached_or_empty())
+            })
+        } else {
+            return;
         };
 
         let prefs = self
@@ -4152,7 +4179,9 @@ impl App {
             std::collections::HashMap::new();
 
         for model in &models {
-            if connected_providers.contains_key(&model.provider_id) {
+            if connected_providers.contains_key(&model.provider_id)
+                || crate::model::ollama::is_ollama_provider(&model.provider_id)
+            {
                 model_lookup.insert((model.provider_id.clone(), model.id.clone()), model.clone());
             }
         }
@@ -4256,7 +4285,9 @@ impl App {
                 continue;
             }
 
-            if connected_providers.contains_key(&model.provider_id) {
+            if connected_providers.contains_key(&model.provider_id)
+                || crate::model::ollama::is_ollama_provider(&model.provider_id)
+            {
                 provider_models
                     .entry(model.provider_name.clone())
                     .or_default()
@@ -4320,34 +4351,26 @@ impl App {
         self.overlay_focus = OverlayFocus::ModelsDialog;
     }
 
-    fn show_sessions_dialog(
-        &mut self,
-        title: impl Into<String>,
-        items: Vec<crate::ui::components::dialog::DialogItem>,
-    ) {
-        self.sessions_dialog_state = init_sessions_dialog(title, items);
-
-        let current_session_id = self.session_manager.get_current_session_id().cloned();
-        if let Some(session_id) = current_session_id {
-            let _ = self
+    fn focus_current_session_or_workspace_in_sessions_dialog(&mut self) {
+        if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
+            if self
                 .sessions_dialog_state
                 .dialog
-                .select_item_by_id(&session_id);
+                .select_item_by_id(&session_id)
+            {
+                return;
+            }
         }
 
-        self.sessions_dialog_state.dialog.show();
-        self.overlay_focus = OverlayFocus::SessionsDialog;
+        let current_workspace_id = self.session_manager.current_workspace_id();
+        let _ = self
+            .sessions_dialog_state
+            .focus_workspace(current_workspace_id);
     }
 
     fn open_sessions_dialog(&mut self) {
         self.refresh_sessions_dialog();
-
-        if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
-            let _ = self
-                .sessions_dialog_state
-                .dialog
-                .select_item_by_id(&session_id);
-        }
+        self.focus_current_session_or_workspace_in_sessions_dialog();
 
         self.sessions_dialog_state.dialog.show();
         self.overlay_focus = OverlayFocus::SessionsDialog;
@@ -4558,6 +4581,11 @@ impl App {
     ) {
         match self.connect_dialog_mode {
             ConnectDialogMode::ProviderSelection => {
+                if crate::model::ollama::is_ollama_provider(&selected_item.id) {
+                    self.connect_local_ollama();
+                    return;
+                }
+
                 if selected_item.id == "openai" {
                     self.show_openai_connect_methods();
                     return;
@@ -4583,6 +4611,52 @@ impl App {
                 }
             },
         }
+    }
+
+    fn connect_local_ollama(&mut self) {
+        let models_result = tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(crate::model::ollama::refresh_model_cache())
+        });
+
+        let models = match models_result {
+            Ok(models) => models,
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Failed to connect Ollama: {}", err),
+                    ToastLevel::Error,
+                    Some(std::time::Duration::from_secs(5)),
+                ));
+                self.overlay_focus = OverlayFocus::None;
+                return;
+            }
+        };
+
+        match crate::persistence::AuthDAO::new().and_then(|dao| {
+            dao.set_provider(
+                crate::model::ollama::PROVIDER_ID.to_string(),
+                crate::persistence::AuthConfig::Local,
+            )
+        }) {
+            Ok(()) => {
+                push_toast(Toast::new(
+                    format!("Connected Ollama ({} local models)", models.len()),
+                    ToastLevel::Success,
+                    None,
+                ));
+                self.connect_dialog_state = init_connect_dialog();
+                self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+            }
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Failed to save Ollama connection: {}", err),
+                    ToastLevel::Error,
+                    None,
+                ));
+            }
+        }
+
+        self.overlay_focus = OverlayFocus::None;
     }
 
     fn begin_openai_oauth_browser(&mut self) {
@@ -7090,6 +7164,40 @@ mod tests {
         assert!(items
             .iter()
             .any(|item| item.id == other_id && item.group == "other-workspace"));
+    }
+
+    #[test]
+    fn sessions_dialog_focuses_current_workspace_from_home_without_current_session() {
+        let mut app = test_app();
+        let current_id = app.create_new_session(Some("Current".to_string()));
+        let other_id = app.create_new_session(Some("Other".to_string()));
+        let other_session = app.session_manager.get_session(&other_id).unwrap();
+        other_session.workspace_id = -1;
+        other_session.workspace_path = "/tmp/other-workspace".to_string();
+        other_session.workspace_name = "other-workspace".to_string();
+
+        app.start_blank_session(None);
+        app.open_sessions_dialog();
+
+        assert_eq!(app.base_focus, BaseFocus::Home);
+        assert!(app.session_manager.get_current_session_id().is_none());
+        assert_eq!(app.sessions_dialog_state.filter, SessionsDialogFilter::All);
+        assert_eq!(
+            app.sessions_dialog_state.dialog.get_focused_group_header(),
+            Some(app.session_manager.current_workspace_name())
+        );
+        assert!(app
+            .sessions_dialog_state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == current_id));
+        assert!(app
+            .sessions_dialog_state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == other_id));
     }
 
     #[test]

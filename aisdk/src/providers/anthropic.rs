@@ -65,7 +65,7 @@ impl AnthropicBuilder {
             base_url: self
                 .base_url
                 .ok_or(Error::MissingField("base_url".into()))?,
-            api_key: self.api_key.ok_or(Error::MissingField("api_key".into()))?,
+            api_key: self.api_key.unwrap_or_default(),
             model_name: self
                 .model_name
                 .ok_or(Error::MissingField("model_name".into()))?,
@@ -176,7 +176,9 @@ impl Provider for Anthropic {
             reqwest::header::CONTENT_TYPE,
             "application/json".parse().unwrap(),
         );
-        request_headers.insert("x-api-key", self.api_key.parse().unwrap());
+        if !self.api_key.is_empty() {
+            request_headers.insert("x-api-key", self.api_key.parse().unwrap());
+        }
         request_headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
 
         let client = reqwest::Client::builder()

@@ -127,7 +127,7 @@ impl OpenAIBuilder {
         let base_url = self
             .base_url
             .ok_or(Error::MissingField("base_url".into()))?;
-        let api_key = self.api_key.ok_or(Error::MissingField("api_key".into()))?;
+        let api_key = self.api_key.unwrap_or_default();
         let model_name = self
             .model_name
             .ok_or(Error::MissingField("model_name".into()))?;
@@ -1290,6 +1290,18 @@ mod tests {
     use crate::chunk::{ChunkType, MessagePhase};
     use crate::message::Message;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn builder_allows_missing_api_key() {
+        let provider = OpenAI::builder()
+            .base_url("http://localhost:11434/v1")
+            .model_name("local-model")
+            .provider_name("local-openai")
+            .build()
+            .expect("api key should be optional");
+
+        assert!(provider.api_key.is_empty());
+    }
 
     #[test]
     fn done_marker_emits_terminal_chunk() {

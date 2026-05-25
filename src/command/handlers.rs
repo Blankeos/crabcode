@@ -100,6 +100,10 @@ pub fn handle_connect<'a>(
                 ("anthropic", "Anthropic"),
                 ("openai", "OpenAI"),
                 ("google", "Google"),
+                (
+                    crate::model::ollama::PROVIDER_ID,
+                    crate::model::ollama::PROVIDER_NAME,
+                ),
             ] {
                 out.insert(
                     id.to_string(),
@@ -117,13 +121,14 @@ pub fn handle_connect<'a>(
             out
         }
 
-        let providers_map = match crate::model::discovery::Discovery::new() {
+        let mut providers_map = match crate::model::discovery::Discovery::new() {
             Ok(discovery) => match discovery.fetch_providers().await {
                 Ok(p) => p,
                 Err(_) => fallback_providers(),
             },
             Err(_) => fallback_providers(),
         };
+        crate::model::ollama::inject_provider(&mut providers_map);
 
         const POPULAR_PROVIDERS: &[&str] = &[
             "opencode",
@@ -136,7 +141,9 @@ pub fn handle_connect<'a>(
         let mut items: Vec<crate::command::registry::DialogItem> = providers_map
             .into_iter()
             .map(|(id, provider)| {
-                let group = if POPULAR_PROVIDERS.contains(&id.as_str()) {
+                let group = if id == crate::model::ollama::PROVIDER_ID {
+                    "Local"
+                } else if POPULAR_PROVIDERS.contains(&id.as_str()) {
                     "Popular"
                 } else {
                     "Other"
@@ -146,7 +153,11 @@ pub fn handle_connect<'a>(
                     id: id.clone(),
                     name: provider.name.clone(),
                     group: group.to_string(),
-                    description: id.clone(),
+                    description: if id == crate::model::ollama::PROVIDER_ID {
+                        "Local Ollama CLI".to_string()
+                    } else {
+                        id.clone()
+                    },
                     tip: if is_connected {
                         Some("🟢 Connected".to_string())
                     } else {
@@ -203,197 +214,247 @@ pub fn handle_models<'a>(
             Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
         };
 
-        if connected_providers.is_empty() {
-            return CommandResult::Error(
-                "No models available. Please connect a provider first using /connect".to_string(),
-            );
-        }
+        let provider_filter_matches_ollama = provider_filter.as_deref().map_or(false, |filter| {
+            let filter = filter.to_ascii_lowercase();
+            crate::model::ollama::PROVIDER_ID.contains(&filter)
+                || crate::model::ollama::PROVIDER_NAME
+                    .to_ascii_lowercase()
+                    .contains(&filter)
+        });
+
+        let has_ollama = connected_providers.contains_key(crate::model::ollama::PROVIDER_ID)
+            || (connected_providers.is_empty() && provider_filter.is_none())
+            || provider_filter_matches_ollama;
+        let has_non_ollama = connected_providers
+            .keys()
+            .any(|provider_id| !crate::model::ollama::is_ollama_provider(provider_id));
 
         let discovery = Discovery::new();
-
-        match discovery {
-            Ok(d) => match d.fetch_models().await {
-                Ok(models) => {
-                    let prefs = prefs_data;
-
-                    let mut model_lookup: std::collections::HashMap<(String, String), ModelType> =
-                        std::collections::HashMap::new();
-
-                    for model in &models {
-                        if connected_providers.contains_key(&model.provider_id)
-                            && if let Some(filter) = &provider_filter {
-                                model.provider_id.contains(filter)
-                                    || model.provider_name.to_lowercase().contains(filter)
-                            } else {
-                                true
-                            }
-                        {
-                            model_lookup.insert(
-                                (model.provider_id.clone(), model.id.clone()),
-                                model.clone(),
-                            );
-                        }
-                    }
-
-                    let favorites_set = prefs
-                        .as_ref()
-                        .map(|p| {
-                            p.favorite
-                                .iter()
-                                .map(|m| (m.provider_id.clone(), m.model_id.clone()))
-                                .collect::<std::collections::HashSet<_>>()
+        let mut models: Vec<ModelType> = if has_non_ollama {
+            match discovery {
+                Ok(d) => match d.fetch_models().await {
+                    Ok(models) => models
+                        .into_iter()
+                        .filter(|model| {
+                            !crate::model::ollama::is_ollama_provider(&model.provider_id)
                         })
-                        .unwrap_or_default();
-
-                    let recent_set = prefs
-                        .as_ref()
-                        .map(|p| {
-                            p.recent
-                                .iter()
-                                .map(|m| (m.provider_id.clone(), m.model_id.clone()))
-                                .collect::<std::collections::HashSet<_>>()
-                        })
-                        .unwrap_or_default();
-
-                    let mut items: Vec<DialogItem> = Vec::new();
-
-                    let add_model_item =
-                        |items: &mut Vec<DialogItem>, model: &ModelType, group: &str| {
-                            let is_active = active_model_id.as_ref() == Some(&model.id);
-                            let is_favorite = favorites_set
-                                .contains(&(model.provider_id.clone(), model.id.clone()));
-
-                            let tip = if is_active {
-                                Some("Active".to_string())
-                            } else if is_favorite {
-                                Some("❤︎".to_string())
-                            } else {
-                                None
-                            };
-
-                            let description = model.provider_name.clone();
-
-                            items.push(DialogItem {
-                                id: model.id.clone(),
-                                name: model.name.clone(),
-                                group: group.to_string(),
-                                description,
-                                tip,
-                                provider_id: model.provider_id.clone(),
-                            });
-                        };
-
-                    let favorites_list = prefs
-                        .as_ref()
-                        .map(|p| p.favorite.clone())
-                        .unwrap_or_default();
-
-                    let mut favorite_models = Vec::new();
-                    for fav in &favorites_list {
-                        if let Some(model) =
-                            model_lookup.get(&(fav.provider_id.clone(), fav.model_id.clone()))
-                        {
-                            favorite_models.push(model.clone());
-                        }
-                    }
-
-                    for model in &favorite_models {
-                        add_model_item(&mut items, model, "Favorite");
-                    }
-
-                    let recent_list = prefs.as_ref().map(|p| p.recent.clone()).unwrap_or_default();
-
-                    let mut recent_models = Vec::new();
-                    for recent in &recent_list {
-                        if favorites_set
-                            .contains(&(recent.provider_id.clone(), recent.model_id.clone()))
-                        {
-                            continue;
-                        }
-                        if let Some(model) =
-                            model_lookup.get(&(recent.provider_id.clone(), recent.model_id.clone()))
-                        {
-                            recent_models.push(model.clone());
-                        }
-                    }
-
-                    for model in &recent_models {
-                        add_model_item(&mut items, model, "Recent");
-                    }
-
-                    let mut provider_models: std::collections::HashMap<String, Vec<ModelType>> =
-                        std::collections::HashMap::new();
-
-                    for model in models {
-                        let model_key = (model.provider_id.clone(), model.id.clone());
-                        if favorites_set.contains(&model_key) || recent_set.contains(&model_key) {
-                            continue;
-                        }
-
-                        if connected_providers.contains_key(&model.provider_id)
-                            && if let Some(filter) = &provider_filter {
-                                model.provider_id.contains(filter)
-                                    || model.provider_name.to_lowercase().contains(filter)
-                            } else {
-                                true
-                            }
-                        {
-                            provider_models
-                                .entry(model.provider_name.clone())
-                                .or_default()
-                                .push(model);
-                        }
-                    }
-
-                    for (provider_name, models_list) in provider_models {
-                        for model in &models_list {
-                            add_model_item(&mut items, model, &provider_name);
-                        }
-                    }
-
-                    items.sort_by(|a, b| {
-                        let is_a_special = a.group == "Favorite" || a.group == "Recent";
-                        let is_b_special = b.group == "Favorite" || b.group == "Recent";
-
-                        if is_a_special && !is_b_special {
-                            return std::cmp::Ordering::Less;
-                        }
-                        if !is_a_special && is_b_special {
-                            return std::cmp::Ordering::Greater;
-                        }
-
-                        if is_a_special && is_b_special {
-                            if a.group == "Favorite" && b.group != "Favorite" {
-                                return std::cmp::Ordering::Less;
-                            }
-                            if a.group != "Favorite" && b.group == "Favorite" {
-                                return std::cmp::Ordering::Greater;
-                            }
-                            return std::cmp::Ordering::Equal;
-                        }
-
-                        a.group.cmp(&b.group).then(a.name.cmp(&b.name))
-                    });
-
-                    if items.is_empty() {
-                        if let Some(filter) = provider_filter {
-                            CommandResult::Error(format!(
-                                "No models found for provider: {}",
-                                filter
-                            ))
+                        .collect(),
+                    Err(e) => {
+                        if has_ollama {
+                            push_toast(Toast::new(
+                                format!("Skipped models.dev models: {}", e),
+                                ToastLevel::Warning,
+                                Some(std::time::Duration::from_secs(3)),
+                            ));
+                            Vec::new()
                         } else {
-                            CommandResult::Error("No models available".to_string())
+                            return CommandResult::Error(format!("Failed to fetch models: {}", e));
                         }
+                    }
+                },
+                Err(e) => {
+                    if has_ollama {
+                        push_toast(Toast::new(
+                            format!("Skipped models.dev models: {}", e),
+                            ToastLevel::Warning,
+                            Some(std::time::Duration::from_secs(3)),
+                        ));
+                        Vec::new()
                     } else {
-                        CommandResult::ShowDialog {
-                            title: "Available Models".to_string(),
-                            items,
-                        }
+                        return CommandResult::Error(format!(
+                            "Failed to initialize model discovery: {}",
+                            e
+                        ));
                     }
                 }
-                Err(e) => CommandResult::Error(format!("Failed to fetch models: {}", e)),
-            },
-            Err(e) => CommandResult::Error(format!("Failed to initialize model discovery: {}", e)),
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mut ollama_error = None;
+        if has_ollama {
+            match crate::model::ollama::models_for_dialog_cached().await {
+                Ok(ollama_models) => models.extend(ollama_models),
+                Err(err) => ollama_error = Some(err.to_string()),
+            }
+        }
+
+        let prefs = prefs_data;
+
+        let mut model_lookup: std::collections::HashMap<(String, String), ModelType> =
+            std::collections::HashMap::new();
+
+        for model in &models {
+            if (connected_providers.contains_key(&model.provider_id)
+                || crate::model::ollama::is_ollama_provider(&model.provider_id))
+                && if let Some(filter) = &provider_filter {
+                    model.provider_id.contains(filter)
+                        || model.provider_name.to_lowercase().contains(filter)
+                } else {
+                    true
+                }
+            {
+                model_lookup.insert((model.provider_id.clone(), model.id.clone()), model.clone());
+            }
+        }
+
+        let favorites_set = prefs
+            .as_ref()
+            .map(|p| {
+                p.favorite
+                    .iter()
+                    .map(|m| (m.provider_id.clone(), m.model_id.clone()))
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+
+        let recent_set = prefs
+            .as_ref()
+            .map(|p| {
+                p.recent
+                    .iter()
+                    .map(|m| (m.provider_id.clone(), m.model_id.clone()))
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut items: Vec<DialogItem> = Vec::new();
+
+        let add_model_item = |items: &mut Vec<DialogItem>, model: &ModelType, group: &str| {
+            let is_active = active_model_id.as_ref() == Some(&model.id);
+            let is_favorite =
+                favorites_set.contains(&(model.provider_id.clone(), model.id.clone()));
+
+            let tip = if is_active {
+                Some("Active".to_string())
+            } else if is_favorite {
+                Some("❤︎".to_string())
+            } else {
+                None
+            };
+
+            let description = model.provider_name.clone();
+
+            items.push(DialogItem {
+                id: model.id.clone(),
+                name: model.name.clone(),
+                group: group.to_string(),
+                description,
+                tip,
+                provider_id: model.provider_id.clone(),
+            });
+        };
+
+        let favorites_list = prefs
+            .as_ref()
+            .map(|p| p.favorite.clone())
+            .unwrap_or_default();
+
+        let mut favorite_models = Vec::new();
+        for fav in &favorites_list {
+            if let Some(model) = model_lookup.get(&(fav.provider_id.clone(), fav.model_id.clone()))
+            {
+                favorite_models.push(model.clone());
+            }
+        }
+
+        for model in &favorite_models {
+            add_model_item(&mut items, model, "Favorite");
+        }
+
+        let recent_list = prefs.as_ref().map(|p| p.recent.clone()).unwrap_or_default();
+
+        let mut recent_models = Vec::new();
+        for recent in &recent_list {
+            if favorites_set.contains(&(recent.provider_id.clone(), recent.model_id.clone())) {
+                continue;
+            }
+            if let Some(model) =
+                model_lookup.get(&(recent.provider_id.clone(), recent.model_id.clone()))
+            {
+                recent_models.push(model.clone());
+            }
+        }
+
+        for model in &recent_models {
+            add_model_item(&mut items, model, "Recent");
+        }
+
+        let mut provider_models: std::collections::HashMap<String, Vec<ModelType>> =
+            std::collections::HashMap::new();
+
+        for model in models {
+            let model_key = (model.provider_id.clone(), model.id.clone());
+            if favorites_set.contains(&model_key) || recent_set.contains(&model_key) {
+                continue;
+            }
+
+            if (connected_providers.contains_key(&model.provider_id)
+                || crate::model::ollama::is_ollama_provider(&model.provider_id))
+                && if let Some(filter) = &provider_filter {
+                    model.provider_id.contains(filter)
+                        || model.provider_name.to_lowercase().contains(filter)
+                } else {
+                    true
+                }
+            {
+                provider_models
+                    .entry(model.provider_name.clone())
+                    .or_default()
+                    .push(model);
+            }
+        }
+
+        for (provider_name, models_list) in provider_models {
+            for model in &models_list {
+                add_model_item(&mut items, model, &provider_name);
+            }
+        }
+
+        items.sort_by(|a, b| {
+            let is_a_special = a.group == "Favorite" || a.group == "Recent";
+            let is_b_special = b.group == "Favorite" || b.group == "Recent";
+
+            if is_a_special && !is_b_special {
+                return std::cmp::Ordering::Less;
+            }
+            if !is_a_special && is_b_special {
+                return std::cmp::Ordering::Greater;
+            }
+
+            if is_a_special && is_b_special {
+                if a.group == "Favorite" && b.group != "Favorite" {
+                    return std::cmp::Ordering::Less;
+                }
+                if a.group != "Favorite" && b.group == "Favorite" {
+                    return std::cmp::Ordering::Greater;
+                }
+                return std::cmp::Ordering::Equal;
+            }
+
+            a.group.cmp(&b.group).then(a.name.cmp(&b.name))
+        });
+
+        if items.is_empty() {
+            let filter_matches_ollama = provider_filter_matches_ollama || provider_filter.is_none();
+
+            if has_ollama && filter_matches_ollama {
+                if let Some(err) = ollama_error {
+                    return CommandResult::Error(format!("Failed to fetch Ollama models: {}", err));
+                }
+            }
+
+            if let Some(filter) = provider_filter {
+                CommandResult::Error(format!("No models found for provider: {}", filter))
+            } else {
+                CommandResult::Error("No models available".to_string())
+            }
+        } else {
+            CommandResult::ShowDialog {
+                title: "Available Models".to_string(),
+                items,
+            }
         }
     })
 }
@@ -545,20 +606,44 @@ pub fn handle_refreshmodels<'a>(
             }
         };
 
-        let providers = match discovery.refresh_cache().await {
+        let (providers_result, ollama_result) = tokio::join!(
+            discovery.refresh_cache(),
+            crate::model::ollama::refresh_model_cache()
+        );
+
+        let mut providers = match providers_result {
             Ok(p) => p,
             Err(e) => {
                 push_toast(Toast::new(
-                    format!("Failed to refresh models cache: {}", e),
-                    ToastLevel::Error,
+                    format!("Skipped models.dev refresh: {}", e),
+                    ToastLevel::Warning,
                     Some(std::time::Duration::from_secs(3)),
                 ));
-                return CommandResult::Success(String::new());
+                std::collections::HashMap::new()
             }
         };
 
+        let ollama_model_count = match ollama_result {
+            Ok(models) => models.len(),
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Skipped Ollama refresh: {}", err),
+                    ToastLevel::Warning,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+                0
+            }
+        };
+
+        crate::model::ollama::inject_provider(&mut providers);
+
         let provider_count = providers.len();
-        let model_count: usize = providers.values().map(|p| p.models.len()).sum();
+        let model_count: usize = providers
+            .values()
+            .filter(|p| !crate::model::ollama::is_ollama_provider(&p.id))
+            .map(|p| p.models.len())
+            .sum::<usize>()
+            + ollama_model_count;
 
         push_toast(Toast::new(
             format!(
@@ -858,7 +943,11 @@ mod tests {
         match result {
             CommandResult::ShowDialog { title, items } => {
                 assert_eq!(title, "Connect a provider");
-                assert!(!items.is_empty());
+                assert!(items.iter().any(|item| {
+                    item.id == crate::model::ollama::PROVIDER_ID
+                        && item.name == crate::model::ollama::PROVIDER_NAME
+                        && item.group == "Local"
+                }));
                 if items.len() >= 4 {
                     assert!(items.iter().any(|item| item.id == "anthropic"
                         || item.id == "openai"
@@ -915,6 +1004,39 @@ mod tests {
             _ => panic!("Expected ShowDialog or Error"),
         }
         let _ = crate::model::discovery::Discovery::cleanup_test();
+    }
+
+    #[tokio::test]
+    async fn test_handle_models_shows_ollama_without_connection() {
+        let _ = crate::persistence::AuthDAO::cleanup_test();
+        crate::model::ollama::set_cached_models_for_test(vec![crate::model::ollama::OllamaModel {
+            id: "llama3.2:latest".to_string(),
+            name: "llama3.2:latest".to_string(),
+        }]);
+
+        let parsed = ParsedCommand {
+            name: "models".to_string(),
+            args: vec![],
+            raw: "/models".to_string(),
+            prefs_dao: None,
+            active_model_id: None,
+        };
+        let mut session_manager = SessionManager::new();
+        let result = handle_models(&parsed, &mut session_manager).await;
+
+        match result {
+            CommandResult::ShowDialog { title, items } => {
+                assert_eq!(title, "Available Models");
+                assert!(items.iter().any(|item| {
+                    item.id == "llama3.2:latest"
+                        && item.provider_id == crate::model::ollama::PROVIDER_ID
+                }));
+            }
+            other => panic!("Expected Ollama models dialog, got {:?}", other),
+        }
+
+        crate::model::ollama::clear_cache_for_test();
+        let _ = crate::persistence::AuthDAO::cleanup_test();
     }
 
     #[tokio::test]

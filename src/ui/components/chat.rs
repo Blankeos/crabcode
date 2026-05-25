@@ -70,6 +70,7 @@ pub struct Chat {
     cached_fingerprint: u64,
     tool_marker_animation_phase: bool,
     hovered_image: Option<ChatImageTarget>,
+    hovered_hyperlink: Option<ChatHyperlinkHover>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +79,12 @@ pub struct ChatImageTarget {
     pub image_index: usize,
     pub placeholder: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatHyperlinkHover {
+    content_line: usize,
+    range: crate::ui::hyperlink::HyperlinkRange,
 }
 
 // Minimum elapsed time before showing tokens/s (250ms)
@@ -692,6 +699,7 @@ impl Chat {
             cached_fingerprint: 0,
             tool_marker_animation_phase: false,
             hovered_image: None,
+            hovered_hyperlink: None,
         }
     }
 
@@ -733,6 +741,7 @@ impl Chat {
             cached_fingerprint: 0,
             tool_marker_animation_phase: false,
             hovered_image: None,
+            hovered_hyperlink: None,
         }
     }
 
@@ -885,6 +894,7 @@ impl Chat {
         self.selection.reset();
         self.pending_click_anchor = None;
         self.hovered_image = None;
+        self.hovered_hyperlink = None;
         self.cached_lines.clear();
         self.cached_positions.clear();
         self.cached_revision = 0;
@@ -1258,6 +1268,18 @@ impl Chat {
         self.set_hovered_image(None)
     }
 
+    pub fn set_hovered_hyperlink(&mut self, target: Option<ChatHyperlinkHover>) -> bool {
+        if self.hovered_hyperlink == target {
+            return false;
+        }
+        self.hovered_hyperlink = target;
+        true
+    }
+
+    pub fn clear_hovered_hyperlink(&mut self) -> bool {
+        self.set_hovered_hyperlink(None)
+    }
+
     pub fn image_at_position(&self, event: MouseEvent, area: Rect) -> Option<ChatImageTarget> {
         use ratatui::layout::Position;
 
@@ -1313,6 +1335,37 @@ impl Chat {
 
         self.resolve_hyperlink_target(content_line, &range)
             .or_else(|| Some(range.target))
+    }
+
+    pub fn hyperlink_hover_at_position(
+        &self,
+        event: MouseEvent,
+        area: Rect,
+    ) -> Option<ChatHyperlinkHover> {
+        use ratatui::layout::Position;
+
+        let point = Position::new(event.column, event.row);
+        let content_area = Self::content_area_for(area);
+
+        if !content_area.contains(point) || self.cached_lines.is_empty() {
+            return None;
+        }
+
+        let content_line =
+            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_col = event.column.saturating_sub(content_area.x) as usize;
+        let line = self.cached_lines.get(content_line)?;
+        let range = crate::ui::hyperlink::hyperlink_range_at_line_col(line, content_col)?;
+
+        let clickable = self
+            .resolve_hyperlink_target(content_line, &range)
+            .or_else(|| Some(range.target.clone()))
+            .is_some();
+
+        clickable.then_some(ChatHyperlinkHover {
+            content_line,
+            range,
+        })
     }
 
     fn resolve_hyperlink_target(
@@ -1856,11 +1909,16 @@ impl Chat {
         let paragraph = Paragraph::new(Text::from(content_lines));
 
         f.render_widget(paragraph, render_area);
-        crate::ui::hyperlink::mark_detected_hyperlinks(
-            f.buffer_mut(),
-            render_area,
-            &all_lines[visible_start..visible_end],
-        );
+        if let Some(hovered) = &self.hovered_hyperlink {
+            if hovered.content_line >= visible_start && hovered.content_line < visible_end {
+                crate::ui::hyperlink::mark_hyperlink_range(
+                    f.buffer_mut(),
+                    render_area,
+                    hovered.content_line - visible_start,
+                    &hovered.range,
+                );
+            }
+        }
 
         self.content_height = content_height;
         self.message_line_positions = positions.to_vec();
@@ -4295,6 +4353,59 @@ mod tests {
                 panic!("expected file target, got {url}");
             }
         }
+    }
+
+    #[test]
+    fn test_hyperlink_underline_only_renders_on_hover() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = test_colors();
+        let mut chat = Chat::with_messages(vec![Message::assistant("open src/ui/hyperlink.rs")]);
+        let area = Rect::new(0, 0, 80, 10);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(!(0..area.height).any(|y| {
+            (0..area.width).any(|x| buffer[(x, y)].modifier.contains(Modifier::UNDERLINED))
+        }));
+
+        let (line_idx, col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find("src/ui/hyperlink.rs")
+                    .map(|col| (line_idx, col as u16))
+            })
+            .expect("path position");
+        let hover = chat
+            .hyperlink_hover_at_position(
+                mouse(
+                    MouseEventKind::Moved,
+                    col,
+                    line_idx as u16,
+                    KeyModifiers::empty(),
+                ),
+                area,
+            )
+            .expect("hyperlink hover");
+        chat.set_hovered_hyperlink(Some(hover));
+
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let underlined = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].modifier.contains(Modifier::UNDERLINED))
+            .count();
+
+        assert_eq!(underlined, "src/ui/hyperlink.rs".len());
     }
 
     #[test]

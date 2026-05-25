@@ -593,12 +593,17 @@ async fn prepare_request_config(
     let auth_dao = crate::persistence::AuthDAO::new()?;
     let auth_config = auth_dao.get_provider(provider_name)?;
 
-    let discovery = crate::model::discovery::Discovery::new()?;
-    let providers = discovery.fetch_providers().await?;
+    let provider = if crate::model::ollama::is_ollama_provider(provider_name) {
+        crate::model::ollama::provider()
+    } else {
+        let discovery = crate::model::discovery::Discovery::new()?;
+        let providers = discovery.fetch_providers().await?;
 
-    let provider = providers
-        .get(provider_name)
-        .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?;
+        providers
+            .get(provider_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?
+    };
 
     let provider_kind = ProviderKind::from_provider(provider_name, &provider.npm);
     let mut request_config = ProviderRequestConfig::new(
@@ -619,7 +624,8 @@ async fn prepare_request_config(
     )
     .await;
 
-    if request_config.api_key.is_none() {
+    if request_config.api_key.is_none() && !crate::model::ollama::is_ollama_provider(provider_name)
+    {
         send_warning(
             sender,
             format!(
@@ -643,6 +649,7 @@ async fn prepare_request_config(
 fn configured_api_key(auth_config: Option<&crate::persistence::AuthConfig>) -> Option<String> {
     auth_config.and_then(|config| match config {
         crate::persistence::AuthConfig::Api { key } => Some(key.clone()),
+        crate::persistence::AuthConfig::Local => None,
         crate::persistence::AuthConfig::OAuth { access, .. } => Some(access.clone()),
     })
 }

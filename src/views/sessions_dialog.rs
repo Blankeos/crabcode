@@ -102,6 +102,18 @@ impl SessionsDialogState {
         self.workspace_group_ids = group_ids;
     }
 
+    pub fn focus_workspace(&mut self, workspace_id: i64) -> bool {
+        let Some(group) = self
+            .workspace_group_ids
+            .iter()
+            .find_map(|(group, id)| (*id == workspace_id).then(|| group.clone()))
+        else {
+            return false;
+        };
+
+        self.dialog.focus_group_header(&group)
+    }
+
     fn focused_workspace_group(&self) -> Option<(String, i64)> {
         let group = self.dialog.get_focused_group_header()?.to_string();
         let workspace_id = self.workspace_group_ids.get(&group).copied()?;

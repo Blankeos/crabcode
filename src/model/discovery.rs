@@ -205,16 +205,14 @@ impl Discovery {
     }
 
     pub async fn fetch_providers(&self) -> Result<HashMap<String, Provider>> {
-        if let Some(cached) = self.load_from_cache()? {
-            return Ok(cached);
-        }
-
-        // In test mode, avoid hard network dependency so unit tests are reliable.
-        if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+        let mut providers = if let Some(cached) = self.load_from_cache()? {
+            cached
+        } else if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+            // In test mode, avoid hard network dependency so unit tests are reliable.
             match self.fetch_from_api().await {
                 Ok(providers) => {
                     let _ = self.save_to_cache(&providers);
-                    return Ok(providers);
+                    providers
                 }
                 Err(_) => {
                     let mut providers: HashMap<String, Provider> = HashMap::new();
@@ -237,30 +235,40 @@ impl Discovery {
                             },
                         );
                     }
-                    return Ok(providers);
+                    providers
                 }
             }
-        }
+        } else {
+            let providers = self.fetch_from_api().await?;
+            self.save_to_cache(&providers)?;
+            providers
+        };
 
-        let providers = self.fetch_from_api().await?;
-
-        self.save_to_cache(&providers)?;
+        crate::model::ollama::inject_provider(&mut providers);
 
         Ok(providers)
     }
 
     pub async fn refresh_cache(&self) -> Result<HashMap<String, Provider>> {
-        let providers = self.fetch_from_api().await?;
+        let mut providers = self.fetch_from_api().await?;
         self.save_to_cache(&providers)?;
+        crate::model::ollama::inject_provider(&mut providers);
         Ok(providers)
     }
 
     pub async fn fetch_models(&self) -> Result<Vec<crate::model::types::Model>> {
-        let providers = self.fetch_providers().await?;
-
-        let mut models = Vec::new();
+        let mut models = crate::model::ollama::models_from_runtime_cache();
+        let providers = match self.fetch_providers().await {
+            Ok(providers) => providers,
+            Err(_err) if !models.is_empty() => return Ok(models),
+            Err(err) => return Err(err),
+        };
 
         for (provider_id, provider) in providers {
+            if crate::model::ollama::is_ollama_provider(&provider_id) {
+                continue;
+            }
+
             for (model_id, model) in provider.models {
                 let mut capabilities = Vec::new();
 

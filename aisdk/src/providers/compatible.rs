@@ -65,7 +65,7 @@ impl OpenAICompatibleBuilder {
             base_url: self
                 .base_url
                 .ok_or(Error::MissingField("base_url".into()))?,
-            api_key: self.api_key.ok_or(Error::MissingField("api_key".into()))?,
+            api_key: self.api_key.unwrap_or_default(),
             model_name: self
                 .model_name
                 .ok_or(Error::MissingField("model_name".into()))?,
@@ -422,6 +422,18 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn builder_allows_missing_api_key() {
+        let provider = OpenAICompatible::builder()
+            .base_url("http://localhost:11434/v1")
+            .model_name("llama3.2:latest")
+            .provider_name("ollama")
+            .build()
+            .expect("api key should be optional");
+
+        assert!(provider.api_key.is_empty());
     }
 
     #[test]

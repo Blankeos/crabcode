@@ -11,6 +11,8 @@ use super::{ensure_data_dir, get_data_dir};
 pub enum AuthConfig {
     #[serde(rename = "api")]
     Api { key: String },
+    #[serde(rename = "local")]
+    Local,
     #[serde(rename = "oauth")]
     OAuth {
         refresh: String,
@@ -140,6 +142,7 @@ impl AuthDAO {
         let providers = self.load()?;
         Ok(providers.get(name).and_then(|c| match c {
             AuthConfig::Api { key } => Some(key.clone()),
+            AuthConfig::Local => None,
             AuthConfig::OAuth { access, .. } => Some(access.clone()),
         }))
     }
