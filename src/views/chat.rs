@@ -1,11 +1,12 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     symbols::border,
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::ThemeColors;
 use crate::ui::components::chat::Chat;
@@ -14,6 +15,9 @@ use crate::ui::components::status_bar::StatusBar;
 use crate::ui::components::wave_spinner::WaveSpinner;
 
 pub const SUBAGENT_FOOTER_HEIGHT: u16 = 3;
+const QUEUED_MESSAGES_MAX_VISIBLE: usize = 3;
+const QUEUED_MESSAGES_TOP_PADDING: u16 = 1;
+const QUEUED_MESSAGES_BOTTOM_PADDING: u16 = 1;
 
 #[derive(Debug)]
 pub struct ChatState {
@@ -79,6 +83,7 @@ pub fn render_chat(
     is_compacting: bool,
     usage_text: &str,
     subagent_tabs: Option<SubagentTabs>,
+    queued_messages: &[String],
 ) {
     let size = f.area();
     let is_subagent_view = subagent_tabs
@@ -96,6 +101,11 @@ pub fn render_chat(
         input.get_height_for_width(size.width)
     };
     let help_height = if is_subagent_view { 0 } else { 1 };
+    let queue_height = if is_subagent_view {
+        0
+    } else {
+        queued_messages_height(queued_messages)
+    };
     let above_status_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -103,6 +113,7 @@ pub fn render_chat(
                 Constraint::Length(0), // Reserved subagent header removed
                 Constraint::Min(0),    // Chat content
                 Constraint::Length(0), // Bottom padding
+                Constraint::Length(queue_height),
                 Constraint::Length(input_height),
                 Constraint::Length(help_height),
                 Constraint::Length(1),
@@ -119,7 +130,7 @@ pub fn render_chat(
         if let Some(tabs) = subagent_tabs.as_ref() {
             render_subagent_footer(
                 f,
-                above_status_chunks[3],
+                above_status_chunks[4],
                 tabs,
                 usage_text,
                 colors,
@@ -129,9 +140,11 @@ pub fn render_chat(
             );
         }
     } else {
+        render_queued_messages(f, above_status_chunks[3], queued_messages, &agent, colors);
+
         input.render(
             f,
-            above_status_chunks[3],
+            above_status_chunks[4],
             &agent,
             &model,
             &provider_name,
@@ -142,7 +155,7 @@ pub fn render_chat(
 
     if is_subagent_view {
         let blank = Block::default();
-        f.render_widget(blank, above_status_chunks[5]);
+        f.render_widget(blank, above_status_chunks[6]);
 
         let status_bar = StatusBar::new(version, cwd, branch, agent, model);
         status_bar.render(f, main_chunks[1], colors);
@@ -155,7 +168,7 @@ pub fn render_chat(
     ];
     let help_line = Line::from(help_text);
     let help_width = help_line.width() as u16;
-    let available_width = above_status_chunks[4].width;
+    let available_width = above_status_chunks[5].width;
     let help_width = help_width.min(available_width);
 
     let usage_width = if !usage_text.is_empty() {
@@ -170,7 +183,7 @@ pub fn render_chat(
             Constraint::Length(usage_width),
             Constraint::Length(help_width),
         ])
-        .split(above_status_chunks[4]);
+        .split(above_status_chunks[5]);
 
     if is_streaming {
         let agent_color = crate::theme::agent_color(&agent, colors);
@@ -233,10 +246,174 @@ pub fn render_chat(
     f.render_widget(help, status_chunks[2]);
 
     let blank = Block::default();
-    f.render_widget(blank, above_status_chunks[5]);
+    f.render_widget(blank, above_status_chunks[6]);
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
     status_bar.render(f, main_chunks[1], colors);
+}
+
+pub fn queued_messages_height(messages: &[String]) -> u16 {
+    if messages.is_empty() {
+        return 0;
+    }
+
+    let visible_messages = messages.len().min(QUEUED_MESSAGES_MAX_VISIBLE);
+    let overflow_line = usize::from(messages.len() > QUEUED_MESSAGES_MAX_VISIBLE);
+    QUEUED_MESSAGES_TOP_PADDING
+        + (1 + visible_messages + overflow_line) as u16
+        + QUEUED_MESSAGES_BOTTOM_PADDING
+}
+
+fn render_queued_messages(
+    f: &mut Frame,
+    area: Rect,
+    messages: &[String],
+    agent: &str,
+    colors: &ThemeColors,
+) {
+    if messages.is_empty() || area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let agent_color = crate::theme::agent_color(agent, colors);
+    let border_set = border::Set {
+        vertical_left: "┃",
+        ..border::PLAIN
+    };
+    let border = Block::new()
+        .borders(Borders::LEFT)
+        .border_set(border_set)
+        .border_style(Style::default().fg(agent_color));
+    let inner_area = border.inner(area);
+    let queue_bg = queued_messages_background(colors);
+    let bg = Block::default().style(Style::default().bg(queue_bg));
+    f.render_widget(bg, area);
+    f.render_widget(border, area);
+
+    let content_area = Rect {
+        x: inner_area.x.saturating_add(2),
+        y: inner_area.y.saturating_add(QUEUED_MESSAGES_TOP_PADDING),
+        width: inner_area.width.saturating_sub(3),
+        height: inner_area
+            .height
+            .saturating_sub(QUEUED_MESSAGES_TOP_PADDING + QUEUED_MESSAGES_BOTTOM_PADDING),
+    };
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+
+    let mut lines = Vec::new();
+    let hint = "esc to interrupt and send immediately";
+    let title = "Messages to submit after next tool call";
+    let title_width = 2 + UnicodeWidthStr::width(title);
+    let hint_width = UnicodeWidthStr::width(hint);
+    let show_hint = content_area.width as usize >= title_width + hint_width + 4;
+
+    let mut header_spans = vec![
+        Span::styled("•", Style::default().fg(agent_color)),
+        Span::raw(" "),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if show_hint {
+        let spacer_width = content_area
+            .width
+            .saturating_sub((title_width + hint_width) as u16);
+        header_spans.push(Span::raw(" ".repeat(spacer_width as usize)));
+        header_spans.push(Span::styled(
+            hint,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    lines.push(Line::from(header_spans));
+
+    let message_width = content_area.width.saturating_sub(4) as usize;
+    for message in messages.iter().take(QUEUED_MESSAGES_MAX_VISIBLE) {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("↳", Style::default().fg(colors.text_weak)),
+            Span::raw(" "),
+            Span::styled(
+                truncate_to_width(message, message_width),
+                Style::default().fg(colors.text_weak),
+            ),
+        ]));
+    }
+
+    if messages.len() > QUEUED_MESSAGES_MAX_VISIBLE {
+        let more = messages.len() - QUEUED_MESSAGES_MAX_VISIBLE;
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("↳", Style::default().fg(colors.text_weak)),
+            Span::raw(" "),
+            Span::styled(
+                format!("+{} more", more),
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]));
+    }
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).style(Style::default().bg(queue_bg)),
+        content_area,
+    );
+}
+
+fn queued_messages_background(colors: &ThemeColors) -> Color {
+    match colors.background_element {
+        Color::Rgb(r, g, b) => {
+            let luminance = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+            if luminance > 235.0 {
+                Color::Rgb(
+                    r.saturating_sub(14),
+                    g.saturating_sub(14),
+                    b.saturating_sub(14),
+                )
+            } else {
+                Color::Rgb(
+                    r.saturating_add(14),
+                    g.saturating_add(14),
+                    b.saturating_add(14),
+                )
+            }
+        }
+        _ if colors.dialog_background != colors.background_element => colors.dialog_background,
+        _ => colors.background,
+    }
+}
+
+fn truncate_to_width(value: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= max_width {
+        return value.to_string();
+    }
+
+    let ellipsis = "...";
+    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+    if max_width <= ellipsis_width {
+        return ".".repeat(max_width);
+    }
+
+    let mut rendered = String::new();
+    let mut width = 0;
+    let target_width = max_width - ellipsis_width;
+    for ch in value.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + char_width > target_width {
+            break;
+        }
+        width += char_width;
+        rendered.push(ch);
+    }
+    rendered.push_str(ellipsis);
+    rendered
 }
 
 fn render_subagent_footer(

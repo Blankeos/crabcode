@@ -17,7 +17,8 @@ use crate::ui::components::popup::Popup;
 use crate::utils::git;
 
 use crate::views::chat::{
-    agent_color_for_tab, init_chat, render_chat, SubagentTab, SubagentTabs, SUBAGENT_FOOTER_HEIGHT,
+    agent_color_for_tab, init_chat, queued_messages_height, render_chat, SubagentTab, SubagentTabs,
+    SUBAGENT_FOOTER_HEIGHT,
 };
 use crate::views::command_palette::{
     handle_command_palette_key_event, handle_command_palette_mouse_event, init_command_palette,
@@ -184,7 +185,14 @@ struct ClientSessionState {
     stream: Option<SessionStreamState>,
     external_stream: Option<ExternalStreamState>,
     tool_calls: ToolCallViewState,
+    queued_messages: std::collections::VecDeque<QueuedUserMessage>,
     unread_completed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct QueuedUserMessage {
+    text: String,
+    image_paths: Vec<std::path::PathBuf>,
 }
 
 impl ClientSessionState {
@@ -195,6 +203,7 @@ impl ClientSessionState {
             stream: None,
             external_stream: None,
             tool_calls: ToolCallViewState::default(),
+            queued_messages: std::collections::VecDeque::new(),
             unread_completed: false,
         }
     }
@@ -225,6 +234,7 @@ pub struct App {
     pub storage_dialog_state: StorageDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
+    esc_timeline_primed: bool,
     pub message_actions_index: Option<usize>,
     pub message_actions_dialog: Option<crate::ui::components::dialog::Dialog>,
     message_actions_return_focus: OverlayFocus,
@@ -444,6 +454,7 @@ impl App {
             storage_dialog_state,
             which_key_state,
             timeline_dialog_state,
+            esc_timeline_primed: false,
             message_actions_index: None,
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
@@ -681,6 +692,12 @@ impl App {
         } else {
             BaseFocus::Chat
         };
+        if !is_child_session
+            && self.has_queued_messages_for_session(session_id)
+            && !self.session_has_active_stream(session_id)
+        {
+            self.submit_queued_messages_for_session(session_id);
+        }
         true
     }
 
@@ -860,6 +877,74 @@ impl App {
         self.session_view_states
             .get_mut(session_id)
             .and_then(|state| state.stream.as_mut())
+    }
+
+    fn session_has_active_stream(&self, session_id: &str) -> bool {
+        self.session_view_states
+            .get(session_id)
+            .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some())
+    }
+
+    fn queued_message_previews_for_current_session(&self) -> Vec<String> {
+        let Some(session_id) = self.session_manager.get_current_session_id() else {
+            return Vec::new();
+        };
+
+        self.session_view_states
+            .get(session_id)
+            .map(|state| {
+                state
+                    .queued_messages
+                    .iter()
+                    .map(Self::queued_message_preview)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn queued_message_preview(message: &QueuedUserMessage) -> String {
+        if !message.text.trim().is_empty() {
+            return message.text.replace('\n', " ");
+        }
+
+        match message.image_paths.len() {
+            0 => String::new(),
+            1 => "[Image]".to_string(),
+            count => format!("[{} images]", count),
+        }
+    }
+
+    fn has_queued_messages_for_session(&self, session_id: &str) -> bool {
+        self.session_view_states
+            .get(session_id)
+            .is_some_and(|state| !state.queued_messages.is_empty())
+    }
+
+    fn queue_message_for_current_session(
+        &mut self,
+        text: String,
+        image_paths: Vec<std::path::PathBuf>,
+    ) -> bool {
+        let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
+            return false;
+        };
+
+        self.ensure_session_view_state(&session_id);
+        if let Some(state) = self.session_view_states.get_mut(&session_id) {
+            state
+                .queued_messages
+                .push_back(QueuedUserMessage { text, image_paths });
+            return true;
+        }
+
+        false
+    }
+
+    fn drain_queued_messages_for_session(&mut self, session_id: &str) -> Vec<QueuedUserMessage> {
+        self.session_view_states
+            .get_mut(session_id)
+            .map(|state| state.queued_messages.drain(..).collect())
+            .unwrap_or_default()
     }
 
     fn streaming_boundary_for_session(
@@ -1252,6 +1337,12 @@ impl App {
         } else {
             1
         };
+        let queued_messages = self.queued_message_previews_for_current_session();
+        let queue_height = if self.is_subagent_session_active() {
+            0
+        } else {
+            queued_messages_height(&queued_messages)
+        };
         let above_status_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints(
@@ -1259,6 +1350,7 @@ impl App {
                     ratatui::layout::Constraint::Length(0),
                     ratatui::layout::Constraint::Min(0),
                     ratatui::layout::Constraint::Length(0),
+                    ratatui::layout::Constraint::Length(queue_height),
                     ratatui::layout::Constraint::Length(input_height),
                     ratatui::layout::Constraint::Length(help_height),
                     ratatui::layout::Constraint::Length(1),
@@ -1271,6 +1363,10 @@ impl App {
     }
 
     pub fn handle_keys(&mut self, key: KeyEvent) {
+        if key.code != KeyCode::Esc {
+            self.reset_esc_timeline_state();
+        }
+
         if key.code == KeyCode::Char('p')
             && key.modifiers == event::KeyModifiers::CONTROL
             && matches!(
@@ -1976,19 +2072,28 @@ impl App {
             KeyCode::Esc => {
                 // If text is selected, clear selection first
                 if self.clear_selection() {
+                    self.reset_esc_timeline_state();
                     return true;
                 }
                 if self.is_streaming {
+                    self.reset_esc_timeline_state();
+                    if let Some(session_id) = self.session_manager.get_current_session_id().cloned()
+                    {
+                        if self.interrupt_streaming_to_send_queued_for_session(&session_id) {
+                            return true;
+                        }
+                    }
                     self.cancel_streaming();
                     return true;
                 }
                 if self.overlay_focus == OverlayFocus::SuggestionsPopup {
+                    self.reset_esc_timeline_state();
                     self.input.clear();
                     clear_suggestions(&mut self.suggestions_popup_state);
                     self.overlay_focus = OverlayFocus::None;
                     true
                 } else {
-                    false
+                    self.handle_timeline_esc_key(key)
                 }
             }
             KeyCode::Enter if key.modifiers == event::KeyModifiers::NONE => {
@@ -2015,6 +2120,30 @@ impl App {
         self.chat_state.wave_spinner.set_color(agent_color);
     }
 
+    fn reset_esc_timeline_state(&mut self) {
+        self.esc_timeline_primed = false;
+    }
+
+    fn handle_timeline_esc_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers != event::KeyModifiers::NONE
+            || self.base_focus != BaseFocus::Chat
+            || !self.input.is_empty()
+            || self.is_subagent_session_active()
+        {
+            self.reset_esc_timeline_state();
+            return false;
+        }
+
+        if self.esc_timeline_primed {
+            self.reset_esc_timeline_state();
+            self.open_timeline_dialog();
+        } else {
+            self.esc_timeline_primed = true;
+        }
+
+        true
+    }
+
     fn handle_input_and_app_keys(&mut self, key: KeyEvent) {
         // If chat text is selected and user presses a key, clear the selection
         // (unless it's Ctrl+C or Escape which are handled earlier)
@@ -2034,10 +2163,6 @@ impl App {
                     use crate::command::parser::parse_input;
 
                     let input_type = parse_input(&input_text);
-                    if !Self::can_submit_input(&input_type, self.is_streaming) {
-                        return;
-                    }
-
                     match input_type {
                         crate::command::parser::InputType::Command(parsed) => {
                             // Don't save commands to prompt history
@@ -2051,7 +2176,20 @@ impl App {
                             if image_paths.is_empty() {
                                 self.input.save_current_to_history();
                             }
-                            self.handle_message_input_with_images(msg, image_paths);
+                            let active_session_streaming = self
+                                .session_manager
+                                .get_current_session_id()
+                                .is_some_and(|id| self.session_has_active_stream(id));
+                            if self.is_streaming && active_session_streaming {
+                                self.queue_message_for_current_session(
+                                    msg.to_string(),
+                                    image_paths,
+                                );
+                            } else if !self.is_streaming {
+                                self.handle_message_input_with_images(msg, image_paths);
+                            } else {
+                                return;
+                            }
                         }
                     }
 
@@ -2094,18 +2232,26 @@ impl App {
             .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
             .split(self.last_frame_size);
         let input_height = self.input.get_height_for_width(self.last_frame_size.width);
+        let queued_messages = self.queued_message_previews_for_current_session();
+        let queue_height =
+            if self.base_focus == BaseFocus::Chat && !self.is_subagent_session_active() {
+                queued_messages_height(&queued_messages)
+            } else {
+                0
+            };
         let input_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints(
                 [
                     ratatui::layout::Constraint::Min(0),
+                    ratatui::layout::Constraint::Length(queue_height),
                     ratatui::layout::Constraint::Length(input_height),
                 ]
                 .as_ref(),
             )
             .split(main_chunks[0]);
 
-        input_chunks[1]
+        input_chunks[2]
     }
 
     fn handle_input_mouse_event(&mut self, mouse: MouseEvent) -> bool {
@@ -3693,6 +3839,8 @@ impl App {
     }
 
     fn open_timeline_dialog(&mut self) {
+        self.reset_esc_timeline_state();
+
         let messages: Vec<crate::session::types::Message> =
             match self.session_manager.get_current_session() {
                 Some(s) => s.messages.clone(),
@@ -4694,9 +4842,36 @@ impl App {
             return;
         };
 
+        self.cancel_streaming_for_session(&session_id);
+    }
+
+    fn cancel_streaming_for_session(&mut self, session_id: &str) {
         if let Some(stream) = self.stream_for_session_mut(&session_id) {
             stream.cancel_token.cancel();
         }
+    }
+
+    fn interrupt_streaming_to_send_queued_for_session(&mut self, session_id: &str) -> bool {
+        if !self.is_active_session(session_id)
+            || !self.has_queued_messages_for_session(session_id)
+            || !self.session_has_active_stream(session_id)
+        {
+            return false;
+        }
+
+        self.cancel_streaming_for_session(session_id);
+        self.mark_streamed_assistant_interrupted(session_id);
+        let _ = self.finalize_and_persist_streamed_messages(
+            session_id,
+            Some("Streaming interrupted to send queued messages"),
+        );
+        let _ = self.session_manager.set_session_status(
+            session_id,
+            crate::session::types::SessionStatus::Interrupted,
+            None,
+        );
+        self.cleanup_streaming_for_session(session_id);
+        self.submit_queued_messages_for_session(session_id)
     }
 
     pub fn update_animations(&mut self) {
@@ -4758,8 +4933,16 @@ impl App {
                 }
             }
 
+            let mut keep_current_stream = true;
             for chunk in chunks {
-                self.process_streaming_chunk_for_session(&session_id, chunk);
+                if !self.process_streaming_chunk_for_session(&session_id, chunk) {
+                    keep_current_stream = false;
+                    break;
+                }
+            }
+
+            if !keep_current_stream {
+                disconnected = false;
             }
 
             if disconnected
@@ -4793,36 +4976,43 @@ impl App {
         &mut self,
         session_id: &str,
         chunk: crate::llm::ChunkMessage,
-    ) {
+    ) -> bool {
         match chunk {
             crate::llm::ChunkMessage::Text(text) => {
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.append_to_last_assistant(&text);
                 }
+                true
             }
             crate::llm::ChunkMessage::Reasoning(reasoning) => {
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.append_reasoning_to_last_assistant(&reasoning);
                 }
+                true
             }
             crate::llm::ChunkMessage::Warning(msg) => {
                 push_toast(Toast::new(msg, ToastLevel::Warning, None));
+                true
             }
             crate::llm::ChunkMessage::End => {
                 self.finish_streaming_session(session_id);
+                false
             }
             crate::llm::ChunkMessage::Failed(error) => {
                 self.fail_streaming_session(session_id, error);
+                false
             }
             crate::llm::ChunkMessage::Cancelled => {
                 self.cancelled_streaming_session(session_id);
+                false
             }
-            crate::llm::ChunkMessage::Metrics { .. } => {}
+            crate::llm::ChunkMessage::Metrics { .. } => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.add_tool_calls_to_session(session_id, tool_calls);
+                true
             }
             crate::llm::ChunkMessage::ToolResult(result) => {
-                self.add_tool_result_to_session(session_id, result);
+                self.add_tool_result_to_session(session_id, result)
             }
             crate::llm::ChunkMessage::SubagentStarted {
                 parent_session_id,
@@ -4840,9 +5030,11 @@ impl App {
                     description,
                     prompt,
                 );
+                true
             }
             crate::llm::ChunkMessage::SubagentChunk { session_id, chunk } => {
-                self.process_streaming_chunk_for_session(&session_id, *chunk);
+                let _ = self.process_streaming_chunk_for_session(&session_id, *chunk);
+                true
             }
             crate::llm::ChunkMessage::PermissionRequest(prompt) => {
                 let _ = self.session_manager.set_session_status(
@@ -4859,6 +5051,7 @@ impl App {
                 }
                 self.permission_dialog_state.enqueue(prompt);
                 self.overlay_focus = OverlayFocus::PermissionDialog;
+                true
             }
             crate::llm::ChunkMessage::QuestionRequest {
                 questions,
@@ -4878,6 +5071,7 @@ impl App {
                 }
                 self.question_dialog_state.enqueue(questions, response_tx);
                 self.overlay_focus = OverlayFocus::QuestionDialog;
+                true
             }
         }
     }
@@ -4969,6 +5163,9 @@ impl App {
         }
 
         self.cleanup_streaming_for_session(session_id);
+        if self.submit_queued_messages_for_session(session_id) {
+            return;
+        }
         self.play_sound_event_with_notification_detail(
             crate::sound::SoundEvent::Complete,
             completion_stats.as_deref(),
@@ -4992,14 +5189,14 @@ impl App {
         true
     }
 
-    fn finish_deferred_streaming_session_if_ready(&mut self, session_id: &str) {
+    fn finish_deferred_streaming_session_if_ready(&mut self, session_id: &str) -> bool {
         let deferred = self
             .session_view_states
             .get(session_id)
             .is_some_and(|state| state.tool_calls.deferred_finish);
 
         if !deferred || self.session_has_running_tool_messages(session_id) {
-            return;
+            return false;
         }
 
         if let Some(state) = self.session_view_states.get_mut(session_id) {
@@ -5007,6 +5204,7 @@ impl App {
         }
 
         self.finish_streaming_session(session_id);
+        true
     }
 
     fn session_has_running_tool_messages(&self, session_id: &str) -> bool {
@@ -5148,6 +5346,7 @@ impl App {
             None,
         ));
         self.cleanup_streaming_for_session(session_id);
+        self.submit_queued_messages_for_session(session_id);
     }
 
     fn cancelled_streaming_session(&mut self, session_id: &str) {
@@ -5168,6 +5367,7 @@ impl App {
 
         push_toast(Toast::new("Streaming cancelled", ToastLevel::Info, None));
         self.cleanup_streaming_for_session(session_id);
+        self.submit_queued_messages_for_session(session_id);
     }
 
     fn add_tool_calls_to_session(
@@ -5222,7 +5422,11 @@ impl App {
         }
     }
 
-    fn add_tool_result_to_session(&mut self, session_id: &str, result: crate::llm::ToolCallResult) {
+    fn add_tool_result_to_session(
+        &mut self,
+        session_id: &str,
+        result: crate::llm::ToolCallResult,
+    ) -> bool {
         let target_idx = self.session_view_states.get(session_id).and_then(|state| {
             state
                 .tool_calls
@@ -5299,7 +5503,16 @@ impl App {
             }
         }
 
-        self.finish_deferred_streaming_session_if_ready(session_id);
+        if self.finish_deferred_streaming_session_if_ready(session_id) {
+            return false;
+        }
+        if self.session_has_active_stream(session_id)
+            && self.has_queued_messages_for_session(session_id)
+            && !self.session_has_running_tool_messages(session_id)
+        {
+            return !self.interrupt_streaming_to_send_queued_for_session(session_id);
+        }
+        true
     }
 
     fn start_llm_streaming(
@@ -5442,6 +5655,55 @@ impl App {
         self.handle_message_input_with_images(msg, Vec::new());
     }
 
+    fn append_user_message_to_current_session(
+        &mut self,
+        msg: String,
+        image_paths: Vec<std::path::PathBuf>,
+    ) {
+        let mut user_message = crate::session::types::Message::user(&msg);
+        user_message.local_image_paths = image_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+        user_message.agent_mode = Some(self.agent.clone());
+        user_message.model = Some(self.model.clone());
+        user_message.provider = Some(self.provider_name.clone());
+        let _ = self
+            .session_manager
+            .add_message_to_current_session(&user_message);
+        self.chat_state.chat.add_message(user_message);
+        self.cached_usage_check = (usize::MAX, u64::MAX);
+    }
+
+    fn submit_queued_messages_for_session(&mut self, session_id: &str) -> bool {
+        if !self.is_active_session(session_id) || self.session_has_active_stream(session_id) {
+            return false;
+        }
+
+        let queued_messages = self.drain_queued_messages_for_session(session_id);
+        if queued_messages.is_empty() {
+            return false;
+        }
+
+        self.base_focus = BaseFocus::Chat;
+        let mut last_text = String::new();
+        for queued in queued_messages {
+            last_text = queued.text.clone();
+            self.append_user_message_to_current_session(queued.text, queued.image_paths);
+        }
+
+        if let Err(e) = self.start_llm_streaming(&last_text) {
+            push_toast(Toast::new(
+                format!("LLM error: {}", e),
+                ToastLevel::Error,
+                None,
+            ));
+            return false;
+        }
+
+        true
+    }
+
     fn run_custom_command_prompt(
         &mut self,
         prompt: String,
@@ -5497,18 +5759,7 @@ impl App {
                     .unwrap_or_else(|| Self::generate_title_from_message(&msg));
                 self.create_new_session(Some(session_title));
             }
-            let mut user_message = crate::session::types::Message::user(&msg);
-            user_message.local_image_paths = image_paths
-                .iter()
-                .map(|path| path.to_string_lossy().to_string())
-                .collect();
-            user_message.agent_mode = Some(self.agent.clone());
-            user_message.model = Some(self.model.clone());
-            user_message.provider = Some(self.provider_name.clone());
-            let _ = self
-                .session_manager
-                .add_message_to_current_session(&user_message);
-            self.chat_state.chat.add_message(user_message.clone());
+            self.append_user_message_to_current_session(msg.clone(), image_paths);
             self.base_focus = BaseFocus::Chat;
 
             if let Err(e) = self.start_llm_streaming(&msg) {
@@ -5523,18 +5774,7 @@ impl App {
             if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
                 self.ensure_session_view_state(&session_id);
             }
-            let mut user_message = crate::session::types::Message::user(&msg);
-            user_message.local_image_paths = image_paths
-                .iter()
-                .map(|path| path.to_string_lossy().to_string())
-                .collect();
-            user_message.agent_mode = Some(self.agent.clone());
-            user_message.model = Some(self.model.clone());
-            user_message.provider = Some(self.provider_name.clone());
-            let _ = self
-                .session_manager
-                .add_message_to_current_session(&user_message);
-            self.chat_state.chat.add_message(user_message.clone());
+            self.append_user_message_to_current_session(msg.clone(), image_paths);
 
             if let Err(e) = self.start_llm_streaming(&msg) {
                 push_toast(Toast::new(
@@ -5597,6 +5837,7 @@ impl App {
             }
             BaseFocus::Chat => {
                 let subagent_tabs = self.subagent_tabs_for_current_session();
+                let queued_messages = self.queued_message_previews_for_current_session();
                 render_chat(
                     f,
                     &mut self.chat_state,
@@ -5613,6 +5854,7 @@ impl App {
                     self.compaction_receiver.is_some(),
                     &usage_text,
                     subagent_tabs,
+                    &queued_messages,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -5861,6 +6103,7 @@ mod tests {
             storage_dialog_state: init_storage_dialog(),
             which_key_state: crate::views::which_key::init_which_key(),
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
+            esc_timeline_primed: false,
             message_actions_index: None,
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
@@ -5912,6 +6155,80 @@ mod tests {
             .as_ref()
             .map(|dialog| dialog.items.iter().map(|item| item.name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    fn add_current_session_message(app: &mut App, message: crate::session::types::Message) {
+        app.chat_state.chat.add_message(message.clone());
+        app.session_manager
+            .add_message_to_current_session(&message)
+            .unwrap();
+    }
+
+    #[test]
+    fn double_esc_opens_timeline_at_most_recent_message() {
+        let mut app = test_app();
+        app.create_new_session(Some("Timeline".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        add_current_session_message(&mut app, crate::session::types::Message::user("Prompt"));
+        add_current_session_message(
+            &mut app,
+            crate::session::types::Message::assistant("Answer"),
+        );
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert!(!app.timeline_dialog_state.dialog.is_visible());
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::TimelineDialog);
+        assert!(app.timeline_dialog_state.dialog.is_visible());
+        assert_eq!(
+            app.timeline_dialog_state
+                .dialog
+                .get_selected()
+                .map(|item| item.id.as_str()),
+            Some("1")
+        );
+        assert_eq!(app.chat_state.chat.highlighted_message_index, Some(1));
+    }
+
+    #[test]
+    fn non_esc_key_clears_pending_double_esc_timeline_open() {
+        let mut app = test_app();
+        app.create_new_session(Some("Timeline".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        add_current_session_message(&mut app, crate::session::types::Message::user("Prompt"));
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_keys(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.input.clear();
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert!(!app.timeline_dialog_state.dialog.is_visible());
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::TimelineDialog);
+        assert!(app.timeline_dialog_state.dialog.is_visible());
+    }
+
+    #[test]
+    fn esc_with_draft_does_not_prime_timeline_open() {
+        let mut app = test_app();
+        app.create_new_session(Some("Timeline".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        add_current_session_message(&mut app, crate::session::types::Message::user("Prompt"));
+
+        app.input.set_text("draft");
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.input.clear();
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert!(!app.timeline_dialog_state.dialog.is_visible());
     }
 
     #[test]
@@ -6056,6 +6373,131 @@ mod tests {
 
         assert!(!App::can_submit_input(&input_type, true));
         assert!(App::can_submit_input(&input_type, false));
+    }
+
+    #[test]
+    fn messages_entered_while_streaming_are_queued() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Queue".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream = Some(SessionStreamState {
+            chunk_receiver: receiver,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            streaming_model: Some("test-model".to_string()),
+            streaming_provider: Some("test-provider".to_string()),
+            chat_len_before_assistant: 0,
+        });
+        app.is_streaming = true;
+        app.input.insert_str("Then about riolu");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert_eq!(state.queued_messages.len(), 1);
+        assert_eq!(state.queued_messages[0].text, "Then about riolu");
+        assert_eq!(
+            app.queued_message_previews_for_current_session(),
+            vec!["Then about riolu".to_string()]
+        );
+        assert!(app.input.is_empty());
+        assert!(app.chat_state.chat.messages.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_messages_cancel_stream_after_next_tool_result() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Queue after tool".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::tool(
+                serde_json::json!({
+                    "id": "call_1",
+                    "name": "bash",
+                    "status": "running",
+                })
+                .to_string(),
+            ));
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let observed_cancel_token = cancel_token.clone();
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState {
+            chunk_receiver: receiver,
+            cancel_token,
+            streaming_model: Some("test-model".to_string()),
+            streaming_provider: Some("test-provider".to_string()),
+            chat_len_before_assistant: 0,
+        });
+        state
+            .tool_calls
+            .tool_call_message_indices
+            .insert("call_1".to_string(), 0);
+        state.tool_calls.tool_call_order.push("call_1".to_string());
+        state.queued_messages.push_back(QueuedUserMessage {
+            text: "then about pikachu".to_string(),
+            image_paths: Vec::new(),
+        });
+        app.is_streaming = true;
+
+        app.add_tool_result_to_session(
+            &session_id,
+            crate::llm::ToolCallResult {
+                tool_call_id: "call_1".to_string(),
+                role: "tool".to_string(),
+                name: "bash".to_string(),
+                content: "done".to_string(),
+            },
+        );
+
+        assert!(observed_cancel_token.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn esc_with_queued_messages_interrupts_and_submits_immediately() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Queue esc".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let boundary = app.chat_state.chat.messages.len();
+        app.chat_state
+            .chat
+            .add_assistant_message("partial response");
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let observed_cancel_token = cancel_token.clone();
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState {
+            chunk_receiver: receiver,
+            cancel_token,
+            streaming_model: Some("test-model".to_string()),
+            streaming_provider: Some("test-provider".to_string()),
+            chat_len_before_assistant: boundary,
+        });
+        state.queued_messages.push_back(QueuedUserMessage {
+            text: "Then about riolu".to_string(),
+            image_paths: Vec::new(),
+        });
+        app.is_streaming = true;
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(observed_cancel_token.is_cancelled());
+        assert!(app
+            .session_view_states
+            .get(&session_id)
+            .unwrap()
+            .queued_messages
+            .is_empty());
+        assert!(app
+            .chat_state
+            .chat
+            .messages
+            .iter()
+            .any(
+                |message| message.role == crate::session::types::MessageRole::User
+                    && message.content == "Then about riolu"
+            ));
     }
 
     #[test]

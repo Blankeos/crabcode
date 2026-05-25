@@ -24,7 +24,6 @@ pub fn discover_themes(
     if PathBuf::from("src/theme.json").is_file() {
         built_in.push(PathBuf::from("src/theme.json"));
     }
-    built_in.extend(list_json_files(Path::new("src/themes")));
     built_in.extend(list_json_files(Path::new("src/generated_themes")));
     layers.push(built_in);
 

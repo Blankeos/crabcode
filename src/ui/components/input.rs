@@ -1,7 +1,7 @@
 use crate::autocomplete::{AutoComplete, Suggestion, SuggestionKind};
 use crate::persistence::PromptHistoryCache;
 use crate::push_toast;
-use crate::theme::{agent_color, ThemeColors};
+use crate::theme::{agent_color, contrast_text, ThemeColors};
 use crate::toast::{Toast, ToastLevel};
 use crate::utils::image_attachment;
 use ratatui::buffer::Buffer;
@@ -9,6 +9,7 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::prelude::{Rect, Style};
+use ratatui::style::{Color, Modifier};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -138,6 +139,10 @@ impl Input {
         reasoning_effort: Option<&str>,
         colors: &ThemeColors,
     ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
         let agent_color = agent_color(agent, colors);
 
         let border_set = border::Set {
@@ -187,6 +192,8 @@ impl Input {
 
         self.textarea
             .set_selection_style(Style::default().bg(colors.accent).fg(colors.text));
+        self.textarea
+            .set_cursor_style(input_cursor_style(agent_color));
         self.textarea.set_style(
             Style::default()
                 .fg(colors.text)
@@ -227,12 +234,18 @@ impl Input {
 
         frame.render_widget(border, area);
 
+        let cap_fill_width = area.width.saturating_sub(1) as usize;
+        let cap_fill = if colors.background_element == Color::Reset {
+            ratatui::text::Span::raw(" ".repeat(cap_fill_width))
+        } else {
+            ratatui::text::Span::styled(
+                "▀".repeat(cap_fill_width),
+                Style::default().fg(colors.background_element),
+            )
+        };
         let cap_row = Paragraph::new(ratatui::text::Line::from(vec![
             ratatui::text::Span::styled("╹", Style::default().fg(agent_color)),
-            ratatui::text::Span::styled(
-                "▀".repeat(area.width as usize - 1),
-                Style::default().fg(colors.background_element),
-            ),
+            cap_fill,
         ]));
         let cap_row_area = Rect::new(area.x, v_chunks[4].y, area.width, 1);
         frame.render_widget(cap_row, cap_row_area);
@@ -1580,6 +1593,14 @@ impl Input {
     }
 }
 
+fn input_cursor_style(color: Color) -> Style {
+    if color == Color::Reset {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().bg(color).fg(contrast_text(color))
+    }
+}
+
 impl Default for Input {
     fn default() -> Self {
         Self::new()
@@ -1909,6 +1930,67 @@ mod tests {
         assert!(first_input_row.contains("0123456789ABCDE"));
         assert!(!first_input_row.contains('F'));
         assert!(second_input_row.contains('F'));
+    }
+
+    #[test]
+    fn test_transparent_input_background_does_not_render_cap_strip() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        let mut colors = test_colors();
+        colors.background_element = Color::Reset;
+
+        let backend = TestBackend::new(20, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 20, 6),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(!buffer_row_text(buffer, 20, 4).contains('▀'));
+    }
+
+    #[test]
+    fn test_input_cursor_uses_agent_color() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        let mut colors = test_colors();
+        colors.secondary = Color::Rgb(238, 121, 72);
+
+        let backend = TestBackend::new(20, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 20, 6),
+                    "Build",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cursor_cell = buffer.cell((3, 1)).expect("cursor cell").style();
+        assert_eq!(cursor_cell.bg, Some(colors.secondary));
+        assert_eq!(
+            cursor_cell.fg,
+            Some(crate::theme::contrast_text(colors.secondary))
+        );
     }
 
     #[test]
