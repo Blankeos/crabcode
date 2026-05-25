@@ -38,6 +38,15 @@ pub fn mark_detected_hyperlinks(buf: &mut Buffer, area: Rect, lines: &[Line<'_>]
     }
 }
 
+pub fn mark_hyperlink_range(buf: &mut Buffer, area: Rect, line_idx: usize, range: &HyperlinkRange) {
+    if line_idx >= area.height as usize {
+        return;
+    }
+
+    let y = area.y.saturating_add(line_idx as u16);
+    mark_range(buf, area, y, range);
+}
+
 pub fn hyperlink_at_line_col(line: &Line<'_>, col: usize) -> Option<HyperlinkTarget> {
     hyperlink_range_at_line_col(line, col).map(|range| range.target)
 }
