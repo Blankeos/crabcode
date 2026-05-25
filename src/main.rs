@@ -90,16 +90,9 @@ fn ansi_fg(color: Color) -> String {
     }
 }
 
-fn push_colored_logo_line(msg: &mut String, line: &str, primary: &str, secondary: &str) {
-    let split = line.chars().count() / 2;
-
-    msg.push_str(primary);
-    for (idx, ch) in line.chars().enumerate() {
-        if idx == split {
-            msg.push_str(secondary);
-        }
-        msg.push(ch);
-    }
+fn push_styled_line(msg: &mut String, line: &str, style: &str) {
+    msg.push_str(style);
+    msg.push_str(line);
     msg.push_str(ANSI_RESET);
     msg.push('\n');
 }
@@ -109,13 +102,14 @@ fn format_post_close_message(
     colors: &crate::theme::ThemeColors,
 ) -> String {
     let mut msg = String::new();
-    let logo_primary = format!("{}{}", ANSI_DIM, ansi_fg(colors.text_weak));
-    let logo_secondary = ansi_fg(colors.primary);
+    let logo_primary = ansi_fg(colors.primary);
+    let logo_bottom = ansi_fg(crate::theme::darken_color(colors.primary, 0.7));
     let label_color = ansi_fg(colors.text_weak);
     let value_color = ansi_fg(colors.text);
 
-    for line in POST_CLOSE_LOGO.lines() {
-        push_colored_logo_line(&mut msg, line, &logo_primary, &logo_secondary);
+    for (i, line) in POST_CLOSE_LOGO.lines().enumerate() {
+        let logo_color = if i == 2 { &logo_bottom } else { &logo_primary };
+        push_styled_line(&mut msg, line, logo_color);
     }
 
     if let Some(info) = info {
