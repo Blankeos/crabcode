@@ -1335,6 +1335,15 @@ impl Chat {
         if !self.selection.active {
             return None;
         }
+
+        let ((s_line, _), (e_line, _)) = self.selection.range();
+        if s_line < self.cached_lines.len() && e_line < self.cached_lines.len() {
+            return crate::ui::selection::extract_selected_text(
+                &self.cached_lines,
+                &self.selection,
+            );
+        }
+
         let lines =
             self.render_visible_messages_without_selection_styling(max_width, model, colors);
         crate::ui::selection::extract_selected_text(&lines, &self.selection)
@@ -3936,6 +3945,85 @@ mod tests {
         assert_eq!(target.image_index, 0);
         assert_eq!(target.placeholder, "[Image #1]");
         assert_eq!(target.path, "/tmp/example.png");
+    }
+
+    #[test]
+    fn selected_text_uses_render_cached_lines_when_copy_width_differs() {
+        let colors = test_colors();
+        let content = "Intro line that wraps differently when copy uses the wrong width.\n\nSo the flow would be:\n```sh\ncode\n```";
+        let mut chat = Chat::with_messages(vec![Message::assistant(content)]);
+        let rendered_width = 42;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(rendered_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = 20;
+        chat.scroll_offset = 0;
+
+        let (line_idx, start_col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find("So the flow").map(|start| (line_idx, start))
+            })
+            .expect("rendered target line");
+
+        chat.selection.active = true;
+        chat.selection.start_line = line_idx;
+        chat.selection.end_line = line_idx;
+        chat.selection.start_col = start_col;
+        chat.selection.end_col = start_col + "So the flow".len();
+
+        assert_eq!(
+            chat.get_selected_text(120, "model", &colors).as_deref(),
+            Some("So the flow")
+        );
+    }
+
+    #[test]
+    fn selected_text_inside_fenced_code_uses_render_cached_lines_when_copy_width_differs() {
+        let colors = test_colors();
+        let content = r#"Before text that is intentionally long enough to wrap at the rendered width.
+
+```sh
+codex exec --skip-git-repo-check \
+    "Use the imagegen skill to generate: ... Save the final image to ./assets/foo.png."
+```"#;
+        let mut chat = Chat::with_messages(vec![Message::assistant(content)]);
+        let rendered_width = 64;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(rendered_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = 20;
+        chat.scroll_offset = 0;
+
+        let (line_idx, start_col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find("imagegen skill").map(|start| (line_idx, start))
+            })
+            .expect("rendered fenced-code target");
+
+        chat.selection.active = true;
+        chat.selection.start_line = line_idx;
+        chat.selection.end_line = line_idx;
+        chat.selection.start_col = start_col;
+        chat.selection.end_col = start_col + "imagegen skill".len();
+
+        assert_eq!(
+            chat.get_selected_text(120, "model", &colors).as_deref(),
+            Some("imagegen skill")
+        );
     }
 
     #[test]

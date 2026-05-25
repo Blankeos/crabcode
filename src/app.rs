@@ -1253,8 +1253,8 @@ impl App {
         if self.chat_state.chat.has_selection() {
             let colors = self.get_current_theme_colors();
             let model = self.model.clone();
-            // Use a default max_width for text extraction
-            let max_width = 80;
+            let chat_area = self.current_chat_area();
+            let max_width = chat_area.width.saturating_sub(2) as usize;
             if let Some(text) = self
                 .chat_state
                 .chat
@@ -1302,11 +1302,12 @@ impl App {
         }
         let colors = self.get_current_theme_colors();
         let model = self.model.clone();
-        let max_width = self.last_frame_size.width.saturating_sub(4) as usize;
+        let chat_area = self.current_chat_area();
+        let max_width = chat_area.width.saturating_sub(2) as usize;
         if let Some(text) =
             self.chat_state
                 .chat
-                .get_selected_text(max_width.max(40), &model, &colors)
+                .get_selected_text(max_width.max(1), &model, &colors)
         {
             if !text.trim().is_empty() {
                 let _ = crate::utils::clipboard::copy_text(&text);

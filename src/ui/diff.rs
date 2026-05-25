@@ -1,4 +1,5 @@
 use crate::theme::ThemeColors;
+use crate::ui::selection::non_selectable_style;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -198,12 +199,14 @@ fn render_unified_diff_with_indent_and_syntax(
         };
         let gutter_bg = diff_gutter_bg(diff_line.line_type, bg, colors.background);
 
-        let indent_style = Style::default().bg(gutter_bg);
-        let gutter_style = Style::default()
-            .fg(colors.diff_gutter)
-            .bg(gutter_bg)
-            .add_modifier(Modifier::DIM);
-        let sign_style = Style::default().fg(fg).bg(gutter_bg);
+        let indent_style = non_selectable_style(Style::default().bg(gutter_bg));
+        let gutter_style = non_selectable_style(
+            Style::default()
+                .fg(colors.diff_gutter)
+                .bg(gutter_bg)
+                .add_modifier(Modifier::DIM),
+        );
+        let sign_style = non_selectable_style(Style::default().fg(fg).bg(gutter_bg));
         let content_style = Style::default().fg(fg).bg(bg);
         let pad_style = Style::default().bg(bg);
 
@@ -229,7 +232,7 @@ fn render_unified_diff_with_indent_and_syntax(
             if visible_width < max_width {
                 spans.push(Span::styled(
                     " ".repeat(max_width - visible_width),
-                    pad_style,
+                    non_selectable_style(pad_style),
                 ));
             }
             lines.push(Line::from(spans));
@@ -295,7 +298,7 @@ fn render_unified_diff_with_indent_and_syntax(
             if visible_width < max_width {
                 spans.push(Span::styled(
                     " ".repeat(max_width - visible_width),
-                    pad_style,
+                    non_selectable_style(pad_style),
                 ));
             }
             lines.push(Line::from(spans));
@@ -652,6 +655,53 @@ mod tests {
 
         assert_ne!(import_span.style.fg, Some(colors.diff_add));
         assert_eq!(import_span.style.bg, Some(colors.diff_add_bg));
+    }
+
+    #[test]
+    fn test_render_unified_diff_gutter_is_not_selection_highlighted_or_copied() {
+        let colors = test_colors();
+        let lines = format_edit_diff("old", "new", 40, &colors);
+        let added_idx = lines
+            .iter()
+            .position(|line| line_text(line).contains("+new"))
+            .expect("expected added line");
+        let selection = crate::ui::selection::Selection {
+            active: true,
+            start_line: added_idx,
+            start_col: 0,
+            end_line: added_idx,
+            end_col: 8,
+            is_dragging: false,
+            anchor: None,
+        };
+
+        let copied = crate::ui::selection::extract_selected_text(&lines, &selection)
+            .expect("expected copied content");
+        assert_eq!(copied, "new");
+
+        let selected_lines = crate::ui::selection::apply_selection_to_lines(
+            lines.clone(),
+            &selection,
+            Color::Rgb(128, 0, 255),
+        );
+        let selected_line = &selected_lines[added_idx];
+        assert_ne!(
+            selected_line.spans[0].style.bg,
+            Some(Color::Rgb(128, 0, 255))
+        );
+        assert_ne!(
+            selected_line.spans[1].style.bg,
+            Some(Color::Rgb(128, 0, 255))
+        );
+        assert_ne!(
+            selected_line.spans[2].style.bg,
+            Some(Color::Rgb(128, 0, 255))
+        );
+        assert!(selected_line
+            .spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("new")
+                && span.style.bg == Some(Color::Rgb(128, 0, 255))));
     }
 
     #[test]

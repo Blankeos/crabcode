@@ -4,7 +4,42 @@ use ratatui::{
     text::Span,
 };
 
-/// Represents a text selection range in the chat content.
+/// Internal marker for spans that should render normally but be ignored by
+/// selection highlighting and clipboard extraction (for example diff gutters).
+pub const NON_SELECTABLE_SPAN_MODIFIER: Modifier = Modifier::HIDDEN;
+
+pub fn non_selectable_style(mut style: Style) -> Style {
+    style.add_modifier.insert(NON_SELECTABLE_SPAN_MODIFIER);
+    style.sub_modifier.remove(NON_SELECTABLE_SPAN_MODIFIER);
+    style
+}
+
+fn is_selectable_span(span: &Span<'_>) -> bool {
+    !span
+        .style
+        .add_modifier
+        .contains(NON_SELECTABLE_SPAN_MODIFIER)
+}
+
+fn visible_style(mut style: Style) -> Style {
+    style.add_modifier.remove(NON_SELECTABLE_SPAN_MODIFIER);
+    style.sub_modifier.remove(NON_SELECTABLE_SPAN_MODIFIER);
+    style
+}
+
+fn visible_span<'a>(span: Span<'a>) -> Span<'a> {
+    Span::styled(span.content, visible_style(span.style))
+}
+
+fn strip_non_selectable_markers<'a>(line: ratatui::text::Line<'a>) -> ratatui::text::Line<'a> {
+    let spans = line.spans.into_iter().map(visible_span).collect();
+    ratatui::text::Line {
+        spans,
+        style: line.style,
+        alignment: line.alignment,
+    }
+}
+
 /// Coordinates are in rendered-content space (line index, column within line).
 #[derive(Debug, Clone, Default)]
 pub struct Selection {
@@ -192,7 +227,10 @@ pub fn apply_selection_to_lines_with_offset<'a>(
     line_offset: usize,
 ) -> Vec<ratatui::text::Line<'a>> {
     if !selection.active {
-        return lines;
+        return lines
+            .into_iter()
+            .map(strip_non_selectable_markers)
+            .collect();
     }
     let ((s_line, _s_col), (e_line, _e_col)) = selection.range();
 
@@ -202,7 +240,7 @@ pub fn apply_selection_to_lines_with_offset<'a>(
         .map(|(visible_idx, line)| {
             let line_idx = line_offset + visible_idx;
             if line_idx < s_line || line_idx > e_line {
-                return line;
+                return strip_non_selectable_markers(line);
             }
             let line_width: usize = line
                 .spans
@@ -216,7 +254,13 @@ pub fn apply_selection_to_lines_with_offset<'a>(
                 let styled_spans: Vec<Span> = line
                     .spans
                     .into_iter()
-                    .map(|s| selection_span_style(&s, accent))
+                    .map(|s| {
+                        if is_selectable_span(&s) {
+                            selection_span_style(&s, accent)
+                        } else {
+                            visible_span(s)
+                        }
+                    })
                     .collect();
                 return ratatui::text::Line::from(styled_spans);
             }
@@ -225,13 +269,14 @@ pub fn apply_selection_to_lines_with_offset<'a>(
             let mut col = 0usize;
             let mut styled_spans = Vec::new();
             for span in line.spans {
-                let new_spans = split_and_style_span(&span, col, accent, sel_range);
-                // Track column advance before extending
-                col += new_spans
-                    .iter()
-                    .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-                    .sum::<usize>();
-                styled_spans.extend(new_spans);
+                let span_width = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+                if is_selectable_span(&span) {
+                    let new_spans = split_and_style_span(&span, col, accent, sel_range);
+                    styled_spans.extend(new_spans);
+                } else {
+                    styled_spans.push(visible_span(span));
+                }
+                col = col.saturating_add(span_width);
             }
             ratatui::text::Line::from(styled_spans)
         })
@@ -246,60 +291,50 @@ pub fn extract_selected_text(
     if !selection.active {
         return None;
     }
-    let ((s_line, s_col), (e_line, e_col)) = selection.range();
+    let ((s_line, _), (e_line, _)) = selection.range();
     let mut result = String::new();
 
     for (line_idx, line) in lines.iter().enumerate() {
         if line_idx < s_line || line_idx > e_line {
             continue;
         }
-        let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        let line_width = unicode_width::UnicodeWidthStr::width(full_text.as_str());
 
-        let start = if line_idx == s_line { s_col } else { 0 };
-        let end = if line_idx == e_line {
-            e_col
-        } else {
-            line_width
+        let line_width: usize = line
+            .spans
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let Some((start, end)) = selection.selection_range_in_line(line_idx, line_width) else {
+            continue;
         };
 
-        if start >= end || start > full_text.len() {
+        let mut line_part = String::new();
+        let mut col = 0usize;
+        for span in &line.spans {
+            let span_width = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+            let span_end = col.saturating_add(span_width);
+
+            if is_selectable_span(span) && start < span_end && end > col {
+                let overlap_start = start.saturating_sub(col);
+                let overlap_end = end.saturating_sub(col).min(span_width);
+                line_part.push_str(slice_by_display_width(
+                    span.content.as_ref(),
+                    overlap_start,
+                    overlap_end,
+                ));
+            }
+
+            col = span_end;
+        }
+
+        if line_part.is_empty() {
             continue;
         }
-
-        // Convert display-width start/end to character indices
-        let chars: Vec<char> = full_text.chars().collect();
-        let mut char_start = 0;
-        let mut display_pos = 0;
-        for (i, c) in chars.iter().enumerate() {
-            if display_pos >= start {
-                char_start = i;
-                break;
-            }
-            display_pos += unicode_width::UnicodeWidthChar::width(*c).unwrap_or(1);
-            char_start = i + 1;
-        }
-
-        let mut char_end = char_start;
-        display_pos = start;
-        for (i, c) in chars[char_start..].iter().enumerate() {
-            if display_pos >= end {
-                char_end = char_start + i;
-                break;
-            }
-            display_pos += unicode_width::UnicodeWidthChar::width(*c).unwrap_or(1);
-            char_end = char_start + i + 1;
-        }
-
-        let end_idx = char_end.min(chars.len());
-        let start_idx = char_start.min(end_idx);
-
-        let selected_part: String = chars[start_idx..end_idx].iter().collect();
 
         if !result.is_empty() {
             result.push('\n');
         }
-        result.push_str(&selected_part);
+        result.push_str(&line_part);
     }
 
     if result.is_empty() {
@@ -307,6 +342,36 @@ pub fn extract_selected_text(
     } else {
         Some(result)
     }
+}
+
+fn slice_by_display_width(text: &str, start: usize, end: usize) -> &str {
+    if start >= end {
+        return "";
+    }
+
+    let mut byte_start = text.len();
+    let mut byte_end = text.len();
+    let mut display_pos = 0usize;
+
+    for (byte_idx, ch) in text.char_indices() {
+        if display_pos >= start && byte_start == text.len() {
+            byte_start = byte_idx;
+        }
+        if display_pos >= end {
+            byte_end = byte_idx;
+            break;
+        }
+        display_pos += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+    }
+
+    if byte_start == text.len() && display_pos >= start {
+        byte_start = text.len();
+    }
+    if display_pos < end {
+        byte_end = text.len();
+    }
+
+    &text[byte_start.min(byte_end)..byte_end]
 }
 
 /// Apply a selection highlight style to a span.
@@ -335,12 +400,12 @@ fn split_and_style_span<'a>(
 
     let (sel_start, sel_end) = match selection_range {
         Some((s, e)) => (s, e),
-        None => return vec![span.clone()],
+        None => return vec![visible_span(span.clone())],
     };
 
     // Check if this span overlaps with the selection
     if sel_end <= col_offset || sel_start >= span_end {
-        return vec![span.clone()];
+        return vec![visible_span(span.clone())];
     }
 
     // Calculate the overlap boundaries in display-width positions relative to the span
@@ -348,7 +413,7 @@ fn split_and_style_span<'a>(
     let overlap_end = sel_end.saturating_sub(col_offset).min(width);
 
     if overlap_start >= overlap_end {
-        return vec![span.clone()];
+        return vec![visible_span(span.clone())];
     }
 
     // Convert display-width positions back to character indices
@@ -374,7 +439,7 @@ fn split_and_style_span<'a>(
     let char_end = char_idx;
 
     if char_start >= char_end {
-        return vec![span.clone()];
+        return vec![visible_span(span.clone())];
     }
 
     let before: String = chars[..char_start].iter().collect();
@@ -384,7 +449,7 @@ fn split_and_style_span<'a>(
     let mut result = Vec::new();
 
     if !before.is_empty() {
-        result.push(Span::styled(before, span.style));
+        result.push(Span::styled(before, visible_style(span.style)));
     }
 
     result.push(Span::styled(
@@ -396,7 +461,7 @@ fn split_and_style_span<'a>(
     ));
 
     if !after.is_empty() {
-        result.push(Span::styled(after, span.style));
+        result.push(Span::styled(after, visible_style(span.style)));
     }
 
     result
