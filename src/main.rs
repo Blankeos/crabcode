@@ -39,19 +39,19 @@ use ratatui::crossterm::{
         LeaveAlternateScreen,
     },
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{backend::CrosstermBackend, style::Color, Terminal};
 use std::io;
 use std::sync::Mutex;
 use std::time::Duration;
 
 const POST_CLOSE_LOGO: &str = include_str!("../crabcode-logo.txt");
-
-lazy_static::lazy_static! {
-    static ref STARTUP_DIAGNOSTICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-}
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_DIM: &str = "\x1b[2m";
 
 pub fn push_startup_diag(msg: String) {
-    STARTUP_DIAGNOSTICS.lock().unwrap().push(msg);
+    if crate::logging::enabled() {
+        let _ = crate::logging::log(&msg);
+    }
 }
 
 #[macro_export]
@@ -61,32 +61,82 @@ macro_rules! startup_diag {
     };
 }
 
-fn flush_startup_diagnostics() {
-    let diags = std::mem::take(&mut *STARTUP_DIAGNOSTICS.lock().unwrap());
-    for msg in diags {
-        eprintln!("{}", msg);
-    }
-}
-
 struct PostCloseInfo {
     session_id: String,
     session_title: String,
 }
 
-fn format_post_close_message(info: Option<&PostCloseInfo>) -> String {
+fn ansi_fg(color: Color) -> String {
+    match color {
+        Color::Black => "\x1b[30m".to_string(),
+        Color::Red => "\x1b[31m".to_string(),
+        Color::Green => "\x1b[32m".to_string(),
+        Color::Yellow => "\x1b[33m".to_string(),
+        Color::Blue => "\x1b[34m".to_string(),
+        Color::Magenta => "\x1b[35m".to_string(),
+        Color::Cyan => "\x1b[36m".to_string(),
+        Color::Gray => "\x1b[37m".to_string(),
+        Color::DarkGray => "\x1b[90m".to_string(),
+        Color::LightRed => "\x1b[91m".to_string(),
+        Color::LightGreen => "\x1b[92m".to_string(),
+        Color::LightYellow => "\x1b[93m".to_string(),
+        Color::LightBlue => "\x1b[94m".to_string(),
+        Color::LightMagenta => "\x1b[95m".to_string(),
+        Color::LightCyan => "\x1b[96m".to_string(),
+        Color::White => "\x1b[97m".to_string(),
+        Color::Indexed(index) => format!("\x1b[38;5;{}m", index),
+        Color::Rgb(r, g, b) => format!("\x1b[38;2;{};{};{}m", r, g, b),
+        Color::Reset => String::new(),
+    }
+}
+
+fn push_colored_logo_line(msg: &mut String, line: &str, primary: &str, secondary: &str) {
+    let split = line.chars().count() / 2;
+
+    msg.push_str(primary);
+    for (idx, ch) in line.chars().enumerate() {
+        if idx == split {
+            msg.push_str(secondary);
+        }
+        msg.push(ch);
+    }
+    msg.push_str(ANSI_RESET);
+    msg.push('\n');
+}
+
+fn format_post_close_message(
+    info: Option<&PostCloseInfo>,
+    colors: &crate::theme::ThemeColors,
+) -> String {
     let mut msg = String::new();
+    let logo_primary = format!("{}{}", ANSI_DIM, ansi_fg(colors.text_weak));
+    let logo_secondary = ansi_fg(colors.primary);
+    let label_color = ansi_fg(colors.text_weak);
+    let value_color = ansi_fg(colors.text);
 
     for line in POST_CLOSE_LOGO.lines() {
-        msg.push_str(line);
-        msg.push('\n');
+        push_colored_logo_line(&mut msg, line, &logo_primary, &logo_secondary);
     }
 
     if let Some(info) = info {
         msg.push('\n');
-        msg.push_str(&format!("  {:<10}{}\n", "Session", info.session_title));
         msg.push_str(&format!(
-            "  {:<10}crabcode -s {}\n",
-            "Continue", info.session_id
+            "  {dim}{label_color}{:<10}{reset}{value_color}{}{reset}\n",
+            "Session",
+            info.session_title,
+            dim = ANSI_DIM,
+            label_color = label_color,
+            value_color = value_color,
+            reset = ANSI_RESET,
+        ));
+        msg.push_str(&format!(
+            "  {dim}{label_color}{:<10}{reset}{value_color}crabcode -s {}{reset}\n",
+            "Continue",
+            info.session_id,
+            dim = ANSI_DIM,
+            label_color = label_color,
+            value_color = value_color,
+            reset = ANSI_RESET,
         ));
     }
 
@@ -228,7 +278,6 @@ async fn run_print_mode(
         }
     }
 
-    flush_startup_diagnostics();
     let _ = no_session_persistence;
     Ok(())
 }
@@ -283,7 +332,6 @@ async fn main() -> Result<()> {
     if args.print_mode {
         let prompt = args.prompt.join(" ");
         if prompt.trim().is_empty() {
-            flush_startup_diagnostics();
             eprintln!("Error: No prompt provided for print mode.");
             eprintln!("Usage: crabcode -p \"<PROMPT>\"");
             std::process::exit(1);
@@ -352,6 +400,8 @@ async fn main() -> Result<()> {
         }
     };
 
+    let post_close_colors = app.get_current_theme_colors();
+
     disable_raw_mode()?;
     if supports_keyboard_enhancement().unwrap_or(false) {
         execute!(
@@ -373,9 +423,10 @@ async fn main() -> Result<()> {
     }
     terminal.show_cursor()?;
 
-    flush_startup_diagnostics();
-
-    print!("{}", format_post_close_message(close_info.as_ref()));
+    print!(
+        "{}",
+        format_post_close_message(close_info.as_ref(), &post_close_colors)
+    );
 
     result
 }
@@ -476,7 +527,7 @@ async fn run_event_loop(
                                 event::Event::FocusLost => {
                                     app.set_terminal_focused(false);
                                 }
-                                _ => {}
+                                event::Event::Resize(_, _) => {}
                             }
                         }
 
@@ -503,7 +554,9 @@ async fn run_event_loop(
                 event::Event::FocusLost => {
                     app.set_terminal_focused(false);
                 }
-                _ => {}
+                event::Event::Resize(_, _) => {
+                    needs_redraw = true;
+                }
             }
         }
     }

@@ -36,7 +36,7 @@
 
 - [x] Feature: Rename command `/rename` - parity with opencode.
 
-- [ ] Bug: theme is not persisted? Or is it by config? Just make theme be based on state now, no more config for it.
+- [ ] Bug: theme is not persisted? Or is it by config? Just make theme be based on state now, no more config for it.. Actually not a bug.. Just warn that it must be configured, this is not your configured theme, configure it in your config. Or just a VERY MINOR warning that says 'You're only trying out this theme, set it in your theme'.???
 
 - [x] Bug: skill loading on conflict. i.e. duplicate frontend-design skill. Warning: duplicate skill name 'frontend-design' (existing: /Users/carlo/.claude/skills/frontend-design/SKILL.md, duplicate: /Users/carlo/.config/opencode/skill/frontend-design/SKILL.md)
 
@@ -139,12 +139,12 @@ Replaced at line 239
 
 - [ ] Codex's "update plan" tool sometimes has a weird premble before the actual checklist shows... Is this relevant for crabcode? Should we update our tool? Can we do it too?
 
-- [ ] Pressing 'enter' while focusing on a grouplabel header for a "workspace". Make it show a dropdown on the right:
-  - Archive (can unarchive on new sessions)
+- [x] ~Pressing 'enter' while focusing on a grouplabel header for a "workspace". Make it show a dropdown on the right
+  - Archive (can unarchive on new sessions)~ - dont do anymore
   - Collapse
   - Uncollapse
 
-- [ ] The footer note for the current cwd/workspace. It trims out the very start. i.e. `...ects/_gamedev/my-game:main`. Instead of this, please show the "between" truncation ?? Just maybe, but maybe not.
+- [x] ~The footer note for the current cwd/workspace. It trims out the very start. i.e. `...ects/_gamedev/my-game:main`. Instead of this, please show the "between" truncation ??~ Just maybe, but maybe not.
 
 - [x] Make tool calls be AS PERMISSIVE, as codex. Meaning won't have to ask me to "read" sometimes.
 

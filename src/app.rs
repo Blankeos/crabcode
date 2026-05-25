@@ -2695,9 +2695,6 @@ impl App {
                             .chat
                             .message_index_at_position(mouse, chat_area);
                         self.chat_state.chat.set_hovered_image(hovered_image);
-                        self.chat_state
-                            .chat
-                            .set_highlighted_message(hovered_message);
                         if hovered_message.is_some() {
                             return;
                         }
@@ -6299,6 +6296,40 @@ mod tests {
         assert_eq!(app.overlay_focus, OverlayFocus::MessageActions);
         assert_eq!(app.message_actions_index, Some(0));
         assert!(message_action_names(&app).contains(&"Undo".to_string()));
+    }
+
+    #[test]
+    fn hovering_chat_message_does_not_set_timeline_highlight() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let _session_id = app.create_new_session(Some("Chat hover".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let message = crate::session::types::Message::assistant("hover me");
+        app.chat_state.chat.add_message(message.clone());
+        app.session_manager
+            .add_message_to_current_session(&message)
+            .unwrap();
+        let colors = app.get_current_theme_colors();
+        let positions = app
+            .chat_state
+            .chat
+            .get_message_line_positions(78, &app.model, &colors);
+        app.chat_state.chat.message_line_positions = positions;
+        app.chat_state.chat.content_height = 4;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+        assert_eq!(
+            app.chat_state.chat.message_index_at_position(
+                mouse(MouseEventKind::Moved, 1, 1),
+                app.current_chat_area(),
+            ),
+            Some(0)
+        );
+
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 1, 1));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert_eq!(app.chat_state.chat.highlighted_message_index, None);
     }
 
     #[test]
