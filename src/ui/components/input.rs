@@ -59,6 +59,8 @@ pub struct Input {
     draft_text: Option<String>,
     local_images: Vec<LocalImageAttachment>,
     pending_pastes: Vec<PendingPaste>,
+    image_open_config: crate::config::ImagesConfig,
+    hovered_image_placeholder: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,12 +102,30 @@ impl Input {
             draft_text: None,
             local_images: Vec::new(),
             pending_pastes: Vec::new(),
+            image_open_config: crate::config::ImagesConfig::default(),
+            hovered_image_placeholder: None,
         }
     }
 
     pub fn with_autocomplete(mut self, autocomplete: AutoComplete) -> Self {
         self.autocomplete = Some(autocomplete);
         self
+    }
+
+    pub fn set_image_open_config(&mut self, config: crate::config::ImagesConfig) {
+        self.image_open_config = config;
+    }
+
+    pub fn contains_mouse(&self, mouse: MouseEvent) -> bool {
+        let Some(area) = self.textarea_area else {
+            return false;
+        };
+        let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+        area.contains(point)
+    }
+
+    pub fn clear_hover(&mut self) {
+        self.hovered_image_placeholder = None;
     }
 
     pub fn render(
@@ -392,10 +412,20 @@ impl Input {
             && mouse_y < textarea_area.y + textarea_area.height;
 
         if !within_textarea {
+            if matches!(mouse.kind, MouseEventKind::Moved) {
+                self.hovered_image_placeholder = None;
+            }
             return false;
         }
 
         match mouse.kind {
+            MouseEventKind::Moved => {
+                let previous_hover = self.hovered_image_placeholder.clone();
+                self.hovered_image_placeholder = self
+                    .image_at_mouse_position(textarea_area, mouse)
+                    .map(|image| image.placeholder);
+                previous_hover != self.hovered_image_placeholder
+            }
             MouseEventKind::ScrollDown => {
                 self.move_cursor_visual(1);
                 true
@@ -414,7 +444,7 @@ impl Input {
                 {
                     let offset = self.flat_offset_for_position(target_row, target_col);
                     if let Some(image) = self.image_at_offset(offset) {
-                        match image_attachment::open_path(&image.path) {
+                        match image_attachment::open_path(&image.path, &self.image_open_config) {
                             Ok(()) => push_toast(Toast::new(
                                 format!("Opened {}", image.placeholder),
                                 ToastLevel::Info,
@@ -714,6 +744,7 @@ impl Input {
             .move_cursor(CursorMove::Jump(row as u16, col as u16));
         self.viewport_top = 0;
         self.preferred_visual_col = None;
+        self.hovered_image_placeholder = None;
     }
 
     fn image_placeholder(number: usize) -> String {
@@ -1039,7 +1070,6 @@ impl Input {
             return;
         }
 
-        let placeholder_style = Style::default().fg(colors.markdown_image);
         let lines = self.textarea.lines();
 
         for (screen_row, visual_line) in visual_lines
@@ -1054,6 +1084,13 @@ impl Input {
             let y = area.y + screen_row as u16;
 
             for image in &self.local_images {
+                let placeholder_style = if self.hovered_image_placeholder.as_deref()
+                    == Some(image.placeholder.as_str())
+                {
+                    Style::default().fg(colors.markdown_image_text)
+                } else {
+                    Style::default().fg(colors.markdown_image)
+                };
                 for (start, _) in line.match_indices(&image.placeholder) {
                     Self::style_line_byte_range(
                         buffer,
@@ -1068,6 +1105,7 @@ impl Input {
             }
 
             for paste in &self.pending_pastes {
+                let placeholder_style = Style::default().fg(colors.markdown_image);
                 for (start, _) in line.match_indices(&paste.placeholder) {
                     Self::style_line_byte_range(
                         buffer,
@@ -1118,7 +1156,11 @@ impl Input {
             }
             let x = area.x + x_offset as u16;
             if let Some(cell) = buffer.cell_mut((x, y)) {
-                cell.set_style(style);
+                if let Some(fg) = style.fg {
+                    cell.set_fg(fg);
+                } else {
+                    cell.set_style(style);
+                }
             }
             x_offset += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
@@ -1304,6 +1346,19 @@ impl Input {
         })
     }
 
+    fn image_at_mouse_position(
+        &self,
+        textarea_area: Rect,
+        mouse: MouseEvent,
+    ) -> Option<LocalImageAttachment> {
+        let relative_x = mouse.column.saturating_sub(textarea_area.x);
+        let relative_y = mouse.row.saturating_sub(textarea_area.y);
+        let (target_row, target_col) =
+            self.cursor_for_screen_position(textarea_area, relative_x, relative_y)?;
+        let offset = self.flat_offset_for_position(target_row, target_col);
+        self.image_at_offset(offset)
+    }
+
     pub fn attach_image(&mut self, path: PathBuf) {
         let placeholder = Self::image_placeholder(self.local_images.len() + 1);
         self.preferred_visual_col = None;
@@ -1353,6 +1408,15 @@ impl Input {
         }
 
         self.local_images = kept;
+        if let Some(hovered) = self.hovered_image_placeholder.as_deref() {
+            if !self
+                .local_images
+                .iter()
+                .any(|image| image.placeholder == hovered)
+            {
+                self.hovered_image_placeholder = None;
+            }
+        }
         self.set_text_preserving_images(&text, cursor);
     }
 
@@ -1436,6 +1500,7 @@ impl Input {
         self.draft_text = None;
         self.local_images.clear();
         self.pending_pastes.clear();
+        self.hovered_image_placeholder = None;
         if let Some(ref mut history) = self.prompt_history {
             history.reset_navigation();
         }
@@ -1465,6 +1530,7 @@ impl Input {
         self.preferred_visual_col = None;
         self.local_images.clear();
         self.pending_pastes.clear();
+        self.hovered_image_placeholder = None;
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -1600,6 +1666,15 @@ mod tests {
             kind,
             column: 0,
             row: 0,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    fn mouse_event_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
             modifiers: KeyModifiers::empty(),
         }
     }
@@ -1923,5 +1998,60 @@ mod tests {
             buffer.cell(paste_pos).expect("paste cell").style().fg,
             Some(colors.markdown_image)
         );
+    }
+
+    #[test]
+    fn test_hovered_image_placeholder_changes_foreground_only() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        input.attach_image(PathBuf::from("/tmp/example.png"));
+
+        let colors = test_colors();
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 40, 6),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let image_pos = find_buffer_text(buffer, 40, 6, "[Image #1]").expect("image placeholder");
+        let before_style = buffer.cell(image_pos).expect("image cell").style();
+        assert_eq!(before_style.fg, Some(colors.markdown_image));
+
+        assert!(input.handle_mouse_event(mouse_event_at(
+            MouseEventKind::Moved,
+            image_pos.0,
+            image_pos.1
+        )));
+
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 40, 6),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let after_style = buffer.cell(image_pos).expect("image cell").style();
+        assert_eq!(after_style.fg, Some(colors.markdown_image_text));
+        assert_eq!(after_style.bg, before_style.bg);
     }
 }

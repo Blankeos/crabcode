@@ -42,6 +42,9 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
   },
   "notifications": {
     "terminal": { "complete": "auto", "condition": "unfocused" }
+  },
+  "images": {
+    "openWith": "auto"
   }
 }
 ```
@@ -55,5 +58,7 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
 | Shared slash commands | `.opencode/commands/` |
 | crabcode-specific command overrides | `.crabcode/commands/` |
 | Personal defaults | `~/.config/crabcode/crabcode.jsonc` |
+
+See [Image Attachments](/config/images) for configuring where clicked `[Image #1]` placeholders open.
 
 For command syntax, frontmatter, arguments, shell output, and file references, use the [OpenCode commands docs](https://opencode.ai/docs/commands/). crabcode reads the same markdown command format.

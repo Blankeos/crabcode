@@ -1233,6 +1233,14 @@ impl Dialog {
         }
     }
 
+    pub fn contains_position(&self, column: u16, row: u16) -> bool {
+        if !self.visible {
+            return false;
+        }
+        use ratatui::layout::Position;
+        self.dialog_area.contains(Position::new(column, row))
+    }
+
     pub fn item_index_at_position(&self, column: u16, row: u16) -> Option<usize> {
         if !self.visible {
             return None;

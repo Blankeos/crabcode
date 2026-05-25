@@ -1,0 +1,61 @@
+---
+title: Images
+description: Configure how pasted image attachments open from the terminal UI.
+---
+
+# Image Attachments
+
+When you paste or autocomplete an image path, crabcode inserts a placeholder such as `[Image #1]`. The placeholder is rendered as interactive text: hovering changes the text color only, and clicking it opens the image.
+
+By default, image opening uses automatic detection:
+
+```jsonc title="crabcode.jsonc"
+{
+  "images": {
+    "openWith": "auto",
+  },
+}
+```
+
+## Open target
+
+`images.openWith` controls where clicked image placeholders open.
+
+| Value | Behavior |
+| --- | --- |
+| `"auto"` | Use an editor opener when crabcode detects a Zed, VSCode, or Cursor integrated terminal. Otherwise use the OS default opener. This is the default. |
+| `"system"` | Always use the OS default opener (`open` on macOS, `xdg-open` on Linux, `start` on Windows). |
+| `"editor"` | Prefer the detected editor opener, then `$VISUAL` or `$EDITOR`; falls back to the OS opener if no editor command is available. |
+| command object | Run a custom command. Use `{path}` anywhere in `args` to insert the image path. |
+
+`auto` treats standalone terminals such as WezTerm, iTerm, Terminal.app, Alacritty, and Kitty as normal terminals, so they open images with the OS-level file opener.
+
+## Custom command
+
+Use a command object when you want complete control over the opener:
+
+```jsonc title="crabcode.jsonc"
+{
+  "images": {
+    "openWith": {
+      "command": "zed",
+      "args": ["{path}"],
+    },
+  },
+}
+```
+
+Other examples:
+
+```jsonc title="crabcode.jsonc"
+{
+  "images": {
+    "openWith": {
+      "command": "open",
+      "args": ["-a", "Preview", "{path}"],
+    },
+  },
+}
+```
+
+If `args` is omitted, crabcode uses `["{path}"]`.

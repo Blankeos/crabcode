@@ -415,3 +415,29 @@ Two issues amplified the cost:
 ### Follow-up
 
 This does not yet add a full Codex-style sampling retry loop around partially streamed websocket failures. The next cost-control target is a bounded stream retry/fallback policy plus sane default `agent_max_steps` for normal Build turns.
+
+## 2026-05-25 Stuck InProgress After Permission Delay
+
+### User-Visible Symptom
+
+After a permission prompt had been open for a while, approving it let the tool finish, but the UI could keep showing the turn as `InProgress` forever.
+
+### Root Cause
+
+`App::process_streaming_chunks` drained available stream chunks with `while let Ok(chunk) = receiver.try_recv()`, but ignored `TryRecvError::Disconnected`.
+
+If the async stream task exited without delivering a terminal `End`, `Failed`, or `Cancelled` chunk, the session's `stream` field stayed populated. That left `is_streaming` true and could leave running tool messages active, even though no producer remained to send the final lifecycle event.
+
+### Fix Applied
+
+- `src/app.rs`
+  - `process_streaming_chunks` now distinguishes `Empty` from `Disconnected`.
+  - It processes any queued chunks first, then if the receiver is disconnected and the stream is still registered, it logs `[STREAM_DISCONNECTED]` and fails the streaming session with `Stream task ended before sending a completion event`.
+  - This reuses the existing failure path, which marks still-running tool messages as `error`, persists streamed messages, clears stream state, and resets the active streaming flag.
+
+### Validation
+
+- `cargo test disconnected_stream_receiver`
+- `cargo test stream_finish_waits_for_running_tool_result`
+- `cargo fmt --check`
+- `cargo check`

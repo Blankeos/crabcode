@@ -83,6 +83,56 @@
       },
       "type": "object"
     },
+    "ImageOpenCommandConfigFile": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "default": [
+            "{path}"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "ImageOpenWith": {
+      "anyOf": [
+        {
+          "enum": [
+            "auto",
+            "system",
+            "editor"
+          ],
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/ImageOpenCommandConfigFile"
+        }
+      ]
+    },
+    "ImagesConfigFile": {
+      "additionalProperties": false,
+      "properties": {
+        "openWith": {
+          "$ref": "#/$defs/ImageOpenWith",
+          "default": "auto"
+        },
+        "open_with": {
+          "$ref": "#/$defs/ImageOpenWith",
+          "default": "auto"
+        }
+      },
+      "type": "object"
+    },
     "TerminalNotificationMode": {
       "anyOf": [
         {
@@ -155,6 +205,16 @@
     "enabled_providers": true,
     "formatter": true,
     "instructions": true,
+    "images": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ImagesConfigFile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "mcp": true,
     "model": {
       "type": [

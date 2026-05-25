@@ -86,6 +86,7 @@ pub struct Message {
     pub provider: Option<String>,
     pub local_image_paths: Vec<String>,
     pub compaction_stats: Option<CompactionStats>,
+    pub was_interrupted: bool,
 }
 
 impl Message {
@@ -107,6 +108,7 @@ impl Message {
             provider: None,
             local_image_paths: Vec::new(),
             compaction_stats: None,
+            was_interrupted: false,
         }
     }
 
@@ -144,6 +146,7 @@ impl Message {
             provider: None,
             local_image_paths: Vec::new(),
             compaction_stats: None,
+            was_interrupted: false,
         }
     }
 
@@ -161,6 +164,10 @@ impl Message {
 
     pub fn mark_complete(&mut self) {
         self.is_complete = true;
+    }
+
+    pub fn mark_interrupted(&mut self) {
+        self.was_interrupted = true;
     }
 }
 

@@ -69,6 +69,15 @@ pub struct Chat {
     cached_colors_hash: u64,
     cached_fingerprint: u64,
     tool_marker_animation_phase: bool,
+    hovered_image: Option<ChatImageTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatImageTarget {
+    pub message_index: usize,
+    pub image_index: usize,
+    pub placeholder: String,
+    pub path: String,
 }
 
 // Minimum elapsed time before showing tokens/s (250ms)
@@ -587,6 +596,7 @@ impl Chat {
             cached_colors_hash: 0,
             cached_fingerprint: 0,
             tool_marker_animation_phase: false,
+            hovered_image: None,
         }
     }
 
@@ -627,6 +637,7 @@ impl Chat {
             cached_colors_hash: 0,
             cached_fingerprint: 0,
             tool_marker_animation_phase: false,
+            hovered_image: None,
         }
     }
 
@@ -778,6 +789,7 @@ impl Chat {
         self.streaming_token_counter = None;
         self.selection.reset();
         self.pending_click_anchor = None;
+        self.hovered_image = None;
         self.cached_lines.clear();
         self.cached_positions.clear();
         self.cached_revision = 0;
@@ -823,6 +835,7 @@ impl Chat {
             msg.model.hash(&mut h);
             msg.provider.hash(&mut h);
             msg.compaction_stats.hash(&mut h);
+            msg.was_interrupted.hash(&mut h);
         }
         max_width.hash(&mut h);
         h.finish()
@@ -1137,20 +1150,70 @@ impl Chat {
         self.highlighted_message_index = idx;
     }
 
+    pub fn set_hovered_image(&mut self, target: Option<ChatImageTarget>) -> bool {
+        if self.hovered_image == target {
+            return false;
+        }
+        self.hovered_image = target;
+        self.cached_revision = 0;
+        true
+    }
+
+    pub fn clear_hovered_image(&mut self) -> bool {
+        self.set_hovered_image(None)
+    }
+
+    pub fn image_at_position(&self, event: MouseEvent, area: Rect) -> Option<ChatImageTarget> {
+        use ratatui::layout::Position;
+
+        let point = Position::new(event.column, event.row);
+        let content_area = Self::content_area_for(area);
+
+        if !content_area.contains(point) || self.cached_lines.is_empty() {
+            return None;
+        }
+
+        let content_line =
+            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_col = event.column.saturating_sub(content_area.x) as usize;
+        let message_index =
+            self.message_index_at_content_line(content_line, self.content_height)?;
+        let line = self.cached_lines.get(content_line)?;
+        let placeholder = placeholder_at_line_col(line, content_col)?;
+        let image_index = image_index_from_placeholder(&placeholder)?;
+        let path = self
+            .messages
+            .get(message_index)?
+            .local_image_paths
+            .get(image_index)?
+            .clone();
+
+        Some(ChatImageTarget {
+            message_index,
+            image_index,
+            placeholder,
+            path,
+        })
+    }
+
     pub fn clear_highlighted_message(&mut self) {
         self.highlighted_message_index = None;
+    }
+
+    fn content_area_for(area: Rect) -> Rect {
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width.saturating_sub(2),
+            height: area.height,
+        }
     }
 
     pub fn message_index_at_position(&self, event: MouseEvent, area: Rect) -> Option<usize> {
         use ratatui::layout::Position;
 
         let point = Position::new(event.column, event.row);
-        let content_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width.saturating_sub(2),
-            height: area.height,
-        };
+        let content_area = Self::content_area_for(area);
 
         if !content_area.contains(point) || self.message_line_positions.is_empty() {
             return None;
@@ -1290,12 +1353,7 @@ impl Chat {
         }
 
         // Calculate the content area (exclude scrollbar column)
-        let content_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width.saturating_sub(2),
-            height: area.height,
-        };
+        let content_area = Self::content_area_for(area);
         let rendered_content_area = Rect {
             x: content_area.x,
             y: content_area.y,
@@ -1927,7 +1985,16 @@ impl Chat {
                 let border_style = Style::default().fg(border_color);
                 let pad_style = Style::default().bg(bg);
                 let text_style = Style::default().fg(colors.text).bg(bg);
-                let image_style = Style::default().fg(colors.markdown_image).bg(bg);
+                let image_style = |placeholder: &str| {
+                    let is_hovered = self.hovered_image.as_ref().is_some_and(|target| {
+                        target.message_index == idx && target.placeholder == placeholder
+                    });
+                    if is_hovered {
+                        Style::default().fg(colors.markdown_image_text).bg(bg)
+                    } else {
+                        Style::default().fg(colors.markdown_image).bg(bg)
+                    }
+                };
                 let content = message.content.clone();
                 let horizontal_padding = 2usize;
                 let right_padding = 2usize;
@@ -1949,7 +2016,7 @@ impl Chat {
                         let styled_content = Line::from(spans_with_image_placeholders(
                             content_line,
                             text_style,
-                            image_style,
+                            &image_style,
                         ));
                         wrap_styled_line(&styled_content, WrapOptions::new(wrap_width))
                     })
@@ -2041,16 +2108,22 @@ impl Chat {
                 }
 
                 if !emitted_anything {
+                    if message.is_complete && message.was_interrupted {
+                        let metadata = self.format_metadata(message, model, colors);
+                        lines.push(Line::from(metadata));
+                        lines.push(Line::from(""));
+                    }
                     return lines;
                 }
 
                 // Add empty line before metadata for spacing
                 let next_role = self.messages.get(idx + 1).map(|m| m.role.clone());
                 let show_metadata = message.is_complete
-                    && !matches!(
-                        next_role,
-                        Some(MessageRole::Tool) | Some(MessageRole::Assistant)
-                    );
+                    && (message.was_interrupted
+                        || !matches!(
+                            next_role,
+                            Some(MessageRole::Tool) | Some(MessageRole::Assistant)
+                        ));
 
                 if show_metadata {
                     lines.push(Line::from(""));
@@ -2886,6 +2959,15 @@ impl Chat {
             }
         }
 
+        if message.was_interrupted {
+            spans.push(Span::styled(
+                " • interrupted",
+                Style::default()
+                    .fg(colors.warning)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
         spans
     }
 
@@ -3056,11 +3138,14 @@ fn line_uses_background(line: &Line<'_>, bg: Color) -> bool {
     line.spans.iter().any(|span| span.style.bg == Some(bg))
 }
 
-fn spans_with_image_placeholders(
+fn spans_with_image_placeholders<F>(
     text: &str,
     text_style: Style,
-    image_style: Style,
-) -> Vec<Span<'static>> {
+    image_style: &F,
+) -> Vec<Span<'static>>
+where
+    F: Fn(&str) -> Style,
+{
     let mut spans = Vec::new();
     let mut remaining = text;
 
@@ -3081,7 +3166,10 @@ fn spans_with_image_placeholders(
             .chars()
             .all(|ch| ch.is_ascii_digit())
         {
-            spans.push(Span::styled(placeholder.to_string(), image_style));
+            spans.push(Span::styled(
+                placeholder.to_string(),
+                image_style(placeholder),
+            ));
         } else {
             spans.push(Span::styled(placeholder.to_string(), text_style));
         }
@@ -3094,6 +3182,47 @@ fn spans_with_image_placeholders(
     }
 
     spans
+}
+
+fn placeholder_at_line_col(line: &Line<'_>, target_col: usize) -> Option<String> {
+    let mut col = 0usize;
+    for span in &line.spans {
+        let text = span.content.as_ref();
+        let width = UnicodeWidthStr::width(text);
+        if target_col >= col && target_col < col.saturating_add(width) {
+            return image_placeholder_in_text_at_display_col(text, target_col - col);
+        }
+        col = col.saturating_add(width);
+    }
+    None
+}
+
+fn image_placeholder_in_text_at_display_col(text: &str, target_col: usize) -> Option<String> {
+    let mut search_from = 0usize;
+    while let Some(relative_start) = text[search_from..].find("[Image #") {
+        let start = search_from + relative_start;
+        let placeholder_start = &text[start..];
+        let Some(end_offset) = placeholder_start.find(']') else {
+            return None;
+        };
+        let end = start + end_offset + 1;
+        let placeholder = &text[start..end];
+        if image_index_from_placeholder(placeholder).is_some() {
+            let start_col = UnicodeWidthStr::width(&text[..start]);
+            let end_col = start_col + UnicodeWidthStr::width(placeholder);
+            if target_col >= start_col && target_col < end_col {
+                return Some(placeholder.to_string());
+            }
+        }
+        search_from = end;
+    }
+    None
+}
+
+fn image_index_from_placeholder(placeholder: &str) -> Option<usize> {
+    let raw_number = placeholder.strip_prefix("[Image #")?.strip_suffix(']')?;
+    let one_based = raw_number.parse::<usize>().ok()?;
+    one_based.checked_sub(1)
 }
 
 fn line_to_static(line: Line<'_>) -> Line<'static> {
@@ -3643,6 +3772,51 @@ mod tests {
     }
 
     #[test]
+    fn test_user_message_image_hit_test_finds_placeholder() {
+        let mut msg = Message::user("see [Image #1] please");
+        msg.local_image_paths = vec!["/tmp/example.png".to_string()];
+        let mut chat = Chat::with_messages(vec![msg]);
+        let colors = test_colors();
+        let area = Rect::new(0, 0, 80, 10);
+        let content_width = area.width.saturating_sub(2) as usize;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(content_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = area.height as usize;
+        chat.scroll_offset = 0;
+
+        let (line_idx, col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find("[Image #1]").map(|col| (line_idx, col as u16))
+            })
+            .expect("image placeholder position");
+
+        let target = chat
+            .image_at_position(
+                mouse(
+                    MouseEventKind::Moved,
+                    col,
+                    line_idx as u16,
+                    KeyModifiers::empty(),
+                ),
+                area,
+            )
+            .expect("image target");
+
+        assert_eq!(target.message_index, 0);
+        assert_eq!(target.image_index, 0);
+        assert_eq!(target.placeholder, "[Image #1]");
+        assert_eq!(target.path, "/tmp/example.png");
+    }
+
+    #[test]
     fn test_compaction_summary_renders_marker() {
         let mut msg = Message::user(format!(
             "{}\nsummary content that should stay hidden",
@@ -3939,6 +4113,60 @@ mod tests {
         let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
 
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn interrupted_assistant_metadata_shows_status_label() {
+        let mut chat = Chat::new();
+        let mut msg = Message::assistant("Partial answer.");
+        msg.t0_ms = Some(1_000);
+        msg.t1_ms = Some(1_200);
+        msg.tn_ms = Some(2_000);
+        msg.output_tokens = Some(40);
+        msg.mark_interrupted();
+        chat.add_message(msg);
+        chat.add_message(Message::tool(
+            serde_json::json!({
+                "id": "call_1",
+                "name": "read",
+                "status": "error",
+                "output_preview": "Streaming cancelled by user",
+            })
+            .to_string(),
+        ));
+        let colors = test_colors();
+
+        let lines = chat.build_all_lines(100, "model", &colors);
+
+        assert!(lines
+            .iter()
+            .map(line_text)
+            .any(|line| line.contains("interrupted")));
+    }
+
+    #[test]
+    fn interrupted_empty_assistant_metadata_still_shows_status_label() {
+        let mut chat = Chat::new();
+        let mut msg = Message::assistant("");
+        msg.mark_interrupted();
+        chat.add_message(msg);
+        chat.add_message(Message::tool(
+            serde_json::json!({
+                "id": "call_1",
+                "name": "read",
+                "status": "error",
+                "output_preview": "Streaming cancelled by user",
+            })
+            .to_string(),
+        ));
+        let colors = test_colors();
+
+        let lines = chat.build_all_lines(100, "model", &colors);
+
+        assert!(lines
+            .iter()
+            .map(line_text)
+            .any(|line| line.contains("interrupted")));
     }
 
     #[test]

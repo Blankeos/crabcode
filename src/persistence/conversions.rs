@@ -34,6 +34,13 @@ impl From<SessionMessage> for Message {
             }
         }
 
+        if msg.was_interrupted {
+            parts.push(MessagePart {
+                part_type: "status".to_string(),
+                data: serde_json::json!({ "state": "interrupted" }),
+            });
+        }
+
         Message {
             id: cuid2::create_id(),
             session_id: 0,
@@ -107,6 +114,14 @@ impl TryFrom<Message> for SessionMessage {
             .find(|p| p.part_type == "compaction_stats")
             .and_then(|p| serde_json::from_value::<CompactionStats>(p.data.clone()).ok());
 
+        let was_interrupted = msg.parts.iter().any(|p| {
+            p.part_type == "status"
+                && p.data
+                    .get("state")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|state| state == "interrupted")
+        });
+
         let role = match msg.role.as_str() {
             "user" => MessageRole::User,
             "assistant" => MessageRole::Assistant,
@@ -148,6 +163,7 @@ impl TryFrom<Message> for SessionMessage {
             provider: msg.provider.clone(),
             local_image_paths,
             compaction_stats,
+            was_interrupted,
         })
     }
 }
@@ -192,5 +208,20 @@ mod tests {
 
         let restored = SessionMessage::try_from(persistence_message).unwrap();
         assert_eq!(restored.compaction_stats, Some(stats));
+    }
+
+    #[test]
+    fn interrupted_status_round_trips_through_message_parts() {
+        let mut session_message = SessionMessage::assistant("partial");
+        session_message.mark_interrupted();
+
+        let persistence_message: Message = session_message.into();
+        assert!(persistence_message.parts.iter().any(|part| {
+            part.part_type == "status"
+                && part.data.get("state").and_then(|value| value.as_str()) == Some("interrupted")
+        }));
+
+        let restored = SessionMessage::try_from(persistence_message).unwrap();
+        assert!(restored.was_interrupted);
     }
 }

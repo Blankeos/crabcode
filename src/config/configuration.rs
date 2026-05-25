@@ -203,6 +203,33 @@ pub struct NotificationsConfig {
     pub terminal: TerminalNotificationsConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageOpenCommandConfig {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageOpenWith {
+    Auto,
+    System,
+    Editor,
+    Command(ImageOpenCommandConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImagesConfig {
+    pub open_with: ImageOpenWith,
+}
+
+impl Default for ImagesConfig {
+    fn default() -> Self {
+        Self {
+            open_with: ImageOpenWith::Auto,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderTimeout {
     Millis(u64),
@@ -220,6 +247,7 @@ pub struct MergedConfig {
     pub provider_timeouts: HashMap<String, ProviderTimeout>,
     pub sounds: SoundsConfig,
     pub notifications: NotificationsConfig,
+    pub images: ImagesConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -715,6 +743,7 @@ fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     out.insert("theme");
     out.insert("sounds");
     out.insert("notifications");
+    out.insert("images");
     out
 }
 
@@ -964,6 +993,7 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
 
     out.sounds = parse_sounds(obj.get("sounds"), diagnostics);
     out.notifications = parse_notifications(obj.get("notifications"), diagnostics);
+    out.images = parse_images(obj.get("images"), diagnostics);
 
     out
 }
@@ -1130,6 +1160,94 @@ fn parse_provider_timeouts(
     }
 
     out
+}
+
+fn parse_images(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> ImagesConfig {
+    let mut images = ImagesConfig::default();
+    let Some(value) = value else {
+        return images;
+    };
+    if value.is_null() {
+        return images;
+    }
+    let Value::Object(map) = value else {
+        diagnostics
+            .warnings
+            .push("images must be an object".to_string());
+        return images;
+    };
+
+    let Some(open_with) = map.get("openWith").or_else(|| map.get("open_with")) else {
+        return images;
+    };
+
+    images.open_with = parse_image_open_with(open_with, "images.openWith", diagnostics);
+    images
+}
+
+fn parse_image_open_with(
+    value: &Value,
+    key: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> ImageOpenWith {
+    match value {
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => ImageOpenWith::Auto,
+            "system" => ImageOpenWith::System,
+            "editor" => ImageOpenWith::Editor,
+            _ => {
+                diagnostics.warnings.push(format!(
+                    "{}: expected auto, system, editor, or a command object",
+                    key
+                ));
+                ImageOpenWith::Auto
+            }
+        },
+        Value::Object(map) => {
+            let command = match map.get("command").and_then(Value::as_str) {
+                Some(command) if !command.trim().is_empty() => command.trim().to_string(),
+                _ => {
+                    diagnostics
+                        .warnings
+                        .push(format!("{}.command must be a non-empty string", key));
+                    return ImageOpenWith::Auto;
+                }
+            };
+
+            let args = match map.get("args") {
+                Some(Value::Array(raw_args)) => {
+                    let mut args = Vec::new();
+                    for arg in raw_args {
+                        if let Some(arg) = arg.as_str() {
+                            args.push(arg.to_string());
+                        } else {
+                            diagnostics
+                                .warnings
+                                .push(format!("{}.args must contain only strings", key));
+                            return ImageOpenWith::Auto;
+                        }
+                    }
+                    args
+                }
+                Some(_) => {
+                    diagnostics
+                        .warnings
+                        .push(format!("{}.args must be an array of strings", key));
+                    return ImageOpenWith::Auto;
+                }
+                None => vec!["{path}".to_string()],
+            };
+
+            ImageOpenWith::Command(ImageOpenCommandConfig { command, args })
+        }
+        _ => {
+            diagnostics.warnings.push(format!(
+                "{}: expected auto, system, editor, or a command object",
+                key
+            ));
+            ImageOpenWith::Auto
+        }
+    }
 }
 
 fn parse_sounds(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> SoundsConfig {
@@ -1322,6 +1440,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "agent",
         "provider",
         "notifications",
+        "images",
     ]
     .into_iter()
     .collect();
@@ -1404,6 +1523,56 @@ mod tests {
             config.notifications.terminal.complete,
             TerminalNotificationMode::Disabled
         );
+    }
+
+    #[test]
+    fn images_open_with_defaults_to_auto() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(&json!({}), &mut diagnostics);
+
+        assert_eq!(config.images.open_with, ImageOpenWith::Auto);
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_images_open_with_string() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "images": {
+                    "openWith": "system"
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.images.open_with, ImageOpenWith::System);
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_images_open_with_command() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "images": {
+                    "openWith": {
+                        "command": "zed",
+                        "args": ["{path}"]
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.images.open_with,
+            ImageOpenWith::Command(ImageOpenCommandConfig {
+                command: "zed".to_string(),
+                args: vec!["{path}".to_string()],
+            })
+        );
+        assert!(diagnostics.warnings.is_empty());
     }
 
     #[test]

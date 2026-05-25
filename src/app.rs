@@ -11,7 +11,7 @@ use crate::session::manager::SessionManager;
 
 use crate::push_toast;
 use crate::toast::{self, Toast, ToastLevel};
-use crate::ui::components::chat::Chat;
+use crate::ui::components::chat::{Chat, ChatImageTarget};
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
 use crate::utils::git;
@@ -239,6 +239,7 @@ pub struct App {
     pub dark_mode: bool,
     pub sounds: crate::sound::ResolvedSoundsConfig,
     pub notifications: crate::config::NotificationsConfig,
+    pub images: crate::config::ImagesConfig,
     terminal_focused: bool,
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
@@ -303,6 +304,7 @@ impl App {
         };
 
         let loaded_config = crate::config::ConfigLoader::load()?;
+        input.set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
                 crate::startup_diag!("Config: {}", msg);
@@ -453,6 +455,7 @@ impl App {
             dark_mode: true,
             sounds: resolved_sounds,
             notifications: loaded_config.merged_config.notifications,
+            images: loaded_config.merged_config.images,
             terminal_focused: true,
             tool_permissions,
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
@@ -2085,6 +2088,10 @@ impl App {
             return false;
         }
 
+        if matches!(mouse.kind, MouseEventKind::Moved) && !self.input.contains_mouse(mouse) {
+            self.input.clear_hover();
+        }
+
         if !self.input.handle_mouse_event(mouse) {
             return false;
         }
@@ -2105,6 +2112,22 @@ impl App {
         true
     }
 
+    fn open_chat_image_target(&self, target: &ChatImageTarget) {
+        let path = std::path::Path::new(&target.path);
+        match crate::utils::image_attachment::open_path(path, &self.images) {
+            Ok(()) => push_toast(Toast::new(
+                format!("Opened {}", target.placeholder),
+                ToastLevel::Info,
+                None,
+            )),
+            Err(err) => push_toast(Toast::new(
+                format!("Failed to open image: {}", err),
+                ToastLevel::Error,
+                None,
+            )),
+        }
+    }
+
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
             crate::emit_log!(
@@ -2116,6 +2139,14 @@ impl App {
                 self.base_focus,
                 self.overlay_focus
             );
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Moved) && !self.input.contains_mouse(mouse) {
+            self.input.clear_hover();
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.base_focus != BaseFocus::Chat {
+            self.chat_state.chat.clear_hovered_image();
         }
 
         // If text is selected and user clicks on an overlay, clear selection instead
@@ -2373,8 +2404,30 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
             }
         } else if self.overlay_focus == OverlayFocus::MessageActions {
+            if matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            ) {
+                let chat_area = self.current_chat_area();
+                let click_inside_popup = self
+                    .message_actions_dialog
+                    .as_ref()
+                    .map(|dialog| dialog.contains_position(mouse.column, mouse.row))
+                    .unwrap_or(false);
+                if !click_inside_popup {
+                    if let Some(target) = self.chat_state.chat.image_at_position(mouse, chat_area) {
+                        self.chat_state.chat.set_hovered_image(Some(target.clone()));
+                        self.pending_chat_message_click = None;
+                        self.close_message_actions();
+                        self.open_chat_image_target(&target);
+                        return;
+                    }
+                }
+            }
+
             let maybe_action = if let Some(ref mut dialog) = self.message_actions_dialog {
-                let clicked_item = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let clicked_item = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                {
                     dialog.item_index_at_position(mouse.column, mouse.row)
                 } else {
                     None
@@ -2456,12 +2509,17 @@ impl App {
                         if !self.chat_state.chat.has_selection()
                             && !self.chat_state.chat.selection.is_dragging =>
                     {
-                        let hovered = self
+                        let hovered_image =
+                            self.chat_state.chat.image_at_position(mouse, chat_area);
+                        let hovered_message = self
                             .chat_state
                             .chat
                             .message_index_at_position(mouse, chat_area);
-                        self.chat_state.chat.set_highlighted_message(hovered);
-                        if hovered.is_some() {
+                        self.chat_state.chat.set_hovered_image(hovered_image);
+                        self.chat_state
+                            .chat
+                            .set_highlighted_message(hovered_message);
+                        if hovered_message.is_some() {
                             return;
                         }
                     }
@@ -2470,6 +2528,15 @@ impl App {
                             && !self.chat_state.chat.has_selection()
                             && !self.chat_state.chat.selection.is_dragging =>
                     {
+                        if let Some(target) =
+                            self.chat_state.chat.image_at_position(mouse, chat_area)
+                        {
+                            self.chat_state.chat.set_hovered_image(Some(target.clone()));
+                            self.pending_chat_message_click = None;
+                            self.open_chat_image_target(&target);
+                            return;
+                        }
+
                         self.pending_chat_message_click = self
                             .chat_state
                             .chat
@@ -2526,6 +2593,7 @@ impl App {
             }
 
             // Handle mouse events for the main input when no overlay is focused
+            self.chat_state.chat.clear_hovered_image();
             self.handle_input_mouse_event(mouse);
         }
     }
@@ -4526,15 +4594,39 @@ impl App {
 
         for session_id in streaming_ids {
             let mut chunks = Vec::new();
+            let mut disconnected = false;
 
             if let Some(stream) = self.stream_for_session_mut(&session_id) {
-                while let Ok(chunk) = stream.chunk_receiver.try_recv() {
-                    chunks.push(chunk);
+                loop {
+                    match stream.chunk_receiver.try_recv() {
+                        Ok(chunk) => chunks.push(chunk),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
+                    }
                 }
             }
 
             for chunk in chunks {
                 self.process_streaming_chunk_for_session(&session_id, chunk);
+            }
+
+            if disconnected
+                && self
+                    .session_view_states
+                    .get(&session_id)
+                    .is_some_and(|state| state.stream.is_some())
+            {
+                crate::emit_log!(
+                    "[STREAM_DISCONNECTED] session_id={} reason=stream_receiver_disconnected_without_terminal_chunk",
+                    session_id
+                );
+                self.fail_streaming_session(
+                    &session_id,
+                    "Stream task ended before sending a completion event".to_string(),
+                );
             }
         }
 
@@ -4870,6 +4962,22 @@ impl App {
         }
     }
 
+    fn mark_streamed_assistant_interrupted(&mut self, session_id: &str) {
+        let Some((start, _, _)) = self.streaming_boundary_for_session(session_id) else {
+            return;
+        };
+
+        if let Some(chat) = self.chat_for_session_mut(session_id) {
+            for idx in (start..chat.messages.len()).rev() {
+                if chat.messages[idx].role == crate::session::types::MessageRole::Assistant {
+                    chat.messages[idx].mark_interrupted();
+                    chat.mark_render_dirty();
+                    return;
+                }
+            }
+        }
+    }
+
     fn fail_streaming_session(&mut self, session_id: &str, error: String) {
         if self
             .finalize_and_persist_streamed_messages(session_id, Some(&error))
@@ -4894,15 +5002,13 @@ impl App {
     }
 
     fn cancelled_streaming_session(&mut self, session_id: &str) {
-        let start = self
-            .streaming_boundary_for_session(session_id)
-            .map(|(start, _, _)| start)
-            .unwrap_or(0);
+        self.mark_streamed_assistant_interrupted(session_id);
 
-        if let Some(chat) = self.chat_for_session_mut(session_id) {
-            chat.mark_streaming_end();
-            chat.finalize_streaming_metrics();
-            chat.truncate_messages(start);
+        if self
+            .finalize_and_persist_streamed_messages(session_id, Some("Streaming cancelled by user"))
+            .is_none()
+        {
+            return;
         }
 
         let _ = self.session_manager.set_session_status(
@@ -5536,7 +5642,11 @@ mod tests {
         App {
             running: true,
             version: "test".to_string(),
-            input: Input::new(),
+            input: {
+                let mut input = Input::new();
+                input.set_image_open_config(crate::config::ImagesConfig::default());
+                input
+            },
             command_registry: registry,
             session_manager: SessionManager::new(),
             home_state: init_home(),
@@ -5582,6 +5692,7 @@ mod tests {
             dark_mode: true,
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
+            images: crate::config::ImagesConfig::default(),
             terminal_focused: true,
             tool_permissions: crate::tools::ToolPermissions::new(".".to_string()),
             skills_dirs: Vec::new(),
@@ -5806,6 +5917,77 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_stream_persists_partial_messages() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Interrupted".to_string()));
+
+        let user_message = crate::session::types::Message::user("Prompt");
+        app.chat_state.chat.add_message(user_message.clone());
+        app.session_manager
+            .add_message_to_current_session(&user_message)
+            .unwrap();
+
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete(
+                "Partial answer.",
+            ));
+        app.chat_state.chat.begin_streaming_turn();
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::tool(
+                serde_json::json!({
+                    "id": "call_1",
+                    "name": "read",
+                    "status": "running",
+                    "args": { "path": "Cargo.toml" },
+                })
+                .to_string(),
+            ));
+
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream = Some(SessionStreamState {
+            chunk_receiver: receiver,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            streaming_model: Some("test-model".to_string()),
+            streaming_provider: Some("test-provider".to_string()),
+            chat_len_before_assistant: 1,
+        });
+        app.is_streaming = true;
+
+        app.cancelled_streaming_session(&session_id);
+
+        assert_eq!(app.chat_state.chat.messages.len(), 3);
+
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(
+            session.status,
+            crate::session::types::SessionStatus::Interrupted
+        );
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(
+            session.messages[1].role,
+            crate::session::types::MessageRole::Assistant
+        );
+        assert_eq!(session.messages[1].content, "Partial answer.");
+        assert!(session.messages[1].is_complete);
+        assert!(session.messages[1].was_interrupted);
+        assert_eq!(session.messages[1].model.as_deref(), Some("test-model"));
+        assert_eq!(
+            session.messages[1].provider.as_deref(),
+            Some("test-provider")
+        );
+
+        let tool_payload: serde_json::Value =
+            serde_json::from_str(&session.messages[2].content).unwrap();
+        assert_eq!(tool_payload["status"], "error");
+        assert_eq!(
+            tool_payload["output_preview"],
+            "Streaming cancelled by user"
+        );
+    }
+
+    #[test]
     fn stream_finish_waits_for_running_tool_result() {
         let mut app = test_app();
         let session_id = app.create_new_session(Some("Deferred".to_string()));
@@ -5892,6 +6074,146 @@ mod tests {
         let tool_payload: serde_json::Value =
             serde_json::from_str(&session_messages[2].content).unwrap();
         assert_eq!(tool_payload["status"], "ok");
+    }
+
+    #[test]
+    fn disconnected_stream_receiver_marks_running_tools_failed() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Disconnected".to_string()));
+
+        let user_message = crate::session::types::Message::user("Prompt");
+        app.chat_state.chat.add_message(user_message.clone());
+        app.session_manager
+            .add_message_to_current_session(&user_message)
+            .unwrap();
+
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Working."));
+        app.chat_state.chat.begin_streaming_turn();
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::tool(
+                serde_json::json!({
+                    "id": "call_1",
+                    "name": "bash",
+                    "status": "running",
+                    "args": { "command": "cargo test" },
+                })
+                .to_string(),
+            ));
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        drop(sender);
+
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState {
+            chunk_receiver: receiver,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            streaming_model: Some("test-model".to_string()),
+            streaming_provider: Some("test-provider".to_string()),
+            chat_len_before_assistant: 1,
+        });
+        state
+            .tool_calls
+            .tool_call_message_indices
+            .insert("call_1".to_string(), 2);
+        state.tool_calls.tool_call_order.push("call_1".to_string());
+        app.is_streaming = true;
+
+        app.process_streaming_chunks();
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert!(state.stream.is_none());
+        assert!(!app.is_streaming);
+
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(session.status, crate::session::types::SessionStatus::Failed);
+        assert_eq!(session.messages.len(), 3);
+
+        let tool_payload: serde_json::Value =
+            serde_json::from_str(&session.messages[2].content).unwrap();
+        assert_eq!(tool_payload["status"], "error");
+        assert_eq!(
+            tool_payload["output_preview"],
+            "Stream task ended before sending a completion event"
+        );
+    }
+
+    #[test]
+    fn disconnected_stream_receiver_processes_queued_tool_result_before_failing() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Tool result then disconnect".to_string()));
+
+        let user_message = crate::session::types::Message::user("Prompt");
+        app.chat_state.chat.add_message(user_message.clone());
+        app.session_manager
+            .add_message_to_current_session(&user_message)
+            .unwrap();
+
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Working."));
+        app.chat_state.chat.begin_streaming_turn();
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::tool(
+                serde_json::json!({
+                    "id": "call_1",
+                    "name": "bash",
+                    "status": "running",
+                    "args": { "command": "cargo test" },
+                })
+                .to_string(),
+            ));
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender
+            .send(crate::llm::ChunkMessage::ToolResult(
+                crate::llm::ToolCallResult {
+                    tool_call_id: "call_1".to_string(),
+                    role: "tool".to_string(),
+                    name: "bash".to_string(),
+                    content: serde_json::json!({
+                        "status": "ok",
+                        "title": "Bash",
+                        "output_preview": "tests passed"
+                    })
+                    .to_string(),
+                },
+            ))
+            .unwrap();
+        drop(sender);
+
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState {
+            chunk_receiver: receiver,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            streaming_model: Some("test-model".to_string()),
+            streaming_provider: Some("test-provider".to_string()),
+            chat_len_before_assistant: 1,
+        });
+        state
+            .tool_calls
+            .tool_call_message_indices
+            .insert("call_1".to_string(), 2);
+        state.tool_calls.tool_call_order.push("call_1".to_string());
+        app.is_streaming = true;
+
+        app.process_streaming_chunks();
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert!(state.stream.is_none());
+        assert!(!app.is_streaming);
+
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(session.status, crate::session::types::SessionStatus::Failed);
+        assert_eq!(session.messages.len(), 3);
+
+        let tool_payload: serde_json::Value =
+            serde_json::from_str(&session.messages[2].content).unwrap();
+        assert_eq!(tool_payload["status"], "ok");
+        assert_eq!(tool_payload["output_preview"], "tests passed");
     }
 
     #[test]
