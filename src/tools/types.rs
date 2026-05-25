@@ -33,6 +33,14 @@ pub struct ToolResult {
     pub title: String,
     pub output: String,
     pub metadata: HashMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ToolResultImage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolResultImage {
+    pub data_url: String,
+    pub media_type: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -106,11 +114,24 @@ impl ToolResult {
             title: title.into(),
             output: output.into(),
             metadata: HashMap::new(),
+            images: Vec::new(),
         }
     }
 
     pub fn with_metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.metadata.insert(key.into(), value);
+        self
+    }
+
+    pub fn with_image(
+        mut self,
+        data_url: impl Into<String>,
+        media_type: impl Into<String>,
+    ) -> Self {
+        self.images.push(ToolResultImage {
+            data_url: data_url.into(),
+            media_type: media_type.into(),
+        });
         self
     }
 }

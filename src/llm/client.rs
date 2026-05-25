@@ -1134,13 +1134,10 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
                     .iter()
                     .filter_map(|path| {
                         let path = std::path::Path::new(path);
-                        match crate::utils::image_attachment::data_url_for_path(path) {
-                            Ok(data_url) => Some(ImageContent {
-                                data_url,
-                                media_type: crate::utils::image_attachment::mime_type_for_path(
-                                    path,
-                                )
-                                .to_string(),
+                        match crate::utils::image_attachment::prompt_image_for_path(path, false) {
+                            Ok(image) => Some(ImageContent {
+                                data_url: image.data_url,
+                                media_type: image.media_type,
                             }),
                             Err(err) => {
                                 crate::emit_log!(
@@ -1202,10 +1199,56 @@ fn tool_messages_for_model(content: &str) -> Option<Vec<AisdkMessage>> {
     let status = obj.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
     let is_error = status.eq_ignore_ascii_case("error");
 
+    let images = if name == "view_image" && !is_error {
+        view_image_tool_images(obj)
+    } else {
+        Vec::new()
+    };
+
     Some(vec![
         AisdkMessage::tool_call(call_id, name, arguments),
-        AisdkMessage::tool_output(call_id, name, output, is_error),
+        AisdkMessage::tool_output_with_images(call_id, name, output, images, is_error),
     ])
+}
+
+fn view_image_tool_images(obj: &serde_json::Map<String, serde_json::Value>) -> Vec<ImageContent> {
+    let path = obj
+        .get("metadata")
+        .and_then(|metadata| metadata.get("path"))
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            obj.get("args")
+                .and_then(|args| args.get("path"))
+                .and_then(|value| value.as_str())
+        });
+    let Some(path) = path else {
+        return Vec::new();
+    };
+
+    let preserve_original = obj
+        .get("metadata")
+        .and_then(|metadata| metadata.get("detail"))
+        .and_then(|value| value.as_str())
+        .map(|detail| detail == "original")
+        .unwrap_or(false);
+
+    match crate::utils::image_attachment::prompt_image_for_path(
+        std::path::Path::new(path),
+        preserve_original,
+    ) {
+        Ok(image) => vec![ImageContent {
+            data_url: image.data_url,
+            media_type: image.media_type,
+        }],
+        Err(err) => {
+            crate::emit_log!(
+                "failed to reattach viewed image {} from tool history: {}",
+                path,
+                err
+            );
+            Vec::new()
+        }
+    }
 }
 
 fn tool_message_observation(content: &str) -> String {

@@ -1,10 +1,24 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
+use image::codecs::jpeg::JpegEncoder;
+use image::codecs::png::PngEncoder;
+use image::codecs::webp::WebPEncoder;
+use image::imageops::FilterType;
+use image::{ColorType, DynamicImage, GenericImageView, ImageEncoder, ImageFormat};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+const MAX_PROMPT_IMAGE_DIMENSION: u32 = 2048;
+
+#[derive(Debug, Clone)]
+pub struct PromptImage {
+    pub data_url: String,
+    pub media_type: String,
+    pub width: u32,
+    pub height: u32,
+}
 
 pub fn is_supported_image_path(path: &Path) -> bool {
     if !path.is_file() {
@@ -44,6 +58,118 @@ pub fn data_url_for_path(path: &Path) -> Result<String> {
     let mime_type = mime_type_for_path(path);
     let encoded = general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{mime_type};base64,{encoded}"))
+}
+
+pub fn prompt_image_for_path(path: &Path, preserve_original: bool) -> Result<PromptImage> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read image {}", path.display()))?;
+    prompt_image_from_bytes(path, bytes, preserve_original)
+}
+
+fn prompt_image_from_bytes(
+    path: &Path,
+    bytes: Vec<u8>,
+    preserve_original: bool,
+) -> Result<PromptImage> {
+    let source_format = image::guess_format(&bytes).ok().and_then(|format| {
+        matches!(
+            format,
+            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP
+        )
+        .then_some(format)
+    });
+
+    let image = image::load_from_memory(&bytes)
+        .with_context(|| format!("failed to decode image {}", path.display()))?;
+    let (width, height) = image.dimensions();
+    let can_keep_original = preserve_original
+        || (width <= MAX_PROMPT_IMAGE_DIMENSION && height <= MAX_PROMPT_IMAGE_DIMENSION);
+
+    let (output_bytes, output_format, output_width, output_height) = if can_keep_original {
+        if let Some(format) = source_format.filter(|format| can_preserve_source_bytes(*format)) {
+            (bytes, format, width, height)
+        } else {
+            let output_format = ImageFormat::Png;
+            let output_bytes = encode_image(&image, output_format)
+                .with_context(|| format!("failed to encode image {}", path.display()))?;
+            (output_bytes, output_format, width, height)
+        }
+    } else {
+        let resized = image.resize(
+            MAX_PROMPT_IMAGE_DIMENSION,
+            MAX_PROMPT_IMAGE_DIMENSION,
+            FilterType::Triangle,
+        );
+        let output_format = source_format
+            .filter(|format| can_preserve_source_bytes(*format))
+            .unwrap_or(ImageFormat::Png);
+        let output_bytes = encode_image(&resized, output_format)
+            .with_context(|| format!("failed to encode image {}", path.display()))?;
+        (
+            output_bytes,
+            output_format,
+            resized.width(),
+            resized.height(),
+        )
+    };
+
+    let media_type = format_to_mime(output_format).to_string();
+    let encoded = general_purpose::STANDARD.encode(output_bytes);
+    Ok(PromptImage {
+        data_url: format!("data:{media_type};base64,{encoded}"),
+        media_type,
+        width: output_width,
+        height: output_height,
+    })
+}
+
+fn can_preserve_source_bytes(format: ImageFormat) -> bool {
+    matches!(
+        format,
+        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP
+    )
+}
+
+fn encode_image(image: &DynamicImage, format: ImageFormat) -> Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+
+    match format {
+        ImageFormat::Jpeg => {
+            let mut encoder = JpegEncoder::new_with_quality(&mut buffer, 85);
+            encoder.encode_image(image)?;
+        }
+        ImageFormat::WebP => {
+            let rgba = image.to_rgba8();
+            let encoder = WebPEncoder::new_lossless(&mut buffer);
+            encoder.write_image(
+                rgba.as_raw(),
+                image.width(),
+                image.height(),
+                ColorType::Rgba8.into(),
+            )?;
+        }
+        _ => {
+            let rgba = image.to_rgba8();
+            let encoder = PngEncoder::new(&mut buffer);
+            encoder.write_image(
+                rgba.as_raw(),
+                image.width(),
+                image.height(),
+                ColorType::Rgba8.into(),
+            )?;
+        }
+    }
+
+    Ok(buffer)
+}
+
+fn format_to_mime(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Gif => "image/gif",
+        ImageFormat::WebP => "image/webp",
+        _ => "image/png",
+    }
 }
 
 pub fn normalize_pasted_path(raw: &str) -> Option<PathBuf> {
@@ -140,6 +266,23 @@ pub fn open_path(path: &Path, config: &crate::config::ImagesConfig) -> Result<()
         crate::config::ImageOpenWith::Editor => open_editor(path).or_else(|_| open_system(path)),
         crate::config::ImageOpenWith::Command(command) => open_custom_command(path, command),
     }
+}
+
+pub fn open_file_path(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Err(anyhow!("file no longer exists: {}", path.display()));
+    }
+
+    open_editor(path).or_else(|_| open_system(path))
+}
+
+pub fn open_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).with_context(|| format!("invalid url: {url}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(anyhow!("unsupported url scheme: {}", parsed.scheme()));
+    }
+
+    open_system_url(parsed.as_str())
 }
 
 fn open_auto(path: &Path) -> Result<()> {
@@ -371,6 +514,35 @@ fn open_system(path: &Path) -> Result<()> {
             .arg(path)
             .spawn()
             .with_context(|| format!("failed to open {}", path.display()))?;
+        Ok(())
+    }
+}
+
+fn open_system_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .with_context(|| format!("failed to open {url}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .with_context(|| format!("failed to open {url}"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .with_context(|| format!("failed to open {url}"))?;
         Ok(())
     }
 }

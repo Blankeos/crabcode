@@ -124,22 +124,12 @@ impl ToolHandler for SkillTool {
             files = file_list,
         );
 
-        Ok(ToolResult {
-            title: format!("Loaded skill: {}", name),
-            output,
-            metadata: {
-                let mut m = std::collections::HashMap::new();
-                m.insert(
-                    "name".to_string(),
-                    serde_json::Value::String(info.name.clone()),
-                );
-                m.insert(
-                    "dir".to_string(),
-                    serde_json::Value::String(dir.to_string_lossy().to_string()),
-                );
-                m
-            },
-        })
+        Ok(ToolResult::new(format!("Loaded skill: {}", name), output)
+            .with_metadata("name", serde_json::Value::String(info.name.clone()))
+            .with_metadata(
+                "dir",
+                serde_json::Value::String(dir.to_string_lossy().to_string()),
+            ))
     }
 }
 

@@ -178,3 +178,10 @@ I want - [x] To do this But I dont want to do this
     - Autodetected depending on the tool used: i.e. if Wezterm, other terminals "open w/ Finder on mac, or native image opener". If inside Zed, open image with Zed. If inside VSCode/Cursor, open with that IDE. (Ambitious but idk if possible)
 
 - [ ] Make the permissions, config-driven customizable behavior. Make it like OpenCode, so we just link the docs for it in OpenCode.
+
+- [x] View image locally tool, instead of read image.
+- [x] Clickable paths.
+
+- [ ] When in another workspace and there are existing sessions in there and I opened /sessions, make that "workspace" the focus especially since the first page is at home.rs.
+
+- [ ] I want to make a SPECIAL integration w/ ollama, specifically the local ollama cli. Maybe `ollama ls` can be cached at runtime? and refreshed with refreshmodels? And a special provider place where I can do /connect on it. And it won't require any API keys? I wanna put it somewhere clean though... So that it doesn't really bother with the models.dev stuff, but just fits in cleanly. A /connect provider called 'Ollama (Local)' would be cool.

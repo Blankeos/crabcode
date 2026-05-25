@@ -1,5 +1,5 @@
 use crate::tools::{ToolContext, ToolRegistry};
-use aisdk::core::tools::ToolExecute;
+use aisdk::core::tools::{ToolExecute, ToolOutput};
 use aisdk::core::Tool;
 use schemars::Schema;
 use serde_json::Value;
@@ -194,8 +194,19 @@ pub async fn convert_to_aisdk_tools(
                     tool_result.output.len()
                 );
 
-                let model_output =
-                    truncate_tool_output(&tool_result.output, TOOL_MODEL_OUTPUT_LIMIT);
+                let model_images = tool_result
+                    .images
+                    .iter()
+                    .map(|image| aisdk::message::ImageContent {
+                        data_url: image.data_url.clone(),
+                        media_type: image.media_type.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let model_output = ToolOutput::new(truncate_tool_output(
+                    &tool_result.output,
+                    TOOL_MODEL_OUTPUT_LIMIT,
+                ))
+                .with_images(model_images);
 
                 if let Some(ref sender) = sender {
                     let preview = truncate_tool_output(&tool_result.output, TOOL_UI_PREVIEW_LIMIT);

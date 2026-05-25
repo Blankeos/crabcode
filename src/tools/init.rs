@@ -1,5 +1,5 @@
 use crate::tools::{
-    fs::{GlobTool, GrepTool, ListTool, ReadTool, WriteTool},
+    fs::{GlobTool, GrepTool, ListTool, ReadTool, ViewImageTool, WriteTool},
     BashTool, EditTool, QuestionTool, SkillTool, TaskTool, ToolRegistry, UpdatePlanTool,
     WebfetchTool,
 };
@@ -12,6 +12,7 @@ pub async fn initialize_tool_registry() -> ToolRegistry {
     registry.register(Arc::new(GrepTool::new())).await;
     registry.register(Arc::new(ListTool::new())).await;
     registry.register(Arc::new(ReadTool::new())).await;
+    registry.register(Arc::new(ViewImageTool::new())).await;
     registry.register(Arc::new(WriteTool::new())).await;
     registry.register(Arc::new(BashTool::new())).await;
     registry.register(Arc::new(EditTool::new())).await;

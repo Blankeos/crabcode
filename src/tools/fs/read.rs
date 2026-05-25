@@ -81,7 +81,7 @@ impl ToolHandler for ReadTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "read".to_string(),
-            description: "Read file or directory contents with pagination. Detects binary files automatically."
+            description: "Read text file or directory contents with pagination. Detects binary files automatically. For local image files, use view_image instead."
                 .to_string(),
             parameters: vec![
                 ParameterSchema {

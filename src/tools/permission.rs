@@ -24,7 +24,7 @@ pub enum PermissionAction {
 impl PermissionAction {
     pub fn from_tool_id(tool_id: &str) -> Self {
         match tool_id {
-            "read" => Self::Read,
+            "read" | "view_image" => Self::Read,
             "write" => Self::Write,
             "edit" => Self::Edit,
             "list" => Self::List,
@@ -377,7 +377,9 @@ fn extract_primary_path(
 ) -> Option<PathBuf> {
     let raw = match action {
         PermissionAction::Read | PermissionAction::Write | PermissionAction::Edit => {
-            get_string(params, "file_path").or_else(|| get_string(params, "filePath"))
+            get_string(params, "file_path")
+                .or_else(|| get_string(params, "filePath"))
+                .or_else(|| get_string(params, "path"))
         }
         PermissionAction::List | PermissionAction::Glob | PermissionAction::Grep => {
             get_string(params, "path").or_else(|| Some(".".to_string()))
