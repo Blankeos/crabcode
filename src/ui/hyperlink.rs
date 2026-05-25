@@ -217,11 +217,11 @@ fn is_local_path_like(path_text: &str) -> bool {
         return false;
     }
 
-    if path_text.starts_with('/')
-        || path_text.starts_with("~/")
-        || path_text.starts_with("./")
-        || path_text.starts_with("../")
-    {
+    if path_text.starts_with('/') {
+        return is_absolute_path_like(path_text);
+    }
+
+    if path_text.starts_with("~/") || path_text.starts_with("./") || path_text.starts_with("../") {
         return path_text.len() > 1;
     }
 
@@ -234,6 +234,15 @@ fn is_local_path_like(path_text: &str) -> bool {
 
 fn is_forbidden_path_char(ch: char) -> bool {
     matches!(ch, '=' | '|' | '*' | '?' | '<' | '>' | '@')
+}
+
+fn is_absolute_path_like(path_text: &str) -> bool {
+    let segments = path_text
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    segments.len() >= 2 || std::path::Path::new(path_text).exists()
 }
 
 fn is_relative_slash_path(path_text: &str) -> bool {
@@ -377,10 +386,10 @@ mod tests {
 
     #[test]
     fn avoids_common_non_path_slash_tokens() {
-        assert!(
-            detect_hyperlinks("streaming at 42t/s, ratio=1/2, non-selectable/unhighlighted")
-                .is_empty()
-        );
+        assert!(detect_hyperlinks(
+            "streaming at 42t/s, ratio=1/2, non-selectable/unhighlighted, /connect"
+        )
+        .is_empty());
     }
 
     #[test]
