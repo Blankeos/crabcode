@@ -824,6 +824,9 @@ async fn stream_provider_request(
             if config.openai_options.force_tool_strict_false {
                 builder = builder.tool_strict_override(false);
             }
+            if config.openai_options.disallow_system_messages {
+                builder = builder.responses_websocket(true);
+            }
             if !config.openai_options.additional_headers.is_empty() {
                 builder = builder.headers(config.openai_options.additional_headers.clone());
             }

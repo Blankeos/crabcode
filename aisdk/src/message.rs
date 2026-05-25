@@ -48,6 +48,21 @@ impl Message {
         arguments: impl Into<String>,
     ) -> Self {
         Self::ToolCall(ToolCallMessage {
+            item_id: None,
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        })
+    }
+
+    pub fn tool_call_with_item_id(
+        item_id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self::ToolCall(ToolCallMessage {
+            item_id: Some(item_id.into()),
             call_id: call_id.into(),
             name: name.into(),
             arguments: arguments.into(),
@@ -94,6 +109,8 @@ pub struct AssistantMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
     pub call_id: String,
     pub name: String,
     pub arguments: String,

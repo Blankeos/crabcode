@@ -170,7 +170,7 @@ I get
 I want - [x] To do this But I dont want to do this
 ```
 
-- [ ] Make the "bash" permission parity to codex. Also I currently dont see the command that it wants to run, so I'm kinda blind on what to run here.
+- [x] Make the "bash" permission parity to codex. Also I currently dont see the command that it wants to run, so I'm kinda blind on what to run here.
 
 - [ ] When pasting images and it creates this [Image #1] tag, make it hoverable (just change the color, not the background), then once clicked, goes to the preferred editor of the user.
   - Multiple paths here:

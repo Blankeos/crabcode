@@ -278,9 +278,21 @@ pub async fn stream_with_tools<P: Provider>(
             let mut tool_calls_to_run = Vec::new();
             let mut tool_call_messages = Vec::new();
 
-            for (call_id, tool_name, args) in tool_calls_to_execute {
-                let tool_call_message =
-                    Message::tool_call(call_id.clone(), tool_name.clone(), canonical_json(&args));
+            for tool_call in tool_calls_to_execute {
+                let call_id = tool_call.call_id;
+                let tool_name = tool_call.name;
+                let args = tool_call.arguments;
+                let arguments = canonical_json(&args);
+                let tool_call_message = if let Some(item_id) = tool_call.item_id {
+                    Message::tool_call_with_item_id(
+                        item_id,
+                        call_id.clone(),
+                        tool_name.clone(),
+                        arguments,
+                    )
+                } else {
+                    Message::tool_call(call_id.clone(), tool_name.clone(), arguments)
+                };
                 current_messages.push(tool_call_message.clone());
                 tool_call_messages.push(tool_call_message);
 
@@ -587,6 +599,14 @@ struct PendingToolCall {
 }
 
 #[derive(Debug)]
+struct CompletedToolCall {
+    item_id: Option<String>,
+    call_id: String,
+    name: String,
+    arguments: serde_json::Value,
+}
+
+#[derive(Debug)]
 struct ToolExecutionResult {
     call_id: String,
     tool_name: String,
@@ -645,7 +665,7 @@ impl ToolCallAccumulator {
         Ok(())
     }
 
-    fn finish(self) -> std::result::Result<Vec<(String, String, serde_json::Value)>, String> {
+    fn finish(self) -> std::result::Result<Vec<CompletedToolCall>, String> {
         let mut results = Vec::new();
 
         for call in self.calls {
@@ -654,11 +674,21 @@ impl ToolCallAccumulator {
                 .filter(|name| !name.is_empty())
                 .ok_or_else(|| format!("Tool call '{}' missing function name", call.key))?;
 
-            let item_id = call.id.unwrap_or_else(|| call.key.clone());
-            let id = call.call_id.unwrap_or(item_id);
-            let args = parse_tool_arguments(&id, &call.arguments, call.final_arguments.as_deref())?;
+            let item_id = call.id.or_else(|| Some(call.key.clone()));
+            let call_id = call
+                .call_id
+                .clone()
+                .or_else(|| item_id.clone())
+                .unwrap_or_else(|| call.key.clone());
+            let args =
+                parse_tool_arguments(&call_id, &call.arguments, call.final_arguments.as_deref())?;
 
-            results.push((id, name, args));
+            results.push(CompletedToolCall {
+                item_id,
+                call_id,
+                name,
+                arguments: args,
+            });
         }
 
         Ok(results)
@@ -1325,9 +1355,9 @@ mod tests {
         let calls = accumulator.finish().unwrap();
 
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "call_1");
-        assert_eq!(calls[0].1, "bash");
-        assert_eq!(calls[0].2["command"], "ls -la");
+        assert_eq!(calls[0].call_id, "call_1");
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].arguments["command"], "ls -la");
     }
 
     #[test]
@@ -1346,9 +1376,10 @@ mod tests {
         let calls = accumulator.finish().unwrap();
 
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "call_1");
-        assert_eq!(calls[0].1, "read");
-        assert_eq!(calls[0].2["file_path"], "Cargo.toml");
+        assert_eq!(calls[0].call_id, "call_1");
+        assert_eq!(calls[0].item_id.as_deref(), Some("fc_1"));
+        assert_eq!(calls[0].name, "read");
+        assert_eq!(calls[0].arguments["file_path"], "Cargo.toml");
     }
 
     #[test]
@@ -1384,10 +1415,10 @@ mod tests {
         let calls = accumulator.finish().unwrap();
 
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].1, "read");
-        assert_eq!(calls[0].2["file_path"], "Cargo.toml");
-        assert_eq!(calls[1].1, "bash");
-        assert_eq!(calls[1].2["command"], "cargo test");
+        assert_eq!(calls[0].name, "read");
+        assert_eq!(calls[0].arguments["file_path"], "Cargo.toml");
+        assert_eq!(calls[1].name, "bash");
+        assert_eq!(calls[1].arguments["command"], "cargo test");
     }
 
     #[test]
@@ -1402,7 +1433,7 @@ mod tests {
 
         let calls = accumulator.finish().unwrap();
 
-        assert_eq!(calls[0].2, serde_json::json!({}));
+        assert_eq!(calls[0].arguments, serde_json::json!({}));
     }
 
     #[test]
@@ -1421,7 +1452,7 @@ mod tests {
         let calls = accumulator.finish().unwrap();
 
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1, "read");
-        assert_eq!(calls[0].2["file_path"], "Cargo.toml");
+        assert_eq!(calls[0].name, "read");
+        assert_eq!(calls[0].arguments["file_path"], "Cargo.toml");
     }
 }
