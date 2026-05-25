@@ -14,6 +14,7 @@ use crate::toast::{self, Toast, ToastLevel};
 use crate::ui::components::chat::{Chat, ChatImageTarget};
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
+use crate::ui::hyperlink::HyperlinkTarget;
 use crate::utils::git;
 
 use crate::views::chat::{
@@ -2300,6 +2301,37 @@ impl App {
         }
     }
 
+    fn open_chat_hyperlink_target(&self, target: &HyperlinkTarget) {
+        match target {
+            HyperlinkTarget::File(path) => {
+                match crate::utils::image_attachment::open_file_path(path) {
+                    Ok(()) => push_toast(Toast::new(
+                        format!("Opened {}", path.display()),
+                        ToastLevel::Info,
+                        None,
+                    )),
+                    Err(err) => push_toast(Toast::new(
+                        format!("Failed to open file: {}", err),
+                        ToastLevel::Error,
+                        None,
+                    )),
+                }
+            }
+            HyperlinkTarget::Url(url) => match crate::utils::image_attachment::open_url(url) {
+                Ok(()) => push_toast(Toast::new(
+                    format!("Opened {}", url),
+                    ToastLevel::Info,
+                    None,
+                )),
+                Err(err) => push_toast(Toast::new(
+                    format!("Failed to open link: {}", err),
+                    ToastLevel::Error,
+                    None,
+                )),
+            },
+        }
+    }
+
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
             crate::emit_log!(
@@ -2594,6 +2626,15 @@ impl App {
                         self.open_chat_image_target(&target);
                         return;
                     }
+
+                    if let Some(target) =
+                        self.chat_state.chat.hyperlink_at_position(mouse, chat_area)
+                    {
+                        self.pending_chat_message_click = None;
+                        self.close_message_actions();
+                        self.open_chat_hyperlink_target(&target);
+                        return;
+                    }
                 }
             }
 
@@ -2701,7 +2742,9 @@ impl App {
                         }
                     }
                     MouseEventKind::Down(MouseButton::Left)
-                        if mouse.modifiers.is_empty()
+                        if (mouse.modifiers.is_empty()
+                            || mouse.modifiers.contains(KeyModifiers::SUPER)
+                            || mouse.modifiers.contains(KeyModifiers::META))
                             && !self.chat_state.chat.has_selection()
                             && !self.chat_state.chat.selection.is_dragging =>
                     {
@@ -2714,10 +2757,20 @@ impl App {
                             return;
                         }
 
-                        self.pending_chat_message_click = self
-                            .chat_state
-                            .chat
-                            .message_index_at_position(mouse, chat_area);
+                        if let Some(target) =
+                            self.chat_state.chat.hyperlink_at_position(mouse, chat_area)
+                        {
+                            self.pending_chat_message_click = None;
+                            self.open_chat_hyperlink_target(&target);
+                            return;
+                        }
+
+                        if mouse.modifiers.is_empty() {
+                            self.pending_chat_message_click = self
+                                .chat_state
+                                .chat
+                                .message_index_at_position(mouse, chat_area);
+                        }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
                         self.pending_chat_message_click = None;

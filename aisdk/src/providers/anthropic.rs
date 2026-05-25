@@ -132,7 +132,7 @@ impl Provider for Anthropic {
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": t.call_id,
-                        "content": t.output,
+                        "content": anthropic_tool_output_content(t),
                         "is_error": t.is_error,
                     }],
                 })),
@@ -283,6 +283,38 @@ fn anthropic_user_content(user: &crate::message::UserMessage) -> serde_json::Val
     }
 
     parts.extend(user.images.iter().map(|image| {
+        let data = image
+            .data_url
+            .split_once(',')
+            .map(|(_, data)| data)
+            .unwrap_or(image.data_url.as_str());
+        serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.media_type,
+                "data": data,
+            },
+        })
+    }));
+
+    serde_json::Value::Array(parts)
+}
+
+fn anthropic_tool_output_content(tool: &crate::message::ToolOutputMessage) -> serde_json::Value {
+    if tool.images.is_empty() {
+        return serde_json::json!(tool.output);
+    }
+
+    let mut parts = Vec::new();
+    if !tool.output.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": tool.output,
+        }));
+    }
+
+    parts.extend(tool.images.iter().map(|image| {
         let data = image
             .data_url
             .split_once(',')

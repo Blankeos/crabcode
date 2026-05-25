@@ -218,6 +218,101 @@ fn display_path(raw: &str, basename_only: bool) -> String {
     trimmed.to_string()
 }
 
+fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
+    if message.role != MessageRole::Tool {
+        return Vec::new();
+    }
+
+    let Some(info) = parse_tool_message(&message.content) else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    let mut push_candidate = |value: Option<&str>| {
+        if let Some(path) = value.and_then(path_candidate_from_value) {
+            if !candidates.iter().any(|candidate| candidate == &path) {
+                candidates.push(path);
+            }
+        }
+    };
+
+    let args_obj = info.args.as_ref().and_then(|value| value.as_object());
+    let metadata_obj = info.metadata.as_ref().and_then(|value| value.as_object());
+    for key in ["path", "file_path", "filePath"] {
+        push_candidate(arg_string(args_obj, &[key]));
+        push_candidate(arg_string(metadata_obj, &[key]));
+    }
+
+    if let Some(title) = info.title.as_deref() {
+        push_candidate(title.split_once(':').map(|(_, path)| path.trim()));
+    }
+
+    candidates
+}
+
+fn matching_tool_path(message: &Message, display: &str) -> Option<std::path::PathBuf> {
+    tool_path_candidates(message)
+        .into_iter()
+        .find(|path| path_matches_display(path, display))
+}
+
+fn path_candidate_from_value(value: &str) -> Option<std::path::PathBuf> {
+    let path_text = value.trim();
+    if path_text.is_empty() {
+        return None;
+    }
+
+    if path_text.starts_with("file://") {
+        return url::Url::parse(path_text).ok()?.to_file_path().ok();
+    }
+
+    if let Some(rest) = path_text.strip_prefix("~/") {
+        return dirs::home_dir().map(|home| home.join(rest));
+    }
+
+    let path = std::path::PathBuf::from(path_text);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        std::env::current_dir().ok().map(|cwd| cwd.join(path))
+    }
+}
+
+fn path_matches_display(path: &std::path::Path, display: &str) -> bool {
+    if display.is_empty() {
+        return false;
+    }
+
+    let path_text = path.to_string_lossy();
+    let candidates = [
+        path_text.into_owned(),
+        display_path(&path.to_string_lossy(), false),
+        display_path(&path.to_string_lossy(), true),
+    ];
+
+    candidates
+        .iter()
+        .any(|candidate| display_matches_candidate(display, candidate))
+}
+
+fn display_matches_candidate(display: &str, candidate: &str) -> bool {
+    display == candidate
+        || display
+            .strip_prefix(candidate)
+            .is_some_and(is_display_location_suffix)
+}
+
+fn is_display_location_suffix(suffix: &str) -> bool {
+    let Some(rest) = suffix.strip_prefix(':') else {
+        return false;
+    };
+
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, ':' | '-'))
+}
+
 fn search_target(
     args_obj: Option<&serde_json::Map<String, JsonValue>>,
     title: Option<&str>,
@@ -1196,6 +1291,82 @@ impl Chat {
         })
     }
 
+    pub fn hyperlink_at_position(
+        &self,
+        event: MouseEvent,
+        area: Rect,
+    ) -> Option<crate::ui::hyperlink::HyperlinkTarget> {
+        use ratatui::layout::Position;
+
+        let point = Position::new(event.column, event.row);
+        let content_area = Self::content_area_for(area);
+
+        if !content_area.contains(point) || self.cached_lines.is_empty() {
+            return None;
+        }
+
+        let content_line =
+            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_col = event.column.saturating_sub(content_area.x) as usize;
+        let line = self.cached_lines.get(content_line)?;
+        let range = crate::ui::hyperlink::hyperlink_range_at_line_col(line, content_col)?;
+
+        self.resolve_hyperlink_target(content_line, &range)
+            .or_else(|| Some(range.target))
+    }
+
+    fn resolve_hyperlink_target(
+        &self,
+        content_line: usize,
+        range: &crate::ui::hyperlink::HyperlinkRange,
+    ) -> Option<crate::ui::hyperlink::HyperlinkTarget> {
+        if !matches!(range.target, crate::ui::hyperlink::HyperlinkTarget::File(_)) {
+            return None;
+        }
+
+        let display = range.text.trim();
+        let message_index = self
+            .message_index_at_content_line(content_line, self.content_height)
+            .or_else(|| self.raw_message_index_at_content_line(content_line, self.content_height));
+
+        if let Some(target) = message_index
+            .and_then(|idx| self.messages.get(idx))
+            .and_then(|message| matching_tool_path(message, display))
+        {
+            return Some(crate::ui::hyperlink::HyperlinkTarget::File(target));
+        }
+
+        self.messages
+            .iter()
+            .find_map(|message| matching_tool_path(message, display))
+            .map(crate::ui::hyperlink::HyperlinkTarget::File)
+    }
+
+    fn raw_message_index_at_content_line(
+        &self,
+        content_line: usize,
+        content_height: usize,
+    ) -> Option<usize> {
+        if content_line >= content_height {
+            return None;
+        }
+
+        self.message_line_positions
+            .iter()
+            .copied()
+            .enumerate()
+            .find_map(|(idx, start)| {
+                let end = self
+                    .message_line_positions
+                    .iter()
+                    .copied()
+                    .skip(idx + 1)
+                    .find(|&next_start| next_start > start)
+                    .unwrap_or(content_height);
+                (content_line >= start && content_line < end).then_some(idx)
+            })
+    }
+
     pub fn clear_highlighted_message(&mut self) {
         self.highlighted_message_index = None;
     }
@@ -1685,6 +1856,11 @@ impl Chat {
         let paragraph = Paragraph::new(Text::from(content_lines));
 
         f.render_widget(paragraph, render_area);
+        crate::ui::hyperlink::mark_detected_hyperlinks(
+            f.buffer_mut(),
+            render_area,
+            &all_lines[visible_start..visible_end],
+        );
 
         self.content_height = content_height;
         self.message_line_positions = positions.to_vec();
@@ -2465,6 +2641,7 @@ impl Chat {
             "question" => "Question",
             "task" => "Task",
             "webfetch" => "Webfetch",
+            "view_image" => "Viewed Image",
             "skill" => "Skill",
             other => other,
         };
@@ -2656,6 +2833,64 @@ impl Chat {
             }
 
             out.extend(panel_lines);
+        } else if name == "view_image" {
+            let active = matches!(status.as_str(), "running" | "pending");
+            let path = metadata
+                .as_ref()
+                .and_then(|m| m.get("path"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    args_obj
+                        .and_then(|o| o.get("path"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| strip_tool_title(title.as_deref(), "Viewed Image"))
+                .unwrap_or("image");
+            let marker_style = Style::default()
+                .fg(if status == "error" {
+                    colors.error
+                } else if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
+            let title_style = Style::default()
+                .fg(if status == "error" {
+                    colors.error
+                } else {
+                    colors.text
+                })
+                .add_modifier(Modifier::BOLD);
+            let gutter_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM);
+            let path_style = Style::default().fg(colors.text_weak);
+            let heading = if active {
+                "Viewing Image"
+            } else {
+                "Viewed Image"
+            };
+
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled(self.tool_marker(active), marker_style),
+                    Span::raw(" "),
+                    Span::styled(heading.to_string(), title_style),
+                ]),
+                max_width,
+                Line::from(Span::styled("  ", marker_style)),
+            );
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled("  └ ".to_string(), gutter_style),
+                    Span::styled(display_path(path, true), path_style),
+                ]),
+                max_width,
+                Line::from(Span::styled("    ", gutter_style)),
+            );
         } else if name == "webfetch" {
             let active = matches!(status.as_str(), "running" | "pending");
             let url = metadata
@@ -3945,6 +4180,121 @@ mod tests {
         assert_eq!(target.image_index, 0);
         assert_eq!(target.placeholder, "[Image #1]");
         assert_eq!(target.path, "/tmp/example.png");
+    }
+
+    #[test]
+    fn test_hyperlink_hit_test_finds_file_path() {
+        let mut chat = Chat::with_messages(vec![Message::assistant("open src/ui/hyperlink.rs:12")]);
+        let colors = test_colors();
+        let area = Rect::new(0, 0, 80, 10);
+        let content_width = area.width.saturating_sub(2) as usize;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(content_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = area.height as usize;
+        chat.scroll_offset = 0;
+
+        let (line_idx, col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find("src/ui/hyperlink.rs")
+                    .map(|col| (line_idx, col as u16))
+            })
+            .expect("path position");
+
+        let target = chat
+            .hyperlink_at_position(
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    col,
+                    line_idx as u16,
+                    KeyModifiers::empty(),
+                ),
+                area,
+            )
+            .expect("hyperlink target");
+
+        match target {
+            crate::ui::hyperlink::HyperlinkTarget::File(path) => {
+                assert!(path.ends_with("src/ui/hyperlink.rs"));
+            }
+            crate::ui::hyperlink::HyperlinkTarget::Url(url) => {
+                panic!("expected file target, got {url}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_hyperlink_hit_test_uses_tool_metadata_for_short_path() {
+        let full_path = std::env::current_dir()
+            .unwrap()
+            .join("fixtures/not-real/screenshot_1.png");
+        let message = Message::tool(
+            serde_json::json!({
+                "name": "view_image",
+                "status": "ok",
+                "metadata": { "path": full_path.to_string_lossy().to_string() },
+                "title": format!("Viewed Image: {}", full_path.display()),
+            })
+            .to_string(),
+        );
+        let mut chat = Chat::with_messages(vec![message]);
+        let colors = test_colors();
+        let area = Rect::new(0, 0, 80, 10);
+        assert_eq!(
+            tool_path_candidates(&chat.messages[0]),
+            vec![full_path.clone()]
+        );
+        let content_width = area.width.saturating_sub(2) as usize;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(content_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = area.height as usize;
+        chat.scroll_offset = 0;
+
+        let (line_idx, col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find("screenshot_1.png")
+                    .map(|col| (line_idx, col as u16))
+            })
+            .expect("short path position");
+        assert_eq!(
+            chat.raw_message_index_at_content_line(line_idx, chat.content_height),
+            Some(0)
+        );
+        assert!(path_matches_display(&full_path, "screenshot_1.png"));
+
+        let target = chat
+            .hyperlink_at_position(
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    col,
+                    line_idx as u16,
+                    KeyModifiers::empty(),
+                ),
+                area,
+            )
+            .expect("hyperlink target");
+
+        match target {
+            crate::ui::hyperlink::HyperlinkTarget::File(path) => assert_eq!(path, full_path),
+            crate::ui::hyperlink::HyperlinkTarget::Url(url) => {
+                panic!("expected file target, got {url}");
+            }
+        }
     }
 
     #[test]

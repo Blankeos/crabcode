@@ -32,7 +32,7 @@ pub mod core {
     }
 
     pub mod tools {
-        pub use crate::tool::ToolExecute;
+        pub use crate::tool::{ToolExecute, ToolOutput};
     }
 
     pub mod chunk {

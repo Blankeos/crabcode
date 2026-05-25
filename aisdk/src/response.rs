@@ -3,7 +3,7 @@ use crate::error::Result;
 use crate::message::Message;
 use crate::provider::Provider;
 use crate::stop::{StopReason, StopWhenFn};
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolOutput};
 use futures::{future::join_all, StreamExt};
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
@@ -82,7 +82,7 @@ pub async fn stream_with_tools<P: Provider>(
         let mut current_messages = messages;
         let mut step_idx: usize = 0;
         let max_steps = max_steps.unwrap_or(usize::MAX);
-        let mut cached_repeatable_tool_results: HashMap<String, String> = HashMap::new();
+        let mut cached_repeatable_tool_results: HashMap<String, ToolOutput> = HashMap::new();
 
         loop {
             step_idx += 1;
@@ -305,10 +305,10 @@ pub async fn stream_with_tools<P: Provider>(
                     tool_results_to_observe.push(ToolExecutionResult {
                         call_id,
                         tool_name,
-                        output: format!(
+                        output: ToolOutput::new(format!(
                             "Duplicate task call skipped; reusing the prior result from this response.\n\n{}",
-                            cached_output
-                        ),
+                            cached_output.text
+                        )),
                         cache_key: None,
                         is_error: false,
                     });
@@ -338,7 +338,10 @@ pub async fn stream_with_tools<P: Provider>(
                                 Err(err) => ToolExecutionResult {
                                     call_id,
                                     tool_name: tool_name.clone(),
-                                    output: format!("Tool '{}' error: {}", tool_name, err),
+                                    output: ToolOutput::new(format!(
+                                        "Tool '{}' error: {}",
+                                        tool_name, err
+                                    )),
                                     cache_key: None,
                                     is_error: true,
                                 },
@@ -346,7 +349,7 @@ pub async fn stream_with_tools<P: Provider>(
                             None => ToolExecutionResult {
                                 call_id,
                                 tool_name: tool_name.clone(),
-                                output: format!("Tool not found: {}", tool_name),
+                                output: ToolOutput::new(format!("Tool not found: {}", tool_name)),
                                 cache_key: None,
                                 is_error: true,
                             },
@@ -387,10 +390,11 @@ pub async fn stream_with_tools<P: Provider>(
                 let tool_output_messages = tool_results_to_observe
                     .into_iter()
                     .map(|result| {
-                        Message::tool_output(
+                        Message::tool_output_with_images(
                             result.call_id,
                             result.tool_name,
-                            result.output,
+                            result.output.text,
+                            result.output.images,
                             result.is_error,
                         )
                     })
@@ -488,7 +492,7 @@ fn message_size(message: &Message) -> (usize, usize) {
         Message::User(message) => (message.content.len(), message.images.len()),
         Message::Assistant(message) => (message.content.len(), 0),
         Message::ToolCall(message) => (message.arguments.len(), 0),
-        Message::ToolOutput(message) => (message.output.len(), 0),
+        Message::ToolOutput(message) => (message.output.len(), message.images.len()),
     }
 }
 
@@ -610,7 +614,7 @@ struct CompletedToolCall {
 struct ToolExecutionResult {
     call_id: String,
     tool_name: String,
-    output: String,
+    output: ToolOutput,
     cache_key: Option<String>,
     is_error: bool,
 }
@@ -1299,7 +1303,9 @@ mod tests {
             .description("edit files")
             .input_schema(Schema::from(true))
             .execute(ToolExecute::new(move |_input| async move {
-                Err("Execution error: Not found: Could not find text to replace".to_string())
+                Err::<String, String>(
+                    "Execution error: Not found: Could not find text to replace".to_string(),
+                )
             }))
             .build()
             .unwrap();

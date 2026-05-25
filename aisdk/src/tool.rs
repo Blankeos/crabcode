@@ -1,13 +1,54 @@
+use crate::message::ImageContent;
 use schemars::Schema;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 pub type AsyncToolFn = Arc<
-    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>>
         + Send
         + Sync,
 >;
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolOutput {
+    pub text: String,
+    pub images: Vec<ImageContent>,
+}
+
+impl ToolOutput {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+
+    pub fn with_images(mut self, images: Vec<ImageContent>) -> Self {
+        self.images = images;
+        self
+    }
+
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.images.is_empty()
+    }
+}
+
+impl From<String> for ToolOutput {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for ToolOutput {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
 
 #[derive(Clone)]
 pub struct ToolExecute {
@@ -15,17 +56,21 @@ pub struct ToolExecute {
 }
 
 impl ToolExecute {
-    pub fn new<F, Fut>(f: F) -> Self
+    pub fn new<F, Fut, O>(f: F) -> Self
     where
         F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<String, String>> + Send + 'static,
+        Fut: Future<Output = Result<O, String>> + Send + 'static,
+        O: Into<ToolOutput> + Send + 'static,
     {
         Self {
-            inner: Arc::new(move |v: serde_json::Value| Box::pin(f(v))),
+            inner: Arc::new(move |v: serde_json::Value| {
+                let fut = f(v);
+                Box::pin(async move { fut.await.map(Into::into) })
+            }),
         }
     }
 
-    pub async fn call(&self, input: serde_json::Value) -> Result<String, String> {
+    pub async fn call(&self, input: serde_json::Value) -> Result<ToolOutput, String> {
         (self.inner)(input).await
     }
 }

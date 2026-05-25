@@ -1231,7 +1231,7 @@ fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_
                 Message::ToolOutput(t) => Some(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": t.call_id,
-                    "output": t.output,
+                    "output": openai_tool_output_content(t),
                 })),
             }
         })
@@ -1251,6 +1251,27 @@ fn openai_responses_user_content(user: &crate::message::UserMessage) -> serde_js
         }));
     }
     parts.extend(user.images.iter().map(|image| {
+        serde_json::json!({
+            "type": "input_image",
+            "image_url": image.data_url,
+        })
+    }));
+    serde_json::Value::Array(parts)
+}
+
+fn openai_tool_output_content(tool: &crate::message::ToolOutputMessage) -> serde_json::Value {
+    if tool.images.is_empty() {
+        return serde_json::json!(tool.output);
+    }
+
+    let mut parts = Vec::new();
+    if !tool.output.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "input_text",
+            "text": tool.output,
+        }));
+    }
+    parts.extend(tool.images.iter().map(|image| {
         serde_json::json!({
             "type": "input_image",
             "image_url": image.data_url,
@@ -1373,6 +1394,30 @@ mod tests {
         assert_eq!(input[1]["type"], "function_call_output");
         assert_eq!(input[1]["call_id"], "call_edit");
         assert_eq!(input[1]["output"], "Replaced at line 7");
+    }
+
+    #[test]
+    fn serializes_tool_image_output_for_responses_input() {
+        let input = build_openai_messages(
+            &[Message::tool_output_with_images(
+                "call_image",
+                "view_image",
+                "Viewed image assets/screenshot_1.png",
+                vec![crate::message::ImageContent {
+                    data_url: "data:image/png;base64,AAA".to_string(),
+                    media_type: "image/png".to_string(),
+                }],
+                false,
+            )],
+            false,
+        );
+
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_image");
+        let output = input[0]["output"].as_array().expect("content items");
+        assert_eq!(output[0]["type"], "input_text");
+        assert_eq!(output[1]["type"], "input_image");
+        assert_eq!(output[1]["image_url"], "data:image/png;base64,AAA");
     }
 
     #[tokio::test]

@@ -102,20 +102,20 @@ impl Provider for OpenAICompatible {
 
         let chat_messages: Vec<serde_json::Value> = messages
             .iter()
-            .map(|m| match m {
-                Message::System(s) => serde_json::json!({
+            .flat_map(|m| match m {
+                Message::System(s) => vec![serde_json::json!({
                     "role": "system",
                     "content": s.content,
-                }),
-                Message::User(u) => serde_json::json!({
+                })],
+                Message::User(u) => vec![serde_json::json!({
                     "role": "user",
                     "content": openai_compatible_user_content(u),
-                }),
-                Message::Assistant(a) => serde_json::json!({
+                })],
+                Message::Assistant(a) => vec![serde_json::json!({
                     "role": "assistant",
                     "content": a.content,
-                }),
-                Message::ToolCall(t) => serde_json::json!({
+                })],
+                Message::ToolCall(t) => vec![serde_json::json!({
                     "role": "assistant",
                     "content": serde_json::Value::Null,
                     "tool_calls": [{
@@ -126,13 +126,8 @@ impl Provider for OpenAICompatible {
                             "arguments": t.arguments,
                         }
                     }],
-                }),
-                Message::ToolOutput(t) => serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": t.call_id,
-                    "name": t.name,
-                    "content": t.output,
-                }),
+                })],
+                Message::ToolOutput(t) => openai_compatible_tool_output_messages(t),
             })
             .collect();
 
@@ -223,6 +218,51 @@ fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_j
         }));
     }
     parts.extend(user.images.iter().map(|image| {
+        serde_json::json!({
+            "type": "image_url",
+            "image_url": {
+                "url": image.data_url,
+            },
+        })
+    }));
+    serde_json::Value::Array(parts)
+}
+
+fn openai_compatible_tool_output_messages(
+    tool: &crate::message::ToolOutputMessage,
+) -> Vec<serde_json::Value> {
+    let mut messages = vec![serde_json::json!({
+        "role": "tool",
+        "tool_call_id": tool.call_id,
+        "name": tool.name,
+        "content": tool.output,
+    })];
+
+    if !tool.images.is_empty() {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": openai_compatible_image_content(
+                &format!("Image returned by tool `{}`.", tool.name),
+                &tool.images,
+            ),
+        }));
+    }
+
+    messages
+}
+
+fn openai_compatible_image_content(
+    text: &str,
+    images: &[crate::message::ImageContent],
+) -> serde_json::Value {
+    let mut parts = Vec::new();
+    if !text.is_empty() {
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": text,
+        }));
+    }
+    parts.extend(images.iter().map(|image| {
         serde_json::json!({
             "type": "image_url",
             "image_url": {

@@ -75,10 +75,21 @@ impl Message {
         output: impl Into<String>,
         is_error: bool,
     ) -> Self {
+        Self::tool_output_with_images(call_id, name, output, Vec::new(), is_error)
+    }
+
+    pub fn tool_output_with_images(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        output: impl Into<String>,
+        images: Vec<ImageContent>,
+        is_error: bool,
+    ) -> Self {
         Self::ToolOutput(ToolOutputMessage {
             call_id: call_id.into(),
             name: name.into(),
             output: output.into(),
+            images,
             is_error,
         })
     }
@@ -121,6 +132,8 @@ pub struct ToolOutputMessage {
     pub call_id: String,
     pub name: String,
     pub output: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageContent>,
     #[serde(default)]
     pub is_error: bool,
 }
