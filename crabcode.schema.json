@@ -159,6 +159,14 @@
           "$ref": "#/$defs/TerminalNotificationMode",
           "default": "auto"
         },
+        "permission": {
+          "$ref": "#/$defs/TerminalNotificationMode",
+          "default": "auto"
+        },
+        "question": {
+          "$ref": "#/$defs/TerminalNotificationMode",
+          "default": "auto"
+        },
         "condition": {
           "default": "unfocused",
           "enum": [

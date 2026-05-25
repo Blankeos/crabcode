@@ -41,7 +41,12 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
     "error": { "enabled": true }
   },
   "notifications": {
-    "terminal": { "complete": "auto", "condition": "unfocused" }
+    "terminal": {
+      "complete": "auto",
+      "permission": "auto",
+      "question": "auto",
+      "condition": "unfocused"
+    }
   },
   "images": {
     "openWith": "auto"

@@ -1,9 +1,9 @@
 ---
 title: Terminal Notifications
-description: Configure terminal-level completion signals for editors such as Zed.
+description: Configure terminal-level prompt and completion signals for editors such as Zed.
 ---
 
-# Completion Signals
+# Editor Alert Signals
 
 Terminal notifications are crabcode-specific and apply only to `crabcode` config files. They are separate from `sounds.<event>.notify`, which sends desktop notifications.
 
@@ -12,19 +12,21 @@ Terminal notifications are crabcode-specific and apply only to `crabcode` config
   "notifications": {
     "terminal": {
       "complete": "auto",
+      "permission": "auto",
+      "question": "auto",
       "condition": "unfocused",
     },
   },
 }
 ```
 
-`notifications.terminal.complete` controls whether crabcode emits a terminal BEL (`\x07`) when an assistant response finishes.
+`notifications.terminal.complete`, `notifications.terminal.permission`, and `notifications.terminal.question` control whether crabcode emits a terminal BEL (`\x07`) when an assistant response finishes, a permission prompt opens, or a question prompt opens.
 
 | Value | Behavior |
 | --- | --- |
 | `"auto"` | Emit BEL only in supported terminals. Currently this targets Zed via `ZED_TERM=true` or `TERM_PROGRAM=zed`. |
 | `"enabled"` / `true` | Emit BEL in any terminal. |
-| `"disabled"` / `false` | Do not emit terminal completion notifications. |
+| `"disabled"` / `false` | Do not emit terminal notifications for that event. |
 
 `notifications.terminal.condition` controls when the signal is emitted.
 

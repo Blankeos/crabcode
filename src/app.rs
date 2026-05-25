@@ -525,7 +525,7 @@ impl App {
         }
     }
 
-    fn notify_terminal_complete(&self) {
+    fn notify_terminal_event(&self, event: crate::sound::SoundEvent) {
         use crate::config::{TerminalNotificationCondition, TerminalNotificationMode};
 
         let terminal = self.notifications.terminal;
@@ -533,7 +533,14 @@ impl App {
             return;
         }
 
-        let should_emit = match terminal.complete {
+        let mode = match event {
+            crate::sound::SoundEvent::Complete => terminal.complete,
+            crate::sound::SoundEvent::Permission => terminal.permission,
+            crate::sound::SoundEvent::Question => terminal.question,
+            crate::sound::SoundEvent::Error => TerminalNotificationMode::Disabled,
+        };
+
+        let should_emit = match mode {
             TerminalNotificationMode::Auto => crate::notify::terminal_bell_supported(),
             TerminalNotificationMode::Enabled => true,
             TerminalNotificationMode::Disabled => false,
@@ -2811,7 +2818,6 @@ impl App {
                     if let Some(idx) = released_pending_message {
                         if !self.chat_state.chat.has_selection() {
                             self.pending_chat_message_click = None;
-                            self.chat_state.chat.scroll_to_message_index(idx);
                             self.chat_state.chat.set_highlighted_message(Some(idx));
                             self.show_message_actions_from(idx, OverlayFocus::None);
                             return;
@@ -5171,6 +5177,7 @@ impl App {
                     let _ = self.switch_to_session(session_id);
                 }
                 self.play_sound_event(crate::sound::SoundEvent::Permission);
+                self.notify_terminal_event(crate::sound::SoundEvent::Permission);
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.pause_streaming_tps_timer();
                 }
@@ -5191,6 +5198,7 @@ impl App {
                     let _ = self.switch_to_session(session_id);
                 }
                 self.play_sound_event(crate::sound::SoundEvent::Question);
+                self.notify_terminal_event(crate::sound::SoundEvent::Question);
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.pause_streaming_tps_timer();
                 }
@@ -5295,7 +5303,7 @@ impl App {
             crate::sound::SoundEvent::Complete,
             completion_stats.as_deref(),
         );
-        self.notify_terminal_complete();
+        self.notify_terminal_event(crate::sound::SoundEvent::Complete);
     }
 
     fn defer_finish_if_tools_are_running(&mut self, session_id: &str) -> bool {
@@ -6407,9 +6415,10 @@ mod tests {
             .chat
             .get_message_line_positions(78, &app.model, &colors);
         app.chat_state.chat.message_line_positions = positions;
-        app.chat_state.chat.content_height = 4;
+        app.chat_state.chat.content_height = 25;
         app.chat_state.chat.viewport_height = 18;
-        app.chat_state.chat.scroll_offset = 0;
+        app.chat_state.chat.scroll_offset = 3;
+        let scroll_offset_before_click = app.chat_state.chat.scroll_offset;
         assert_eq!(
             app.chat_state.chat.message_index_at_position(
                 mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
@@ -6423,6 +6432,10 @@ mod tests {
 
         assert_eq!(app.overlay_focus, OverlayFocus::MessageActions);
         assert_eq!(app.message_actions_index, Some(0));
+        assert_eq!(
+            app.chat_state.chat.scroll_offset,
+            scroll_offset_before_click
+        );
         assert!(message_action_names(&app).contains(&"Undo".to_string()));
     }
 

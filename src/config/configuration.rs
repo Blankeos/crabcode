@@ -185,6 +185,8 @@ pub enum TerminalNotificationCondition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalNotificationsConfig {
     pub complete: TerminalNotificationMode,
+    pub permission: TerminalNotificationMode,
+    pub question: TerminalNotificationMode,
     pub condition: TerminalNotificationCondition,
 }
 
@@ -192,6 +194,8 @@ impl Default for TerminalNotificationsConfig {
     fn default() -> Self {
         Self {
             complete: TerminalNotificationMode::Auto,
+            permission: TerminalNotificationMode::Auto,
+            question: TerminalNotificationMode::Auto,
             condition: TerminalNotificationCondition::Unfocused,
         }
     }
@@ -1360,6 +1364,22 @@ fn parse_notifications(
         );
     }
 
+    if let Some(permission) = terminal_map.get("permission") {
+        notifications.terminal.permission = parse_terminal_notification_mode(
+            permission,
+            "notifications.terminal.permission",
+            diagnostics,
+        );
+    }
+
+    if let Some(question) = terminal_map.get("question") {
+        notifications.terminal.question = parse_terminal_notification_mode(
+            question,
+            "notifications.terminal.question",
+            diagnostics,
+        );
+    }
+
     if let Some(condition) = terminal_map.get("condition") {
         notifications.terminal.condition = parse_terminal_notification_condition(
             condition,
@@ -1471,6 +1491,8 @@ mod tests {
                 "notifications": {
                     "terminal": {
                         "complete": "enabled",
+                        "permission": "enabled",
+                        "question": "disabled",
                         "condition": "always"
                     }
                 }
@@ -1481,6 +1503,14 @@ mod tests {
         assert_eq!(
             config.notifications.terminal.complete,
             TerminalNotificationMode::Enabled
+        );
+        assert_eq!(
+            config.notifications.terminal.permission,
+            TerminalNotificationMode::Enabled
+        );
+        assert_eq!(
+            config.notifications.terminal.question,
+            TerminalNotificationMode::Disabled
         );
         assert_eq!(
             config.notifications.terminal.condition,
@@ -1496,6 +1526,14 @@ mod tests {
 
         assert_eq!(
             config.notifications.terminal.complete,
+            TerminalNotificationMode::Auto
+        );
+        assert_eq!(
+            config.notifications.terminal.permission,
+            TerminalNotificationMode::Auto
+        );
+        assert_eq!(
+            config.notifications.terminal.question,
             TerminalNotificationMode::Auto
         );
         assert_eq!(
