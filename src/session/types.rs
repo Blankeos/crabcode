@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +170,49 @@ impl Message {
     pub fn mark_interrupted(&mut self) {
         self.was_interrupted = true;
     }
+}
+
+pub fn logical_message_block_start(messages: &[Message], idx: usize) -> Option<usize> {
+    let message = messages.get(idx)?;
+
+    match message.role {
+        MessageRole::User => Some(idx),
+        MessageRole::Assistant | MessageRole::System | MessageRole::Tool => {
+            let segment_start = previous_user_index(messages, idx)
+                .map(|user_idx| user_idx.saturating_add(1))
+                .unwrap_or(0);
+
+            (segment_start..=idx)
+                .find(|&candidate| matches!(messages[candidate].role, MessageRole::Assistant))
+        }
+    }
+}
+
+pub fn logical_message_block_range(messages: &[Message], idx: usize) -> Option<Range<usize>> {
+    let start = logical_message_block_start(messages, idx)?;
+
+    match messages.get(start)?.role {
+        MessageRole::User => Some(start..start.saturating_add(1)),
+        MessageRole::Assistant => {
+            let end = messages
+                .iter()
+                .enumerate()
+                .skip(start.saturating_add(1))
+                .find_map(|(candidate, message)| {
+                    matches!(message.role, MessageRole::User).then_some(candidate)
+                })
+                .unwrap_or(messages.len());
+
+            Some(start..end)
+        }
+        MessageRole::System | MessageRole::Tool => None,
+    }
+}
+
+fn previous_user_index(messages: &[Message], idx: usize) -> Option<usize> {
+    (0..idx)
+        .rev()
+        .find(|&candidate| matches!(messages[candidate].role, MessageRole::User))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -464,6 +508,31 @@ mod tests {
         assert_eq!(MessageRole::User, MessageRole::User);
         assert_eq!(MessageRole::Assistant, MessageRole::Assistant);
         assert_ne!(MessageRole::User, MessageRole::Assistant);
+    }
+
+    #[test]
+    fn logical_message_block_range_groups_assistant_turn_parts() {
+        let messages = vec![
+            Message::user("Prompt"),
+            Message::assistant(""),
+            Message::tool("tool call"),
+            Message::assistant("Final answer"),
+            Message::user("Next prompt"),
+        ];
+
+        assert_eq!(logical_message_block_range(&messages, 0), Some(0..1));
+        assert_eq!(logical_message_block_range(&messages, 1), Some(1..4));
+        assert_eq!(logical_message_block_range(&messages, 2), Some(1..4));
+        assert_eq!(logical_message_block_range(&messages, 3), Some(1..4));
+        assert_eq!(logical_message_block_range(&messages, 4), Some(4..5));
+    }
+
+    #[test]
+    fn logical_message_block_range_ignores_orphan_tool_rows() {
+        let messages = vec![Message::tool("orphan"), Message::user("Prompt")];
+
+        assert_eq!(logical_message_block_range(&messages, 0), None);
+        assert_eq!(logical_message_block_range(&messages, 1), Some(1..2));
     }
 
     #[test]

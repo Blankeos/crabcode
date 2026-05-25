@@ -96,7 +96,7 @@
 
 - [x] better timeline highlighting of each "message"
 
-- [ ] Timeline highlighting of each message is not very accurate. It's accurate for "my messages". but for the ai responses, ai can seem to only highlight, even via `ctrl+x g`, the first few messages before a tool call happens. This is the same with the mouse hover effects. Expectations:
+- [x] Timeline highlighting of each message is not very accurate. It's accurate for "my messages". but for the ai responses, ai can seem to only highlight, even via `ctrl+x g`, the first few messages before a tool call happens. This is the same with the mouse hover effects. Expectations:
   - I hover/timelinehighlight my message, it encapsulates the entire message box (met)
   - I hover/timelinehighlight an ai response's message, it encapsulates the entire block, including tool calls, including the thinking, etc. (not met).
   - Essentially, I was imagining kinda the same as having a 'copy' button under each "message" record in the "messages: []" array in vercel ai sdk. That's kinda the point here. But for the limitations of TUIs, I want to just use a click on the entire message block (mine or the AI response, and open a dialog -- which is mostly the current behavior now)
@@ -176,3 +176,5 @@ I want - [x] To do this But I dont want to do this
   - Multiple paths here:
     - Should it be configurable?
     - Autodetected depending on the tool used: i.e. if Wezterm, other terminals "open w/ Finder on mac, or native image opener". If inside Zed, open image with Zed. If inside VSCode/Cursor, open with that IDE. (Ambitious but idk if possible)
+
+- [ ] Make the permissions, config-driven customizable behavior. Make it like OpenCode, so we just link the docs for it in OpenCode.

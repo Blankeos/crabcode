@@ -1,5 +1,5 @@
 use crate::session::types::{Message, MessageRole};
-use crate::theme::{contrast_text, ThemeColors};
+use crate::theme::ThemeColors;
 use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
 use crate::ui::scrollbar::{
     render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
@@ -1241,23 +1241,35 @@ impl Chat {
             return None;
         }
 
-        for (idx, message) in self.messages.iter().enumerate() {
-            if !matches!(message.role, MessageRole::User | MessageRole::Assistant)
-                || crate::session::compaction::is_compaction_summary(message)
-            {
+        let mut idx = 0usize;
+        while idx < self.messages.len() {
+            let Some(message) = self.messages.get(idx) else {
+                break;
+            };
+
+            if crate::session::compaction::is_compaction_summary(message) {
+                idx = idx.saturating_add(1);
                 continue;
             }
 
-            let Some(&start) = self.message_line_positions.get(idx) else {
+            let Some(block) =
+                crate::session::types::logical_message_block_range(&self.messages, idx)
+            else {
+                idx = idx.saturating_add(1);
                 continue;
             };
-            let mut end = self
-                .message_line_positions
-                .iter()
-                .copied()
-                .skip(idx + 1)
-                .find(|&next_start| next_start > start)
-                .unwrap_or(content_height);
+
+            if block.start != idx {
+                idx = idx.saturating_add(1);
+                continue;
+            }
+
+            let Some((start, mut end)) =
+                self.message_block_line_range(idx, &self.message_line_positions, content_height)
+            else {
+                idx = block.end.max(idx.saturating_add(1));
+                continue;
+            };
 
             while end > start
                 && self
@@ -1272,9 +1284,34 @@ impl Chat {
             if content_line >= start && content_line < end {
                 return Some(idx);
             }
+
+            idx = block.end.max(idx.saturating_add(1));
         }
 
         None
+    }
+
+    fn message_block_line_range(
+        &self,
+        idx: usize,
+        positions: &[usize],
+        content_height: usize,
+    ) -> Option<(usize, usize)> {
+        let message = self.messages.get(idx)?;
+        if crate::session::compaction::is_compaction_summary(message) {
+            return None;
+        }
+
+        let block = crate::session::types::logical_message_block_range(&self.messages, idx)?;
+        let start = positions.get(block.start).copied()?;
+        let end = positions
+            .iter()
+            .copied()
+            .skip(block.end)
+            .find(|&next_start| next_start > start)
+            .unwrap_or(content_height);
+
+        (end > start).then_some((start, end))
     }
 
     fn update_scrollbar(&mut self) {
@@ -1567,28 +1604,26 @@ impl Chat {
         let visible_start = clamped_scroll.min(content_height);
         let visible_end = content_height.min(clamped_scroll.saturating_add(viewport));
 
-        let highlight_range = self.highlighted_message_index.and_then(|hl| {
-            if hl < positions.len() {
-                let start = positions[hl];
-                let end = if hl + 1 < positions.len() {
-                    positions[hl + 1]
-                } else {
-                    content_height
-                };
-                (end > start).then_some((start, end))
-            } else {
-                None
-            }
-        });
+        let highlight_range = self
+            .highlighted_message_index
+            .and_then(|hl| self.message_block_line_range(hl, positions, content_height));
         let visible_highlight_range =
             trim_trailing_blank_highlight_lines(highlight_range, all_lines);
+        let highlight_bg = self
+            .highlighted_message_index
+            .and_then(|idx| {
+                crate::session::types::logical_message_block_start(&self.messages, idx)
+                    .and_then(|start| self.messages.get(start))
+            })
+            .map(|message| timeline_highlight_bg(message, colors))
+            .unwrap_or(colors.interactive);
 
         let mut content_lines: Vec<Line<'static>> = all_lines[visible_start..visible_end].to_vec();
         apply_timeline_highlight_to_lines(
             &mut content_lines,
             visible_highlight_range,
             visible_start,
-            colors.interactive,
+            highlight_bg,
         );
 
         let render_area = Rect {
@@ -1625,7 +1660,7 @@ impl Chat {
                         width: content_area.width,
                         height,
                     };
-                    let hl_block = Block::new().style(Style::default().bg(colors.interactive));
+                    let hl_block = Block::new().style(Style::default().bg(highlight_bg));
                     f.render_widget(hl_block, hl_area);
                 }
             }
@@ -3079,8 +3114,7 @@ fn apply_timeline_highlight_to_lines(
         return;
     };
 
-    let fg = contrast_text(bg);
-    let highlight_style = Style::default().fg(fg).bg(bg);
+    let highlight_style = Style::default().bg(bg);
 
     for (line_idx, line) in lines.iter_mut().enumerate() {
         let global_idx = visible_start + line_idx;
@@ -3090,9 +3124,31 @@ fn apply_timeline_highlight_to_lines(
 
         line.style = line.style.patch(highlight_style);
         for span in line.spans.iter_mut() {
-            span.style = span.style.fg(fg).bg(bg);
+            span.style = span.style.bg(bg);
         }
     }
+}
+
+fn timeline_highlight_bg(message: &Message, colors: &ThemeColors) -> Color {
+    if matches!(message.role, MessageRole::Assistant) {
+        return blend_colors(colors.interactive, colors.background, 0.22)
+            .unwrap_or(colors.background_element);
+    }
+
+    colors.interactive
+}
+
+fn blend_colors(foreground: Color, background: Color, alpha: f32) -> Option<Color> {
+    let (Color::Rgb(fr, fg, fb), Color::Rgb(br, bg, bb)) = (foreground, background) else {
+        return None;
+    };
+
+    let alpha = alpha.clamp(0.0, 1.0);
+    let mix = |front: u8, back: u8| {
+        ((front as f32 * alpha) + (back as f32 * (1.0 - alpha))).round() as u8
+    };
+
+    Some(Color::Rgb(mix(fr, br), mix(fg, bg), mix(fb, bb)))
 }
 
 fn trim_trailing_blank_highlight_lines(
@@ -3424,6 +3480,67 @@ mod tests {
                 Rect::new(0, 0, 40, 8),
             ),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn click_hit_test_maps_assistant_turn_rows_to_block_start() {
+        let mut chat = Chat::with_messages(vec![
+            Message::user("Prompt"),
+            Message::assistant("I will check."),
+            Message::tool(
+                serde_json::json!({
+                    "name": "bash",
+                    "status": "ok",
+                    "output_preview": "tests passed",
+                })
+                .to_string(),
+            ),
+            Message::assistant("Done."),
+            Message::user("Next prompt"),
+        ]);
+        let colors = test_colors();
+        let (lines, positions) = chat.build_all_lines_with_positions(80, "model", &colors);
+        let content_height = lines.len();
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.message_line_positions = positions.clone();
+        chat.content_height = content_height;
+        chat.viewport_height = 20;
+        chat.scroll_offset = 0;
+
+        let assistant_range = chat
+            .message_block_line_range(1, &positions, content_height)
+            .expect("assistant block range");
+
+        assert!(assistant_range.0 <= positions[2]);
+        assert!(positions[3] < assistant_range.1);
+        assert_eq!(
+            chat.message_index_at_content_line(positions[2], content_height),
+            Some(1)
+        );
+        assert_eq!(
+            chat.message_index_at_content_line(positions[3], content_height),
+            Some(1)
+        );
+        assert_eq!(
+            chat.message_index_at_content_line(positions[4], content_height),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn assistant_timeline_highlight_uses_muted_interactive_color() {
+        let mut colors = test_colors();
+        colors.interactive = Color::Rgb(100, 50, 200);
+        colors.background = Color::Rgb(10, 10, 10);
+
+        assert_eq!(
+            timeline_highlight_bg(&Message::assistant("Answer"), &colors),
+            Color::Rgb(30, 19, 52)
+        );
+        assert_eq!(
+            timeline_highlight_bg(&Message::user("Prompt"), &colors),
+            colors.interactive
         );
     }
 

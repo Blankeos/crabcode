@@ -3783,18 +3783,31 @@ impl App {
 
         match action {
             "copy" => {
-                if let Some(session) = self.session_manager.get_current_session() {
-                    if let Some(msg) = session.messages.get(idx) {
-                        let _ = crate::utils::clipboard::copy_text(&msg.content);
-                        push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
-                    }
+                let copy_text = self
+                    .session_manager
+                    .get_current_session()
+                    .and_then(|session| {
+                        crate::session::types::logical_message_block_range(&session.messages, idx)
+                            .map(|range| message_block_clipboard_text(&session.messages, range))
+                    });
+
+                if let Some(text) = copy_text {
+                    let _ = crate::utils::clipboard::copy_text(&text);
+                    push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
                 }
                 self.close_message_actions();
             }
             "fork" => {
                 let messages_to_fork: Vec<crate::session::types::Message> = {
                     if let Some(session) = self.session_manager.get_current_session() {
-                        session.messages.iter().take(idx + 1).cloned().collect()
+                        let end = crate::session::types::logical_message_block_range(
+                            &session.messages,
+                            idx,
+                        )
+                        .map(|range| range.end)
+                        .unwrap_or_else(|| idx.saturating_add(1).min(session.messages.len()));
+
+                        session.messages.iter().take(end).cloned().collect()
                     } else {
                         return;
                     }
@@ -5725,6 +5738,44 @@ impl App {
     }
 }
 
+fn message_block_clipboard_text(
+    messages: &[crate::session::types::Message],
+    range: std::ops::Range<usize>,
+) -> String {
+    messages
+        .get(range)
+        .unwrap_or(&[])
+        .iter()
+        .flat_map(message_clipboard_sections)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn message_clipboard_sections(message: &crate::session::types::Message) -> Vec<String> {
+    let mut sections = Vec::new();
+
+    if let Some(reasoning) = message.reasoning.as_deref().map(str::trim) {
+        if !reasoning.is_empty() {
+            sections.push(format!("Thinking:\n{}", reasoning));
+        }
+    }
+
+    let content = message.content.trim();
+    if !content.is_empty() {
+        if matches!(message.role, crate::session::types::MessageRole::Tool) {
+            let content = serde_json::from_str::<serde_json::Value>(content)
+                .ok()
+                .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                .unwrap_or_else(|| content.to_string());
+            sections.push(format!("Tool:\n{}", content));
+        } else {
+            sections.push(message.content.clone());
+        }
+    }
+
+    sections
+}
+
 fn append_usage_suffix(mut text: String, suffix: String) -> String {
     if text.is_empty() {
         suffix
@@ -5861,6 +5912,31 @@ mod tests {
             .as_ref()
             .map(|dialog| dialog.items.iter().map(|item| item.name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn message_block_clipboard_text_includes_assistant_turn_parts() {
+        let mut assistant = crate::session::types::Message::assistant("Final answer");
+        assistant.reasoning = Some("Check files".to_string());
+        let messages = vec![
+            crate::session::types::Message::user("Prompt"),
+            assistant,
+            crate::session::types::Message::tool(
+                serde_json::json!({
+                    "name": "read",
+                    "status": "ok",
+                    "output_preview": "contents",
+                })
+                .to_string(),
+            ),
+        ];
+
+        let text = message_block_clipboard_text(&messages, 1..3);
+
+        assert!(text.contains("Thinking:\nCheck files"));
+        assert!(text.contains("Final answer"));
+        assert!(text.contains("Tool:\n{"));
+        assert!(text.contains("\"output_preview\": \"contents\""));
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
