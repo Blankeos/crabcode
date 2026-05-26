@@ -20,6 +20,7 @@ pub enum CommandPaletteAppAction {
     ToggleAgentMode,
     CycleReasoningEffort,
     OpenStorage,
+    OpenSkillsDialog,
 }
 
 #[derive(Debug)]
@@ -43,7 +44,21 @@ impl CommandPaletteState {
             .map(|item| (item.id.clone(), item.provider_id.clone()));
 
         let mut items = core_palette_items(registry, is_chat);
-        items.extend(custom_command_items(registry, is_chat));
+        items.insert(
+        items
+            .iter()
+            .position(|item| item.group == "Model")
+            .unwrap_or(items.len()),
+        app_action_item(
+            "open-skills-dialog",
+            "Skills",
+            "Model",
+            "View and select available skills",
+            None,
+        ),
+    );
+
+    items.extend(custom_command_items(registry, is_chat));
 
         self.dialog = Dialog::with_items("Command Palette", items).with_actions(base_actions());
         self.dialog.set_search_query(search_query);
@@ -166,6 +181,9 @@ fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
             }
             "open-storage" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenStorage)
+            }
+            "open-skills-dialog" => {
+                CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenSkillsDialog)
             }
             _ => CommandPaletteAction::None,
         };

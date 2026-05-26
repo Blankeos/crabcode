@@ -3195,6 +3195,7 @@ impl App {
                         let _ = self.cycle_active_reasoning_effort();
                     }
                     CommandPaletteAppAction::OpenStorage => self.open_storage_dialog(),
+                    CommandPaletteAppAction::OpenSkillsDialog => self.show_skills_dialog(),
                 }
                 self.clear_suggestions_and_blur();
             }
