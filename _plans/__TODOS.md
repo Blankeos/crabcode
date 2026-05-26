@@ -137,7 +137,7 @@ Replaced at line 239
 
 - [x] Proper textwrapping of input for the input chatbox. I can paste a long string (that doesnt compact), or type a long sentence, and it won't wrap to the next line. It just has horizontal scrolling. I dont want horizontal scrolling.
 
-- [ ] Codex's "update plan" tool sometimes has a weird premble before the actual checklist shows... Is this relevant for crabcode? Should we update our tool? Can we do it too?
+- [x] Codex's "update plan" tool sometimes has a weird premble before the actual checklist shows... Is this relevant for crabcode? Should we update our tool? Can we do it too?
 
 - [x] ~Pressing 'enter' while focusing on a grouplabel header for a "workspace". Make it show a dropdown on the right
   - Archive (can unarchive on new sessions)~ - dont do anymore

@@ -220,6 +220,8 @@ fn validate_plan_items(plan: &[PlanItem]) -> Result<(), ToolError> {
         ));
     }
 
+    let mut in_progress_count = 0;
+
     for (idx, item) in plan.iter().enumerate() {
         if item.step.trim().is_empty() {
             return Err(ToolError::Validation(format!(
@@ -237,6 +239,16 @@ fn validate_plan_items(plan: &[PlanItem]) -> Result<(), ToolError> {
                 item.step, item.status
             )));
         }
+
+        if item.status == "in_progress" {
+            in_progress_count += 1;
+        }
+    }
+
+    if in_progress_count > 1 {
+        return Err(ToolError::Validation(
+            "Plan must contain at most one in_progress item".to_string(),
+        ));
     }
 
     Ok(())
@@ -247,7 +259,7 @@ impl ToolHandler for UpdatePlanTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "update_plan".to_string(),
-            description: "Update the current task plan. Use this for non-trivial, multi-step work. Provide an optional explanation and a plan array with step/status items. Status must be pending, in_progress, or completed.".to_string(),
+            description: "Update the current task plan. Use this for non-trivial, multi-step work. Provide an optional explanation and a plan array with step/status items. Status must be pending, in_progress, or completed. At most one step can be in_progress at a time.".to_string(),
             parameters: vec![
                 ParameterSchema {
                     name: "explanation".to_string(),
@@ -257,7 +269,7 @@ impl ToolHandler for UpdatePlanTool {
                 },
                 ParameterSchema {
                     name: "plan".to_string(),
-                    description: "Array of plan items, each with step and status (pending, in_progress, completed)".to_string(),
+                    description: "Array of plan items, each with step and status (pending, in_progress, completed). At most one item may be in_progress.".to_string(),
                     required: true,
                     param_type: ParameterType::Array(Box::new(plan_item_param_type())),
                 },
@@ -330,6 +342,20 @@ mod tests {
         assert_eq!(update.plan[0].status, "pending");
         assert_eq!(update.plan[1].status, "in_progress");
         assert_eq!(update.plan[2].status, "completed");
+    }
+
+    #[test]
+    fn parse_update_plan_rejects_multiple_in_progress_items() {
+        let params = json!({
+            "plan": [
+                {"step": "Implement rendering", "status": "in_progress"},
+                {"step": "Validate rendering", "status": "in_progress"}
+            ]
+        });
+
+        let err = parse_update_plan(&params).unwrap_err();
+
+        assert!(err.to_string().contains("at most one in_progress item"));
     }
 
     #[tokio::test]

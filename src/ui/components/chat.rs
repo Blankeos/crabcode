@@ -4727,6 +4727,42 @@ codex exec --skip-git-repo-check \
     }
 
     #[test]
+    fn test_updated_plan_renders_explanation_before_steps() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "update_plan",
+            "status": "ok",
+            "metadata": {
+                "explanation": "Need a short plan before editing.",
+                "plan": [
+                    {"step": "Locate renderer", "status": "completed"},
+                    {"step": "Implement checklist", "status": "in_progress"},
+                    {"step": "Validate output", "status": "pending"}
+                ]
+            },
+            "output_preview": "Plan updated",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "⬢ Updated Plan",
+                "  └ Need a short plan before editing.",
+                "    ✔ Locate renderer",
+                "    • Implement checklist",
+                "    □ Validate output",
+                "",
+            ]
+        );
+    }
+
+    #[test]
     fn test_short_updated_plan_content_renders_at_top() {
         use ratatui::{backend::TestBackend, Terminal};
 
