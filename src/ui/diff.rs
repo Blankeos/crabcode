@@ -257,9 +257,13 @@ fn render_unified_diff_with_indent_and_syntax(
                 .collect::<Vec<_>>();
             wrap_styled_spans(&styled, content_width)
         });
-        let wrapped_plain = wrapped_syntax_spans
-            .is_none()
-            .then(|| textwrap::wrap(&diff_line.text, content_width));
+        let wrapped_plain = wrapped_syntax_spans.is_none().then(|| {
+            let display_text = expand_tabs_for_display(&diff_line.text, 0);
+            textwrap::wrap(&display_text, content_width)
+                .into_iter()
+                .map(|chunk| chunk.into_owned())
+                .collect::<Vec<_>>()
+        });
         let chunk_count = wrapped_syntax_spans
             .as_ref()
             .map(|chunks| chunks.len())
@@ -361,7 +365,7 @@ fn wrap_styled_spans(spans: &[Span<'static>], max_cols: usize) -> Vec<Vec<Span<'
             let mut chars_col = 0;
 
             for ch in remaining.chars() {
-                let width = ch.width().unwrap_or(if ch == '\t' { TAB_WIDTH } else { 0 });
+                let width = display_char_width(ch, col + chars_col);
                 if col + chars_col + width > max_cols {
                     break;
                 }
@@ -378,14 +382,17 @@ fn wrap_styled_spans(spans: &[Span<'static>], max_cols: usize) -> Vec<Vec<Span<'
                     break;
                 };
                 let ch_len = ch.len_utf8();
-                current_line.push(Span::styled(remaining[..ch_len].to_string(), style));
-                col = ch.width().unwrap_or(if ch == '\t' { TAB_WIDTH } else { 1 });
+                current_line.push(Span::styled(
+                    expand_tabs_for_display(&remaining[..ch_len], col),
+                    style,
+                ));
+                col = display_char_width(ch, col).max(1);
                 remaining = &remaining[ch_len..];
                 continue;
             }
 
             let (chunk, rest) = remaining.split_at(byte_end);
-            current_line.push(Span::styled(chunk.to_string(), style));
+            current_line.push(Span::styled(expand_tabs_for_display(chunk, col), style));
             col += chars_col;
             remaining = rest;
 
@@ -401,6 +408,40 @@ fn wrap_styled_spans(spans: &[Span<'static>], max_cols: usize) -> Vec<Vec<Span<'
     }
 
     result
+}
+
+fn display_char_width(ch: char, col: usize) -> usize {
+    if ch == '\t' {
+        let offset = col % TAB_WIDTH;
+        return if offset == 0 {
+            TAB_WIDTH
+        } else {
+            TAB_WIDTH - offset
+        };
+    }
+
+    ch.width().unwrap_or(0)
+}
+
+fn expand_tabs_for_display(text: &str, start_col: usize) -> String {
+    if !text.contains('\t') {
+        return text.to_string();
+    }
+
+    let mut expanded = String::with_capacity(text.len());
+    let mut col = start_col;
+    for ch in text.chars() {
+        if ch == '\t' {
+            let width = display_char_width(ch, col).max(1);
+            expanded.push_str(&" ".repeat(width));
+            col += width;
+        } else {
+            expanded.push(ch);
+            col += display_char_width(ch, col);
+        }
+    }
+
+    expanded
 }
 
 /// Convenience: compute and render a unified diff in one call.
@@ -655,6 +696,41 @@ mod tests {
 
         assert_ne!(import_span.style.fg, Some(colors.diff_add));
         assert_eq!(import_span.style.bg, Some(colors.diff_add_bg));
+    }
+
+    #[test]
+    fn test_render_unified_diff_expands_plain_tabs() {
+        let colors = test_colors();
+        let lines = format_edit_diff_with_start("", "\talpha", 1, 40, &colors, "");
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered.iter().all(|line| !line.contains('\t')));
+        assert!(rendered.iter().any(|line| line.starts_with("1 +    alpha")));
+    }
+
+    #[test]
+    fn test_render_unified_diff_expands_syntax_tabs() {
+        let colors = test_colors();
+        let new = "\t\tcarfront = {\n\t\t\tinterval = 8.5,\n";
+
+        let lines = format_edit_diff_for_path_with_start(
+            "",
+            new,
+            16,
+            80,
+            &colors,
+            "    ",
+            "arcade/core/levels.lua",
+        );
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered.iter().all(|line| !line.contains('\t')));
+        assert!(rendered
+            .iter()
+            .any(|line| line.starts_with("    16 +        carfront = {")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.starts_with("    17 +            interval = 8.5,")));
     }
 
     #[test]
