@@ -45,20 +45,20 @@ impl CommandPaletteState {
 
         let mut items = core_palette_items(registry, is_chat);
         items.insert(
-        items
-            .iter()
-            .position(|item| item.group == "Model")
-            .unwrap_or(items.len()),
-        app_action_item(
-            "open-skills-dialog",
-            "Skills",
-            "Model",
-            "View and select available skills",
-            None,
-        ),
-    );
+            items
+                .iter()
+                .position(|item| item.group == "Model")
+                .unwrap_or(items.len()),
+            app_action_item(
+                "open-skills-dialog",
+                "Skills",
+                "Model",
+                "View and select available skills",
+                None,
+            ),
+        );
 
-    items.extend(custom_command_items(registry, is_chat));
+        items.extend(custom_command_items(registry, is_chat));
 
         self.dialog = Dialog::with_items("Command Palette", items).with_actions(base_actions());
         self.dialog.set_search_query(search_query);

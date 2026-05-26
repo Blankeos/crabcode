@@ -6,6 +6,8 @@ This file contains important information about the codebase that the AI agent sh
 
 Before adding/changing scripts, make sure to check `justfile` for existing recipes (this repo uses `just` and typically runs scripts via `bun`).
 
+Always run fmt at the end of changes.
+
 ## File Locations
 
 ### Configuration Docs

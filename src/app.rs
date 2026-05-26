@@ -283,6 +283,10 @@ pub struct App {
 
 impl App {
     pub fn new() -> Result<Self> {
+        Self::new_with_model_override(None)
+    }
+
+    pub fn new_with_model_override(model_override: Option<&str>) -> Result<Self> {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
@@ -369,13 +373,16 @@ impl App {
             }
         }
 
-        let active_model_info = if let Some(ref dao) = prefs_dao {
-            dao.get_active_model().ok().flatten()
+        let model_override = model_override.map(parse_model_ref);
+        let active_model_info = if model_override.is_none() {
+            prefs_dao
+                .as_ref()
+                .and_then(|dao| dao.get_active_model().ok().flatten())
         } else {
             None
         };
 
-        if active_model_info.is_none() {
+        if model_override.is_none() && active_model_info.is_none() {
             if let (Some(ref dao), Some(model_str)) = (
                 prefs_dao.as_ref(),
                 loaded_config.merged_config.model.clone(),
@@ -385,14 +392,18 @@ impl App {
             }
         }
 
-        let active_model_info = if let Some(ref dao) = prefs_dao {
-            dao.get_active_model().ok().flatten()
+        let active_model_info = if model_override.is_none() {
+            prefs_dao
+                .as_ref()
+                .and_then(|dao| dao.get_active_model().ok().flatten())
         } else {
             None
         };
 
         let (active_model, active_provider_name) =
-            if let Some((provider_id, model_id)) = active_model_info {
+            if let Some((provider_id, model_id)) = model_override {
+                (model_id, provider_id)
+            } else if let Some((provider_id, model_id)) = active_model_info {
                 (model_id.clone(), provider_id.clone())
             } else if let Some(model_str) = loaded_config.merged_config.model.clone() {
                 let (provider_id, model_id) = parse_model_ref(&model_str);

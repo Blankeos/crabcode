@@ -139,6 +139,7 @@ fn format_post_close_message(
 
 async fn run_print_mode(
     prompt: &str,
+    model_override: Option<&str>,
     no_session_persistence: bool,
     dangerously_skip_permissions: bool,
 ) -> Result<()> {
@@ -154,7 +155,10 @@ async fn run_print_mode(
         let active = prefs_dao
             .as_ref()
             .and_then(|d| d.get_active_model().ok().flatten());
-        if let Some((pid, mid)) = active {
+        if let Some(model) = model_override {
+            let (pid, mid) = crate::app::parse_model_ref(model);
+            (pid, mid)
+        } else if let Some((pid, mid)) = active {
             (pid, mid)
         } else if let Some(m) = loaded_config.merged_config.model.clone() {
             let (pid, mid) = crate::app::parse_model_ref(&m);
@@ -307,6 +311,10 @@ struct Args {
     #[arg(long = "no-session-persistence")]
     no_session_persistence: bool,
 
+    /// Model to use for this invocation, formatted as provider/model
+    #[arg(short = 'm', long = "model")]
+    model: Option<String>,
+
     /// Skip permission prompts in print mode. Intended for isolated benchmark/CI workspaces.
     #[arg(long = "dangerously-skip-permissions")]
     dangerously_skip_permissions: bool,
@@ -332,13 +340,14 @@ async fn main() -> Result<()> {
         }
         return run_print_mode(
             &prompt,
+            args.model.as_deref(),
             args.no_session_persistence,
             args.dangerously_skip_permissions,
         )
         .await;
     }
 
-    let mut app = App::new()?;
+    let mut app = App::new_with_model_override(args.model.as_deref())?;
 
     if let Some(ref session_id) = args.session {
         app.session_manager.switch_session(session_id);
@@ -423,6 +432,70 @@ async fn main() -> Result<()> {
     );
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_model_after_print_prompt() {
+        let args = Args::try_parse_from([
+            "crabcode",
+            "-p",
+            "hi",
+            "--model",
+            "opencode-go/deepseek-v4-flash",
+        ])
+        .unwrap();
+
+        assert_eq!(args.prompt, vec!["hi"]);
+        assert_eq!(args.model.as_deref(), Some("opencode-go/deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn parses_model_with_no_session_persistence_after_print_prompt() {
+        let args = Args::try_parse_from([
+            "crabcode",
+            "-p",
+            "hi",
+            "--no-session-persistence",
+            "--model",
+            "opencode-go/kimi-k2.5",
+        ])
+        .unwrap();
+
+        assert_eq!(args.prompt, vec!["hi"]);
+        assert!(args.no_session_persistence);
+        assert_eq!(args.model.as_deref(), Some("opencode-go/kimi-k2.5"));
+    }
+
+    #[test]
+    fn parses_short_model_alias() {
+        let args = Args::try_parse_from(["crabcode", "-p", "hi", "-m", "openai/gpt-5.2"]).unwrap();
+
+        assert_eq!(args.prompt, vec!["hi"]);
+        assert_eq!(args.model.as_deref(), Some("openai/gpt-5.2"));
+    }
+
+    #[test]
+    fn double_dash_keeps_model_like_tokens_in_prompt() {
+        let args = Args::try_parse_from([
+            "crabcode",
+            "-p",
+            "hi",
+            "--",
+            "--model",
+            "opencode-go/deepseek-v4-flash",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.prompt,
+            vec!["hi", "--model", "opencode-go/deepseek-v4-flash"]
+        );
+        assert_eq!(args.model, None);
+    }
 }
 
 async fn run_event_loop(
