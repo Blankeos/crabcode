@@ -921,7 +921,7 @@ impl Chat {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Bump this whenever rendering logic changes (tables, markdown, etc.)
-        const RENDER_VERSION: u64 = 5;
+        const RENDER_VERSION: u64 = 6;
         RENDER_VERSION.hash(&mut h);
         colors.hash(&mut h);
         self.messages.len().hash(&mut h);
@@ -1471,7 +1471,7 @@ impl Chat {
                 break;
             };
 
-            if crate::session::compaction::is_compaction_summary(message) {
+            if crate::session::compaction::is_compaction_display_item(message) {
                 idx = idx.saturating_add(1);
                 continue;
             }
@@ -1522,7 +1522,7 @@ impl Chat {
         content_height: usize,
     ) -> Option<(usize, usize)> {
         let message = self.messages.get(idx)?;
-        if crate::session::compaction::is_compaction_summary(message) {
+        if crate::session::compaction::is_compaction_display_item(message) {
             return None;
         }
 
@@ -1987,6 +1987,24 @@ impl Chat {
             }
 
             let message = &self.messages[idx];
+            if crate::session::compaction::is_compaction_marker(message)
+                || (crate::session::compaction::is_compaction_summary(message)
+                    && message.compaction_stats.is_some())
+            {
+                all_lines.extend(format_compaction_marker(
+                    message.compaction_stats,
+                    max_width,
+                    colors,
+                ));
+                all_lines.push(Line::from(""));
+                idx += 1;
+                continue;
+            }
+            if crate::session::compaction::is_compaction_summary(message) {
+                idx += 1;
+                continue;
+            }
+
             let attached_to_assistant =
                 idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
             let message_lines = self.format_message(
@@ -2002,11 +2020,6 @@ impl Chat {
             );
             all_lines.extend(message_lines);
             idx += 1;
-        }
-
-        if let Some(stats) = latest_compaction_marker_stats(&self.messages) {
-            all_lines.extend(format_compaction_marker(stats, max_width, colors));
-            all_lines.push(Line::from(""));
         }
 
         (all_lines, positions)
@@ -2252,7 +2265,7 @@ impl Chat {
 
         match message.role {
             MessageRole::User => {
-                if crate::session::compaction::is_compaction_summary(message) {
+                if crate::session::compaction::is_compaction_display_item(message) {
                     return lines;
                 }
 
@@ -3332,16 +3345,6 @@ impl Chat {
         // Default to Plan if no preceding user message with agent_mode found
         "Plan".to_string()
     }
-}
-
-fn latest_compaction_marker_stats(
-    messages: &[Message],
-) -> Option<Option<crate::session::types::CompactionStats>> {
-    messages
-        .iter()
-        .rev()
-        .find(|message| crate::session::compaction::is_compaction_summary(message))
-        .map(|message| message.compaction_stats)
 }
 
 fn format_compaction_marker<'a>(
@@ -4488,29 +4491,49 @@ codex exec --skip-git-repo-check \
     }
 
     #[test]
-    fn test_compaction_summary_renders_marker() {
-        let mut msg = Message::user(format!(
+    fn test_compaction_marker_renders_at_compaction_point() {
+        let summary = Message::user(format!(
             "{}\nsummary content that should stay hidden",
             crate::session::compaction::SUMMARY_PREFIX
         ));
-        msg.compaction_stats = Some(crate::session::types::CompactionStats {
+        let stats = crate::session::types::CompactionStats {
             before_tokens: 12_000,
             after_tokens: 360,
             before_messages: 8,
             after_messages: 2,
-        });
-        let chat = Chat::with_messages(vec![msg, Message::user("tail")]);
+        };
+        let marker = crate::session::compaction::compaction_marker(stats);
+        let chat = Chat::with_messages(vec![
+            summary,
+            Message::user("tail"),
+            marker,
+            Message::user("after compact"),
+        ]);
         let colors = test_colors();
 
         let lines = chat.build_all_lines(80, "model", &colors);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
         assert!(!rendered.iter().any(|line| line.contains("summary content")));
-        assert!(rendered.iter().any(|line| line.contains("tail")));
+        let marker_idx = rendered
+            .iter()
+            .position(|line| line.contains("Context compacted"))
+            .expect("rendered compaction marker");
+        let tail_idx = rendered
+            .iter()
+            .position(|line| line.contains("tail"))
+            .expect("rendered retained tail");
+        let after_idx = rendered
+            .iter()
+            .position(|line| line.contains("after compact"))
+            .expect("rendered later user message");
+
         assert_eq!(
-            rendered.iter().rev().find(|line| !line.is_empty()),
+            rendered.get(marker_idx),
             Some(&"• Context compacted (12.0K -> 360, saved 97%)".to_string())
         );
+        assert!(tail_idx < marker_idx);
+        assert!(marker_idx < after_idx);
     }
 
     #[test]

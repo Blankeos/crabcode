@@ -112,7 +112,7 @@
 
 - [x] wysiwyg double escape to G
 
-- [ ] Compaction logic is a little broken. I did /compact, and the context compacted is ALWAYS at the bottom. instead of just at the part where it tried to compact the messages. Can we study how codex and opencode do it? meaning if I send a new message after compacting. The "compacted" label is still at the bottom of that most recent message
+- [x] Compaction logic is a little broken. I did /compact, and the context compacted is ALWAYS at the bottom. instead of just at the part where it tried to compact the messages. Can we study how codex and opencode do it? meaning if I send a new message after compacting. The "compacted" label is still at the bottom of that most recent message
 
 - [x] When a message is sent, the [Image #1] or [Image #2] tags, become just white, not the unique color we have for them in the chat input box.
 

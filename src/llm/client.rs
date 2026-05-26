@@ -1131,6 +1131,10 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
     let mut aisdk_messages = Vec::new();
 
     for msg in messages {
+        if crate::session::compaction::is_compaction_marker(msg) {
+            continue;
+        }
+
         match msg.role {
             crate::session::types::MessageRole::System => {
                 aisdk_messages.push(AisdkMessage::system(msg.content.clone()));
@@ -1462,6 +1466,25 @@ mod tests {
                 assert!(!output.is_error);
             }
             other => panic!("expected tool output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compaction_marker_is_not_sent_to_model() {
+        let stats = crate::session::types::CompactionStats {
+            before_tokens: 12_000,
+            after_tokens: 360,
+            before_messages: 8,
+            after_messages: 2,
+        };
+        let marker = crate::session::compaction::compaction_marker(stats);
+
+        let messages = convert_messages(&[crate::session::types::Message::user("tail"), marker]);
+
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            AisdkMessage::User(message) => assert_eq!(message.content, "tail"),
+            other => panic!("expected user message, got {other:?}"),
         }
     }
 }

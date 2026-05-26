@@ -2,6 +2,7 @@ use crate::session::types::{CompactionStats, Message, MessageRole};
 
 pub const DEFAULT_TAIL_TURNS: usize = 2;
 pub const SUMMARY_PREFIX: &str = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
+pub const COMPACTION_MARKER_CONTENT: &str = "[crabcode:context-compacted]";
 
 const SUMMARIZATION_PROMPT: &str = r#"You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
@@ -92,6 +93,10 @@ pub fn build_prompt(messages: &[Message]) -> String {
     prompt.push_str("Summarize the following session transcript.\n\n<session-transcript>\n");
 
     for (idx, message) in messages.iter().enumerate() {
+        if is_compaction_marker(message) {
+            continue;
+        }
+
         let content = message_content_for_prompt(message);
         if content.trim().is_empty() {
             continue;
@@ -123,7 +128,6 @@ pub fn build_compacted_messages(
     summary_message.provider = provider;
     summary_message.agent_mode = agent_mode;
     summary_message.token_count = Some(estimate_tokens(&summary_message.content));
-    summary_message.compaction_stats = stats;
     if let Some(first_tail) = tail_messages.first() {
         summary_message.timestamp = first_tail
             .timestamp
@@ -133,6 +137,9 @@ pub fn build_compacted_messages(
 
     let mut messages = vec![summary_message];
     messages.extend(tail_messages);
+    if let Some(stats) = stats {
+        append_compaction_marker(&mut messages, stats);
+    }
     messages
 }
 
@@ -141,6 +148,10 @@ pub fn total_context_tokens(messages: &[Message]) -> usize {
 }
 
 pub fn message_context_tokens(message: &Message) -> usize {
+    if is_compaction_marker(message) {
+        return 0;
+    }
+
     message
         .token_count
         .unwrap_or_else(|| estimate_tokens(&message.content))
@@ -154,7 +165,38 @@ pub fn latest_compaction_stats(messages: &[Message]) -> Option<CompactionStats> 
 }
 
 pub fn is_compaction_summary(message: &Message) -> bool {
-    message.compaction_stats.is_some() || message.content.starts_with(SUMMARY_PREFIX)
+    message.content.starts_with(SUMMARY_PREFIX)
+}
+
+pub fn is_compaction_marker(message: &Message) -> bool {
+    message.content == COMPACTION_MARKER_CONTENT && message.compaction_stats.is_some()
+}
+
+pub fn is_compaction_display_item(message: &Message) -> bool {
+    is_compaction_summary(message) || is_compaction_marker(message)
+}
+
+pub fn compaction_marker(stats: CompactionStats) -> Message {
+    let mut marker = Message::system(COMPACTION_MARKER_CONTENT);
+    marker.compaction_stats = Some(stats);
+    marker.token_count = Some(0);
+    marker
+}
+
+pub fn append_compaction_marker(messages: &mut Vec<Message>, stats: CompactionStats) {
+    let mut marker = compaction_marker(stats);
+    let now = std::time::SystemTime::now();
+    marker.timestamp = messages
+        .last()
+        .map(|message| {
+            if now < message.timestamp {
+                message.timestamp
+            } else {
+                now
+            }
+        })
+        .unwrap_or(now);
+    messages.push(marker);
 }
 
 pub fn format_token_count(count: usize) -> String {
@@ -307,6 +349,32 @@ mod tests {
         assert!(compacted[0].content.starts_with(SUMMARY_PREFIX));
         assert_eq!(compacted[1].content, "tail");
         assert!(compacted[0].timestamp <= compacted[1].timestamp);
+    }
+
+    #[test]
+    fn compaction_marker_is_appended_after_retained_tail() {
+        let stats = CompactionStats {
+            before_tokens: 12_000,
+            after_tokens: 360,
+            before_messages: 8,
+            after_messages: 2,
+        };
+
+        let compacted = build_compacted_messages(
+            "summary",
+            vec![Message::user("tail")],
+            None,
+            None,
+            None,
+            Some(stats),
+        );
+
+        assert_eq!(compacted.len(), 3);
+        assert!(is_compaction_summary(&compacted[0]));
+        assert_eq!(compacted[1].content, "tail");
+        assert!(is_compaction_marker(&compacted[2]));
+        assert_eq!(compacted[2].compaction_stats, Some(stats));
+        assert_eq!(message_context_tokens(&compacted[2]), 0);
     }
 
     #[test]

@@ -3397,9 +3397,7 @@ impl App {
                     before_messages,
                     after_messages: messages.len(),
                 };
-                if let Some(summary_message) = messages.first_mut() {
-                    summary_message.compaction_stats = Some(stats);
-                }
+                crate::session::compaction::append_compaction_marker(&mut messages, stats);
                 (messages, stats)
             });
 
