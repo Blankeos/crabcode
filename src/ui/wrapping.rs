@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use crate::ui::selection::NON_SELECTABLE_SPAN_MODIFIER;
 use ratatui::{
     style::Style,
     text::{Line, Span},
@@ -247,7 +248,7 @@ fn line_from_range(
         let content = original.spans[idx].content.as_ref();
         spans.push(Span::styled(
             content[local_start..local_end].to_string(),
-            original.style.patch(*span_style),
+            merge_non_selectable_marker(original.style, *span_style),
         ));
     }
 
@@ -262,12 +263,25 @@ fn clone_spans(spans: &[Span<'_>], base_style: Style) -> Vec<Span<'static>> {
     spans
         .iter()
         .map(|span| {
-            Span::styled(
-                span.content.as_ref().to_string(),
-                base_style.patch(span.style),
-            )
+            let style = merge_non_selectable_marker(base_style, span.style);
+            Span::styled(span.content.as_ref().to_string(), style)
         })
         .collect()
+}
+
+fn merge_non_selectable_marker(base_style: Style, span_style: Style) -> Style {
+    let mut style = base_style.patch(span_style);
+    if base_style
+        .add_modifier
+        .contains(NON_SELECTABLE_SPAN_MODIFIER)
+        || span_style
+            .add_modifier
+            .contains(NON_SELECTABLE_SPAN_MODIFIER)
+    {
+        style.add_modifier.insert(NON_SELECTABLE_SPAN_MODIFIER);
+        style.sub_modifier.remove(NON_SELECTABLE_SPAN_MODIFIER);
+    }
+    style
 }
 
 #[cfg(test)]

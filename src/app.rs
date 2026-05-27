@@ -1,6 +1,12 @@
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::{
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
+};
 
 use crate::autocomplete::AutoComplete;
 use crate::command::handlers::register_all_commands;
@@ -179,6 +185,24 @@ struct ToolCallViewState {
     deferred_finish: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionActionTarget {
+    Chat,
+    Input,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectionActionBarState {
+    target: SelectionActionTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionAction {
+    Annotate,
+    Copy,
+    Dismiss,
+}
+
 #[derive(Debug)]
 struct ClientSessionState {
     chat: Chat,
@@ -239,6 +263,7 @@ pub struct App {
     pub message_actions_index: Option<usize>,
     pub message_actions_dialog: Option<crate::ui::components::dialog::Dialog>,
     message_actions_return_focus: OverlayFocus,
+    selection_action_bar: Option<SelectionActionBarState>,
     pending_chat_message_click: Option<usize>,
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     openai_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<OpenAIOAuthTaskMessage>>,
@@ -470,6 +495,7 @@ impl App {
             message_actions_index: None,
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
+            selection_action_bar: None,
             pending_chat_message_click: None,
             api_key_input,
             openai_oauth_receiver: None,
@@ -1244,6 +1270,20 @@ impl App {
             .unwrap_or_else(|| self.cwd.clone())
     }
 
+    fn current_selection_action_bar_area(&self) -> Option<Rect> {
+        self.selection_action_bar.map(|state| match state.target {
+            SelectionActionTarget::Chat => chat_selection_action_bar_area(
+                self.current_chat_area(),
+                self.chat_state.chat.scroll_offset,
+                &self.chat_state.chat.selection,
+            ),
+            SelectionActionTarget::Input => input_selection_action_bar_area(
+                self.last_frame_size,
+                self.suggestions_popup_anchor_area(),
+            ),
+        })
+    }
+
     fn current_git_branch(&mut self, cwd: &str) -> Option<String> {
         const GIT_BRANCH_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -1269,37 +1309,25 @@ impl App {
     }
 
     fn try_copy_selection(&mut self) -> bool {
-        // Check chat selection
         if self.chat_state.chat.has_selection() {
-            let colors = self.get_current_theme_colors();
-            let model = self.model.clone();
-            let chat_area = self.current_chat_area();
-            let max_width = chat_area.width.saturating_sub(2) as usize;
-            if let Some(text) = self
-                .chat_state
-                .chat
-                .get_selected_text(max_width, &model, &colors)
-            {
-                let _ = crate::utils::clipboard::copy_text(&text);
-                push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
-            }
+            let _ = self.copy_chat_selection();
             self.chat_state.chat.selection.clear();
+            self.selection_action_bar = None;
             return true;
         }
-        // Check input selection
+
         if self.input.has_selection() {
-            let text = self.input.get_selected_text();
-            if !text.is_empty() {
-                let _ = crate::utils::clipboard::copy_text(&text);
-                push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
-            }
+            let _ = self.copy_input_selection();
             self.input.clear_selection();
+            self.selection_action_bar = None;
             return true;
         }
+
         false
     }
 
     fn clear_selection(&mut self) -> bool {
+        self.selection_action_bar = None;
         if self.chat_state.chat.has_selection() {
             self.chat_state.chat.selection.clear();
             return true;
@@ -1311,33 +1339,122 @@ impl App {
         false
     }
 
-    fn copy_chat_selection(&mut self) {
-        if !self.chat_state.chat.has_selection() {
-            return;
+    fn copy_input_selection(&mut self) -> bool {
+        if !self.input.has_selection() {
+            return false;
         }
-        // Don't copy zero-width selections (e.g., single click without drag)
+
+        let text = self.input.get_selected_text();
+        if text.is_empty() {
+            return false;
+        }
+
+        let _ = crate::utils::clipboard::copy_text(&text);
+        push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
+        true
+    }
+
+    fn selected_chat_text(&self) -> Option<String> {
+        if !self.chat_state.chat.has_selection() {
+            return None;
+        }
+
         let ((s_line, s_col), (e_line, e_col)) = self.chat_state.chat.selection.range();
         if s_line == e_line && s_col == e_col {
-            return;
+            return None;
         }
+
         let colors = self.get_current_theme_colors();
         let model = self.model.clone();
         let chat_area = self.current_chat_area();
         let max_width = chat_area.width.saturating_sub(2) as usize;
-        if let Some(text) =
-            self.chat_state
-                .chat
-                .get_selected_text(max_width.max(1), &model, &colors)
-        {
-            if !text.trim().is_empty() {
-                let _ = crate::utils::clipboard::copy_text(&text);
-                push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
-            }
+        self.chat_state
+            .chat
+            .get_selected_text(max_width.max(1), &model, &colors)
+            .filter(|text| !text.trim().is_empty())
+    }
+
+    fn selected_text_for_action(&self, target: SelectionActionTarget) -> Option<String> {
+        match target {
+            SelectionActionTarget::Chat => self.selected_chat_text(),
+            SelectionActionTarget::Input => self
+                .input
+                .has_selection()
+                .then(|| self.input.get_selected_text())
+                .filter(|text| !text.is_empty()),
         }
     }
 
-    fn current_chat_area(&self) -> ratatui::layout::Rect {
-        let size = self.last_frame_size;
+    fn show_selection_action_bar_for(&mut self, target: SelectionActionTarget) {
+        self.selection_action_bar = self
+            .selected_text_for_action(target)
+            .map(|_| SelectionActionBarState { target });
+    }
+
+    fn dismiss_selection_actions(&mut self) -> bool {
+        let had_selection = self.clear_selection();
+        self.pending_chat_message_click = None;
+        had_selection
+    }
+
+    fn annotate_selection(&mut self, target: SelectionActionTarget) -> bool {
+        if target != SelectionActionTarget::Chat {
+            return false;
+        }
+
+        let Some(text) = self.selected_text_for_action(target) else {
+            return self.dismiss_selection_actions();
+        };
+
+        if !self.input.is_empty() {
+            self.input.insert_str("\n");
+        }
+        self.input.insert_str(&format_selection_annotation(&text));
+        self.dismiss_selection_actions();
+        push_toast(Toast::new(
+            "Annotated selection in prompt",
+            ToastLevel::Info,
+            None,
+        ));
+        true
+    }
+
+    fn handle_selection_action_key(&mut self, key: KeyEvent) -> bool {
+        let Some(state) = self.selection_action_bar else {
+            return false;
+        };
+
+        match key.code {
+            KeyCode::Char('y') if key.modifiers == event::KeyModifiers::NONE => {
+                let _ = self.try_copy_selection();
+                true
+            }
+            KeyCode::Char('i')
+                if key.modifiers == event::KeyModifiers::NONE
+                    && state.target == SelectionActionTarget::Chat =>
+            {
+                self.annotate_selection(state.target)
+            }
+            KeyCode::Esc if key.modifiers == event::KeyModifiers::NONE => {
+                self.dismiss_selection_actions();
+                self.reset_esc_timeline_state();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn copy_chat_selection(&mut self) -> bool {
+        let Some(text) = self.selected_chat_text() else {
+            return false;
+        };
+
+        let _ = crate::utils::clipboard::copy_text(&text);
+        push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
+        true
+    }
+
+    fn chat_area_for_size(&self, size: Rect) -> Rect {
         let main_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints(
@@ -1383,6 +1500,10 @@ impl App {
         above_status_chunks[1]
     }
 
+    fn current_chat_area(&self) -> Rect {
+        self.chat_area_for_size(self.last_frame_size)
+    }
+
     pub fn handle_keys(&mut self, key: KeyEvent) {
         if key.code != KeyCode::Esc {
             self.reset_esc_timeline_state();
@@ -1396,6 +1517,10 @@ impl App {
             )
         {
             self.open_command_palette();
+            return;
+        }
+
+        if self.handle_selection_action_key(key) {
             return;
         }
 
@@ -1413,7 +1538,6 @@ impl App {
                 return;
             }
             KeyCode::Char('c') if key.modifiers == event::KeyModifiers::CONTROL => {
-                // If text is selected (chat or input), copy to clipboard first
                 if self.try_copy_selection() {
                     return;
                 }
@@ -2166,9 +2290,11 @@ impl App {
     }
 
     fn handle_input_and_app_keys(&mut self, key: KeyEvent) {
-        // If chat text is selected and user presses a key, clear the selection
-        // (unless it's Ctrl+C or Escape which are handled earlier)
-        self.chat_state.chat.selection.clear();
+        if self.selection_action_bar.is_some() {
+            self.dismiss_selection_actions();
+        } else {
+            self.chat_state.chat.selection.clear();
+        }
 
         if self.is_subagent_session_active() {
             clear_suggestions(&mut self.suggestions_popup_state);
@@ -2275,9 +2401,43 @@ impl App {
         input_chunks[2]
     }
 
+    fn handle_selection_action_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let Some(state) = self.selection_action_bar else {
+            return false;
+        };
+        let Some(area) = self.current_selection_action_bar_area() else {
+            return false;
+        };
+
+        let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+        if !area.contains(point) {
+            return false;
+        }
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => true,
+            MouseEventKind::Up(MouseButton::Left) => {
+                let rel = mouse.column.saturating_sub(area.x) as usize;
+                match selection_action_for_column(state.target, rel) {
+                    SelectionAction::Annotate => self.annotate_selection(state.target),
+                    SelectionAction::Copy => {
+                        let _ = self.try_copy_selection();
+                        true
+                    }
+                    SelectionAction::Dismiss => self.dismiss_selection_actions(),
+                }
+            }
+            _ => true,
+        }
+    }
+
     fn handle_input_mouse_event(&mut self, mouse: MouseEvent) -> bool {
         if self.is_subagent_session_active() {
             return false;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.selection_action_bar = None;
         }
 
         if matches!(mouse.kind, MouseEventKind::Moved) && !self.input.contains_mouse(mouse) {
@@ -2294,10 +2454,10 @@ impl App {
                 ratatui::crossterm::event::MouseButton::Left
             )
         ) {
-            let text = self.input.get_selected_text();
-            if !text.is_empty() {
-                let _ = crate::utils::clipboard::copy_text(&text);
-                push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
+            if self.input.has_selection() && !self.input.get_selected_text().is_empty() {
+                self.show_selection_action_bar_for(SelectionActionTarget::Input);
+            } else {
+                self.selection_action_bar = None;
             }
         }
         self.update_suggestions();
@@ -2368,6 +2528,17 @@ impl App {
             self.input.clear_hover();
         }
 
+        if self.handle_selection_action_mouse(mouse) {
+            return;
+        }
+
+        if self.selection_action_bar.is_some()
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            self.dismiss_selection_actions();
+            return;
+        }
+
         if matches!(mouse.kind, MouseEventKind::Moved) && self.base_focus != BaseFocus::Chat {
             self.chat_state.chat.clear_hovered_image();
             self.chat_state.chat.clear_hovered_hyperlink();
@@ -2375,15 +2546,14 @@ impl App {
 
         // If text is selected and user clicks on an overlay, clear selection instead
         if self.overlay_focus != OverlayFocus::None
-            && self.chat_state.chat.has_selection()
+            && (self.chat_state.chat.has_selection() || self.input.has_selection())
+            && self.selection_action_bar.is_none()
             && matches!(
                 mouse.kind,
                 ratatui::crossterm::event::MouseEventKind::Down(_)
             )
         {
-            self.copy_chat_selection();
-            self.chat_state.chat.selection.clear();
-            self.pending_chat_message_click = None;
+            self.dismiss_selection_actions();
             return;
         }
 
@@ -2734,10 +2904,7 @@ impl App {
 
                 let point = ratatui::layout::Position::new(mouse.column, mouse.row);
                 if !chat_area.contains(point) {
-                    // Click outside chat area, copy selection before clearing
-                    self.copy_chat_selection();
-                    self.chat_state.chat.selection.clear();
-                    self.pending_chat_message_click = None;
+                    self.dismiss_selection_actions();
                 }
             }
 
@@ -2827,6 +2994,10 @@ impl App {
                     };
 
                 if self.chat_state.chat.handle_mouse_event(mouse, chat_area) {
+                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                        self.selection_action_bar = None;
+                    }
+
                     if let Some(idx) = released_pending_message {
                         if !self.chat_state.chat.has_selection() {
                             self.pending_chat_message_click = None;
@@ -2840,12 +3011,11 @@ impl App {
                         self.pending_chat_message_click = None;
                     }
 
-                    // Auto-copy when selection is finalized (mouse up after drag)
+                    // Show copy/annotate actions when selection is finalized (mouse up after drag)
                     if !had_selection && self.chat_state.chat.has_selection() {
-                        // New selection just started, don't copy yet
+                        // New selection just started, don't show actions yet
                     } else if was_dragging && !self.chat_state.chat.selection.is_dragging {
-                        // Selection was just finalized (mouse up)
-                        self.copy_chat_selection();
+                        self.show_selection_action_bar_for(SelectionActionTarget::Chat);
                     }
                     return;
                 }
@@ -6120,8 +6290,165 @@ impl App {
             crate::views::which_key::render_which_key(f, &self.which_key_state, &colors);
         }
 
+        if let Some(state) = self.selection_action_bar {
+            let area = match state.target {
+                SelectionActionTarget::Chat => chat_selection_action_bar_area(
+                    self.chat_area_for_size(size),
+                    self.chat_state.chat.scroll_offset,
+                    &self.chat_state.chat.selection,
+                ),
+                SelectionActionTarget::Input => {
+                    input_selection_action_bar_area(size, self.suggestions_popup_anchor_area())
+                }
+            };
+            render_selection_action_bar(f, area, state.target, &colors);
+        }
+
         toast::render_toasts(f, &get_toast_manager().lock().unwrap(), &colors);
     }
+}
+
+fn format_selection_annotation(text: &str) -> String {
+    let text = text.trim();
+    if text.lines().count() <= 1 {
+        format!("`{}`", text)
+    } else {
+        format!("```\n{}\n```", text)
+    }
+}
+
+const SELECTION_ACTION_BAR_WIDTH: u16 = 24;
+const CHAT_SELECTION_ACTION_COPY_COL: usize = 12;
+const CHAT_SELECTION_ACTION_ESC_COL: usize = 19;
+const INPUT_SELECTION_ACTION_ESC_COL: usize = 8;
+
+fn selection_action_for_column(target: SelectionActionTarget, column: usize) -> SelectionAction {
+    match target {
+        SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_COPY_COL => {
+            SelectionAction::Annotate
+        }
+        SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_ESC_COL => {
+            SelectionAction::Copy
+        }
+        SelectionActionTarget::Chat => SelectionAction::Dismiss,
+        SelectionActionTarget::Input if column < INPUT_SELECTION_ACTION_ESC_COL => {
+            SelectionAction::Copy
+        }
+        SelectionActionTarget::Input => SelectionAction::Dismiss,
+    }
+}
+
+fn chat_selection_action_bar_area(
+    chat_area: Rect,
+    scroll_offset: usize,
+    selection: &crate::ui::selection::Selection,
+) -> Rect {
+    let content_area = Rect {
+        x: chat_area.x,
+        y: chat_area.y,
+        width: chat_area.width.saturating_sub(2),
+        height: chat_area.height,
+    };
+    let ((start_line, start_col), (end_line, _)) = selection.range();
+    selection_action_bar_area_for_anchor(
+        content_area,
+        scroll_offset,
+        start_line,
+        end_line,
+        start_col,
+        SELECTION_ACTION_BAR_WIDTH,
+    )
+}
+
+fn input_selection_action_bar_area(frame_area: Rect, input_area: Rect) -> Rect {
+    let y = input_area.y.saturating_sub(1);
+    let x = input_area.x.saturating_add(1);
+    clamp_action_bar_area(
+        frame_area,
+        Rect::new(x, y, SELECTION_ACTION_BAR_WIDTH.min(frame_area.width), 1),
+    )
+}
+
+fn selection_action_bar_area_for_anchor(
+    area: Rect,
+    scroll_offset: usize,
+    start_line: usize,
+    end_line: usize,
+    start_col: usize,
+    width: u16,
+) -> Rect {
+    let visible_start_line = start_line.saturating_sub(scroll_offset);
+    let visible_end_line = end_line.saturating_sub(scroll_offset);
+    let y = if visible_start_line > 0 {
+        area.y.saturating_add(visible_start_line as u16 - 1)
+    } else {
+        area.y.saturating_add(
+            (visible_end_line + 1).min(area.height.saturating_sub(1) as usize) as u16,
+        )
+    };
+    let x = area.x.saturating_add(start_col as u16).min(
+        area.x
+            .saturating_add(area.width.saturating_sub(width.max(1))),
+    );
+
+    clamp_action_bar_area(area, Rect::new(x, y, width.min(area.width), 1))
+}
+
+fn clamp_action_bar_area(container: Rect, mut area: Rect) -> Rect {
+    area.width = area.width.min(container.width);
+    if area.width == 0 || container.width == 0 || container.height == 0 {
+        return Rect::new(container.x, container.y, 0, 0);
+    }
+
+    let max_x = container
+        .x
+        .saturating_add(container.width.saturating_sub(area.width));
+    area.x = area.x.clamp(container.x, max_x);
+    let max_y = container
+        .y
+        .saturating_add(container.height.saturating_sub(1));
+    area.y = area.y.clamp(container.y, max_y);
+    area.height = 1;
+    area
+}
+
+fn render_selection_action_bar(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    target: SelectionActionTarget,
+    colors: &theme::ThemeColors,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    f.render_widget(Clear, area);
+    let bg = colors.dialog_background;
+    let key_style = Style::default()
+        .fg(colors.text_strong)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(colors.text_weak).bg(bg);
+    let line = if target == SelectionActionTarget::Chat {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("i", key_style),
+            Span::styled(" annotate ", label_style),
+            Span::styled("y", key_style),
+            Span::styled(" copy ", label_style),
+            Span::styled("esc", key_style),
+            Span::raw(" "),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("y", key_style),
+            Span::styled(" copy ", label_style),
+            Span::styled("esc", key_style),
+            Span::raw(" "),
+        ])
+    };
+    f.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), area);
 }
 
 fn message_block_clipboard_text(
@@ -6251,6 +6578,7 @@ mod tests {
             message_actions_index: None,
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
+            selection_action_bar: None,
             pending_chat_message_click: None,
             api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
             openai_oauth_receiver: None,
@@ -6407,6 +6735,57 @@ mod tests {
             row,
             modifiers: KeyModifiers::empty(),
         }
+    }
+
+    #[test]
+    fn selection_action_bar_column_mapping_matches_rendered_labels() {
+        assert_eq!(
+            selection_action_for_column(SelectionActionTarget::Chat, 1),
+            SelectionAction::Annotate
+        );
+        assert_eq!(
+            selection_action_for_column(SelectionActionTarget::Chat, 12),
+            SelectionAction::Copy
+        );
+        assert_eq!(
+            selection_action_for_column(SelectionActionTarget::Chat, 19),
+            SelectionAction::Dismiss
+        );
+        assert_eq!(
+            selection_action_for_column(SelectionActionTarget::Input, 1),
+            SelectionAction::Copy
+        );
+        assert_eq!(
+            selection_action_for_column(SelectionActionTarget::Input, 8),
+            SelectionAction::Dismiss
+        );
+    }
+
+    #[test]
+    fn chat_selection_action_i_annotates_and_dismisses_selection() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant("alpha beta"));
+        app.chat_state.chat.selection.active = true;
+        app.chat_state.chat.selection.start_line = 0;
+        app.chat_state.chat.selection.start_col = 0;
+        app.chat_state.chat.selection.end_line = 0;
+        app.chat_state.chat.selection.end_col = "alpha".len();
+
+        app.show_selection_action_bar_for(SelectionActionTarget::Chat);
+        assert_eq!(
+            app.selection_action_bar.map(|state| state.target),
+            Some(SelectionActionTarget::Chat)
+        );
+
+        app.handle_keys(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+        assert_eq!(app.input.get_text(), "`alpha`");
+        assert!(app.selection_action_bar.is_none());
+        assert!(!app.chat_state.chat.has_selection());
     }
 
     #[test]

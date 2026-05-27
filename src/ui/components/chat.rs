@@ -4,7 +4,7 @@ use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
 use crate::ui::scrollbar::{
     render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
 };
-use crate::ui::selection::Selection;
+use crate::ui::selection::{non_selectable_style, Selection};
 use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
 use crate::utils::token_counter::StreamingTokenCounter;
 use ratatui::{
@@ -2273,8 +2273,8 @@ impl Chat {
                 let border_color =
                     crate::theme::agent_mode_color(message.agent_mode.as_deref(), colors);
                 let bg = colors.background_element;
-                let border_style = Style::default().fg(border_color);
-                let pad_style = Style::default().bg(bg);
+                let border_style = non_selectable_style(Style::default().fg(border_color));
+                let pad_style = non_selectable_style(Style::default().bg(bg));
                 let text_style = Style::default().fg(colors.text).bg(bg);
                 let image_style = |placeholder: &str| {
                     let is_hovered = self.hovered_image.as_ref().is_some_and(|target| {
@@ -4488,6 +4488,48 @@ codex exec --skip-git-repo-check \
             chat.get_selected_text(120, "model", &colors).as_deref(),
             Some("imagegen skill")
         );
+    }
+
+    #[test]
+    fn selected_user_message_text_excludes_panel_gutter_and_padding() {
+        let colors = test_colors();
+        let mut chat =
+            Chat::with_messages(vec![Message::user("control if\njust quickly bloats it.")]);
+        let rendered_width = 40;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(rendered_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = 20;
+        chat.scroll_offset = 0;
+
+        let first_line = chat
+            .cached_lines
+            .iter()
+            .position(|line| line_text(line).contains("control if"))
+            .expect("first user text line");
+        let second_line = chat
+            .cached_lines
+            .iter()
+            .position(|line| line_text(line).contains("just quickly bloats it."))
+            .expect("second user text line");
+        let second_line_width =
+            UnicodeWidthStr::width(line_text(&chat.cached_lines[second_line]).as_str());
+
+        chat.selection.active = true;
+        chat.selection.start_line = first_line;
+        chat.selection.start_col = 0;
+        chat.selection.end_line = second_line;
+        chat.selection.end_col = second_line_width;
+
+        let selected = chat
+            .get_selected_text(rendered_width, "model", &colors)
+            .expect("selected text");
+
+        assert_eq!(selected, "control if\njust quickly bloats it.");
+        assert!(!selected.contains('▌'));
     }
 
     #[test]
