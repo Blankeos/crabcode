@@ -22,6 +22,7 @@ const OPENAI_ERROR_BODY_MAX_CHARS: usize = 2048;
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const OPENAI_WEBSOCKET_IDLE_MAX: Duration = Duration::from_secs(60);
+const OPENAI_WEBSOCKET_STREAM_RETRIES: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct OpenAI {
@@ -199,6 +200,26 @@ struct OpenAIRequestSnapshot {
 struct OpenAIResponseSnapshot {
     response_id: String,
     items_added: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Default)]
+struct WebsocketStreamProgress {
+    emitted_non_replayable_output: bool,
+}
+
+impl WebsocketStreamProgress {
+    fn record_chunk(&mut self, chunk: &ChunkType) {
+        if matches!(
+            chunk,
+            ChunkType::Text(_) | ChunkType::Reasoning(_) | ChunkType::ToolCall(_)
+        ) {
+            self.emitted_non_replayable_output = true;
+        }
+    }
+
+    fn can_retry_without_duplicate_output(&self) -> bool {
+        !self.emitted_non_replayable_output
+    }
 }
 
 #[async_trait]
@@ -436,9 +457,9 @@ impl OpenAI {
                 state.clear_connection();
             }
 
-            let mut fresh_ws = connect_openai_websocket(ws_url, headers).await?;
+            let mut fresh_ws = connect_openai_websocket(ws_url.clone(), headers).await?;
             fresh_ws
-                .send(WsMessage::Text(request_text))
+                .send(WsMessage::Text(request_text.clone()))
                 .await
                 .map_err(|err| Error::Provider(format!("websocket send failed: {err}")))?;
             ws = fresh_ws;
@@ -456,59 +477,109 @@ impl OpenAI {
         ))));
         let websocket_state = Arc::clone(&self.websocket_state);
         let request_snapshot = request_snapshot_from_body(&full_body);
+        let retry_ws_url = ws_url.clone();
+        let retry_headers = headers.clone();
         tokio::spawn(async move {
-            let mut response_id = None;
-            let mut items_added = Vec::new();
+            let mut retry_count = 0usize;
 
-            while let Some(message) = ws.next().await {
-                match message {
-                    Ok(WsMessage::Text(text)) => {
-                        collect_websocket_response_state(&text, &mut response_id, &mut items_added);
-                        if let Some(chunk) = response_sse_data_to_chunk(&text) {
-                            let is_completed =
-                                matches!(chunk, Ok(ChunkType::ResponseCompleted { .. }));
-                            if tx.send(chunk).is_err() {
-                                return;
-                            }
-                            if is_completed {
-                                if let Some(response_id) = response_id {
-                                    let mut state = websocket_state.lock().await;
-                                    state.connection = Some(ws);
-                                    state.last_used_at = Some(Instant::now());
-                                    state.last_request = Some(request_snapshot);
-                                    state.last_response = Some(OpenAIResponseSnapshot {
-                                        response_id,
-                                        items_added,
-                                    });
+            loop {
+                let mut response_id = None;
+                let mut items_added = Vec::new();
+                let mut progress = WebsocketStreamProgress::default();
+
+                let failure = loop {
+                    match ws.next().await {
+                        Some(Ok(WsMessage::Text(text))) => {
+                            collect_websocket_response_state(
+                                &text,
+                                &mut response_id,
+                                &mut items_added,
+                            );
+                            if let Some(chunk) = response_sse_data_to_chunk(&text) {
+                                let is_completed =
+                                    matches!(chunk, Ok(ChunkType::ResponseCompleted { .. }));
+                                if let Ok(ref chunk) = chunk {
+                                    progress.record_chunk(chunk);
                                 }
-                                return;
+                                if tx.send(chunk).is_err() {
+                                    return;
+                                }
+                                if is_completed {
+                                    if let Some(response_id) = response_id {
+                                        let mut state = websocket_state.lock().await;
+                                        state.connection = Some(ws);
+                                        state.last_used_at = Some(Instant::now());
+                                        state.last_request = Some(request_snapshot.clone());
+                                        state.last_response = Some(OpenAIResponseSnapshot {
+                                            response_id,
+                                            items_added,
+                                        });
+                                    }
+                                    return;
+                                }
                             }
                         }
+                        Some(Ok(WsMessage::Ping(_))) | Some(Ok(WsMessage::Pong(_))) => {}
+                        Some(Ok(WsMessage::Close(_))) => {
+                            break "websocket closed before response.completed".to_string();
+                        }
+                        Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Frame(_))) => {}
+                        Some(Err(err)) => {
+                            break format!("websocket stream error: {}", err);
+                        }
+                        None => {
+                            break "websocket stream ended before response.completed".to_string();
+                        }
                     }
-                    Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {}
-                    Ok(WsMessage::Close(_)) => {
-                        websocket_state.lock().await.clear_connection();
-                        let _ = tx.send(Ok(ChunkType::Failed(
-                            "websocket closed before response.completed".to_string(),
-                        )));
+                };
+
+                websocket_state.lock().await.clear_connection();
+
+                if retry_count < OPENAI_WEBSOCKET_STREAM_RETRIES
+                    && progress.can_retry_without_duplicate_output()
+                {
+                    retry_count += 1;
+                    if tx
+                        .send(Ok(ChunkType::Metadata(format!(
+                            "openai_transport=responses_websocket_retry attempt={} reason={}",
+                            retry_count, failure
+                        ))))
+                        .is_err()
+                    {
                         return;
                     }
-                    Ok(WsMessage::Binary(_)) | Ok(WsMessage::Frame(_)) => {}
-                    Err(err) => {
-                        websocket_state.lock().await.clear_connection();
+
+                    let mut fresh_ws = match connect_openai_websocket(
+                        retry_ws_url.clone(),
+                        &retry_headers,
+                    )
+                    .await
+                    {
+                        Ok(ws) => ws,
+                        Err(err) => {
+                            let _ = tx.send(Ok(ChunkType::Failed(format!(
+                                "{}; websocket retry connect failed: {}",
+                                failure, err
+                            ))));
+                            return;
+                        }
+                    };
+
+                    if let Err(err) = fresh_ws.send(WsMessage::Text(request_text.clone())).await {
                         let _ = tx.send(Ok(ChunkType::Failed(format!(
-                            "websocket stream error: {}",
-                            err
+                            "{}; websocket retry send failed: {}",
+                            failure, err
                         ))));
                         return;
                     }
-                }
-            }
 
-            websocket_state.lock().await.clear_connection();
-            let _ = tx.send(Ok(ChunkType::Failed(
-                "websocket stream ended before response.completed".to_string(),
-            )));
+                    ws = fresh_ws;
+                    continue;
+                }
+
+                let _ = tx.send(Ok(ChunkType::Failed(failure)));
+                return;
+            }
         });
 
         Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async {
@@ -1285,7 +1356,7 @@ mod tests {
     use super::{
         build_openai_messages, request_snapshot_from_body, response_sse_data_to_chunk,
         responses_function_call_chunk, websocket_request_body_from_state, OpenAI,
-        OpenAIResponseSnapshot, OpenAIWebsocketState,
+        OpenAIResponseSnapshot, OpenAIWebsocketState, WebsocketStreamProgress,
     };
     use crate::chunk::{ChunkType, MessagePhase};
     use crate::message::Message;
@@ -1323,6 +1394,34 @@ mod tests {
                 end_turn: Some(false)
             })
         ));
+    }
+
+    #[test]
+    fn websocket_stream_progress_allows_retry_before_output() {
+        let mut progress = WebsocketStreamProgress::default();
+
+        progress.record_chunk(&ChunkType::Metadata(
+            "openai_transport=responses_websocket".to_string(),
+        ));
+        progress.record_chunk(&ChunkType::AssistantMessagePhase {
+            phase: Some(MessagePhase::Commentary),
+        });
+
+        assert!(progress.can_retry_without_duplicate_output());
+    }
+
+    #[test]
+    fn websocket_stream_progress_blocks_retry_after_replay_unsafe_chunks() {
+        for chunk in [
+            ChunkType::Text("partial".to_string()),
+            ChunkType::Reasoning("thinking".to_string()),
+            ChunkType::ToolCall(r#"[{"id":"call_1"}]"#.to_string()),
+        ] {
+            let mut progress = WebsocketStreamProgress::default();
+            progress.record_chunk(&chunk);
+
+            assert!(!progress.can_retry_without_duplicate_output());
+        }
     }
 
     #[test]

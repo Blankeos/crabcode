@@ -441,3 +441,38 @@ If the async stream task exited without delivering a terminal `End`, `Failed`, o
 - `cargo test stream_finish_waits_for_running_tool_result`
 - `cargo fmt --check`
 - `cargo check`
+
+## 2026-05-28 WebSocket Reset During Highlight Refactor
+
+### User-Visible Symptom
+
+While refactoring text selection so highlighting shows explicit actions instead of copying immediately, crabcode stopped mid-task after several successful edits.
+
+### `app.log` Evidence
+
+Primary session id: `ocesi62w1f7b7pr7g5n9j7o2`.
+
+Relevant sequence:
+
+- `00:39:37`: an edit to `src/ui/selection.rs` completed successfully.
+- `00:39:37`: provider step 139 started with `previous_response_id=true`.
+- `00:39:41`: the stream failed with `WebSocket protocol error: Connection reset without closing handshake`.
+- The stream summary had `response_completed=0`, `relay_result=Error`, `stop_reason=Some(Error(...))`, and `current_phase=commentary`.
+
+### Root Cause
+
+This was not premature final-answer completion. It was a transport failure before a terminal `response.completed` event.
+
+The disconnected-receiver handling correctly treats this as a failed stream, but crabcode still does not have a retry/resume path for a partially streamed provider step. The interrupted feature work had to be resumed manually from the dirty tree and `app.log` context.
+
+### Fix Applied
+
+- `aisdk/src/providers/openai.rs`
+  - Added one bounded retry for Responses websocket read failures before `response.completed`.
+  - Retries reconnect on a fresh websocket and resends the same request only if the failed attempt has not emitted text, reasoning, or tool-call chunks.
+  - Keeps text/tool retries conservative to avoid duplicated visible output or duplicate tool execution.
+  - Emits retry metadata as `openai_transport=responses_websocket_retry ...` for future log diagnosis.
+
+### Follow-up
+
+- This still does not retry after partial text, reasoning, or tool-call output has already been emitted. Supporting that safely would require resumable provider responses or UI/model de-duplication of replayed deltas.
