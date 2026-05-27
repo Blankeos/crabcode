@@ -198,7 +198,7 @@ struct SelectionActionBarState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionAction {
-    Annotate,
+    AddToPrompt,
     Copy,
     Dismiss,
 }
@@ -1397,7 +1397,7 @@ impl App {
         had_selection
     }
 
-    fn annotate_selection(&mut self, target: SelectionActionTarget) -> bool {
+    fn add_selection_to_prompt(&mut self, target: SelectionActionTarget) -> bool {
         if target != SelectionActionTarget::Chat {
             return false;
         }
@@ -1409,10 +1409,11 @@ impl App {
         if !self.input.is_empty() {
             self.input.insert_str("\n");
         }
-        self.input.insert_str(&format_selection_annotation(&text));
+        self.input
+            .insert_str(&format_selection_prompt_addition(&text));
         self.dismiss_selection_actions();
         push_toast(Toast::new(
-            "Annotated selection in prompt",
+            "Added selection to prompt",
             ToastLevel::Info,
             None,
         ));
@@ -1433,7 +1434,7 @@ impl App {
                 if key.modifiers == event::KeyModifiers::NONE
                     && state.target == SelectionActionTarget::Chat =>
             {
-                self.annotate_selection(state.target)
+                self.add_selection_to_prompt(state.target)
             }
             KeyCode::Esc if key.modifiers == event::KeyModifiers::NONE => {
                 self.dismiss_selection_actions();
@@ -2419,7 +2420,7 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => {
                 let rel = mouse.column.saturating_sub(area.x) as usize;
                 match selection_action_for_column(state.target, rel) {
-                    SelectionAction::Annotate => self.annotate_selection(state.target),
+                    SelectionAction::AddToPrompt => self.add_selection_to_prompt(state.target),
                     SelectionAction::Copy => {
                         let _ = self.try_copy_selection();
                         true
@@ -3011,7 +3012,7 @@ impl App {
                         self.pending_chat_message_click = None;
                     }
 
-                    // Show copy/annotate actions when selection is finalized (mouse up after drag)
+                    // Show copy/add-to-prompt actions when selection is finalized (mouse up after drag)
                     if !had_selection && self.chat_state.chat.has_selection() {
                         // New selection just started, don't show actions yet
                     } else if was_dragging && !self.chat_state.chat.selection.is_dragging {
@@ -6308,7 +6309,7 @@ impl App {
     }
 }
 
-fn format_selection_annotation(text: &str) -> String {
+fn format_selection_prompt_addition(text: &str) -> String {
     let text = text.trim();
     if text.lines().count() <= 1 {
         format!("`{}`", text)
@@ -6317,15 +6318,15 @@ fn format_selection_annotation(text: &str) -> String {
     }
 }
 
-const SELECTION_ACTION_BAR_WIDTH: u16 = 24;
-const CHAT_SELECTION_ACTION_COPY_COL: usize = 12;
-const CHAT_SELECTION_ACTION_ESC_COL: usize = 19;
+const SELECTION_ACTION_BAR_WIDTH: u16 = 28;
+const CHAT_SELECTION_ACTION_COPY_COL: usize = 16;
+const CHAT_SELECTION_ACTION_ESC_COL: usize = 23;
 const INPUT_SELECTION_ACTION_ESC_COL: usize = 8;
 
 fn selection_action_for_column(target: SelectionActionTarget, column: usize) -> SelectionAction {
     match target {
         SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_COPY_COL => {
-            SelectionAction::Annotate
+            SelectionAction::AddToPrompt
         }
         SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_ESC_COL => {
             SelectionAction::Copy
@@ -6433,7 +6434,7 @@ fn render_selection_action_bar(
         Line::from(vec![
             Span::raw(" "),
             Span::styled("i", key_style),
-            Span::styled(" annotate ", label_style),
+            Span::styled(" add to prompt ", label_style),
             Span::styled("y", key_style),
             Span::styled(" copy ", label_style),
             Span::styled("esc", key_style),
@@ -6741,14 +6742,14 @@ mod tests {
     fn selection_action_bar_column_mapping_matches_rendered_labels() {
         assert_eq!(
             selection_action_for_column(SelectionActionTarget::Chat, 1),
-            SelectionAction::Annotate
+            SelectionAction::AddToPrompt
         );
         assert_eq!(
-            selection_action_for_column(SelectionActionTarget::Chat, 12),
+            selection_action_for_column(SelectionActionTarget::Chat, 16),
             SelectionAction::Copy
         );
         assert_eq!(
-            selection_action_for_column(SelectionActionTarget::Chat, 19),
+            selection_action_for_column(SelectionActionTarget::Chat, 23),
             SelectionAction::Dismiss
         );
         assert_eq!(
@@ -6762,7 +6763,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_selection_action_i_annotates_and_dismisses_selection() {
+    fn chat_selection_action_i_adds_to_prompt_and_dismisses_selection() {
         let mut app = test_app();
         app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
         app.base_focus = BaseFocus::Chat;
