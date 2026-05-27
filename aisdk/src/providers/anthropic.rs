@@ -206,68 +206,181 @@ impl Provider for Anthropic {
         let stream = response
             .bytes_stream()
             .eventsource()
-            .filter_map(|ev| {
-                match ev {
-                    Ok(event) => {
-                        let event_type = event.event.as_str();
-                        let data = &event.data;
+            .filter_map(|ev| match ev {
+                Ok(event) => {
+                    let event_type = event.event.as_str();
+                    let data = &event.data;
 
-                        if data.is_empty() {
-                            return futures::future::ready(None);
-                        }
+                    if data.is_empty() {
+                        return futures::future::ready(None);
+                    }
 
-                        match serde_json::from_str::<serde_json::Value>(data) {
-                            Ok(value) => match event_type {
-                                "content_block_delta" => {
-                                    let delta = &value["delta"];
-                                    match delta["type"].as_str() {
-                                        Some("text_delta") => futures::future::ready(
-                                            delta["text"]
-                                                .as_str()
-                                                .map(|t| Ok(ChunkType::Text(t.to_string()))),
-                                        ),
-                                        Some("thinking_delta") => futures::future::ready(
-                                            delta["thinking"]
-                                                .as_str()
-                                                .map(|t| Ok(ChunkType::Reasoning(t.to_string()))),
-                                        ),
-                                        Some("input_json_delta") => futures::future::ready(
-                                            delta["partial_json"]
-                                                .as_str()
-                                                .map(|j| Ok(ChunkType::ToolCall(j.to_string()))),
-                                        ),
-                                        _ => futures::future::ready(None),
-                                    }
-                                }
-                                "message_delta" => {
-                                    // Stream exhausts naturally after message_stop
-                                    futures::future::ready(None)
-                                }
-                                "error" => {
-                                    let error_msg = value["error"]["message"]
-                                        .as_str()
-                                        .unwrap_or("Unknown error");
-                                    futures::future::ready(Some(Ok(ChunkType::Failed(
-                                        error_msg.to_string(),
-                                    ))))
-                                }
-                                _ => futures::future::ready(None),
-                            },
-                            Err(e) => futures::future::ready(Some(Ok(ChunkType::Failed(format!(
-                                "Invalid SSE data: {}",
-                                e
-                            ))))),
+                    match serde_json::from_str::<serde_json::Value>(data) {
+                        Ok(value) => {
+                            futures::future::ready(anthropic_stream_chunk(event_type, &value))
                         }
+                        Err(e) => futures::future::ready(Some(Ok(ChunkType::Failed(format!(
+                            "Invalid SSE data: {}",
+                            e
+                        ))))),
                     }
-                    Err(e) => {
-                        let err = format!("SSE error: {}", e);
-                        futures::future::ready(Some(Ok(ChunkType::Failed(err))))
-                    }
+                }
+                Err(e) => {
+                    let err = format!("SSE error: {}", e);
+                    futures::future::ready(Some(Ok(ChunkType::Failed(err))))
                 }
             })
             .boxed();
 
         Ok(stream)
+    }
+}
+
+fn anthropic_stream_chunk(
+    event_type: &str,
+    value: &serde_json::Value,
+) -> Option<Result<ChunkType>> {
+    match event_type {
+        "content_block_start" => anthropic_tool_call_start(value)
+            .map(ChunkType::ToolCall)
+            .map(Ok),
+        "content_block_delta" => anthropic_content_block_delta(value).map(Ok),
+        "message_delta" => anthropic_message_delta(value).map(Ok),
+        "message_stop" => Some(Ok(ChunkType::End(String::new()))),
+        "error" => {
+            let error_msg = value["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error");
+            Some(Ok(ChunkType::Failed(error_msg.to_string())))
+        }
+        _ => None,
+    }
+}
+
+fn anthropic_content_block_delta(value: &serde_json::Value) -> Option<ChunkType> {
+    let delta = value.get("delta")?;
+
+    match delta.get("type").and_then(|delta_type| delta_type.as_str()) {
+        Some("text_delta") => delta
+            .get("text")
+            .and_then(|text| text.as_str())
+            .filter(|text| !text.is_empty())
+            .map(|text| ChunkType::Text(text.to_string())),
+        Some("thinking_delta") => delta
+            .get("thinking")
+            .and_then(|thinking| thinking.as_str())
+            .filter(|thinking| !thinking.is_empty())
+            .map(|thinking| ChunkType::Reasoning(thinking.to_string())),
+        Some("input_json_delta") => {
+            anthropic_tool_call_arguments_delta(value).map(ChunkType::ToolCall)
+        }
+        _ => None,
+    }
+}
+
+fn anthropic_message_delta(value: &serde_json::Value) -> Option<ChunkType> {
+    let stop_reason = value
+        .get("delta")
+        .and_then(|delta| delta.get("stop_reason"))
+        .and_then(|stop_reason| stop_reason.as_str())?;
+
+    match stop_reason {
+        "max_tokens" => Some(ChunkType::Incomplete("stop_reason=max_tokens".to_string())),
+        "refusal" => Some(ChunkType::Failed("stop_reason=refusal".to_string())),
+        _ => None,
+    }
+}
+
+fn anthropic_tool_call_start(value: &serde_json::Value) -> Option<String> {
+    let content_block = value.get("content_block")?;
+    if content_block
+        .get("type")
+        .and_then(|block_type| block_type.as_str())
+        != Some("tool_use")
+    {
+        return None;
+    }
+
+    let mut function = serde_json::Map::new();
+    if let Some(name) = content_block
+        .get("name")
+        .and_then(|name| name.as_str())
+        .filter(|name| !name.is_empty())
+    {
+        function.insert(
+            "name".to_string(),
+            serde_json::Value::String(name.to_string()),
+        );
+    }
+
+    if let Some(input) = content_block
+        .get("input")
+        .filter(|input| !anthropic_tool_input_is_empty(input))
+    {
+        function.insert(
+            "arguments_done".to_string(),
+            serde_json::Value::String(input.to_string()),
+        );
+    }
+
+    let mut item = anthropic_tool_call_item_base(value, function);
+    if let Some(id) = content_block
+        .get("id")
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+    {
+        item.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+    }
+    item.insert(
+        "type".to_string(),
+        serde_json::Value::String("function".to_string()),
+    );
+
+    serde_json::to_string(&vec![serde_json::Value::Object(item)]).ok()
+}
+
+fn anthropic_tool_call_arguments_delta(value: &serde_json::Value) -> Option<String> {
+    let partial_json = value
+        .get("delta")
+        .and_then(|delta| delta.get("partial_json"))
+        .and_then(|partial_json| partial_json.as_str())
+        .filter(|partial_json| !partial_json.is_empty())?;
+
+    let mut function = serde_json::Map::new();
+    function.insert(
+        "arguments".to_string(),
+        serde_json::Value::String(partial_json.to_string()),
+    );
+
+    serde_json::to_string(&vec![serde_json::Value::Object(
+        anthropic_tool_call_item_base(value, function),
+    )])
+    .ok()
+}
+
+fn anthropic_tool_call_item_base(
+    value: &serde_json::Value,
+    function: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut item = serde_json::Map::new();
+
+    if let Some(index) = value.get("index").and_then(|index| index.as_u64()) {
+        item.insert(
+            "index".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(index)),
+        );
+    }
+
+    item.insert("function".to_string(), serde_json::Value::Object(function));
+    item
+}
+
+fn anthropic_tool_input_is_empty(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.is_empty(),
+        serde_json::Value::String(text) => text.trim().is_empty(),
+        _ => false,
     }
 }
 
@@ -301,6 +414,102 @@ fn anthropic_user_content(user: &crate::message::UserMessage) -> serde_json::Val
     }));
 
     serde_json::Value::Array(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_call_json(event_type: &str, value: serde_json::Value) -> serde_json::Value {
+        let chunk = anthropic_stream_chunk(event_type, &value)
+            .expect("event should produce a chunk")
+            .expect("chunk should parse");
+
+        let ChunkType::ToolCall(json) = chunk else {
+            panic!("expected tool call chunk");
+        };
+
+        serde_json::from_str::<serde_json::Value>(&json).expect("tool call should be json")
+    }
+
+    #[test]
+    fn emits_tool_call_start_as_openai_style_delta() {
+        let json = tool_call_json(
+            "content_block_start",
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "read",
+                    "input": {},
+                },
+            }),
+        );
+
+        assert_eq!(json[0]["index"], 1);
+        assert_eq!(json[0]["id"], "toolu_1");
+        assert_eq!(json[0]["type"], "function");
+        assert_eq!(json[0]["function"]["name"], "read");
+        assert!(json[0]["function"].get("arguments").is_none());
+    }
+
+    #[test]
+    fn emits_tool_input_delta_as_openai_style_delta() {
+        let json = tool_call_json(
+            "content_block_delta",
+            serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": "{\"file_path\"",
+                },
+            }),
+        );
+
+        assert_eq!(json[0]["index"], 0);
+        assert_eq!(json[0]["function"]["arguments"], "{\"file_path\"");
+    }
+
+    #[test]
+    fn ignores_empty_tool_input_delta() {
+        let value = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": "",
+            },
+        });
+
+        assert!(anthropic_stream_chunk("content_block_delta", &value).is_none());
+    }
+
+    #[test]
+    fn message_stop_emits_terminal_chunk() {
+        let chunk = anthropic_stream_chunk("message_stop", &serde_json::json!({}))
+            .expect("event should produce a chunk")
+            .expect("chunk should parse");
+
+        assert!(matches!(chunk, ChunkType::End(_)));
+    }
+
+    #[test]
+    fn max_tokens_stop_reason_emits_incomplete_chunk() {
+        let value = serde_json::json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "max_tokens",
+            },
+        });
+        let chunk = anthropic_stream_chunk("message_delta", &value)
+            .expect("event should produce a chunk")
+            .expect("chunk should parse");
+
+        assert!(matches!(chunk, ChunkType::Incomplete(_)));
+    }
 }
 
 fn anthropic_tool_output_content(tool: &crate::message::ToolOutputMessage) -> serde_json::Value {
