@@ -100,6 +100,8 @@ impl Provider for OpenAICompatible {
             format!("{}/v1/chat/completions", base)
         };
 
+        let include_empty_tool_call_reasoning =
+            openai_compatible_requires_tool_call_reasoning_content(self);
         let chat_messages: Vec<serde_json::Value> = messages
             .iter()
             .flat_map(|m| match m {
@@ -115,18 +117,10 @@ impl Provider for OpenAICompatible {
                     "role": "assistant",
                     "content": a.content,
                 })],
-                Message::ToolCall(t) => vec![serde_json::json!({
-                    "role": "assistant",
-                    "content": serde_json::Value::Null,
-                    "tool_calls": [{
-                        "id": t.call_id,
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "arguments": t.arguments,
-                        }
-                    }],
-                })],
+                Message::ToolCall(t) => vec![openai_compatible_tool_call_message(
+                    t,
+                    include_empty_tool_call_reasoning,
+                )],
                 Message::ToolOutput(t) => openai_compatible_tool_output_messages(t),
             })
             .collect();
@@ -226,6 +220,40 @@ fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_j
         })
     }));
     serde_json::Value::Array(parts)
+}
+
+fn openai_compatible_tool_call_message(
+    tool: &crate::message::ToolCallMessage,
+    include_empty_reasoning_content: bool,
+) -> serde_json::Value {
+    let mut message = serde_json::json!({
+        "role": "assistant",
+        "content": serde_json::Value::Null,
+        "tool_calls": [{
+            "id": tool.call_id,
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "arguments": tool.arguments,
+            }
+        }],
+    });
+
+    if let Some(reasoning_content) = &tool.reasoning_content {
+        message["reasoning_content"] = serde_json::Value::String(reasoning_content.clone());
+    } else if include_empty_reasoning_content {
+        message["reasoning_content"] = serde_json::Value::String(String::new());
+    }
+
+    message
+}
+
+fn openai_compatible_requires_tool_call_reasoning_content(provider: &OpenAICompatible) -> bool {
+    let model = provider.model_name.to_ascii_lowercase();
+    let provider_name = provider.provider_name.to_ascii_lowercase();
+    let base_url = provider.base_url.to_ascii_lowercase();
+
+    model.contains("kimi") || provider_name.contains("moonshot") || base_url.contains("moonshot")
 }
 
 fn openai_compatible_tool_output_messages(
@@ -455,6 +483,44 @@ mod tests {
         let chunks = tool_call_chunks(data);
 
         assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn tool_call_message_preserves_reasoning_content() {
+        let message = Message::tool_call_with_reasoning(
+            "call_1",
+            "read",
+            r#"{"file_path":"src/lib.rs"}"#,
+            "plan",
+        );
+        let Message::ToolCall(tool) = message else {
+            panic!("expected tool call message");
+        };
+
+        let payload = openai_compatible_tool_call_message(&tool, false);
+
+        assert_eq!(payload["reasoning_content"], "plan");
+    }
+
+    #[test]
+    fn kimi_tool_call_message_includes_empty_reasoning_content_fallback() {
+        let provider = OpenAICompatible::builder()
+            .base_url("https://opencode.ai/zen/go/v1")
+            .model_name("kimi-k2.6")
+            .provider_name("OpenCode Go")
+            .build()
+            .unwrap();
+        let message = Message::tool_call("call_1", "read", r#"{"file_path":"src/lib.rs"}"#);
+        let Message::ToolCall(tool) = message else {
+            panic!("expected tool call message");
+        };
+
+        let payload = openai_compatible_tool_call_message(
+            &tool,
+            openai_compatible_requires_tool_call_reasoning_content(&provider),
+        );
+
+        assert_eq!(payload["reasoning_content"], "");
     }
 
     #[test]

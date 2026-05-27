@@ -52,6 +52,7 @@ impl Message {
             call_id: call_id.into(),
             name: name.into(),
             arguments: arguments.into(),
+            reasoning_content: None,
         })
     }
 
@@ -66,6 +67,38 @@ impl Message {
             call_id: call_id.into(),
             name: name.into(),
             arguments: arguments.into(),
+            reasoning_content: None,
+        })
+    }
+
+    pub fn tool_call_with_reasoning(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+        reasoning_content: impl Into<String>,
+    ) -> Self {
+        Self::ToolCall(ToolCallMessage {
+            item_id: None,
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            reasoning_content: Some(reasoning_content.into()),
+        })
+    }
+
+    pub fn tool_call_with_item_id_and_reasoning(
+        item_id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+        reasoning_content: impl Into<String>,
+    ) -> Self {
+        Self::ToolCall(ToolCallMessage {
+            item_id: Some(item_id.into()),
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            reasoning_content: Some(reasoning_content.into()),
         })
     }
 
@@ -125,6 +158,8 @@ pub struct ToolCallMessage {
     pub call_id: String,
     pub name: String,
     pub arguments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

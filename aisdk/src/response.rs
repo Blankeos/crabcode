@@ -136,6 +136,7 @@ pub async fn stream_with_tools<P: Provider>(
             let mut has_tool_call = false;
             let mut tool_call_accumulator = ToolCallAccumulator::default();
             let mut accumulated_text = String::new();
+            let mut accumulated_reasoning = String::new();
             let mut saw_terminal_event = false;
             let mut response_end_turn = None;
             let mut provider_finish_reason = None;
@@ -165,6 +166,7 @@ pub async fn stream_with_tools<P: Provider>(
                         let _ = tx_loop.send(ChunkType::Text(text));
                     }
                     Ok(ChunkType::Reasoning(reasoning)) => {
+                        accumulated_reasoning.push_str(&reasoning);
                         let _ = tx_loop.send(ChunkType::Reasoning(reasoning));
                     }
                     Ok(ChunkType::ToolCall(json_str)) => {
@@ -312,15 +314,32 @@ pub async fn stream_with_tools<P: Provider>(
                 let tool_name = tool_call.name;
                 let args = tool_call.arguments;
                 let arguments = canonical_json(&args);
-                let tool_call_message = if let Some(item_id) = tool_call.item_id {
-                    Message::tool_call_with_item_id(
+                let tool_call_message = if accumulated_reasoning.is_empty() {
+                    if let Some(item_id) = tool_call.item_id {
+                        Message::tool_call_with_item_id(
+                            item_id,
+                            call_id.clone(),
+                            tool_name.clone(),
+                            arguments,
+                        )
+                    } else {
+                        Message::tool_call(call_id.clone(), tool_name.clone(), arguments)
+                    }
+                } else if let Some(item_id) = tool_call.item_id {
+                    Message::tool_call_with_item_id_and_reasoning(
                         item_id,
                         call_id.clone(),
                         tool_name.clone(),
                         arguments,
+                        accumulated_reasoning.clone(),
                     )
                 } else {
-                    Message::tool_call(call_id.clone(), tool_name.clone(), arguments)
+                    Message::tool_call_with_reasoning(
+                        call_id.clone(),
+                        tool_name.clone(),
+                        arguments,
+                        accumulated_reasoning.clone(),
+                    )
                 };
                 current_messages.push(tool_call_message.clone());
                 tool_call_messages.push(tool_call_message);
@@ -903,6 +922,11 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
+    struct ReasoningToolCallProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
     struct RepeatingTaskProvider {
         requests: Arc<AtomicUsize>,
     }
@@ -952,6 +976,47 @@ mod tests {
                 vec![
                     Ok(ChunkType::ToolCall(
                         r#"[{"index":0,"id":"call_1","type":"function","function":{"name":"wait","arguments":"{\"id\":1}"}},{"index":1,"id":"call_2","type":"function","function":{"name":"wait","arguments":"{\"id\":2}"}}]"#
+                            .to_string(),
+                    )),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::ToolCalls),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(ChunkType::Text("done".to_string())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
+                ]
+            };
+
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ReasoningToolCallProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let chunks = if request == 0 {
+                vec![
+                    Ok(ChunkType::Reasoning("inspect the file".to_string())),
+                    Ok(ChunkType::ToolCall(
+                        r#"[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":"{\"file_path\":\"src/lib.rs\"}"}}]"#
                             .to_string(),
                     )),
                     Ok(ChunkType::End {
@@ -1259,6 +1324,45 @@ mod tests {
         assert_eq!(observations.len(), 2);
         assert!(observations.iter().any(|output| output.call_id == "call_1"));
         assert!(observations.iter().any(|output| output.call_id == "call_2"));
+    }
+
+    #[tokio::test]
+    async fn preserves_reasoning_content_on_tool_call_history() {
+        let provider = ReasoningToolCallProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let read_tool = Tool::builder()
+            .name("read")
+            .description("read a file")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(|_input| async move {
+                Ok("file contents".to_string())
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider,
+            vec![Message::user("inspect")],
+            vec![read_tool],
+            Some(3),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        while response.stream.next().await.is_some() {}
+
+        let tool_call_reasoning = response.messages().await.into_iter().find_map(|message| {
+            if let Message::ToolCall(tool_call) = message {
+                tool_call.reasoning_content
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(tool_call_reasoning.as_deref(), Some("inspect the file"));
     }
 
     #[tokio::test]
