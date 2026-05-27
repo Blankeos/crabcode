@@ -51,6 +51,7 @@ struct ProviderRequestConfig {
     model_name: String,
     api_key: Option<String>,
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
+    supports_image_input: bool,
     openai_options: OpenAIRequestOptions,
 }
 
@@ -62,6 +63,7 @@ impl ProviderRequestConfig {
         model_name: String,
         api_key: Option<String>,
         reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
+        supports_image_input: bool,
     ) -> Self {
         Self {
             kind,
@@ -70,6 +72,7 @@ impl ProviderRequestConfig {
             model_name,
             api_key,
             reasoning_effort,
+            supports_image_input,
             openai_options: OpenAIRequestOptions::default(),
         }
     }
@@ -378,7 +381,7 @@ pub async fn stream_llm_with_cancellation(
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &sender).await?;
 
-    let aisdk_messages = convert_messages(&messages);
+    let aisdk_messages = convert_messages_for_model(&messages, request_config.supports_image_input);
 
     let tool_registry = crate::tools::initialize_tool_registry().await;
 
@@ -396,6 +399,7 @@ pub async fn stream_llm_with_cancellation(
         },
         base_url: request_config.base_url.clone(),
         reasoning_effort: request_config.reasoning_effort,
+        supports_image_input: request_config.supports_image_input,
     });
 
     let aisdk_tools = convert_to_aisdk_tools(
@@ -405,6 +409,7 @@ pub async fn stream_llm_with_cancellation(
         tool_permissions,
         Some(session_id.clone()),
         None,
+        request_config.supports_image_input,
     )
     .await;
 
@@ -605,6 +610,7 @@ async fn prepare_request_config(
             .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?
     };
 
+    let supports_image_input = model_supports_image_input(provider.models.get(&model));
     let model_route = resolve_model_route(&provider, model);
     let provider_kind = ProviderKind::from_provider(provider_name, &model_route.npm_package);
     let mut request_config = ProviderRequestConfig::new(
@@ -614,6 +620,7 @@ async fn prepare_request_config(
         model_route.model_name,
         configured_api_key(auth_config.as_ref()),
         reasoning_effort,
+        supports_image_input,
     );
 
     maybe_apply_openai_oauth_overrides(
@@ -637,11 +644,16 @@ async fn prepare_request_config(
     }
 
     crate::emit_log!(
-        "Provider: {}, NPM: {}, Base URL: {}, Model: {}",
+        "Provider: {}, NPM: {}, Base URL: {}, Model: {}, Image Input: {}",
         provider_name,
         model_route.npm_package,
         request_config.base_url,
-        request_config.model_name
+        request_config.model_name,
+        if request_config.supports_image_input {
+            "supported"
+        } else {
+            "unsupported"
+        }
     );
 
     Ok(request_config)
@@ -685,6 +697,18 @@ fn resolve_model_route(
         api,
         model_name,
     }
+}
+
+fn model_supports_image_input(model: Option<&crate::model::discovery::Model>) -> bool {
+    let Some(model) = model else {
+        return true;
+    };
+
+    if let Some(modalities) = model.modalities.as_ref() {
+        return modalities.input.iter().any(|item| item == "image");
+    }
+
+    model.attachment
 }
 
 fn configured_api_key(auth_config: Option<&crate::persistence::AuthConfig>) -> Option<String> {
@@ -1173,6 +1197,13 @@ fn estimate_tokens(content: &str) -> usize {
 }
 
 fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMessage> {
+    convert_messages_for_model(messages, true)
+}
+
+fn convert_messages_for_model(
+    messages: &[crate::session::types::Message],
+    supports_image_input: bool,
+) -> Vec<AisdkMessage> {
     let mut aisdk_messages = Vec::new();
 
     for msg in messages {
@@ -1185,6 +1216,14 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
                 aisdk_messages.push(AisdkMessage::system(msg.content.clone()));
             }
             crate::session::types::MessageRole::User => {
+                if !supports_image_input && !msg.local_image_paths.is_empty() {
+                    aisdk_messages.push(AisdkMessage::user(content_with_unsupported_image_note(
+                        &msg.content,
+                        msg.local_image_paths.len(),
+                    )));
+                    continue;
+                }
+
                 let images = msg
                     .local_image_paths
                     .iter()
@@ -1215,10 +1254,15 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
                 }
             }
             crate::session::types::MessageRole::Assistant => {
+                if msg.content.trim().is_empty() {
+                    continue;
+                }
                 aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));
             }
             crate::session::types::MessageRole::Tool => {
-                if let Some(tool_messages) = tool_messages_for_model(&msg.content) {
+                if let Some(tool_messages) =
+                    tool_messages_for_model(&msg.content, supports_image_input)
+                {
                     aisdk_messages.extend(tool_messages);
                 } else {
                     aisdk_messages.push(AisdkMessage::user(tool_message_observation(&msg.content)));
@@ -1230,7 +1274,7 @@ fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMes
     aisdk_messages
 }
 
-fn tool_messages_for_model(content: &str) -> Option<Vec<AisdkMessage>> {
+fn tool_messages_for_model(content: &str, supports_image_input: bool) -> Option<Vec<AisdkMessage>> {
     let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
     let obj = value.as_object()?;
 
@@ -1255,16 +1299,34 @@ fn tool_messages_for_model(content: &str) -> Option<Vec<AisdkMessage>> {
     let status = obj.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
     let is_error = status.eq_ignore_ascii_case("error");
 
-    let images = if name == "view_image" && !is_error {
+    let images = if name == "view_image" && !is_error && supports_image_input {
         view_image_tool_images(obj)
     } else {
         Vec::new()
+    };
+    let output = if name == "view_image" && !is_error && !supports_image_input {
+        content_with_unsupported_image_note(output, 1)
+    } else {
+        output.to_string()
     };
 
     Some(vec![
         AisdkMessage::tool_call(call_id, name, arguments),
         AisdkMessage::tool_output_with_images(call_id, name, output, images, is_error),
     ])
+}
+
+fn content_with_unsupported_image_note(content: &str, image_count: usize) -> String {
+    let image_label = if image_count == 1 { "image" } else { "images" };
+    let note = format!(
+        "ERROR: Cannot read {image_label} (this model does not support image input). Inform the user."
+    );
+
+    if content.trim().is_empty() {
+        note
+    } else {
+        format!("{content}\n\n{note}")
+    }
 }
 
 fn view_image_tool_images(obj: &serde_json::Map<String, serde_json::Value>) -> Vec<ImageContent> {
@@ -1416,8 +1478,9 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        convert_messages, is_openai_oauth_model_allowed, openai_request_instructions,
-        resolve_model_route, AisdkMessage, OpenAIRequestOptions, ProviderKind,
+        convert_messages, convert_messages_for_model, is_openai_oauth_model_allowed,
+        model_supports_image_input, openai_request_instructions, resolve_model_route, AisdkMessage,
+        OpenAIRequestOptions, ProviderKind,
     };
 
     #[test]
@@ -1575,6 +1638,130 @@ mod tests {
             }
             other => panic!("expected tool output, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn empty_assistant_messages_are_not_sent_to_provider() {
+        let messages = convert_messages(&[
+            crate::session::types::Message::system("system"),
+            crate::session::types::Message::user("prompt"),
+            crate::session::types::Message::assistant(""),
+            crate::session::types::Message::assistant("   \n\t"),
+            crate::session::types::Message::assistant("answer"),
+        ]);
+
+        assert_eq!(messages.len(), 3);
+        match &messages[0] {
+            AisdkMessage::System(message) => assert_eq!(message.content, "system"),
+            other => panic!("expected system message, got {other:?}"),
+        }
+        match &messages[1] {
+            AisdkMessage::User(message) => assert_eq!(message.content, "prompt"),
+            other => panic!("expected user message, got {other:?}"),
+        }
+        match &messages[2] {
+            AisdkMessage::Assistant(message) => assert_eq!(message.content, "answer"),
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_images_become_text_note_for_text_only_model() {
+        let mut user_message = crate::session::types::Message::user("what is in this?");
+        user_message.local_image_paths = vec!["/tmp/example.png".to_string()];
+
+        let messages = convert_messages_for_model(&[user_message], false);
+
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            AisdkMessage::User(message) => {
+                assert!(message.images.is_empty());
+                assert!(message.content.contains("what is in this?"));
+                assert!(message
+                    .content
+                    .contains("this model does not support image input"));
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_image_tool_history_becomes_text_note_for_text_only_model() {
+        let tool_message = crate::session::types::Message::tool(
+            serde_json::json!({
+                "name": "view_image",
+                "status": "ok",
+                "id": "call_view_image",
+                "args": {
+                    "path": "/tmp/example.png"
+                },
+                "metadata": {
+                    "path": "/tmp/example.png"
+                },
+                "output_preview": "Viewed image /tmp/example.png (2x1, image/png)"
+            })
+            .to_string(),
+        );
+
+        let messages = convert_messages_for_model(&[tool_message], false);
+
+        assert_eq!(messages.len(), 2);
+        match &messages[1] {
+            AisdkMessage::ToolOutput(output) => {
+                assert!(output.images.is_empty());
+                assert!(output.output.contains("Viewed image /tmp/example.png"));
+                assert!(output
+                    .output
+                    .contains("this model does not support image input"));
+            }
+            other => panic!("expected tool output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_image_input_support_uses_modalities_then_attachment() {
+        let image_model: crate::model::discovery::Model =
+            serde_json::from_value(serde_json::json!({
+                "id": "vision",
+                "name": "Vision",
+                "attachment": false,
+                "modalities": {
+                    "input": ["text", "image"],
+                    "output": ["text"]
+                }
+            }))
+            .unwrap();
+        let text_model: crate::model::discovery::Model =
+            serde_json::from_value(serde_json::json!({
+                "id": "text",
+                "name": "Text",
+                "attachment": true,
+                "modalities": {
+                    "input": ["text"],
+                    "output": ["text"]
+                }
+            }))
+            .unwrap();
+        let attachment_model: crate::model::discovery::Model =
+            serde_json::from_value(serde_json::json!({
+                "id": "legacy-vision",
+                "name": "Legacy Vision",
+                "attachment": true
+            }))
+            .unwrap();
+        let no_attachment_model: crate::model::discovery::Model =
+            serde_json::from_value(serde_json::json!({
+                "id": "legacy-text",
+                "name": "Legacy Text",
+                "attachment": false
+            }))
+            .unwrap();
+
+        assert!(model_supports_image_input(Some(&image_model)));
+        assert!(!model_supports_image_input(Some(&text_model)));
+        assert!(model_supports_image_input(Some(&attachment_model)));
+        assert!(!model_supports_image_input(Some(&no_attachment_model)));
+        assert!(model_supports_image_input(None));
     }
 
     #[test]

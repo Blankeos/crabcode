@@ -20,6 +20,7 @@ pub async fn convert_to_aisdk_tools(
     permissions: crate::tools::ToolPermissions,
     session_id: Option<String>,
     message_id: Option<String>,
+    supports_image_input: bool,
 ) -> Vec<Tool> {
     let mut aisdk_tools = Vec::new();
     let tools = registry.list().await;
@@ -53,6 +54,7 @@ pub async fn convert_to_aisdk_tools(
             let permissions = permissions.clone();
             let session_id = session_id.clone();
             let message_id = message_id.clone();
+            let supports_image_input = supports_image_input;
 
             async move {
                 let call_seq = TOOL_CALL_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
@@ -202,11 +204,15 @@ pub async fn convert_to_aisdk_tools(
                         media_type: image.media_type.clone(),
                     })
                     .collect::<Vec<_>>();
-                let model_output = ToolOutput::new(truncate_tool_output(
-                    &tool_result.output,
-                    TOOL_MODEL_OUTPUT_LIMIT,
-                ))
-                .with_images(model_images);
+                let mut model_output_text =
+                    truncate_tool_output(&tool_result.output, TOOL_MODEL_OUTPUT_LIMIT);
+                let model_output = if supports_image_input || model_images.is_empty() {
+                    ToolOutput::new(model_output_text).with_images(model_images)
+                } else {
+                    model_output_text.push_str("\n\n");
+                    model_output_text.push_str(&unsupported_image_input_note(model_images.len()));
+                    ToolOutput::new(model_output_text)
+                };
 
                 if let Some(ref sender) = sender {
                     let preview = truncate_tool_output(&tool_result.output, TOOL_UI_PREVIEW_LIMIT);
@@ -312,6 +318,13 @@ fn truncate_tool_output(output: &str, limit: usize) -> String {
         limit
     ));
     truncated
+}
+
+fn unsupported_image_input_note(image_count: usize) -> String {
+    let image_label = if image_count == 1 { "image" } else { "images" };
+    format!(
+        "ERROR: Cannot read {image_label} (this model does not support image input). Inform the user."
+    )
 }
 
 fn send_tool_error_result(

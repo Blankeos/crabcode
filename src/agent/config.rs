@@ -8,6 +8,7 @@ pub struct LlmSessionConfig {
     pub provider_kind: ProviderKind,
     pub base_url: String,
     pub reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
+    pub supports_image_input: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

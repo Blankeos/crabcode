@@ -156,6 +156,7 @@ pub async fn run_subagent(
         permissions,
         Some(session_id.clone()),
         None,
+        session.supports_image_input,
     )
     .await;
 
