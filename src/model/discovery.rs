@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
+const CACHE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
@@ -56,6 +57,16 @@ pub struct Model {
     pub cost: Option<Cost>,
     #[serde(default)]
     pub limit: Option<Limit>,
+    #[serde(default)]
+    pub provider: Option<ModelProvider>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProvider {
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub api: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +101,8 @@ pub struct Limit {
 struct CacheEntry {
     data: HashMap<String, Provider>,
     timestamp: u64,
+    #[serde(default)]
+    schema_version: u32,
 }
 
 pub struct Discovery {
@@ -171,6 +184,10 @@ impl Discovery {
         let entry: CacheEntry =
             serde_json::from_str(&cached_json).context("Failed to parse cache file")?;
 
+        if entry.schema_version < CACHE_SCHEMA_VERSION {
+            return Ok(None);
+        }
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("System time is before UNIX epoch")?
@@ -194,6 +211,7 @@ impl Discovery {
         let entry = CacheEntry {
             data: data.clone(),
             timestamp: now,
+            schema_version: CACHE_SCHEMA_VERSION,
         };
 
         let serialized =
@@ -343,9 +361,15 @@ impl Discovery {
         let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
         let provider = entry.data.get(provider_id)?;
         let model = provider.models.get(model_id)?;
+        let provider_npm = model
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.npm.as_deref())
+            .filter(|npm| !npm.trim().is_empty())
+            .unwrap_or(provider.npm.as_str());
         Some(crate::model::reasoning::capability_for_model(
             provider_id,
-            &provider.npm,
+            provider_npm,
             model_id,
             &model.id,
             &model.name,
@@ -516,6 +540,7 @@ mod tests {
         let entry = CacheEntry {
             data: providers.clone(),
             timestamp: 123456,
+            schema_version: CACHE_SCHEMA_VERSION,
         };
 
         let serialized = serde_json::to_string(&entry).unwrap();
@@ -523,6 +548,25 @@ mod tests {
 
         assert_eq!(deserialized.data.len(), 1);
         assert_eq!(deserialized.timestamp, 123456);
+        assert_eq!(deserialized.schema_version, CACHE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_model_provider_override_deserialization() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id": "qwen3.7-max",
+            "name": "Qwen3.7 Max",
+            "release_date": "2026-05-21",
+            "last_updated": "2026-05-21",
+            "provider": {
+                "npm": "@ai-sdk/anthropic"
+            }
+        }))
+        .unwrap();
+
+        let provider = model.provider.expect("provider override");
+        assert_eq!(provider.npm.as_deref(), Some("@ai-sdk/anthropic"));
+        assert_eq!(provider.api, None);
     }
 
     #[tokio::test]

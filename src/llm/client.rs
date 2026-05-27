@@ -605,12 +605,13 @@ async fn prepare_request_config(
             .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?
     };
 
-    let provider_kind = ProviderKind::from_provider(provider_name, &provider.npm);
+    let model_route = resolve_model_route(&provider, model);
+    let provider_kind = ProviderKind::from_provider(provider_name, &model_route.npm_package);
     let mut request_config = ProviderRequestConfig::new(
         provider_kind,
         provider.name.clone(),
-        provider_kind.normalize_base_url(&provider.api),
-        model,
+        provider_kind.normalize_base_url(&model_route.api),
+        model_route.model_name,
         configured_api_key(auth_config.as_ref()),
         reasoning_effort,
     );
@@ -638,12 +639,52 @@ async fn prepare_request_config(
     crate::emit_log!(
         "Provider: {}, NPM: {}, Base URL: {}, Model: {}",
         provider_name,
-        provider.npm,
+        model_route.npm_package,
         request_config.base_url,
         request_config.model_name
     );
 
     Ok(request_config)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedModelRoute {
+    npm_package: String,
+    api: String,
+    model_name: String,
+}
+
+fn resolve_model_route(
+    provider: &crate::model::discovery::Provider,
+    requested_model: String,
+) -> ResolvedModelRoute {
+    let model = provider.models.get(&requested_model);
+
+    let npm_package = model
+        .and_then(|model| model.provider.as_ref())
+        .and_then(|provider| provider.npm.as_deref())
+        .filter(|npm| !npm.trim().is_empty())
+        .unwrap_or(provider.npm.as_str())
+        .to_string();
+
+    let api = model
+        .and_then(|model| model.provider.as_ref())
+        .and_then(|provider| provider.api.as_deref())
+        .filter(|api| !api.trim().is_empty())
+        .unwrap_or(provider.api.as_str())
+        .to_string();
+
+    let model_name = model
+        .map(|model| model.id.as_str())
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(requested_model.as_str())
+        .to_string();
+
+    ResolvedModelRoute {
+        npm_package,
+        api,
+        model_name,
+    }
 }
 
 fn configured_api_key(auth_config: Option<&crate::persistence::AuthConfig>) -> Option<String> {
@@ -1371,8 +1412,8 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        convert_messages, is_openai_oauth_model_allowed, openai_request_instructions, AisdkMessage,
-        OpenAIRequestOptions,
+        convert_messages, is_openai_oauth_model_allowed, openai_request_instructions,
+        resolve_model_route, AisdkMessage, OpenAIRequestOptions, ProviderKind,
     };
 
     #[test]
@@ -1426,6 +1467,69 @@ mod tests {
     fn openai_oauth_rejects_known_non_codex_chat_models() {
         assert!(!is_openai_oauth_model_allowed("gpt-5-chat-latest"));
         assert!(!is_openai_oauth_model_allowed("gpt-4o"));
+    }
+
+    #[test]
+    fn model_provider_override_selects_anthropic_route() {
+        let provider: crate::model::discovery::Provider =
+            serde_json::from_value(serde_json::json!({
+                "id": "opencode-go",
+                "name": "OpenCode Go",
+                "api": "https://opencode.ai/zen/go/v1",
+                "npm": "@ai-sdk/openai-compatible",
+                "env": ["OPENCODE_API_KEY"],
+                "models": {
+                    "qwen3.7-max": {
+                        "id": "qwen3.7-max",
+                        "name": "Qwen3.7 Max",
+                        "release_date": "2026-05-21",
+                        "last_updated": "2026-05-21",
+                        "provider": {
+                            "npm": "@ai-sdk/anthropic"
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+
+        let route = resolve_model_route(&provider, "qwen3.7-max".to_string());
+        assert_eq!(route.npm_package, "@ai-sdk/anthropic");
+        assert_eq!(route.api, "https://opencode.ai/zen/go/v1");
+        assert_eq!(route.model_name, "qwen3.7-max");
+        assert_eq!(
+            ProviderKind::from_provider("opencode-go", &route.npm_package),
+            ProviderKind::Anthropic
+        );
+        assert_eq!(
+            ProviderKind::Anthropic.normalize_base_url(&route.api),
+            "https://opencode.ai/zen/go"
+        );
+    }
+
+    #[test]
+    fn model_route_falls_back_to_provider_transport() {
+        let provider: crate::model::discovery::Provider =
+            serde_json::from_value(serde_json::json!({
+                "id": "opencode-go",
+                "name": "OpenCode Go",
+                "api": "https://opencode.ai/zen/go/v1",
+                "npm": "@ai-sdk/openai-compatible",
+                "env": ["OPENCODE_API_KEY"],
+                "models": {
+                    "kimi-k2.6": {
+                        "id": "kimi-k2.6",
+                        "name": "Kimi K2.6",
+                        "release_date": "2026-04-21",
+                        "last_updated": "2026-04-21"
+                    }
+                }
+            }))
+            .unwrap();
+
+        let route = resolve_model_route(&provider, "kimi-k2.6".to_string());
+        assert_eq!(route.npm_package, "@ai-sdk/openai-compatible");
+        assert_eq!(route.api, "https://opencode.ai/zen/go/v1");
+        assert_eq!(route.model_name, "kimi-k2.6");
     }
 
     #[test]

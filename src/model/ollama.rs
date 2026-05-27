@@ -124,6 +124,7 @@ fn cached_discovery_models(
                         open_weights: true,
                         cost: None,
                         limit: None,
+                        provider: None,
                     },
                 )
             })
