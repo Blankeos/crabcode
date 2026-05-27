@@ -554,6 +554,11 @@ impl Input {
         result
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_textarea_area_for_test(&mut self, area: Rect) {
+        self.textarea_area = Some(area);
+    }
+
     pub fn clear_selection(&mut self) {
         self.textarea.cancel_selection();
     }

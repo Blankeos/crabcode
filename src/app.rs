@@ -2446,6 +2446,15 @@ impl App {
         }
 
         if !self.input.handle_mouse_event(mouse) {
+            if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                && self.input.has_selection()
+                && !self.input.get_selected_text().is_empty()
+            {
+                self.show_selection_action_bar_for(SelectionActionTarget::Input);
+                self.update_suggestions();
+                return true;
+            }
+
             return false;
         }
 
@@ -6787,6 +6796,35 @@ mod tests {
         assert_eq!(app.input.get_text(), "`alpha`");
         assert!(app.selection_action_bar.is_none());
         assert!(!app.chat_state.chat.has_selection());
+    }
+
+    #[test]
+    fn input_selection_action_bar_shows_when_drag_releases_outside_input() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.input.set_text("alpha beta");
+        app.input
+            .set_textarea_area_for_test(ratatui::layout::Rect::new(2, 20, 20, 1));
+
+        assert!(app.handle_input_mouse_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            20
+        )));
+        assert!(app.handle_input_mouse_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            7,
+            20
+        )));
+        assert!(app.input.has_selection());
+        assert_eq!(app.input.get_selected_text(), "alpha");
+
+        assert!(app.handle_input_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), 7, 19)));
+
+        assert_eq!(
+            app.selection_action_bar.map(|state| state.target),
+            Some(SelectionActionTarget::Input)
+        );
     }
 
     #[test]
