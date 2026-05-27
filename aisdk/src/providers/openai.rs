@@ -1055,7 +1055,7 @@ fn error_source_chain(err: &(dyn StdError + 'static)) -> String {
 
 fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
     if data == "[DONE]" {
-        return Some(Ok(ChunkType::End(String::new())));
+        return Some(Ok(ChunkType::End { reason: None }));
     }
     if data.is_empty() {
         return None;
@@ -1378,7 +1378,7 @@ mod tests {
     fn done_marker_emits_terminal_chunk() {
         let chunk = response_sse_data_to_chunk("[DONE]").expect("expected terminal chunk");
 
-        assert!(matches!(chunk, Ok(ChunkType::End(_))));
+        assert!(matches!(chunk, Ok(ChunkType::End { .. })));
     }
 
     #[test]

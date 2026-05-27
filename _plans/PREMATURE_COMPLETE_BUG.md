@@ -476,3 +476,58 @@ The disconnected-receiver handling correctly treats this as a failed stream, but
 ### Follow-up
 
 - This still does not retry after partial text, reasoning, or tool-call output has already been emitted. Supporting that safely would require resumable provider responses or UI/model de-duplication of replayed deltas.
+
+## 2026-05-28 Phase-Less Interim Text Recurrence
+
+### User-Visible Symptom
+
+During a Sheetpilot landing-page build fix, crabcode stopped after a failed `bun run build` with another progress-update-shaped response:
+
+> There's a version conflict with `@universal-deploy/node` expecting a newer Vite API. Let me check the dependency tree.
+
+The task was not complete: the model had just stated the next investigation step and had not inspected the dependency tree.
+
+### `app.log` Evidence
+
+Primary session id: `f6ce3q379uwmtmz4jf3dq6i5`.
+
+Relevant sequence:
+
+- `02:00:50`: `bash` call `call_130` ran `bun run build` and returned a failed build output.
+- `02:00:50`: provider step 40 started with `provider_kind=Anthropic`, `base_url=https://opencode.ai/zen/go`, and `agent_max_steps=None`.
+- `02:00:54`: text chunks streamed the progress update above.
+- `02:00:54`: AISDK logged `provider_step_finish step=40 has_tool_call=false end_turn=None last_phase=unknown assistant_text_chars=118 action=finish`.
+- `02:00:54`: relay summary had `response_completed=0`, `assistant_phase=0`, and all assistant text counted as `unphased`.
+- `02:00:54`: crabcode marked the stream complete as `outcome=Exhausted`, `effective_outcome=Finished`, `stop_reason=Some(Finish)`.
+
+### Root Cause
+
+This was not the earlier OpenAI Responses case where a preamble was incorrectly emitted in `final_answer`. The Anthropic-compatible transport did not expose Codex-style `assistant_message_phase` or Responses `end_turn`, and crabcode also discarded the provider's native stop/finish reason. That meant AISDK collapsed a phase-less no-tool terminal step into `StopReason::Finish` with no structured way to tell whether this was a final assistant answer or merely a provider message boundary.
+
+Codex avoids this class when using Responses because completion is anchored on `response.completed` plus message phase/end-turn signals. Opencode keeps finish reasons in its message state instead of collapsing all provider terminal events to the same shape. Crabcode had no equivalent finish-reason preservation for phase-less providers.
+
+### Fix Applied
+
+- `aisdk/src/response.rs`
+  - Removed the prose-based interim-progress classifier.
+  - Tracks provider finish reasons from terminal chunks and logs `provider_finish_reason=...`.
+  - Continues once for phase-less no-tool output when tools are available and the terminal reason is not an explicit final-answer stop. This is a structured fallback for providers that lack Codex-style message phases.
+  - Treats OpenAI-compatible `finish_reason=stop` / `stop_sequence` as explicit final stops, while Anthropic `end_turn` is treated as a provider message boundary unless accompanied by a Codex-style final phase.
+  - The guard remains bounded to one consecutive follow-up and resets after an actual tool-call step.
+- `aisdk/src/chunk.rs`
+  - Added normalized `FinishReason` values.
+- `aisdk/src/providers/anthropic.rs`
+  - Preserves Anthropic `message_delta.stop_reason` instead of discarding non-error reasons such as `end_turn` and `tool_use`.
+- `aisdk/src/providers/compatible.rs`
+  - Preserves OpenAI-compatible `finish_reason` on terminal chunks.
+
+### Validation
+
+- `cargo test -q -p aisdk continues_once_after_phase_less_end_turn_without_final_phase`
+- `cargo test -q -p aisdk phase_less_final_text_still_finishes`
+- `cargo test -q -p aisdk end_turn_stop_reason_emits_terminal_reason`
+- `cargo test -q -p aisdk finish_reason_emits_terminal_chunk`
+- `cargo test -q -p aisdk`
+- `cargo check`
+- `cargo fmt --check`
+- `git diff --check`

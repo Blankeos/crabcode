@@ -1,4 +1,4 @@
-use crate::chunk::ChunkType;
+use crate::chunk::{ChunkType, FinishReason};
 use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
@@ -289,7 +289,7 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
 
     if data == "[DONE]" {
         debug_log("[SSE] Terminal: [DONE]");
-        return vec![Ok(ChunkType::End(String::new()))];
+        return vec![Ok(ChunkType::End { reason: None })];
     }
 
     if data.is_empty() || is_sse_metadata_line(data) {
@@ -397,7 +397,9 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
         "content_filter" => chunks.push(Ok(ChunkType::Failed(
             "finish_reason=content_filter".to_string(),
         ))),
-        _ => chunks.push(Ok(ChunkType::End(String::new()))),
+        _ => chunks.push(Ok(ChunkType::End {
+            reason: Some(FinishReason::from_openai_compatible(finish_reason)),
+        })),
     }
 
     if chunks.is_empty() {
@@ -459,7 +461,10 @@ mod tests {
     fn done_marker_emits_terminal_chunk() {
         let chunks = process_sse_data("[DONE]");
 
-        assert!(matches!(chunks.as_slice(), [Ok(ChunkType::End(_))]));
+        assert!(matches!(
+            chunks.as_slice(),
+            [Ok(ChunkType::End { reason: None })]
+        ));
     }
 
     #[test]
@@ -468,9 +473,12 @@ mod tests {
 
         let chunks = process_sse_data(data);
 
-        assert!(chunks
-            .iter()
-            .any(|chunk| matches!(chunk, Ok(ChunkType::End(_)))));
+        assert!(chunks.iter().any(|chunk| matches!(
+            chunk,
+            Ok(ChunkType::End {
+                reason: Some(FinishReason::Stop)
+            })
+        )));
     }
 
     #[test]

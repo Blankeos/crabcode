@@ -7,7 +7,7 @@ pub enum ChunkType {
     AssistantMessagePhase { phase: Option<MessagePhase> },
     ResponseCompleted { end_turn: Option<bool> },
     Metadata(String),
-    End(String),
+    End { reason: Option<FinishReason> },
     Failed(String),
     Incomplete(String),
     NotSupported(String),
@@ -17,4 +17,63 @@ pub enum ChunkType {
 pub enum MessagePhase {
     Commentary,
     FinalAnswer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishReason {
+    Stop,
+    ToolCalls,
+    Length,
+    ContentFilter,
+    Refusal,
+    EndTurn,
+    StopSequence,
+    PauseTurn,
+    Unknown(String),
+}
+
+impl FinishReason {
+    pub fn from_openai_compatible(reason: &str) -> Self {
+        match reason {
+            "stop" => Self::Stop,
+            "tool_calls" | "function_call" => Self::ToolCalls,
+            "length" => Self::Length,
+            "content_filter" => Self::ContentFilter,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    pub fn from_anthropic(reason: &str) -> Self {
+        match reason {
+            "end_turn" => Self::EndTurn,
+            "tool_use" => Self::ToolCalls,
+            "max_tokens" => Self::Length,
+            "stop_sequence" => Self::StopSequence,
+            "pause_turn" => Self::PauseTurn,
+            "refusal" => Self::Refusal,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Stop => "stop",
+            Self::ToolCalls => "tool_calls",
+            Self::Length => "length",
+            Self::ContentFilter => "content_filter",
+            Self::Refusal => "refusal",
+            Self::EndTurn => "end_turn",
+            Self::StopSequence => "stop_sequence",
+            Self::PauseTurn => "pause_turn",
+            Self::Unknown(reason) => reason.as_str(),
+        }
+    }
+
+    /// True when a phase-less provider gave a stop reason that is strong
+    /// enough to accept as a final assistant response without another agent
+    /// loop step. Anthropic `end_turn` is intentionally excluded: it marks the
+    /// provider message boundary, not a Codex-style final-answer phase.
+    pub fn is_final_assistant_stop(&self) -> bool {
+        matches!(self, Self::Stop | Self::StopSequence)
+    }
 }

@@ -1,4 +1,4 @@
-use crate::chunk::{ChunkType, MessagePhase};
+use crate::chunk::{ChunkType, FinishReason, MessagePhase};
 use crate::error::Result;
 use crate::message::Message;
 use crate::provider::Provider;
@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+const PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT: usize = 1;
 
 pub struct StreamTextResponse {
     pub stream: LanguageModelStream,
@@ -83,6 +85,7 @@ pub async fn stream_with_tools<P: Provider>(
         let mut step_idx: usize = 0;
         let max_steps = max_steps.unwrap_or(usize::MAX);
         let mut cached_repeatable_tool_results: HashMap<String, ToolOutput> = HashMap::new();
+        let mut phase_less_ambiguous_follow_ups = 0usize;
 
         loop {
             step_idx += 1;
@@ -135,6 +138,7 @@ pub async fn stream_with_tools<P: Provider>(
             let mut accumulated_text = String::new();
             let mut saw_terminal_event = false;
             let mut response_end_turn = None;
+            let mut provider_finish_reason = None;
             let mut last_assistant_message_phase = None;
             let mut current_assistant_message_phase = None;
 
@@ -172,12 +176,19 @@ pub async fn stream_with_tools<P: Provider>(
                             return;
                         }
                     }
-                    Ok(ChunkType::End(_content)) => {
+                    Ok(ChunkType::End { reason }) => {
                         // Processed internally — NOT forwarded to tx_loop.
                         // Forwarding End would cause relay_stream_to_sender
                         // to return Ended prematurely, dropping the channel
                         // before tool execution / subsequent steps.
                         saw_terminal_event = true;
+                        if let Some(reason) = reason {
+                            let label = reason.label().to_string();
+                            provider_finish_reason = Some(reason);
+                            let _ = tx_loop.send(ChunkType::Metadata(format!(
+                                "provider_finish_reason={label}"
+                            )));
+                        }
                     }
                     Ok(ChunkType::Metadata(msg)) => {
                         let _ = tx_loop.send(ChunkType::Metadata(msg));
@@ -227,16 +238,29 @@ pub async fn stream_with_tools<P: Provider>(
                 let end_turn_requires_follow_up = matches!(response_end_turn, Some(false));
                 let commentary_requires_follow_up =
                     matches!(last_assistant_message_phase, Some(MessagePhase::Commentary));
-                let needs_follow_up = end_turn_requires_follow_up || commentary_requires_follow_up;
+                let phase_less_ambiguous_requires_follow_up = !tools.is_empty()
+                    && response_end_turn.is_none()
+                    && last_assistant_message_phase.is_none()
+                    && phase_less_ambiguous_follow_ups < PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT
+                    && provider_finish_reason
+                        .as_ref()
+                        .is_none_or(|reason| !reason.is_final_assistant_stop());
+                let needs_follow_up = end_turn_requires_follow_up
+                    || commentary_requires_follow_up
+                    || phase_less_ambiguous_requires_follow_up;
                 let action = if needs_follow_up {
                     "continue"
                 } else {
                     "finish"
                 };
                 let _ = tx_loop.send(ChunkType::Metadata(format!(
-                    "provider_step_finish step={} has_tool_call=false end_turn={:?} last_phase={} assistant_text_chars={} action={} preview={:?}",
+                    "provider_step_finish step={} has_tool_call=false end_turn={:?} provider_finish_reason={} last_phase={} assistant_text_chars={} action={} preview={:?}",
                     step_idx,
                     response_end_turn,
+                    provider_finish_reason
+                        .as_ref()
+                        .map(FinishReason::label)
+                        .unwrap_or("unknown"),
                     message_phase_label(last_assistant_message_phase),
                     assistant_text.len(),
                     action,
@@ -246,6 +270,9 @@ pub async fn stream_with_tools<P: Provider>(
                 if needs_follow_up {
                     let reason = if end_turn_requires_follow_up {
                         "end_turn=false"
+                    } else if phase_less_ambiguous_requires_follow_up {
+                        phase_less_ambiguous_follow_ups += 1;
+                        "phase_less_terminal_without_final_signal"
                     } else {
                         "assistant_message_phase=commentary"
                     };
@@ -258,6 +285,8 @@ pub async fn stream_with_tools<P: Provider>(
                 *stop_reason_arc.lock().await = Some(StopReason::Finish);
                 break;
             }
+
+            phase_less_ambiguous_follow_ups = 0;
 
             let tool_calls_to_execute = match tool_call_accumulator.finish() {
                 Ok(tool_calls) if !tool_calls.is_empty() => tool_calls,
@@ -852,7 +881,7 @@ fn tool_call_key(item: &serde_json::Value, array_index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{stream_with_tools, ToolCallAccumulator};
-    use crate::chunk::{ChunkType, MessagePhase};
+    use crate::chunk::{ChunkType, FinishReason, MessagePhase};
     use crate::message::Message;
     use crate::provider::{Provider, ProviderStream};
     use crate::stop::StopReason;
@@ -887,6 +916,16 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
+    struct PhaselessAmbiguousProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct PhaselessFinalProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
     struct RecoveringToolFailureProvider {
         requests: Arc<AtomicUsize>,
         observed_follow_up: Arc<Mutex<Option<String>>>,
@@ -915,12 +954,16 @@ mod tests {
                         r#"[{"index":0,"id":"call_1","type":"function","function":{"name":"wait","arguments":"{\"id\":1}"}},{"index":1,"id":"call_2","type":"function","function":{"name":"wait","arguments":"{\"id\":2}"}}]"#
                             .to_string(),
                     )),
-                    Ok(ChunkType::End(String::new())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::ToolCalls),
+                    }),
                 ]
             } else {
                 vec![
                     Ok(ChunkType::Text("done".to_string())),
-                    Ok(ChunkType::End(String::new())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
                 ]
             };
 
@@ -951,11 +994,15 @@ mod tests {
                         r#"[{"index":0,"id":"call_repeat","type":"function","function":{"name":"task","arguments":"{\"description\":\"Write haiku\",\"prompt\":\"Write a haiku\",\"subagent_type\":\"general\"}"}}]"#
                             .to_string(),
                     )),
-                    Ok(ChunkType::End(String::new())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::ToolCalls),
+                    }),
                 ],
                 _ => vec![
                     Ok(ChunkType::Text("done".to_string())),
-                    Ok(ChunkType::End(String::new())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
                 ],
             };
 
@@ -1029,6 +1076,77 @@ mod tests {
     }
 
     #[async_trait]
+    impl Provider for PhaselessAmbiguousProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let chunks = match request {
+                0 => vec![
+                    Ok(ChunkType::Text("Dependency conflict found.".to_string())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::EndTurn),
+                    }),
+                ],
+                1 => vec![
+                    Ok(ChunkType::ToolCall(
+                        r#"[{"index":0,"id":"call_list","type":"function","function":{"name":"list","arguments":"{\"path\":\".\"}"}}]"#
+                            .to_string(),
+                    )),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::ToolCalls),
+                    }),
+                ],
+                _ => vec![
+                    Ok(ChunkType::Text("Done.".to_string())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
+                ],
+            };
+
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for PhaselessFinalProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ChunkType::Text("Done. Build now passes.".to_string())),
+                Ok(ChunkType::End {
+                    reason: Some(FinishReason::Stop),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait]
     impl Provider for RecoveringToolFailureProvider {
         fn name(&self) -> &str {
             "test"
@@ -1051,7 +1169,9 @@ mod tests {
                         r#"[{"index":0,"id":"call_edit","type":"function","function":{"name":"edit","arguments":"{\"file_path\":\"src/lib.rs\",\"old_string\":\"missing\",\"new_string\":\"replacement\"}"}}]"#
                             .to_string(),
                     )),
-                    Ok(ChunkType::End(String::new())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::ToolCalls),
+                    }),
                 ]
             } else {
                 let follow_up = messages
@@ -1065,7 +1185,9 @@ mod tests {
 
                 vec![
                     Ok(ChunkType::Text("recovered".to_string())),
-                    Ok(ChunkType::End(String::new())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
                 ]
             };
 
@@ -1254,6 +1376,106 @@ mod tests {
 
         assert_eq!(text, "I'll inspect that next.Done.");
         assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+    }
+
+    #[tokio::test]
+    async fn continues_once_after_phase_less_end_turn_without_final_phase() {
+        let provider = PhaselessAmbiguousProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let executions = Arc::new(AtomicUsize::new(0));
+
+        let list_executions = executions.clone();
+        let list_tool = Tool::builder()
+            .name("list")
+            .description("list files")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(move |_input| {
+                let list_executions = list_executions.clone();
+                async move {
+                    list_executions.fetch_add(1, Ordering::SeqCst);
+                    Ok("package.json\nbun.lock".to_string())
+                }
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("fix the build")],
+            vec![list_tool],
+            Some(5),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let mut text = String::new();
+        let mut continuation_logged = false;
+        let mut finish_reason_logged = false;
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::Text(delta) => text.push_str(&delta),
+                ChunkType::Metadata(message)
+                    if message.contains("phase_less_terminal_without_final_signal") =>
+                {
+                    continuation_logged = true;
+                }
+                ChunkType::Metadata(message)
+                    if message.contains("provider_finish_reason=end_turn") =>
+                {
+                    finish_reason_logged = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(text, "Dependency conflict found.Done.");
+        assert!(continuation_logged);
+        assert!(finish_reason_logged);
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 3);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+    }
+
+    #[tokio::test]
+    async fn phase_less_final_text_still_finishes() {
+        let provider = PhaselessFinalProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let noop_tool = Tool::builder()
+            .name("noop")
+            .description("noop")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(
+                |_input| async move { Ok("ok".to_string()) },
+            ))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("fix the build")],
+            vec![noop_tool],
+            Some(5),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let mut text = String::new();
+        while let Some(chunk) = response.stream.next().await {
+            if let ChunkType::Text(delta) = chunk {
+                text.push_str(&delta);
+            }
+        }
+
+        assert_eq!(text, "Done. Build now passes.");
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
         assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
     }
 

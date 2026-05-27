@@ -567,7 +567,7 @@ pub async fn summarize_for_compaction(
             }
             ChunkType::Reasoning(_)
             | ChunkType::ToolCall(_)
-            | ChunkType::End(_)
+            | ChunkType::End { .. }
             | ChunkType::AssistantMessagePhase { .. }
             | ChunkType::ResponseCompleted { .. }
             | ChunkType::Metadata(_)
@@ -1059,12 +1059,16 @@ async fn relay_stream_to_sender(
                     tool_call.len(),
                 );
             }
-            ChunkType::End(_msg) => {
+            ChunkType::End { reason } => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("End", elapsed_ms);
+                let reason = reason
+                    .as_ref()
+                    .map(|reason| reason.label())
+                    .unwrap_or("unknown");
                 crate::emit_log!(
-                    "[RELAY] End chunk — returning Ended {}",
-                    stats.describe_at(Some(elapsed_ms))
+                    "[RELAY] End chunk reason={reason} — returning Ended {}",
+                    stats.describe_at(Some(elapsed_ms)),
                 );
                 let duration_ms = elapsed_ms as u64;
                 let _ = sender.send(crate::llm::ChunkMessage::Metrics {

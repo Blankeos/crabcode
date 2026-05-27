@@ -272,7 +272,7 @@ pub async fn run_subagent(
                 }
                 return Err(format!("Subagent streaming failed: {}", err));
             }
-            ChunkType::End(_) => {
+            ChunkType::End { .. } => {
                 break;
             }
             ChunkType::ResponseCompleted { .. } => {

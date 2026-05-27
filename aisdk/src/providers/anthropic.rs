@@ -1,4 +1,4 @@
-use crate::chunk::ChunkType;
+use crate::chunk::{ChunkType, FinishReason};
 use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
@@ -246,7 +246,7 @@ fn anthropic_stream_chunk(
             .map(Ok),
         "content_block_delta" => anthropic_content_block_delta(value).map(Ok),
         "message_delta" => anthropic_message_delta(value).map(Ok),
-        "message_stop" => Some(Ok(ChunkType::End(String::new()))),
+        "message_stop" => Some(Ok(ChunkType::End { reason: None })),
         "error" => {
             let error_msg = value["error"]["message"]
                 .as_str()
@@ -287,7 +287,9 @@ fn anthropic_message_delta(value: &serde_json::Value) -> Option<ChunkType> {
     match stop_reason {
         "max_tokens" => Some(ChunkType::Incomplete("stop_reason=max_tokens".to_string())),
         "refusal" => Some(ChunkType::Failed("stop_reason=refusal".to_string())),
-        _ => None,
+        reason => Some(ChunkType::End {
+            reason: Some(FinishReason::from_anthropic(reason)),
+        }),
     }
 }
 
@@ -493,7 +495,7 @@ mod tests {
             .expect("event should produce a chunk")
             .expect("chunk should parse");
 
-        assert!(matches!(chunk, ChunkType::End(_)));
+        assert!(matches!(chunk, ChunkType::End { reason: None }));
     }
 
     #[test]
@@ -509,6 +511,26 @@ mod tests {
             .expect("chunk should parse");
 
         assert!(matches!(chunk, ChunkType::Incomplete(_)));
+    }
+
+    #[test]
+    fn end_turn_stop_reason_emits_terminal_reason() {
+        let value = serde_json::json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "end_turn",
+            },
+        });
+        let chunk = anthropic_stream_chunk("message_delta", &value)
+            .expect("event should produce a chunk")
+            .expect("chunk should parse");
+
+        assert!(matches!(
+            chunk,
+            ChunkType::End {
+                reason: Some(FinishReason::EndTurn)
+            }
+        ));
     }
 }
 
