@@ -1,26 +1,53 @@
 ---
-title: Terminal Notifications
-description: Configure terminal-level prompt and completion signals for editors such as Zed.
+title: Notifications
+description: Configure event sounds, desktop notifications, and terminal alert signals.
 ---
 
-# Editor Alert Signals
+# Configure alerts
 
-Terminal notifications are crabcode-specific and apply only to `crabcode` config files. They are separate from `sounds.<event>.notify`, which sends desktop notifications.
+Notifications are crabcode-specific and apply only to `crabcode` config files. Each event can control terminal alert signals, audio, and native desktop notifications from one place.
 
 ```jsonc title="crabcode.jsonc"
 {
   "notifications": {
-    "terminal": {
-      "complete": "auto",
-      "permission": "auto",
-      "question": "auto",
-      "condition": "unfocused",
+    "terminalCondition": "unfocused",
+    "complete": {
+      "terminal": "auto",
+      "soundEnabled": true,
+      "soundFile": "",
+      "desktop": true,
+    },
+    "error": {
+      "soundEnabled": true,
+      "soundFile": "",
+      "desktop": false,
+    },
+    "permission": {
+      "terminal": "auto",
+      "soundEnabled": false,
+      "soundFile": "/absolute/path/to/permission.wav",
+      "desktop": false,
+    },
+    "question": {
+      "terminal": "auto",
+      "soundEnabled": false,
+      "soundFile": "/absolute/path/to/question.wav",
+      "desktop": false,
     },
   },
 }
 ```
 
-`notifications.terminal.complete`, `notifications.terminal.permission`, and `notifications.terminal.question` control whether crabcode emits a terminal BEL (`\x07`) when an assistant response finishes, a permission prompt opens, or a question prompt opens.
+Events are `complete`, `error`, `permission`, and `question`.
+
+| Field | Behavior |
+| --- | --- |
+| `terminal` | Emits a terminal BEL (`\x07`) for editor alerts such as Zed tab dots. |
+| `soundEnabled` | Plays audio for the event. |
+| `soundFile` | Optional absolute path to a custom audio file. Use `""`, `null`, or omit it to use defaults. |
+| `desktop` | Sends a native desktop notification. |
+
+`complete` and `error` default to `soundEnabled: true` and use bundled sounds when `soundFile` is unset. `permission` and `question` default to silent unless you enable them and provide a file.
 
 | Value | Behavior |
 | --- | --- |
@@ -28,7 +55,7 @@ Terminal notifications are crabcode-specific and apply only to `crabcode` config
 | `"enabled"` / `true` | Emit BEL in any terminal. |
 | `"disabled"` / `false` | Do not emit terminal notifications for that event. |
 
-`notifications.terminal.condition` controls when the signal is emitted.
+`notifications.terminalCondition` controls when terminal signals are emitted.
 
 | Value | Behavior |
 | --- | --- |
@@ -36,3 +63,7 @@ Terminal notifications are crabcode-specific and apply only to `crabcode` config
 | `"always"` | Emit even while the terminal is focused. |
 
 In Zed, BEL marks the terminal as notified, which lets Zed render the accent dot on the terminal tab or terminal thread entry. Other terminals may play an audible bell, so use `"enabled"` only when you want that behavior outside supported terminals.
+
+Desktop notifications are best-effort. On macOS, crabcode uses Notification Center through `osascript`; on Linux, it uses the available desktop notification backend.
+
+The old top-level `sounds` config is deprecated. crabcode still reads it with a startup warning, but new configs should use `notifications.<event>.soundEnabled`, `notifications.<event>.soundFile`, and `notifications.<event>.desktop`.

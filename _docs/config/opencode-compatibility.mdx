@@ -7,7 +7,7 @@ description: What OpenCode configuration works in crabcode and what is crabcode-
 
 > Don't think CrabCode as another agent config to manage, just treat it like configuring OpenCode.
 
-Most OpenCode docs apply directly: config is JSON/JSONC, project assets live under `.opencode/`, and command files use the OpenCode markdown command format. crabcode adds a small terminal-specific layer for sounds, notifications, and theme selection.
+Most OpenCode docs apply directly: config is JSON/JSONC, project assets live under `.opencode/`, and command files use the OpenCode markdown command format. crabcode adds a small terminal-specific layer for notifications and theme selection.
 
 ## Compatibility map
 
@@ -32,8 +32,7 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 | Markdown agent files | ✅ |  | Discovered for diagnostics, not applied as runtime agent definitions yet. |
 | `provider.<id>.options.timeout` | ✅ | partial | Integer milliseconds or `false` to disable timeout. |
 | `theme` | ✅ | ✅ | In crabcode config files only. OpenCode config `theme` is ignored by crabcode. |
-| `sounds` |  | ✅ | crabcode-specific terminal audio and notifications. |
-| `notifications` |  | ✅ | crabcode-specific terminal alert signals such as Zed tab dots. |
+| `notifications` |  | ✅ | crabcode-specific sounds, desktop notifications, and terminal alert signals such as Zed tab dots. |
 | `mcp` | ✅ |  | Accepted at the top level for forward compatibility, not wired to tools yet. |
 | `permission` | ✅ |  | Accepted at the top level, not enforced from config yet. |
 | `instructions` | ✅ |  | Accepted at the top level, but config-driven instruction files are not loaded yet. |

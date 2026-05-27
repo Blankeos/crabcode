@@ -9,35 +9,41 @@
   // Default model (used only when you don't have an active model persisted yet).
   "model": "openai/gpt-5.2",
 
-  // Sounds are optional.
-  // - `enabled` toggles each event.
-  // - `notify` toggles desktop notifications per event.
-  // - `file` must be an absolute path (no `~`, no relative).
-  // - If `enabled` is true and `file` is omitted:
+  // Notifications are optional and grouped by event.
+  // - `terminal` controls editor alert signals such as Zed tab dots.
+  // - `desktop` toggles native desktop notifications per event.
+  // - `soundEnabled` toggles each event's audio.
+  // - `soundFile` must be an absolute path (no `~`, no relative).
+  // - If `soundEnabled` is true and `soundFile` is omitted:
   //   - `complete` and `error` use bundled defaults
   //   - `permission` and `question` stay silent
-  "sounds": {
+  "notifications": {
+    "terminalCondition": "unfocused",
     "error": {
-      "enabled": true,
-      "notify": false,
+      "terminal": "disabled",
+      "soundEnabled": true,
+      "desktop": false,
       // Optional override:
-      // "file": "/absolute/path/to/error.mp3"
+      // "soundFile": "/absolute/path/to/error.mp3"
     },
     "complete": {
-      "enabled": true,
-      "notify": false,
+      "terminal": "auto",
+      "soundEnabled": true,
+      "desktop": false,
       // Optional override:
-      // "file": "/absolute/path/to/complete.mp3"
+      // "soundFile": "/absolute/path/to/complete.mp3"
     },
     "permission": {
-      "enabled": false,
-      "notify": false,
-      // "file": "/absolute/path/to/permission.wav"
+      "terminal": "auto",
+      "soundEnabled": false,
+      "desktop": false,
+      // "soundFile": "/absolute/path/to/permission.wav"
     },
     "question": {
-      "enabled": false,
-      "notify": false,
-      // "file": "/absolute/path/to/question.wav"
+      "terminal": "auto",
+      "soundEnabled": false,
+      "desktop": false,
+      // "soundFile": "/absolute/path/to/question.wav"
     }
   },
 

@@ -365,11 +365,11 @@ impl App {
             }
         }
 
-        let (resolved_sounds, sound_warnings) =
-            crate::sound::resolve_effective_sounds(&loaded_config.merged_config.sounds);
-        if !sound_warnings.is_empty() {
-            for msg in &sound_warnings {
-                crate::startup_diag!("Sound warning: {}", msg);
+        let (resolved_sounds, notification_warnings) =
+            crate::sound::resolve_effective_sounds(&loaded_config.merged_config.notifications);
+        if !notification_warnings.is_empty() {
+            for msg in &notification_warnings {
+                crate::startup_diag!("Notification warning: {}", msg);
             }
         }
 
@@ -531,7 +531,7 @@ impl App {
             crate::sound::play_file(path);
         }
 
-        if self.sounds.notify_for_event(event) {
+        if self.notifications.desktop_for_event(event) {
             crate::notify::notify_event(event, detail);
         }
     }
@@ -539,16 +539,17 @@ impl App {
     fn notify_terminal_event(&self, event: crate::sound::SoundEvent) {
         use crate::config::{TerminalNotificationCondition, TerminalNotificationMode};
 
-        let terminal = self.notifications.terminal;
-        if terminal.condition == TerminalNotificationCondition::Unfocused && self.terminal_focused {
+        if self.notifications.terminal_condition == TerminalNotificationCondition::Unfocused
+            && self.terminal_focused
+        {
             return;
         }
 
         let mode = match event {
-            crate::sound::SoundEvent::Complete => terminal.complete,
-            crate::sound::SoundEvent::Permission => terminal.permission,
-            crate::sound::SoundEvent::Question => terminal.question,
-            crate::sound::SoundEvent::Error => TerminalNotificationMode::Disabled,
+            crate::sound::SoundEvent::Complete => self.notifications.complete.terminal,
+            crate::sound::SoundEvent::Permission => self.notifications.permission.terminal,
+            crate::sound::SoundEvent::Question => self.notifications.question.terminal,
+            crate::sound::SoundEvent::Error => self.notifications.error.terminal,
         };
 
         let should_emit = match mode {

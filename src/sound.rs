@@ -16,10 +16,6 @@ pub struct ResolvedSoundsConfig {
     pub complete: Option<PathBuf>,
     pub permission: Option<PathBuf>,
     pub question: Option<PathBuf>,
-    pub error_notify: bool,
-    pub complete_notify: bool,
-    pub permission_notify: bool,
-    pub question_notify: bool,
 }
 
 impl ResolvedSoundsConfig {
@@ -29,15 +25,6 @@ impl ResolvedSoundsConfig {
             SoundEvent::Complete => self.complete.as_deref(),
             SoundEvent::Permission => self.permission.as_deref(),
             SoundEvent::Question => self.question.as_deref(),
-        }
-    }
-
-    pub fn notify_for_event(&self, event: SoundEvent) -> bool {
-        match event {
-            SoundEvent::Error => self.error_notify,
-            SoundEvent::Complete => self.complete_notify,
-            SoundEvent::Permission => self.permission_notify,
-            SoundEvent::Question => self.question_notify,
         }
     }
 }
@@ -58,54 +45,45 @@ const BUILTIN_ERROR_MP3: &[u8] = include_bytes!("../sounds/error.mp3");
 const BUILTIN_COMPLETE_MP3: &[u8] = include_bytes!("../sounds/complete.mp3");
 
 pub fn resolve_effective_sounds(
-    config: &crate::config::SoundsConfig,
+    config: &crate::config::NotificationsConfig,
 ) -> (ResolvedSoundsConfig, Vec<String>) {
     let mut warnings = Vec::new();
     let mut built_in_cache = BuiltInSoundCache::default();
 
     let resolved = ResolvedSoundsConfig {
         error: resolve_event_path(
-            "sounds.error",
+            "notifications.error",
             &config.error,
             Some(BuiltInSound::Error),
             &mut built_in_cache,
             &mut warnings,
         ),
         complete: resolve_event_path(
-            "sounds.complete",
+            "notifications.complete",
             &config.complete,
             Some(BuiltInSound::Complete),
             &mut built_in_cache,
             &mut warnings,
         ),
         permission: resolve_event_path(
-            "sounds.permission",
+            "notifications.permission",
             &config.permission,
             None,
             &mut built_in_cache,
             &mut warnings,
         ),
         question: resolve_event_path(
-            "sounds.question",
+            "notifications.question",
             &config.question,
             None,
             &mut built_in_cache,
             &mut warnings,
         ),
-        error_notify: config.error.notify,
-        complete_notify: config.complete.notify,
-        permission_notify: config.permission.notify,
-        question_notify: config.question.notify,
     };
 
-    if (resolved.error_notify
-        || resolved.complete_notify
-        || resolved.permission_notify
-        || resolved.question_notify)
-        && !crate::notify::is_supported()
-    {
+    if config.any_desktop_enabled() && !crate::notify::is_supported() {
         warnings.push(
-            "Desktop notifications are enabled for sounds, but no supported notification backend is available on this OS"
+            "Desktop notifications are enabled, but no supported notification backend is available on this OS"
                 .to_string(),
         );
     }
@@ -115,16 +93,16 @@ pub fn resolve_effective_sounds(
 
 fn resolve_event_path(
     key: &str,
-    effect: &crate::config::SoundEffectConfig,
+    effect: &crate::config::NotificationEventConfig,
     fallback: Option<BuiltInSound>,
     built_in_cache: &mut BuiltInSoundCache,
     warnings: &mut Vec<String>,
 ) -> Option<PathBuf> {
-    if !effect.enabled {
+    if !effect.sound_enabled {
         return None;
     }
 
-    if let Some(path) = effect.file.as_ref() {
+    if let Some(path) = effect.sound_file.as_ref() {
         if path.is_file() {
             return Some(path.clone());
         }

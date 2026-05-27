@@ -1,88 +1,5 @@
 {
   "$defs": {
-    "SoundEffectConfigFile": {
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "file": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "notify": {
-          "default": false,
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "SoundsConfigFile": {
-      "additionalProperties": false,
-      "properties": {
-        "complete": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SoundEffectConfigFile"
-            },
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "error": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SoundEffectConfigFile"
-            },
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "permission": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SoundEffectConfigFile"
-            },
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "question": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SoundEffectConfigFile"
-            },
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "type": "object"
-    },
     "ImageOpenCommandConfigFile": {
       "additionalProperties": false,
       "properties": {
@@ -152,28 +69,49 @@
         }
       ]
     },
-    "TerminalNotificationsConfigFile": {
+    "TerminalNotificationCondition": {
+      "enum": [
+        "unfocused",
+        "always"
+      ],
+      "type": "string"
+    },
+    "NotificationEventConfigFile": {
       "additionalProperties": false,
       "properties": {
-        "complete": {
-          "$ref": "#/$defs/TerminalNotificationMode",
-          "default": "auto"
+        "terminal": {
+          "$ref": "#/$defs/TerminalNotificationMode"
         },
-        "permission": {
-          "$ref": "#/$defs/TerminalNotificationMode",
-          "default": "auto"
+        "soundEnabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
-        "question": {
-          "$ref": "#/$defs/TerminalNotificationMode",
-          "default": "auto"
+        "sound_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
-        "condition": {
-          "default": "unfocused",
-          "enum": [
-            "unfocused",
-            "always"
-          ],
-          "type": "string"
+        "soundFile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sound_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desktop": {
+          "default": false,
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -181,15 +119,53 @@
     "NotificationsConfigFile": {
       "additionalProperties": false,
       "properties": {
-        "terminal": {
+        "complete": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TerminalNotificationsConfigFile"
+              "$ref": "#/$defs/NotificationEventConfigFile"
             },
             {
               "type": "null"
             }
           ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NotificationEventConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "permission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NotificationEventConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "question": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NotificationEventConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminalCondition": {
+          "$ref": "#/$defs/TerminalNotificationCondition",
+          "default": "unfocused"
+        },
+        "terminal_condition": {
+          "$ref": "#/$defs/TerminalNotificationCondition",
+          "default": "unfocused"
         }
       },
       "type": "object"
@@ -242,16 +218,6 @@
     },
     "permission": true,
     "provider": true,
-    "sounds": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/SoundsConfigFile"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "theme": {
       "type": [
         "string",

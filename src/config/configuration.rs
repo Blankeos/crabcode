@@ -127,48 +127,6 @@ pub struct ConfigInventory {
     pub command_files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct SoundEffectConfig {
-    pub file: Option<PathBuf>,
-    pub enabled: bool,
-    pub notify: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SoundsConfig {
-    pub error: SoundEffectConfig,
-    pub complete: SoundEffectConfig,
-    pub permission: SoundEffectConfig,
-    pub question: SoundEffectConfig,
-}
-
-impl Default for SoundsConfig {
-    fn default() -> Self {
-        Self {
-            error: SoundEffectConfig {
-                file: None,
-                enabled: true,
-                notify: false,
-            },
-            complete: SoundEffectConfig {
-                file: None,
-                enabled: true,
-                notify: false,
-            },
-            permission: SoundEffectConfig {
-                file: None,
-                enabled: false,
-                notify: false,
-            },
-            question: SoundEffectConfig {
-                file: None,
-                enabled: false,
-                notify: false,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalNotificationMode {
     Auto,
@@ -182,28 +140,71 @@ pub enum TerminalNotificationCondition {
     Always,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalNotificationsConfig {
-    pub complete: TerminalNotificationMode,
-    pub permission: TerminalNotificationMode,
-    pub question: TerminalNotificationMode,
-    pub condition: TerminalNotificationCondition,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationEventConfig {
+    pub terminal: TerminalNotificationMode,
+    pub sound_enabled: bool,
+    pub sound_file: Option<PathBuf>,
+    pub desktop: bool,
 }
 
-impl Default for TerminalNotificationsConfig {
-    fn default() -> Self {
-        Self {
-            complete: TerminalNotificationMode::Auto,
-            permission: TerminalNotificationMode::Auto,
-            question: TerminalNotificationMode::Auto,
-            condition: TerminalNotificationCondition::Unfocused,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationsConfig {
+    pub error: NotificationEventConfig,
+    pub complete: NotificationEventConfig,
+    pub permission: NotificationEventConfig,
+    pub question: NotificationEventConfig,
+    pub terminal_condition: TerminalNotificationCondition,
+}
+
+impl NotificationsConfig {
+    pub fn desktop_for_event(&self, event: crate::sound::SoundEvent) -> bool {
+        match event {
+            crate::sound::SoundEvent::Error => self.error.desktop,
+            crate::sound::SoundEvent::Complete => self.complete.desktop,
+            crate::sound::SoundEvent::Permission => self.permission.desktop,
+            crate::sound::SoundEvent::Question => self.question.desktop,
         }
+    }
+
+    pub fn any_desktop_enabled(&self) -> bool {
+        self.error.desktop
+            || self.complete.desktop
+            || self.permission.desktop
+            || self.question.desktop
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct NotificationsConfig {
-    pub terminal: TerminalNotificationsConfig,
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            error: NotificationEventConfig {
+                terminal: TerminalNotificationMode::Disabled,
+                sound_enabled: true,
+                sound_file: None,
+                desktop: false,
+            },
+            complete: NotificationEventConfig {
+                terminal: TerminalNotificationMode::Auto,
+                sound_enabled: true,
+                sound_file: None,
+                desktop: false,
+            },
+            permission: NotificationEventConfig {
+                terminal: TerminalNotificationMode::Auto,
+                sound_enabled: false,
+                sound_file: None,
+                desktop: false,
+            },
+            question: NotificationEventConfig {
+                terminal: TerminalNotificationMode::Auto,
+                sound_enabled: false,
+                sound_file: None,
+                desktop: false,
+            },
+            terminal_condition: TerminalNotificationCondition::Unfocused,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,7 +249,6 @@ pub struct MergedConfig {
     pub agent_tool_policies: HashMap<String, Vec<String>>,
     pub agent_steps: HashMap<String, usize>,
     pub provider_timeouts: HashMap<String, ProviderTimeout>,
-    pub sounds: SoundsConfig,
     pub notifications: NotificationsConfig,
     pub images: ImagesConfig,
 }
@@ -994,8 +994,10 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     out.agent_steps = parse_agent_steps(obj.get("agent"), diagnostics);
     out.provider_timeouts = parse_provider_timeouts(obj.get("provider"), diagnostics);
 
-    out.sounds = parse_sounds(obj.get("sounds"), diagnostics);
-    out.notifications = parse_notifications(obj.get("notifications"), diagnostics);
+    let mut notifications = NotificationsConfig::default();
+    apply_legacy_sounds(obj.get("sounds"), &mut notifications, diagnostics);
+    apply_notifications(obj.get("notifications"), &mut notifications, diagnostics);
+    out.notifications = notifications;
     out.images = parse_images(obj.get("images"), diagnostics);
 
     out
@@ -1253,49 +1255,223 @@ fn parse_image_open_with(
     }
 }
 
-fn parse_sounds(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> SoundsConfig {
-    let mut sounds = SoundsConfig::default();
-    let Some(Value::Object(map)) = value else {
-        return sounds;
+fn apply_legacy_sounds(
+    value: Option<&Value>,
+    notifications: &mut NotificationsConfig,
+    diagnostics: &mut ConfigDiagnostics,
+) {
+    let Some(value) = value else {
+        return;
     };
+
+    if value.is_null() {
+        return;
+    }
+
+    let Value::Object(map) = value else {
+        diagnostics
+            .warnings
+            .push("sounds is deprecated and must be an object when used".to_string());
+        return;
+    };
+
+    diagnostics.warnings.push(
+        "sounds is deprecated; move audio settings to notifications.<event>.soundEnabled and notifications.<event>.soundFile"
+            .to_string(),
+    );
 
     if map.contains_key("notify") {
         diagnostics.warnings.push(
-            "sounds.notify is no longer supported; use sounds.<event>.notify (for example sounds.complete.notify)"
+            "sounds.notify is no longer supported; use notifications.<event>.desktop instead"
                 .to_string(),
         );
     }
 
-    apply_sound_event(
-        &mut sounds.error,
+    apply_legacy_sound_event(
+        &mut notifications.error,
         map.get("error"),
         "sounds.error",
+        "notifications.error",
         diagnostics,
     );
-    apply_sound_event(
-        &mut sounds.complete,
+    apply_legacy_sound_event(
+        &mut notifications.complete,
         map.get("complete"),
         "sounds.complete",
+        "notifications.complete",
         diagnostics,
     );
-    apply_sound_event(
-        &mut sounds.permission,
+    apply_legacy_sound_event(
+        &mut notifications.permission,
         map.get("permission"),
         "sounds.permission",
+        "notifications.permission",
         diagnostics,
     );
-    apply_sound_event(
-        &mut sounds.question,
+    apply_legacy_sound_event(
+        &mut notifications.question,
         map.get("question"),
         "sounds.question",
+        "notifications.question",
         diagnostics,
     );
-
-    sounds
 }
 
-fn apply_sound_event(
-    target: &mut SoundEffectConfig,
+fn apply_legacy_sound_event(
+    target: &mut NotificationEventConfig,
+    value: Option<&Value>,
+    old_key: &str,
+    new_key: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) {
+    let Some(value) = value else {
+        return;
+    };
+
+    if let Value::Bool(enabled) = value {
+        target.sound_enabled = *enabled;
+        return;
+    }
+
+    let Value::Object(map) = value else {
+        diagnostics
+            .warnings
+            .push(format!("{} must be a boolean or object when used", old_key));
+        return;
+    };
+
+    if let Some(Value::Bool(enabled)) = map.get("enabled") {
+        target.sound_enabled = *enabled;
+    }
+
+    if let Some(Value::Bool(notify)) = map.get("notify") {
+        diagnostics.warnings.push(format!(
+            "{}.notify is deprecated; use {}.desktop instead",
+            old_key, new_key
+        ));
+        target.desktop = *notify;
+    }
+
+    if let Some(Value::String(file)) = map.get("file") {
+        apply_sound_file(target, file, &format!("{}.file", old_key), diagnostics);
+    }
+}
+
+fn apply_notifications(
+    value: Option<&Value>,
+    notifications: &mut NotificationsConfig,
+    diagnostics: &mut ConfigDiagnostics,
+) {
+    let Some(value) = value else {
+        return;
+    };
+
+    if value.is_null() {
+        return;
+    }
+
+    let Value::Object(map) = value else {
+        diagnostics
+            .warnings
+            .push("notifications must be an object".to_string());
+        return;
+    };
+
+    apply_legacy_terminal_notifications(map.get("terminal"), notifications, diagnostics);
+
+    if let Some(condition) = map
+        .get("terminalCondition")
+        .or_else(|| map.get("terminal_condition"))
+    {
+        notifications.terminal_condition = parse_terminal_notification_condition(
+            condition,
+            "notifications.terminalCondition",
+            diagnostics,
+        );
+    }
+
+    apply_notification_event(
+        &mut notifications.error,
+        map.get("error"),
+        "notifications.error",
+        diagnostics,
+    );
+    apply_notification_event(
+        &mut notifications.complete,
+        map.get("complete"),
+        "notifications.complete",
+        diagnostics,
+    );
+    apply_notification_event(
+        &mut notifications.permission,
+        map.get("permission"),
+        "notifications.permission",
+        diagnostics,
+    );
+    apply_notification_event(
+        &mut notifications.question,
+        map.get("question"),
+        "notifications.question",
+        diagnostics,
+    );
+}
+
+fn apply_legacy_terminal_notifications(
+    value: Option<&Value>,
+    notifications: &mut NotificationsConfig,
+    diagnostics: &mut ConfigDiagnostics,
+) {
+    let Some(value) = value else {
+        return;
+    };
+
+    let Value::Object(terminal_map) = value else {
+        diagnostics
+            .warnings
+            .push("notifications.terminal must be an object".to_string());
+        return;
+    };
+
+    diagnostics.warnings.push(
+        "notifications.terminal is deprecated; use notifications.<event>.terminal and notifications.terminalCondition instead"
+            .to_string(),
+    );
+
+    if let Some(complete) = terminal_map.get("complete") {
+        notifications.complete.terminal = parse_terminal_notification_mode(
+            complete,
+            "notifications.terminal.complete",
+            diagnostics,
+        );
+    }
+
+    if let Some(permission) = terminal_map.get("permission") {
+        notifications.permission.terminal = parse_terminal_notification_mode(
+            permission,
+            "notifications.terminal.permission",
+            diagnostics,
+        );
+    }
+
+    if let Some(question) = terminal_map.get("question") {
+        notifications.question.terminal = parse_terminal_notification_mode(
+            question,
+            "notifications.terminal.question",
+            diagnostics,
+        );
+    }
+
+    if let Some(condition) = terminal_map.get("condition") {
+        notifications.terminal_condition = parse_terminal_notification_condition(
+            condition,
+            "notifications.terminal.condition",
+            diagnostics,
+        );
+    }
+}
+
+fn apply_notification_event(
+    target: &mut NotificationEventConfig,
     value: Option<&Value>,
     key: &str,
     diagnostics: &mut ConfigDiagnostics,
@@ -1304,91 +1480,81 @@ fn apply_sound_event(
         return;
     };
 
-    if let Value::Bool(enabled) = value {
-        target.enabled = *enabled;
+    if value.is_null() {
         return;
     }
 
     let Value::Object(map) = value else {
+        diagnostics
+            .warnings
+            .push(format!("{} must be an object", key));
         return;
     };
 
-    if let Some(Value::Bool(enabled)) = map.get("enabled") {
-        target.enabled = *enabled;
+    if let Some(terminal) = map.get("terminal") {
+        target.terminal =
+            parse_terminal_notification_mode(terminal, &format!("{}.terminal", key), diagnostics);
     }
 
-    if let Some(Value::Bool(notify)) = map.get("notify") {
-        target.notify = *notify;
+    if let Some(desktop) = map.get("desktop") {
+        if let Some(desktop) = desktop.as_bool() {
+            target.desktop = desktop;
+        } else if !desktop.is_null() {
+            diagnostics
+                .warnings
+                .push(format!("{}.desktop must be a boolean", key));
+        }
     }
 
-    if let Some(Value::String(file)) = map.get("file") {
-        let p = PathBuf::from(file);
-        if p.is_absolute() {
-            target.file = Some(p);
-        } else {
-            diagnostics.warnings.push(format!(
-                "{}: sound file must be an absolute path; treating as disabled",
-                key
-            ));
-            target.file = None;
-            target.enabled = false;
+    if let Some(sound_enabled) = map.get("soundEnabled").or_else(|| map.get("sound_enabled")) {
+        if let Some(sound_enabled) = sound_enabled.as_bool() {
+            target.sound_enabled = sound_enabled;
+        } else if !sound_enabled.is_null() {
+            diagnostics
+                .warnings
+                .push(format!("{}.soundEnabled must be a boolean", key));
+        }
+    }
+
+    if let Some(sound_file) = map.get("soundFile").or_else(|| map.get("sound_file")) {
+        match sound_file {
+            Value::String(file) => {
+                apply_sound_file(target, file, &format!("{}.soundFile", key), diagnostics);
+            }
+            Value::Null => {
+                target.sound_file = None;
+            }
+            _ => {
+                diagnostics
+                    .warnings
+                    .push(format!("{}.soundFile must be a string or null", key));
+            }
         }
     }
 }
 
-fn parse_notifications(
-    value: Option<&Value>,
+fn apply_sound_file(
+    target: &mut NotificationEventConfig,
+    file: &str,
+    key: &str,
     diagnostics: &mut ConfigDiagnostics,
-) -> NotificationsConfig {
-    let mut notifications = NotificationsConfig::default();
-    let Some(Value::Object(map)) = value else {
-        return notifications;
-    };
-
-    let Some(terminal) = map.get("terminal") else {
-        return notifications;
-    };
-
-    let Value::Object(terminal_map) = terminal else {
-        diagnostics
-            .warnings
-            .push("notifications.terminal must be an object".to_string());
-        return notifications;
-    };
-
-    if let Some(complete) = terminal_map.get("complete") {
-        notifications.terminal.complete = parse_terminal_notification_mode(
-            complete,
-            "notifications.terminal.complete",
-            diagnostics,
-        );
+) {
+    if file.trim().is_empty() {
+        target.sound_file = None;
+        return;
     }
 
-    if let Some(permission) = terminal_map.get("permission") {
-        notifications.terminal.permission = parse_terminal_notification_mode(
-            permission,
-            "notifications.terminal.permission",
-            diagnostics,
-        );
+    let p = PathBuf::from(file);
+    if p.is_absolute() {
+        target.sound_file = Some(p);
+    } else {
+        diagnostics.warnings.push(format!(
+            "{}: sound file must be an absolute path; treating as disabled",
+            key
+        ));
+        target.sound_file = None;
+        target.sound_enabled = false;
     }
-
-    if let Some(question) = terminal_map.get("question") {
-        notifications.terminal.question = parse_terminal_notification_mode(
-            question,
-            "notifications.terminal.question",
-            diagnostics,
-        );
-    }
-
-    if let Some(condition) = terminal_map.get("condition") {
-        notifications.terminal.condition = parse_terminal_notification_condition(
-            condition,
-            "notifications.terminal.condition",
-            diagnostics,
-        );
-    }
-
-    notifications
 }
 
 fn parse_terminal_notification_mode(
@@ -1484,7 +1650,56 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parses_terminal_notifications() {
+    fn parses_event_notifications() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "notifications": {
+                    "terminalCondition": "always",
+                    "complete": {
+                        "terminal": "enabled",
+                        "desktop": true,
+                        "soundEnabled": true,
+                        "soundFile": "/tmp/complete.wav"
+                    },
+                    "permission": {
+                        "terminal": "enabled"
+                    },
+                    "question": {
+                        "terminal": "disabled"
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.notifications.complete.terminal,
+            TerminalNotificationMode::Enabled
+        );
+        assert!(config.notifications.complete.desktop);
+        assert!(config.notifications.complete.sound_enabled);
+        assert_eq!(
+            config.notifications.complete.sound_file,
+            Some(PathBuf::from("/tmp/complete.wav"))
+        );
+        assert_eq!(
+            config.notifications.permission.terminal,
+            TerminalNotificationMode::Enabled
+        );
+        assert_eq!(
+            config.notifications.question.terminal,
+            TerminalNotificationMode::Disabled
+        );
+        assert_eq!(
+            config.notifications.terminal_condition,
+            TerminalNotificationCondition::Always
+        );
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn legacy_terminal_notifications_are_migrated() {
         let mut diagnostics = ConfigDiagnostics::default();
         let config = parse_merged_config(
             &json!({
@@ -1501,22 +1716,25 @@ mod tests {
         );
 
         assert_eq!(
-            config.notifications.terminal.complete,
+            config.notifications.complete.terminal,
             TerminalNotificationMode::Enabled
         );
         assert_eq!(
-            config.notifications.terminal.permission,
+            config.notifications.permission.terminal,
             TerminalNotificationMode::Enabled
         );
         assert_eq!(
-            config.notifications.terminal.question,
+            config.notifications.question.terminal,
             TerminalNotificationMode::Disabled
         );
         assert_eq!(
-            config.notifications.terminal.condition,
+            config.notifications.terminal_condition,
             TerminalNotificationCondition::Always
         );
-        assert!(diagnostics.warnings.is_empty());
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("notifications.terminal is deprecated")));
     }
 
     #[test]
@@ -1525,19 +1743,19 @@ mod tests {
         let config = parse_merged_config(&json!({}), &mut diagnostics);
 
         assert_eq!(
-            config.notifications.terminal.complete,
+            config.notifications.complete.terminal,
             TerminalNotificationMode::Auto
         );
         assert_eq!(
-            config.notifications.terminal.permission,
+            config.notifications.permission.terminal,
             TerminalNotificationMode::Auto
         );
         assert_eq!(
-            config.notifications.terminal.question,
+            config.notifications.question.terminal,
             TerminalNotificationMode::Auto
         );
         assert_eq!(
-            config.notifications.terminal.condition,
+            config.notifications.terminal_condition,
             TerminalNotificationCondition::Unfocused
         );
     }
@@ -1548,8 +1766,8 @@ mod tests {
         let config = parse_merged_config(
             &json!({
                 "notifications": {
-                    "terminal": {
-                        "complete": false
+                    "complete": {
+                        "terminal": false
                     }
                 }
             }),
@@ -1557,9 +1775,39 @@ mod tests {
         );
 
         assert_eq!(
-            config.notifications.terminal.complete,
+            config.notifications.complete.terminal,
             TerminalNotificationMode::Disabled
         );
+    }
+
+    #[test]
+    fn legacy_sounds_are_migrated_to_notification_events() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "sounds": {
+                    "complete": {
+                        "enabled": true,
+                        "notify": true,
+                        "file": "/tmp/complete.wav"
+                    },
+                    "question": false
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert!(config.notifications.complete.sound_enabled);
+        assert!(config.notifications.complete.desktop);
+        assert_eq!(
+            config.notifications.complete.sound_file,
+            Some(PathBuf::from("/tmp/complete.wav"))
+        );
+        assert!(!config.notifications.question.sound_enabled);
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("sounds is deprecated")));
     }
 
     #[test]

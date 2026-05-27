@@ -17,7 +17,7 @@ A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interac
 ## Features
 
 - **Made with Rust** - Uses ratatui, crossterm and nucleo (fuzzy search), all fast tech.
-- **Sounds** - I wanted this in opencode, I just made it built in instead of a plugin.
+- **Notifications** - Sounds, desktop notifications, and terminal alert signals are built in.
 - **TPS, TTFT, Latency metrics** - Also wanted this in opencode, just made it built-in.
 - **Opens instantly** - one of my main motivations why I made this! :D Very lightweight after build.
 - **Terminal UI (TUI)** - Beautiful, responsive interface built with [ratatui](https://github.com/ratatui-org/ratatui)

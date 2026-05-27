@@ -36,16 +36,15 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
   "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json",
   "model": "openai/gpt-5.2",
   "theme": "crabcode-orange",
-  "sounds": {
-    "complete": { "enabled": true },
-    "error": { "enabled": true }
-  },
   "notifications": {
-    "terminal": {
-      "complete": "auto",
-      "permission": "auto",
-      "question": "auto",
-      "condition": "unfocused"
+    "terminalCondition": "unfocused",
+    "complete": {
+      "terminal": "auto",
+      "soundEnabled": true,
+      "desktop": true
+    },
+    "error": {
+      "soundEnabled": true
     }
   },
   "images": {

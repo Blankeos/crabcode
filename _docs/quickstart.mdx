@@ -58,9 +58,15 @@ crabcode uses JSONC (JSON with comments). Create a `crabcode.jsonc` in your proj
 {
   "theme": "default",
   "model": "openai/gpt-5.2",
-  "sounds": {
-    "complete": { "enabled": true },
-    "error": { "enabled": true },
+  "notifications": {
+    "complete": {
+      "terminal": "auto",
+      "soundEnabled": true,
+      "desktop": true,
+    },
+    "error": {
+      "soundEnabled": true,
+    },
   },
 }
 ```
@@ -99,4 +105,4 @@ Once you're in crabcode:
 | Credentials              | `~/.local/state/crabcode/auth.json`                   | `$XDG_STATE_HOME/crabcode/auth.json`                   |
 | Preferences and Sessions | `~/.local/state/crabcode/data.db`                     | `$XDG_STATE_HOME/crabcode/data.db`                     |
 | Model cache              | `~/.local/state/crabcode/cache/models_dev_cache.json` | `$XDG_STATE_HOME/crabcode/cache/models_dev_cache.json` |
-| Sounds                   | `~/.local/state/crabcode/sounds`                      | `$XDG_STATE_HOME/crabcode/sounds`                      |
+| Bundled notification sounds | `~/.local/state/crabcode/sounds`                   | `$XDG_STATE_HOME/crabcode/sounds`                      |

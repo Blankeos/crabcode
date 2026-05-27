@@ -22,6 +22,9 @@ devdocs:
 log:
     tail -f app.log
 
+sync_readme:
+    cp README.md npm/README.md
+
 # Release: bump versions, create release commit, and create a git tag.
 
 # Usage: just tag [patch|minor|major]
