@@ -3,6 +3,7 @@ use crate::persistence::PromptHistoryCache;
 use crate::push_toast;
 use crate::theme::{agent_color, contrast_text, ThemeColors};
 use crate::toast::{Toast, ToastLevel};
+use crate::ui::selection::EdgeScrollDirection;
 use crate::utils::image_attachment;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -50,12 +51,20 @@ struct VisualLine {
     end_col: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelectionEdgeScroll {
+    direction: EdgeScrollDirection,
+    column: u16,
+}
+
 pub struct Input {
     textarea: TextArea<'static>,
     pub autocomplete: Option<AutoComplete>,
     textarea_area: Option<Rect>,
     viewport_top: usize,
     preferred_visual_col: Option<usize>,
+    selection_drag_active: bool,
+    selection_edge_scroll: Option<SelectionEdgeScroll>,
     prompt_history: Option<PromptHistoryCache>,
     draft_text: Option<String>,
     local_images: Vec<LocalImageAttachment>,
@@ -99,6 +108,8 @@ impl Input {
             textarea_area: None,
             viewport_top: 0,
             preferred_visual_col: None,
+            selection_drag_active: false,
+            selection_edge_scroll: None,
             prompt_history,
             draft_text: None,
             local_images: Vec::new(),
@@ -127,6 +138,95 @@ impl Input {
 
     pub fn clear_hover(&mut self) {
         self.hovered_image_placeholder = None;
+    }
+
+    pub fn has_active_selection_edge_scroll(&self) -> bool {
+        self.selection_edge_scroll.is_some()
+    }
+
+    pub fn tick_selection_edge_scroll(&mut self) -> bool {
+        let Some(edge_scroll) = self.selection_edge_scroll else {
+            return false;
+        };
+        if !self.selection_drag_active {
+            self.selection_edge_scroll = None;
+            return false;
+        }
+
+        self.preferred_visual_col = Some(edge_scroll.column as usize);
+        let moved = match edge_scroll.direction {
+            EdgeScrollDirection::Up => self.move_cursor_visual(-1),
+            EdgeScrollDirection::Down => self.move_cursor_visual(1),
+        };
+        if !moved {
+            self.selection_edge_scroll = None;
+        }
+        moved
+    }
+
+    fn clear_selection_drag_state(&mut self) {
+        self.selection_drag_active = false;
+        self.selection_edge_scroll = None;
+        self.preferred_visual_col = None;
+    }
+
+    fn clamped_relative_x(area: Rect, column: u16) -> u16 {
+        if area.width == 0 {
+            return 0;
+        }
+        column
+            .saturating_sub(area.x)
+            .min(area.width.saturating_sub(1))
+    }
+
+    fn clamped_relative_y(area: Rect, row: u16) -> u16 {
+        if area.height == 0 {
+            return 0;
+        }
+        row.saturating_sub(area.y)
+            .min(area.height.saturating_sub(1))
+    }
+
+    fn edge_scroll_direction(area: Rect, row: u16) -> Option<EdgeScrollDirection> {
+        if area.height == 0 {
+            return None;
+        }
+        let bottom = area.y.saturating_add(area.height.saturating_sub(1));
+        if row <= area.y {
+            Some(EdgeScrollDirection::Up)
+        } else if row >= bottom {
+            Some(EdgeScrollDirection::Down)
+        } else {
+            None
+        }
+    }
+
+    fn update_selection_edge_scroll(&mut self, area: Rect, mouse: MouseEvent) {
+        if !self.selection_drag_active || area.width == 0 || area.height == 0 {
+            self.selection_edge_scroll = None;
+            return;
+        }
+
+        self.selection_edge_scroll =
+            Self::edge_scroll_direction(area, mouse.row).map(|direction| SelectionEdgeScroll {
+                direction,
+                column: Self::clamped_relative_x(area, mouse.column),
+            });
+    }
+
+    fn move_selection_to_mouse_position(&mut self, area: Rect, mouse: MouseEvent) -> bool {
+        let relative_x = Self::clamped_relative_x(area, mouse.column);
+        let relative_y = Self::clamped_relative_y(area, mouse.row);
+
+        let Some((target_row, target_col)) =
+            self.cursor_for_screen_position(area, relative_x, relative_y)
+        else {
+            return false;
+        };
+
+        self.textarea
+            .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
+        true
     }
 
     pub fn render(
@@ -425,8 +525,22 @@ impl Input {
             && mouse_y < textarea_area.y + textarea_area.height;
 
         if !within_textarea {
-            if matches!(mouse.kind, MouseEventKind::Moved) {
-                self.hovered_image_placeholder = None;
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) if self.selection_drag_active => {
+                    self.preferred_visual_col = None;
+                    self.move_selection_to_mouse_position(textarea_area, mouse);
+                    self.update_selection_edge_scroll(textarea_area, mouse);
+                    let _ = self.tick_selection_edge_scroll();
+                    return true;
+                }
+                MouseEventKind::Up(MouseButton::Left) if self.selection_drag_active => {
+                    self.clear_selection_drag_state();
+                    return false;
+                }
+                MouseEventKind::Moved => {
+                    self.hovered_image_placeholder = None;
+                }
+                _ => {}
             }
             return false;
         }
@@ -475,6 +589,8 @@ impl Input {
                     self.textarea
                         .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
                     self.textarea.start_selection();
+                    self.selection_drag_active = true;
+                    self.selection_edge_scroll = None;
                 } else {
                     let lines = self.textarea.lines();
                     let last_row = lines.len().saturating_sub(1);
@@ -482,32 +598,32 @@ impl Input {
                     self.textarea
                         .move_cursor(CursorMove::Jump(last_row as u16, last_col as u16));
                     self.textarea.start_selection();
+                    self.selection_drag_active = true;
+                    self.selection_edge_scroll = None;
                 }
                 true
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                self.preferred_visual_col = None;
-                // Extend the ongoing selection
-                let relative_x = mouse_x.saturating_sub(textarea_area.x);
-                let relative_y = mouse_y.saturating_sub(textarea_area.y);
-
-                if let Some((target_row, target_col)) =
-                    self.cursor_for_screen_position(textarea_area, relative_x, relative_y)
-                {
-                    // Since start_selection() was called and is_selecting() is true,
-                    // move_cursor extends the selection
-                    self.textarea
-                        .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
+                if !self.selection_drag_active {
+                    return false;
                 }
+                self.preferred_visual_col = None;
+                // Since start_selection() was called and is_selecting() is true,
+                // move_cursor extends the selection.
+                self.move_selection_to_mouse_position(textarea_area, mouse);
+                self.update_selection_edge_scroll(textarea_area, mouse);
+                let _ = self.tick_selection_edge_scroll();
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 // Selection finalized (cursor was moved during drag)
+                self.clear_selection_drag_state();
                 true
             }
             MouseEventKind::Up(MouseButton::Right) => {
                 // Right-click clears selection
                 self.textarea.cancel_selection();
+                self.clear_selection_drag_state();
                 true
             }
             _ => false,
@@ -561,6 +677,7 @@ impl Input {
 
     pub fn clear_selection(&mut self) {
         self.textarea.cancel_selection();
+        self.clear_selection_drag_state();
     }
 
     /// Delete the word before the cursor. Handles multi-byte emoji correctly
@@ -751,6 +868,7 @@ impl Input {
                 .bg(ratatui::style::Color::Rgb(255, 140, 0))
                 .fg(ratatui::style::Color::Reset),
         );
+        self.clear_selection_drag_state();
     }
 
     fn set_text_preserving_images(&mut self, text: &str, cursor_offset: usize) {
@@ -2044,6 +2162,28 @@ mod tests {
 
         assert!(input.handle_mouse_event(mouse_event(MouseEventKind::ScrollUp)));
         assert_eq!(input.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn test_mouse_drag_at_bottom_edge_scrolls_wrapped_input_selection() {
+        let mut input = Input::new();
+        input.insert_str("0123456789ABCDEFGHIJ");
+        input.textarea_area = Some(Rect::new(0, 0, 5, 2));
+
+        assert!(input.handle_mouse_event(mouse_event_at(
+            MouseEventKind::Down(MouseButton::Left),
+            0,
+            0,
+        )));
+        assert!(input.handle_mouse_event(mouse_event_at(
+            MouseEventKind::Drag(MouseButton::Left),
+            4,
+            1,
+        )));
+
+        assert!(input.has_active_selection_edge_scroll());
+        assert_eq!(input.textarea.cursor(), (0, 14));
+        assert_eq!(input.get_selected_text(), "0123456789ABCD");
     }
 
     #[test]

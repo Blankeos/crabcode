@@ -2908,8 +2908,13 @@ impl App {
                 }
             }
         } else if self.overlay_focus == OverlayFocus::None {
-            // If chat has a selection and user clicks outside chat area, clear it
-            if self.chat_state.chat.has_selection() && self.base_focus == BaseFocus::Chat {
+            // If chat has a selection and user clicks outside chat area, clear it.
+            // Dragging is handled by the chat component so edge scrolling can continue.
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && self.chat_state.chat.has_selection()
+                && !self.chat_state.chat.selection.is_dragging
+                && self.base_focus == BaseFocus::Chat
+            {
                 let chat_area = self.current_chat_area();
 
                 let point = ratatui::layout::Position::new(mouse.column, mouse.row);
@@ -5204,6 +5209,11 @@ impl App {
         if self.last_animation_update.elapsed() >= ANIMATION_INTERVAL {
             self.chat_state.wave_spinner.update();
             self.home_state.tick();
+            if self.tick_selection_edge_scroll() {
+                self.selection_action_bar = None;
+                self.pending_chat_message_click = None;
+                self.update_suggestions();
+            }
             self.last_animation_update = std::time::Instant::now();
         }
 
@@ -5215,6 +5225,7 @@ impl App {
 
     pub fn is_animation_running(&self) -> bool {
         self.base_focus == BaseFocus::Home
+            || self.has_active_selection_edge_scroll()
             || self.is_streaming
             || self.chat_state.chat.has_active_tool_messages()
             || self.compaction_receiver.is_some()
@@ -5225,6 +5236,17 @@ impl App {
                 .any(|state| state.stream.is_some() || state.external_stream.is_some())
             || (self.overlay_focus == OverlayFocus::SessionsDialog
                 && self.sessions_dialog_state.dialog.is_visible())
+    }
+
+    fn has_active_selection_edge_scroll(&self) -> bool {
+        self.input.has_active_selection_edge_scroll()
+            || self.chat_state.chat.has_active_selection_edge_scroll()
+    }
+
+    fn tick_selection_edge_scroll(&mut self) -> bool {
+        let input_scrolled = self.input.tick_selection_edge_scroll();
+        let chat_scrolled = self.chat_state.chat.tick_selection_edge_scroll();
+        input_scrolled || chat_scrolled
     }
 
     pub fn process_streaming_chunks(&mut self) {

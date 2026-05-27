@@ -190,6 +190,6 @@ I want - [x] To do this But I dont want to do this
 
 - [x] Zed alert circle thing when asking permission or question, please emit it. Currently it's only on completions by default I think.
 
-- [ ] Let's refactor highlights so that "highlighting" doesn't copy immediately. But rather, show a little dropdown like this so that I have control if I wanna copy or not. I want this because there are some parts that are kinda bothersome especially for users with clipboard history, it just quickly bloats it.
+- [x] Let's refactor highlights so that "highlighting" doesn't copy immediately. But rather, show a little dropdown like this so that I have control if I wanna copy or not. I want this because there are some parts that are kinda bothersome especially for users with clipboard history, it just quickly bloats it.
 
-- [ ] Minor bug.. Whatever I typed... and then pressed up multiple times, meaning I got to the "previously submitted chats i made", I go back down with down, and I got just an empty chat lol. So it looks like the chat I sent is gone.
+- [x] Mouse scroll ux just like opencode, when highlighting. Needs to scroll when I reach edges as I drag and click.

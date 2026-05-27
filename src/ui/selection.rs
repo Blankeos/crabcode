@@ -4,6 +4,12 @@ use ratatui::{
     text::Span,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EdgeScrollDirection {
+    Up,
+    Down,
+}
+
 /// Internal marker for spans that should render normally but be ignored by
 /// selection highlighting and clipboard extraction (for example diff gutters).
 pub const NON_SELECTABLE_SPAN_MODIFIER: Modifier = Modifier::HIDDEN;

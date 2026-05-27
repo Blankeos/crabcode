@@ -4,7 +4,7 @@ use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
 use crate::ui::scrollbar::{
     render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
 };
-use crate::ui::selection::{non_selectable_style, Selection};
+use crate::ui::selection::{non_selectable_style, EdgeScrollDirection, Selection};
 use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
 use crate::utils::token_counter::StreamingTokenCounter;
 use ratatui::{
@@ -55,6 +55,7 @@ pub struct Chat {
     pub message_line_positions: Vec<usize>,
     /// Text selection state for copy-on-select
     pub selection: Selection,
+    selection_edge_scroll: Option<SelectionEdgeScroll>,
     /// Anchor that existed before the current mouse click started.
     pending_click_anchor: Option<(usize, usize)>,
     /// Index of the message highlighted by timeline navigation (None = no highlight)
@@ -71,6 +72,12 @@ pub struct Chat {
     tool_marker_animation_phase: bool,
     hovered_image: Option<ChatImageTarget>,
     hovered_hyperlink: Option<ChatHyperlinkHover>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelectionEdgeScroll {
+    direction: EdgeScrollDirection,
+    column: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -688,6 +695,7 @@ impl Chat {
             streaming_message_idx: None,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
+            selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
             render_revision: 1,
@@ -730,6 +738,7 @@ impl Chat {
             streaming_message_idx: None,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
+            selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
             render_revision: 1,
@@ -1546,6 +1555,99 @@ impl Chat {
         self.scrollbar_state = self.scrollbar_state.position(position);
     }
 
+    pub fn has_active_selection_edge_scroll(&self) -> bool {
+        self.selection_edge_scroll.is_some()
+    }
+
+    pub fn tick_selection_edge_scroll(&mut self) -> bool {
+        let Some(edge_scroll) = self.selection_edge_scroll else {
+            return false;
+        };
+        if !self.selection.is_dragging {
+            self.selection_edge_scroll = None;
+            return false;
+        }
+
+        let before = self.scroll_offset;
+        match edge_scroll.direction {
+            EdgeScrollDirection::Up => self.scroll_up(1),
+            EdgeScrollDirection::Down => self.scroll_down(1),
+        }
+
+        if self.scroll_offset == before {
+            self.selection_edge_scroll = None;
+            return false;
+        }
+
+        let line = match edge_scroll.direction {
+            EdgeScrollDirection::Up => self.scroll_offset,
+            EdgeScrollDirection::Down => self
+                .scroll_offset
+                .saturating_add(self.viewport_height.saturating_sub(1))
+                .min(self.content_height.saturating_sub(1)),
+        };
+        self.selection.extend(line, edge_scroll.column);
+        true
+    }
+
+    fn clear_selection_edge_scroll(&mut self) {
+        self.selection_edge_scroll = None;
+    }
+
+    fn edge_scroll_direction(area: Rect, row: u16) -> Option<EdgeScrollDirection> {
+        if area.height == 0 {
+            return None;
+        }
+        let bottom = area.y.saturating_add(area.height.saturating_sub(1));
+        if row <= area.y {
+            Some(EdgeScrollDirection::Up)
+        } else if row >= bottom {
+            Some(EdgeScrollDirection::Down)
+        } else {
+            None
+        }
+    }
+
+    fn clamped_content_column(content_area: Rect, column: u16) -> usize {
+        if content_area.width == 0 {
+            return 0;
+        }
+        column
+            .saturating_sub(content_area.x)
+            .min(content_area.width.saturating_sub(1)) as usize
+    }
+
+    fn clamped_content_row(content_area: Rect, row: u16) -> u16 {
+        if content_area.height == 0 {
+            return 0;
+        }
+        row.saturating_sub(content_area.y)
+            .min(content_area.height.saturating_sub(1))
+    }
+
+    fn update_selection_edge_scroll(&mut self, content_area: Rect, event: MouseEvent) {
+        if !self.selection.is_dragging || content_area.width == 0 || content_area.height == 0 {
+            self.clear_selection_edge_scroll();
+            return;
+        }
+
+        self.selection_edge_scroll =
+            Self::edge_scroll_direction(content_area, event.row).map(|direction| {
+                SelectionEdgeScroll {
+                    direction,
+                    column: Self::clamped_content_column(content_area, event.column),
+                }
+            });
+    }
+
+    fn drag_selection_to_position(&mut self, content_area: Rect, event: MouseEvent) {
+        let content_line = (Self::clamped_content_row(content_area, event.row) as usize
+            + self.scroll_offset)
+            .min(self.content_height.saturating_sub(1));
+        let content_col = Self::clamped_content_column(content_area, event.column);
+        self.selection.extend(content_line, content_col);
+    }
+
     pub fn has_selection(&self) -> bool {
         self.selection.active
     }
@@ -1594,6 +1696,13 @@ impl Chat {
             width: 1,
             height: area.height,
         };
+        let content_area = Self::content_area_for(area);
+        let rendered_content_area = Rect {
+            x: content_area.x,
+            y: content_area.y,
+            width: content_area.width,
+            height: content_area.height,
+        };
 
         if self.is_dragging_scrollbar {
             match event.kind {
@@ -1615,21 +1724,25 @@ impl Chat {
             self.scrollbar_drag_offset = None;
             // If dragging selection outside area, finalize it
             if self.selection.is_dragging {
-                self.selection.finish();
-                self.pending_click_anchor = None;
-                // Copy will be handled by app.rs on mouse up
+                match event.kind {
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        self.drag_selection_to_position(rendered_content_area, event);
+                        self.update_selection_edge_scroll(rendered_content_area, event);
+                        let _ = self.tick_selection_edge_scroll();
+                        return true;
+                    }
+                    MouseEventKind::Up(_) => {
+                        self.selection.finish();
+                        self.clear_selection_edge_scroll();
+                        self.pending_click_anchor = None;
+                        // Copy will be handled by app.rs on mouse up
+                        return true;
+                    }
+                    _ => {}
+                }
             }
             return false;
         }
-
-        // Calculate the content area (exclude scrollbar column)
-        let content_area = Self::content_area_for(area);
-        let rendered_content_area = Rect {
-            x: content_area.x,
-            y: content_area.y,
-            width: content_area.width,
-            height: content_area.height,
-        };
 
         let is_on_scrollbar = scrollbar_area.contains(point);
         let is_in_content = rendered_content_area.contains(point);
@@ -1671,10 +1784,12 @@ impl Chat {
                             .selection
                             .start_from_anchor_to(content_line, content_col)
                     {
+                        self.clear_selection_edge_scroll();
                         true
                     } else {
                         // Start text selection and record this normal click as the anchor.
                         self.selection.start(content_line, content_col);
+                        self.clear_selection_edge_scroll();
                         true
                     }
                 } else {
@@ -1687,10 +1802,9 @@ impl Chat {
                     true
                 } else if is_in_content && self.selection.is_dragging {
                     // Extend text selection
-                    let content_line = (event.row.saturating_sub(rendered_content_area.y) as usize)
-                        .saturating_add(self.scroll_offset);
-                    let content_col = event.column.saturating_sub(rendered_content_area.x) as usize;
-                    self.selection.extend(content_line, content_col);
+                    self.drag_selection_to_position(rendered_content_area, event);
+                    self.update_selection_edge_scroll(rendered_content_area, event);
+                    let _ = self.tick_selection_edge_scroll();
                     true
                 } else {
                     false
@@ -1723,6 +1837,7 @@ impl Chat {
 
                     // Finalize text selection
                     self.selection.finish();
+                    self.clear_selection_edge_scroll();
                     self.pending_click_anchor = None;
                     // If selection is zero-width (click without drag), clear it
                     let ((s_line, s_col), (e_line, e_col)) = self.selection.range();
@@ -1738,6 +1853,7 @@ impl Chat {
                 // Right-click clears selection
                 if self.selection.active {
                     self.selection.clear();
+                    self.clear_selection_edge_scroll();
                     self.pending_click_anchor = None;
                     true
                 } else {
@@ -5250,6 +5366,47 @@ codex exec --skip-git-repo-check \
 
         chat.scroll_up(10);
         assert_eq!(chat.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_mouse_drag_at_bottom_edge_scrolls_chat_selection() {
+        let mut chat = chat_with_content_height(20);
+        chat.viewport_height = 5;
+        let area = Rect::new(0, 0, 40, 5);
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                2,
+                2,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                2,
+                4,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+
+        assert_eq!(chat.scroll_offset, 1);
+        assert!(chat.has_active_selection_edge_scroll());
+        assert_eq!(chat.selection.range(), ((2, 2), (5, 2)));
+
+        assert!(chat.handle_mouse_event(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                2,
+                4,
+                KeyModifiers::NONE,
+            ),
+            area,
+        ));
+        assert!(!chat.has_active_selection_edge_scroll());
     }
 
     #[test]
