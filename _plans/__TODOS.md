@@ -210,6 +210,6 @@ I want - [x] To do this But I dont want to do this
 
 - [ ] Make "▼ 💭 Thinking" rendered like this. And an accordion, so if I click it with my mouse, or with a special hotkey + command palette command. It can be toggled on and off.
 
-- [ ] Subagent UI view is not rendering the full table it seems like.. I always see this.. just the top.
+- [x] Subagent UI view is not rendering the full table it seems like.. I always see this.. just the top.
   - `┌─────────────────────────┬────────────────────────────────────────────────────────────────────────────` - never the full table
   - Thouh I think the table does have content. I think it's just being weird.

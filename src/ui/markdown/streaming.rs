@@ -617,18 +617,12 @@ mod tests {
         let lines = render_markdown(input, 80, &colors);
 
         // Convert lines to string for inspection
-        let output: String = lines
+        let line_strings: Vec<String> = lines.iter().map(line_to_string).collect();
+        let output = line_strings.join("\n");
+        let table_lines: Vec<_> = line_strings
             .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        eprintln!("render_markdown output:\n{}", output);
+            .filter(|line| is_preprocessed_table_line(line))
+            .collect();
 
         // Should contain our Unicode box-drawing corners, not raw markdown
         assert!(
@@ -645,6 +639,19 @@ mod tests {
             !output.contains("| A |"),
             "Raw markdown table should be replaced"
         );
+        assert_eq!(
+            table_lines.len(),
+            5,
+            "Rendered table rows should remain separate lines:\n{}",
+            output
+        );
+        for line in table_lines {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(line.as_str()) <= 80,
+                "Rendered table line should fit the viewport: {}",
+                line
+            );
+        }
     }
 
     #[test]

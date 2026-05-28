@@ -29,7 +29,7 @@ pub fn preprocess_tables(content: &str, max_width: usize) -> String {
                 in_table = false;
                 last_end = range.end;
                 let rendered = render_table(&rows, &table_alignments, max_width);
-                result.push_str(&rendered);
+                result.push_str(&preserve_table_line_breaks(&rendered));
                 rows.clear();
             }
             Event::Start(Tag::TableHead) => {
@@ -78,6 +78,20 @@ pub fn preprocess_tables(content: &str, max_width: usize) -> String {
 
     // Flush remaining content after last table
     result.push_str(&content[last_end..]);
+    result
+}
+
+fn preserve_table_line_breaks(rendered: &str) -> String {
+    let mut result = String::with_capacity(rendered.len());
+    let mut lines = rendered.split('\n').peekable();
+
+    while let Some(line) = lines.next() {
+        result.push_str(line);
+        if lines.peek().is_some() {
+            result.push_str("  \n");
+        }
+    }
+
     result
 }
 

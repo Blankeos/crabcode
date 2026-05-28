@@ -930,7 +930,7 @@ impl Chat {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Bump this whenever rendering logic changes (tables, markdown, etc.)
-        const RENDER_VERSION: u64 = 7;
+        const RENDER_VERSION: u64 = 8;
         RENDER_VERSION.hash(&mut h);
         colors.hash(&mut h);
         self.messages.len().hash(&mut h);
