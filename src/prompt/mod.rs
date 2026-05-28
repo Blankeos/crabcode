@@ -35,6 +35,7 @@ pub struct SystemPromptComposer {
     is_git_repo: bool,
     platform: String,
     tool_registry: Option<ToolRegistry>,
+    agent_registry: Option<crate::agent::definition::AgentRegistry>,
 }
 
 impl SystemPromptComposer {
@@ -50,11 +51,20 @@ impl SystemPromptComposer {
             is_git_repo,
             platform: platform.into(),
             tool_registry: None,
+            agent_registry: None,
         }
     }
 
     pub fn with_tool_registry(mut self, registry: ToolRegistry) -> Self {
         self.tool_registry = Some(registry);
+        self
+    }
+
+    pub fn with_agent_registry(
+        mut self,
+        registry: crate::agent::definition::AgentRegistry,
+    ) -> Self {
+        self.agent_registry = Some(registry);
         self
     }
 
@@ -317,7 +327,11 @@ Tool use:
         }
 
         // Add available subagents listing
-        let subagents = crate::agent::subagent::SubAgentDef::all();
+        let registry = self
+            .agent_registry
+            .clone()
+            .unwrap_or_else(crate::agent::definition::AgentRegistry::default);
+        let subagents = registry.visible_subagents();
         if !subagents.is_empty() {
             let subagents_xml = subagents
                 .iter()

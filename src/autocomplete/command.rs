@@ -4,6 +4,7 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SuggestionKind {
     Command,
+    Agent,
     File,
 }
 
@@ -43,9 +44,21 @@ impl Suggestion {
         }
     }
 
+    pub fn agent(name: impl Into<String>, description: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            replacement: name.clone(),
+            name,
+            description: description.into(),
+            kind: SuggestionKind::Agent,
+            is_directory: false,
+        }
+    }
+
     pub fn display_prefix(&self) -> &'static str {
         match self.kind {
             SuggestionKind::Command => "/",
+            SuggestionKind::Agent => "@",
             SuggestionKind::File => "",
         }
     }

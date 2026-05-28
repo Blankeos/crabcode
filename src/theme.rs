@@ -135,12 +135,12 @@ pub fn contrast_text(background: ratatui::style::Color) -> ratatui::style::Color
 }
 
 pub fn agent_color(agent: &str, colors: &ThemeColors) -> ratatui::style::Color {
-    match agent {
+    match agent.to_ascii_lowercase().as_str() {
         // Match OpenCode primary agent colors:
         // - Build: secondary
         // - Plan: accent
-        "Build" => colors.secondary,
-        "Plan" => colors.accent,
+        "build" => colors.secondary,
+        "plan" => colors.accent,
         _ => colors.primary,
     }
 }

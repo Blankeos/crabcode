@@ -7,6 +7,13 @@ pub struct ParsedCommand<'a> {
     pub active_model_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedAgentMention {
+    pub agent: String,
+    pub prompt: String,
+    pub raw: String,
+}
+
 impl<'a> ParsedCommand<'a> {
     pub fn raw_args(&self) -> &str {
         let Some(without_slash) = self.raw.trim().strip_prefix('/') else {
@@ -28,10 +35,11 @@ impl<'a> PartialEq for ParsedCommand<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputType<'a> {
     Command(ParsedCommand<'a>),
+    AgentMention(ParsedAgentMention),
     Message(String),
 }
 
-pub fn parse_input(input: &str) -> InputType {
+pub fn parse_input(input: &str) -> InputType<'_> {
     let trimmed = input.trim();
 
     if trimmed.starts_with('/') {
@@ -40,10 +48,38 @@ pub fn parse_input(input: &str) -> InputType {
         }
     }
 
+    if trimmed.starts_with('@') {
+        if let Some(parsed) = parse_agent_mention(trimmed) {
+            return InputType::AgentMention(parsed);
+        }
+    }
+
     InputType::Message(trimmed.to_string())
 }
 
-fn parse_command(input: &str) -> Option<ParsedCommand> {
+fn parse_agent_mention(input: &str) -> Option<ParsedAgentMention> {
+    let rest = input.strip_prefix('@')?;
+    let (agent, prompt) = rest
+        .split_once(char::is_whitespace)
+        .map(|(agent, prompt)| (agent, prompt.trim_start()))
+        .unwrap_or((rest, ""));
+
+    if agent.is_empty()
+        || !agent
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return None;
+    }
+
+    Some(ParsedAgentMention {
+        agent: agent.to_ascii_lowercase(),
+        prompt: prompt.to_string(),
+        raw: input.to_string(),
+    })
+}
+
+fn parse_command(input: &str) -> Option<ParsedCommand<'_>> {
     let without_slash = input.strip_prefix('/')?;
     let parts = shlex::split(without_slash).unwrap_or_else(|| {
         without_slash
@@ -175,6 +211,27 @@ mod tests {
                 active_model_id: None,
             })
         );
+    }
+
+    #[test]
+    fn test_parse_input_agent_mention() {
+        let input = "@explore find parser tests";
+        let result = parse_input(input);
+        assert_eq!(
+            result,
+            InputType::AgentMention(ParsedAgentMention {
+                agent: "explore".to_string(),
+                prompt: "find parser tests".to_string(),
+                raw: input.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_input_invalid_agent_mention_is_message() {
+        let input = "@../file";
+        let result = parse_input(input);
+        assert_eq!(result, InputType::Message("@../file".to_string()));
     }
 
     #[test]

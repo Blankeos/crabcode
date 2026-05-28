@@ -12,6 +12,7 @@ pub enum AutoCompleteMode {
 pub struct AutoComplete {
     pub command_auto: CommandAuto,
     pub file_auto: FileAuto,
+    pub agents: Vec<Suggestion>,
     pub mode: AutoCompleteMode,
 }
 
@@ -20,8 +21,14 @@ impl AutoComplete {
         Self {
             command_auto,
             file_auto: FileAuto::new(),
+            agents: Vec::new(),
             mode: AutoCompleteMode::Command,
         }
+    }
+
+    pub fn with_agents(mut self, agents: Vec<Suggestion>) -> Self {
+        self.agents = agents;
+        self
     }
 
     pub fn get_suggestions(&self, input: &str, is_chat: bool) -> Vec<Suggestion> {

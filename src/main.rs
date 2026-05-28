@@ -200,27 +200,25 @@ async fn run_print_mode(
 
     let (sender, mut receiver) = mpsc::unbounded_channel();
 
+    let agent_registry = loaded_config.merged_config.agent_registry.clone();
     let mut agent_policies = crate::tools::AgentToolPolicies::default();
-    for (mode, tools) in &loaded_config.merged_config.agent_tool_policies {
-        agent_policies = agent_policies.with_custom_tools(mode.clone(), tools.clone());
+    for (mode, tools) in agent_registry.tool_policy_map() {
+        agent_policies = agent_policies.with_custom_tools(mode, tools);
     }
     let tool_permissions = crate::tools::ToolPermissions::new(std::path::PathBuf::from(&cwd))
         .with_agent_policies(agent_policies)
         .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
-        .with_agent_permission_rules(loaded_config.merged_config.agent_permission_rules.clone())
+        .with_agent_permission_rules(agent_registry.permission_rules_map())
         .dangerously_skip_permissions(dangerously_skip_permissions);
-    let agent_steps = loaded_config.merged_config.agent_steps.clone();
-    let agent_max_steps = loaded_config
-        .merged_config
-        .agent_steps
-        .get(&agent_mode.to_ascii_lowercase())
-        .copied();
+    let agent_max_steps = agent_registry
+        .get(&agent_mode)
+        .and_then(|agent| agent.max_steps);
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
     let prompt_registry = crate::tools::initialize_tool_registry_with_dynamic(
         Some(sender.clone()),
         tool_permissions.clone(),
-        agent_steps.clone(),
+        agent_registry.clone(),
         cancel_token.clone(),
     )
     .await;
@@ -238,7 +236,8 @@ async fn run_print_mode(
         is_git_repo,
         std::env::consts::OS,
     )
-    .with_tool_registry(prompt_registry);
+    .with_tool_registry(prompt_registry)
+    .with_agent_registry(agent_registry.clone());
     let system_prompt = composer.compose().await;
     let messages = vec![Message::system(system_prompt), Message::user(prompt)];
 
@@ -255,7 +254,7 @@ async fn run_print_mode(
             reasoning_effort,
             agent_mode.clone(),
             agent_max_steps,
-            agent_steps,
+            agent_registry,
             tool_permissions,
             messages,
             sender,

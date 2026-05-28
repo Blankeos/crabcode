@@ -2519,8 +2519,8 @@ impl Chat {
                 }
 
                 if !emitted_anything {
-                    if message.is_complete && message.was_interrupted {
-                        let metadata = self.format_metadata(message, model, colors);
+                    if is_streaming || (message.is_complete && message.was_interrupted) {
+                        let metadata = self.format_metadata(message, model, colors, !is_streaming);
                         lines.push(Line::from(metadata));
                         lines.push(Line::from(""));
                     }
@@ -2529,16 +2529,17 @@ impl Chat {
 
                 // Add empty line before metadata for spacing
                 let next_role = self.messages.get(idx + 1).map(|m| m.role.clone());
-                let show_metadata = message.is_complete
-                    && (message.was_interrupted
-                        || !matches!(
-                            next_role,
-                            Some(MessageRole::Tool) | Some(MessageRole::Assistant)
-                        ));
+                let show_metadata = is_streaming
+                    || (message.is_complete
+                        && (message.was_interrupted
+                            || !matches!(
+                                next_role,
+                                Some(MessageRole::Tool) | Some(MessageRole::Assistant)
+                            )));
 
                 if show_metadata {
                     lines.push(Line::from(""));
-                    let metadata = self.format_metadata(message, model, colors);
+                    let metadata = self.format_metadata(message, model, colors, !is_streaming);
                     lines.push(Line::from(metadata));
                     lines.push(Line::from(""));
                 } else {
@@ -3346,7 +3347,13 @@ impl Chat {
         out
     }
 
-    fn format_metadata(&self, message: &Message, _model: &str, colors: &ThemeColors) -> Vec<Span> {
+    fn format_metadata(
+        &self,
+        message: &Message,
+        model: &str,
+        colors: &ThemeColors,
+        include_metrics: bool,
+    ) -> Vec<Span<'_>> {
         let mut spans = Vec::new();
 
         // Get agent mode from previous user message or default to "Plan"
@@ -3363,7 +3370,7 @@ impl Chat {
 
         // Agent type
         spans.push(Span::styled(
-            agent_mode,
+            display_agent_name(&agent_mode),
             Style::default()
                 .fg(agent_color)
                 .add_modifier(Modifier::BOLD),
@@ -3373,14 +3380,14 @@ impl Chat {
         spans.push(Span::styled(" • ", Style::default().fg(colors.text_weak)));
 
         // Model ID - use persisted model from message, fallback to current model
-        let model_display = message.model.as_deref().unwrap_or(_model);
+        let model_display = message.model.as_deref().unwrap_or(model);
         spans.push(Span::styled(
             model_display.to_string(),
             Style::default().fg(colors.text),
         ));
 
-        // Timing + throughput metrics (only show for completed messages)
-        if message.is_complete {
+        // Timing + throughput metrics are shown only once the stream is done.
+        if include_metrics {
             if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
                 let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
 
@@ -3493,6 +3500,23 @@ fn format_compaction_marker<'a>(
 
 fn is_synthetic_tool_result_text(content: &str) -> bool {
     content.trim_start().starts_with("[tool result:")
+}
+
+fn display_agent_name(agent: &str) -> String {
+    let mut out = String::new();
+    let mut word_start = true;
+    for ch in agent.trim().chars() {
+        if matches!(ch, '-' | '_' | ' ') {
+            out.push(ch);
+            word_start = true;
+        } else if word_start {
+            out.push(ch.to_ascii_uppercase());
+            word_start = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn render_line_backgrounds(
@@ -3730,6 +3754,13 @@ mod tests {
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
     use ratatui::style::Color;
+
+    #[test]
+    fn display_agent_name_title_cases_agent_words() {
+        assert_eq!(display_agent_name("build"), "Build");
+        assert_eq!(display_agent_name("vlm-agent"), "Vlm-Agent");
+        assert_eq!(display_agent_name("general_reviewer"), "General_Reviewer");
+    }
 
     fn test_colors() -> ThemeColors {
         ThemeColors {
@@ -5036,6 +5067,62 @@ codex exec --skip-git-repo-check \
         let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
 
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn streaming_assistant_metadata_shows_agent_model_without_metrics() {
+        let mut chat = Chat::new();
+        let mut user = Message::user("Prompt");
+        user.agent_mode = Some("build".to_string());
+        chat.add_message(user);
+
+        let mut msg = Message::incomplete("Streaming answer.");
+        msg.model = Some("glm-4.7".to_string());
+        msg.t0_ms = Some(1_000);
+        msg.t1_ms = Some(1_200);
+        msg.tn_ms = Some(2_000);
+        msg.output_tokens = Some(40);
+        chat.add_message(msg);
+        let colors = test_colors();
+
+        let lines = chat.build_all_lines(100, "fallback-model", &colors);
+        let metadata = lines
+            .iter()
+            .map(line_text)
+            .find(|line| line.contains("Build • glm-4.7"))
+            .expect("streaming metadata line");
+
+        assert!(!metadata.contains("ttft"));
+        assert!(!metadata.contains("t/s"));
+        assert!(!metadata.contains("1.0s"));
+    }
+
+    #[test]
+    fn completed_assistant_metadata_includes_latency_metrics() {
+        let mut chat = Chat::new();
+        let mut user = Message::user("Prompt");
+        user.agent_mode = Some("build".to_string());
+        chat.add_message(user);
+
+        let mut msg = Message::assistant("Done.");
+        msg.model = Some("glm-4.7".to_string());
+        msg.t0_ms = Some(1_000);
+        msg.t1_ms = Some(1_200);
+        msg.tn_ms = Some(2_000);
+        msg.output_tokens = Some(40);
+        chat.add_message(msg);
+        let colors = test_colors();
+
+        let lines = chat.build_all_lines(100, "fallback-model", &colors);
+        let metadata = lines
+            .iter()
+            .map(line_text)
+            .find(|line| line.contains("Build • glm-4.7"))
+            .expect("completed metadata line");
+
+        assert!(metadata.contains("1.0s"));
+        assert!(metadata.contains("ttft 0.2s"));
+        assert!(metadata.contains("50t/s"));
     }
 
     #[test]

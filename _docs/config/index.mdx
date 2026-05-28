@@ -98,6 +98,58 @@ You can also override permissions per agent. Agent rules are merged after global
 
 Plan mode is read-only by default and does not expose `bash`, `write`, or `edit` unless an explicit agent tool policy enables them. The existing safety prompts for sensitive reads, external paths, and repeated identical tool calls remain active by default.
 
+## Agents
+
+crabcode builds one runtime agent registry from built-in agents, OpenCode markdown agent files, and JSON config. Built-ins include `build`, `plan`, `explore`, and `general`.
+
+Markdown agents live in `.opencode/agents/` or `~/.config/opencode/agents/`. YAML frontmatter configures the agent, and the markdown body becomes that agent's instructions.
+
+```md title=".opencode/agents/reviewer.md"
+---
+description: Review code without making edits
+mode: subagent
+hidden: false
+tools:
+  - read
+  - grep
+  - glob
+steps: 8
+permission:
+  edit: deny
+task_permissions:
+  explore: allow
+---
+
+Review the requested code and return findings with file paths and line numbers.
+```
+
+JSON agents use the same registry and override markdown definitions when names match.
+
+```jsonc title="crabcode.jsonc"
+{
+  "agent": {
+    "reviewer": {
+      "description": "Review code without making edits",
+      "mode": "subagent",
+      "hidden": false,
+      "max_steps": 8,
+      "tools": ["read", "grep", "glob"],
+      "permission": {
+        "edit": "deny"
+      },
+      "task_permissions": {
+        "explore": "allow",
+        "general": "deny"
+      }
+    }
+  }
+}
+```
+
+Supported agent fields are `name`, `description`, `mode` (`primary`, `subagent`, or `all`), `hidden`, `model`, `temperature`, `top_p`, `steps`, `maxSteps`, `max_steps`, `tools`, `permission`, `task_permissions`, and `instructions`/`prompt`. Subagent `model` overrides are applied when the agent is invoked through Task or `@agent`; `temperature` and `top_p` are parsed for compatibility but are not yet applied to runtime requests.
+
+Direct `@agent` invocation is available for visible `subagent` and `all` agents. For example, `@explore trace config loading` starts a child session through the Task flow.
+
 ## What belongs where
 
 | Need | Put it in |

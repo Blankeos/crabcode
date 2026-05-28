@@ -3,7 +3,6 @@ use crate::tools::{
     BashTool, EditTool, QuestionTool, SkillTool, TaskTool, ToolPermissions, ToolRegistry,
     UpdatePlanTool, WebfetchTool,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -29,7 +28,7 @@ pub async fn register_dynamic_tools(
     registry: &ToolRegistry,
     sender: Option<crate::llm::ChunkSender>,
     permissions: ToolPermissions,
-    agent_steps: HashMap<String, usize>,
+    agent_registry: crate::agent::definition::AgentRegistry,
     cancel_token: CancellationToken,
 ) {
     registry
@@ -42,7 +41,7 @@ pub async fn register_dynamic_tools(
         .register(Arc::new(
             TaskTool::new(registry.clone())
                 .with_sender_opt(sender)
-                .with_runtime_options(permissions, agent_steps, cancel_token),
+                .with_runtime_options(permissions, agent_registry, cancel_token),
         ))
         .await;
 }
@@ -50,11 +49,11 @@ pub async fn register_dynamic_tools(
 pub async fn initialize_tool_registry_with_dynamic(
     sender: Option<crate::llm::ChunkSender>,
     permissions: ToolPermissions,
-    agent_steps: HashMap<String, usize>,
+    agent_registry: crate::agent::definition::AgentRegistry,
     cancel_token: CancellationToken,
 ) -> ToolRegistry {
     let registry = initialize_tool_registry().await;
-    register_dynamic_tools(&registry, sender, permissions, agent_steps, cancel_token).await;
+    register_dynamic_tools(&registry, sender, permissions, agent_registry, cancel_token).await;
     registry
 }
 
@@ -83,7 +82,7 @@ mod tests {
         let registry = initialize_tool_registry_with_dynamic(
             None,
             ToolPermissions::new("."),
-            HashMap::new(),
+            crate::agent::definition::AgentRegistry::default(),
             CancellationToken::new(),
         )
         .await;
@@ -98,7 +97,7 @@ mod tests {
         let registry = initialize_tool_registry_with_dynamic(
             None,
             permissions.clone(),
-            HashMap::new(),
+            crate::agent::definition::AgentRegistry::default(),
             CancellationToken::new(),
         )
         .await;

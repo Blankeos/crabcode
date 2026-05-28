@@ -1563,6 +1563,13 @@ impl Input {
                 let text = self.get_text();
                 self.replace_range(0..text.len(), &replacement);
             }
+            SuggestionKind::Agent => {
+                let Some(token) = self.current_at_token(true) else {
+                    return;
+                };
+                let replacement = format!("@{} ", suggestion.replacement);
+                self.replace_range(token.range, &replacement);
+            }
             SuggestionKind::File => {
                 let Some(token) = self.current_at_token(true) else {
                     return;
@@ -1606,7 +1613,21 @@ impl Input {
             let suggestions = if let Some(filter) = self.command_query() {
                 autocomplete.command_auto.get_suggestions(&filter, is_chat)
             } else if let Some(token) = self.current_at_token(true) {
-                autocomplete.file_auto.get_suggestions(&token.query)
+                let mut suggestions = Vec::new();
+                suggestions.extend(
+                    autocomplete
+                        .agents
+                        .iter()
+                        .filter(|agent| {
+                            agent
+                                .name
+                                .to_ascii_lowercase()
+                                .starts_with(&token.query.to_ascii_lowercase())
+                        })
+                        .cloned(),
+                );
+                suggestions.extend(autocomplete.file_auto.get_suggestions(&token.query));
+                suggestions
             } else {
                 Vec::new()
             };
@@ -1709,7 +1730,21 @@ impl Input {
                 return autocomplete.command_auto.get_suggestions(&filter, is_chat);
             }
             if let Some(token) = self.current_at_token(true) {
-                return autocomplete.file_auto.get_suggestions(&token.query);
+                let mut suggestions = Vec::new();
+                suggestions.extend(
+                    autocomplete
+                        .agents
+                        .iter()
+                        .filter(|agent| {
+                            agent
+                                .name
+                                .to_ascii_lowercase()
+                                .starts_with(&token.query.to_ascii_lowercase())
+                        })
+                        .cloned(),
+                );
+                suggestions.extend(autocomplete.file_auto.get_suggestions(&token.query));
+                return suggestions;
             }
         }
         Vec::new()
@@ -2114,6 +2149,26 @@ mod tests {
             cursor_cell.fg,
             Some(crate::theme::contrast_text(colors.secondary))
         );
+    }
+
+    #[test]
+    fn test_agent_autocomplete_is_available_outside_chat() {
+        let mut input = Input::new().with_autocomplete(
+            AutoComplete::new(crate::autocomplete::CommandAuto::default()).with_agents(vec![
+                Suggestion::agent("explore", "Explore code"),
+                Suggestion::agent("general", "General task"),
+            ]),
+        );
+        input.insert_str("@");
+
+        let suggestions = input.get_autocomplete_suggestions(false);
+
+        assert!(suggestions
+            .iter()
+            .any(|s| s.kind == SuggestionKind::Agent && s.name == "explore"));
+        assert!(suggestions
+            .iter()
+            .any(|s| s.kind == SuggestionKind::Agent && s.name == "general"));
     }
 
     #[test]

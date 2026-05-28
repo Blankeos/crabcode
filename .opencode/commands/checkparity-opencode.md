@@ -5,6 +5,8 @@ agent: build
 
 Audit the crabcode codebase (this Rust project) against the opencode AI coding agent for 1:1 feature parity. Focus ONLY on core harness functionality (agent loop, system prompt, subagents, tool calling, skill loading, agent config, commands). Do NOT audit UX, theming, keybinds, or non-harness features.
 
+Before changing `_docs/__PARITY.md`, read the existing file and preserve any recently completed items. Add or update a short "Recent implementation notes" section that says which prior gaps have been closed, then adjust the matrix and priority list so completed work is not still presented as an open gap.
+
 ## What to Audit
 
 For each area below, read the relevant crabcode source files, compare against how opencode does it (I will provide opencode's behavior inline), and produce a table row: Feature | Crabcode Status | Gap

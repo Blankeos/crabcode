@@ -799,7 +799,7 @@ pub fn expand_permission_pattern(pattern: &str) -> String {
     trimmed.to_string()
 }
 
-fn wildcard_match(input: &str, pattern: &str) -> bool {
+pub(crate) fn wildcard_match(input: &str, pattern: &str) -> bool {
     let input = input.replace('\\', "/");
     let pattern = pattern.replace('\\', "/");
     let mut escaped = String::new();

@@ -17,6 +17,8 @@ pub enum ChunkMessage {
         session_id: String,
         title: String,
         subagent_type: String,
+        model: Option<String>,
+        provider: Option<String>,
         description: String,
         prompt: String,
     },

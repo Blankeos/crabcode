@@ -365,7 +365,7 @@ pub async fn stream_llm_with_cancellation(
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     agent_mode: String,
     agent_max_steps: Option<usize>,
-    agent_steps: HashMap<String, usize>,
+    agent_registry: crate::agent::definition::AgentRegistry,
     tool_permissions: crate::tools::ToolPermissions,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
@@ -387,7 +387,7 @@ pub async fn stream_llm_with_cancellation(
     let tool_registry = crate::tools::initialize_tool_registry_with_dynamic(
         Some(sender.clone()),
         tool_permissions.clone(),
-        agent_steps,
+        agent_registry,
         cancel_token.clone(),
     )
     .await;
@@ -552,6 +552,41 @@ pub async fn stream_llm_with_cancellation(
     }
 
     Ok(())
+}
+
+pub async fn configure_subagent_llm_session(
+    provider_name: &str,
+    model: String,
+    reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
+    sender: &crate::llm::ChunkSender,
+) -> Result<(), DynError> {
+    let session =
+        build_subagent_llm_session(provider_name, model, reasoning_effort, sender).await?;
+    crate::agent::config::set_llm_session(session);
+    Ok(())
+}
+
+pub async fn build_subagent_llm_session(
+    provider_name: &str,
+    model: String,
+    reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
+    sender: &crate::llm::ChunkSender,
+) -> Result<crate::agent::config::LlmSessionConfig, DynError> {
+    let request_config =
+        prepare_request_config(provider_name, model, reasoning_effort, sender).await?;
+    Ok(crate::agent::config::LlmSessionConfig {
+        provider_name: request_config.provider_name,
+        model: request_config.model_name,
+        api_key: request_config.api_key,
+        provider_kind: match request_config.kind {
+            ProviderKind::OpenAI => crate::agent::config::ProviderKind::OpenAI,
+            ProviderKind::OpenAICompatible => crate::agent::config::ProviderKind::OpenAICompatible,
+            ProviderKind::Anthropic => crate::agent::config::ProviderKind::Anthropic,
+        },
+        base_url: request_config.base_url,
+        reasoning_effort: request_config.reasoning_effort,
+        supports_image_input: request_config.supports_image_input,
+    })
 }
 
 pub async fn summarize_for_compaction(

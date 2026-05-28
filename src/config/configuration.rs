@@ -248,6 +248,7 @@ pub struct MergedConfig {
     pub theme: Option<String>,
     pub model: Option<String>,
     pub default_agent: Option<String>,
+    pub agent_registry: crate::agent::definition::AgentRegistry,
     pub commands: Vec<crate::command::custom::CustomCommand>,
     pub agent_tool_policies: HashMap<String, Vec<String>>,
     pub permission_rules: PermissionRules,
@@ -332,6 +333,22 @@ impl ConfigLoader {
             &mut diagnostics,
         );
         let mut merged_config = parse_merged_config(&merged, &mut diagnostics);
+        let mut agent_definitions = crate::agent::definition::load_markdown_agent_definitions(
+            &inventory.opencode_agents,
+            &mut diagnostics.warnings,
+        );
+        let mut ignored_agent_warnings = Vec::new();
+        agent_definitions.extend(
+            crate::agent::definition::parse_agent_definitions_from_config(
+                merged.get("agent"),
+                &mut ignored_agent_warnings,
+            ),
+        );
+        merged_config.agent_registry = crate::agent::definition::AgentRegistry::with_definitions(
+            merged_config.default_agent.as_deref(),
+            agent_definitions,
+        );
+        merged_config.sync_agent_derived_fields();
         merged_config.commands = commands;
         diagnostics.unimplemented_keys = collect_unimplemented_keys(&merged);
 
@@ -996,9 +1013,15 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     }
 
     out.permission_rules = parse_permission_rules(obj.get("permission"), diagnostics, "permission");
-    out.agent_tool_policies = parse_agent_tool_policies(obj.get("agent"), diagnostics);
-    out.agent_permission_rules = parse_agent_permission_rules(obj.get("agent"), diagnostics);
-    out.agent_steps = parse_agent_steps(obj.get("agent"), diagnostics);
+    let json_agents = crate::agent::definition::parse_agent_definitions_from_config(
+        obj.get("agent"),
+        &mut diagnostics.warnings,
+    );
+    out.agent_registry = crate::agent::definition::AgentRegistry::with_definitions(
+        out.default_agent.as_deref(),
+        json_agents,
+    );
+    out.sync_agent_derived_fields();
     out.provider_timeouts = parse_provider_timeouts(obj.get("provider"), diagnostics);
 
     let mut notifications = NotificationsConfig::default();
@@ -1008,6 +1031,14 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     out.images = parse_images(obj.get("images"), diagnostics);
 
     out
+}
+
+impl MergedConfig {
+    fn sync_agent_derived_fields(&mut self) {
+        self.agent_tool_policies = self.agent_registry.tool_policy_map();
+        self.agent_permission_rules = self.agent_registry.permission_rules_map();
+        self.agent_steps = self.agent_registry.max_steps_map();
+    }
 }
 
 fn parse_agent_tool_policies(

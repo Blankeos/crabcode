@@ -1,122 +1,25 @@
 use crate::agent::config::{get_llm_session, ProviderKind};
+use crate::agent::definition::AgentDefinition;
 use crate::tools::ToolRegistry;
-
-const EXPLORE_SYSTEM_PROMPT: &str = r#"You are a fast, read-only code exploration agent. Your job is to search codebases, find files, and answer questions about code structure.
-
-TOOLS AVAILABLE:
-- glob: Find files by pattern matching
-- grep: Search file contents using regex
-- read: Read file contents with pagination
-- list: List directory contents
-
-IMPORTANT RULES:
-- Only use the tools listed above (glob, grep, read, list)
-- Search in parallel when possible (use multiple tool calls at once)
-- Be thorough - search patterns, naming conventions, and related files
-- Return a single comprehensive message with all findings
-- Focus on precise code locations (file paths and line numbers)
-- If you can't find something after thorough searching, report that clearly
-- Do NOT use bash, write, edit, or any other tools
-
-You will receive a detailed task description from the primary agent. Complete it and return your findings in a single message."#;
-
-const GENERAL_SYSTEM_PROMPT: &str = r#"You are a general-purpose subagent that can use all available tools to complete complex multi-step tasks autonomously.
-
-IMPORTANT RULES:
-- Your entire response will be returned to the primary agent as a single tool result
-- Complete ALL steps autonomously before returning
-- Be thorough and verify your work using available tools
-- Return a single comprehensive message with your results
-- Do NOT ask questions back to the user - just complete the task
-- Do NOT use the update_plan tool
-
-You will receive a detailed task description from the primary agent. Complete it and return your findings in a single comprehensive message."#;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubAgentType {
-    Explore,
-    General,
-}
-
-impl SubAgentType {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "explore" => Some(Self::Explore),
-            "general" => Some(Self::General),
-            _ => None,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Explore => "explore",
-            Self::General => "general",
-        }
-    }
-
-    pub fn description(&self) -> &'static str {
-        match self {
-            Self::Explore => "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns, search code for keywords, or answer questions about the codebase. This agent is read-only and fast.",
-            Self::General => "General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel, generate and run complex scripts, or research unfamiliar code.",
-        }
-    }
-
-    pub fn system_prompt(&self) -> &'static str {
-        match self {
-            Self::Explore => EXPLORE_SYSTEM_PROMPT,
-            Self::General => GENERAL_SYSTEM_PROMPT,
-        }
-    }
-
-    pub fn allowed_tools(&self) -> Vec<&'static str> {
-        match self {
-            Self::Explore => vec!["glob", "grep", "read", "list"],
-            Self::General => vec![
-                "bash", "edit", "write", "read", "grep", "glob", "list", "skill", "webfetch",
-            ],
-        }
-    }
-}
-
-pub struct SubAgentDef {
-    pub subagent_type: SubAgentType,
-    pub name: String,
-    pub description: String,
-}
 
 pub struct SubAgentRunResult {
     pub output: String,
     pub tool_call_count: usize,
 }
 
-impl SubAgentDef {
-    pub fn all() -> Vec<SubAgentDef> {
-        vec![
-            SubAgentDef {
-                subagent_type: SubAgentType::Explore,
-                name: SubAgentType::Explore.name().to_string(),
-                description: SubAgentType::Explore.description().to_string(),
-            },
-            SubAgentDef {
-                subagent_type: SubAgentType::General,
-                name: SubAgentType::General.name().to_string(),
-                description: SubAgentType::General.description().to_string(),
-            },
-        ]
-    }
-}
-
 pub async fn build_scoped_registry(
     full_registry: &ToolRegistry,
-    subagent_type: &SubAgentType,
+    agent: &AgentDefinition,
 ) -> ToolRegistry {
     let scoped = ToolRegistry::new();
-    let allowed = subagent_type.allowed_tools();
+    let allowed = agent.tools.as_ref();
 
     let full_tools = full_registry.list().await;
 
     for tool_def in &full_tools {
-        if allowed.contains(&tool_def.id.as_str()) {
+        let tool_allowed = allowed
+            .is_none_or(|tools| tools.iter().any(|tool| tool == "*" || tool == &tool_def.id));
+        if tool_allowed {
             if let Some(handler) = full_registry.get(&tool_def.id).await {
                 scoped.register(handler).await;
             }
@@ -127,7 +30,7 @@ pub async fn build_scoped_registry(
 }
 
 pub async fn run_subagent(
-    subagent_type: SubAgentType,
+    agent: AgentDefinition,
     description: &str,
     prompt: &str,
     full_registry: &ToolRegistry,
@@ -143,14 +46,15 @@ pub async fn run_subagent(
     use futures::StreamExt;
     use std::collections::HashMap;
 
-    let session = get_llm_session().ok_or("LLM session not configured")?;
+    let parent_session = get_llm_session().ok_or("LLM session not configured")?;
+    let session = resolve_subagent_session(&agent, parent_session, sender.as_ref()).await?;
 
-    let scoped_registry = build_scoped_registry(full_registry, &subagent_type).await;
+    let scoped_registry = build_scoped_registry(full_registry, &agent).await;
 
     let aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
         &scoped_registry,
         sender.clone(),
-        "build".to_string(),
+        agent.name.clone(),
         permissions,
         Some(session_id.clone()),
         None,
@@ -159,7 +63,10 @@ pub async fn run_subagent(
     )
     .await;
 
-    let system_prompt = subagent_type.system_prompt();
+    let system_prompt = agent
+        .instructions
+        .as_deref()
+        .unwrap_or("Complete the delegated task and return a concise, comprehensive result.");
     let user_content = format!(
         "## Task Description\n{}\n\n## Task Prompt\n{}",
         description, prompt
@@ -175,7 +82,7 @@ pub async fn run_subagent(
     crate::emit_log!(
         "[SUBAGENT] stream_start session_id={} subagent_type={} tools={} description_bytes={} prompt_bytes={} max_steps={:?} sender_present={}",
         session_id,
-        subagent_type.name(),
+        agent.name,
         aisdk_tools.len(),
         description.len(),
         prompt.len(),
@@ -227,7 +134,7 @@ pub async fn run_subagent(
                 crate::emit_log!(
                     "[SUBAGENT] stream_failed session_id={} subagent_type={} duration_ms={} error={}",
                     session_id,
-                    subagent_type.name(),
+                    agent.name,
                     stream_started_at.elapsed().as_millis(),
                     err
                 );
@@ -246,7 +153,7 @@ pub async fn run_subagent(
                 crate::emit_log!(
                     "[SUBAGENT_METADATA] session_id={} subagent_type={} {}",
                     session_id,
-                    subagent_type.name(),
+                    agent.name,
                     message
                 );
             }
@@ -313,7 +220,7 @@ pub async fn run_subagent(
                     crate::emit_log!(
                         "[SUBAGENT_METADATA] session_id={} subagent_type={} {}",
                         session_id,
-                        subagent_type.name(),
+                        agent.name,
                         message
                     );
                 }
@@ -324,7 +231,7 @@ pub async fn run_subagent(
     crate::emit_log!(
         "[SUBAGENT] stream_finish session_id={} subagent_type={} duration_ms={} stop_reason={:?} text_bytes={} tool_call_count={}",
         session_id,
-        subagent_type.name(),
+        agent.name,
         stream_started_at.elapsed().as_millis(),
         stop_reason,
         collected_text.len(),
@@ -400,6 +307,43 @@ async fn start_subagent_stream(
                 .map_err(|e| format!("Stream error: {}", e))
         }
     }
+}
+
+async fn resolve_subagent_session(
+    agent: &AgentDefinition,
+    parent_session: crate::agent::config::LlmSessionConfig,
+    sender: Option<&crate::llm::ChunkSender>,
+) -> Result<crate::agent::config::LlmSessionConfig, String> {
+    let Some(model_ref) = agent.model.as_deref() else {
+        return Ok(parent_session);
+    };
+
+    let model_ref = model_ref.trim();
+    if model_ref.is_empty() {
+        return Ok(parent_session);
+    }
+
+    let Some((provider, model)) = model_ref.split_once('/') else {
+        let mut session = parent_session;
+        session.model = model_ref.to_string();
+        return Ok(session);
+    };
+    let provider = provider.trim();
+    let model = model.trim();
+    if provider.is_empty() || model.is_empty() {
+        return Ok(parent_session);
+    }
+
+    let (fallback_sender, _fallback_rx) = tokio::sync::mpsc::unbounded_channel();
+    let sender = sender.unwrap_or(&fallback_sender);
+    crate::llm::client::build_subagent_llm_session(
+        provider,
+        model.to_string(),
+        parent_session.reasoning_effort,
+        sender,
+    )
+    .await
+    .map_err(|err| err.to_string())
 }
 
 fn normalize_subagent_output(output: String) -> String {

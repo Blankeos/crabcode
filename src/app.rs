@@ -14,6 +14,7 @@ use crate::command::parser::InputType;
 use crate::command::registry::Registry;
 use crate::llm::client::stream_llm_with_cancellation;
 use crate::session::manager::SessionManager;
+use crate::tools::ToolHandler;
 
 use crate::push_toast;
 use crate::toast::{self, Toast, ToastLevel};
@@ -273,6 +274,7 @@ pub struct App {
     storage_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<StorageTaskMessage>>,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
+    pub agent_registry: crate::agent::definition::AgentRegistry,
     pub agent_steps: std::collections::HashMap<String, usize>,
     pub provider_timeouts: std::collections::HashMap<String, crate::config::ProviderTimeout>,
     pub model: String,
@@ -380,9 +382,21 @@ impl App {
             registry.register_custom(command);
         }
         crate::command::handlers::register_skill_commands(&mut registry);
-        input.autocomplete = Some(AutoComplete::new(crate::autocomplete::CommandAuto::new(
-            &registry,
-        )));
+        let agent_registry = loaded_config.merged_config.agent_registry.clone();
+        let agent_suggestions = agent_registry
+            .visible_subagents()
+            .into_iter()
+            .map(|agent| {
+                crate::autocomplete::Suggestion::agent(
+                    agent.name.clone(),
+                    agent.description.clone(),
+                )
+            })
+            .collect();
+        input.autocomplete = Some(
+            AutoComplete::new(crate::autocomplete::CommandAuto::new(&registry))
+                .with_agents(agent_suggestions),
+        );
 
         if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
             if !default_agent.trim().is_empty() {
@@ -443,7 +457,7 @@ impl App {
             &loaded_config.cwd,
             loaded_config.merged_config.theme.as_deref(),
         );
-        let agent_steps = loaded_config.merged_config.agent_steps.clone();
+        let agent_steps = agent_registry.max_steps_map();
         let provider_timeouts = loaded_config.merged_config.provider_timeouts.clone();
 
         let theme_for_colors = themes
@@ -456,15 +470,13 @@ impl App {
         let chat_state = init_chat(chat, &agent, &colors);
         let session_rename_dialog_state = init_session_rename_dialog(colors);
         let mut agent_policies = crate::tools::AgentToolPolicies::default();
-        for (mode, tools) in &loaded_config.merged_config.agent_tool_policies {
+        for (mode, tools) in agent_registry.tool_policy_map() {
             agent_policies = agent_policies.with_custom_tools(mode.clone(), tools.clone());
         }
         let tool_permissions = crate::tools::ToolPermissions::new(cwd_path.clone())
             .with_agent_policies(agent_policies)
             .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
-            .with_agent_permission_rules(
-                loaded_config.merged_config.agent_permission_rules.clone(),
-            );
+            .with_agent_permission_rules(agent_registry.permission_rules_map());
 
         let discovery = crate::model::discovery::Discovery::new().ok();
         let cached_git_branch = git::get_branch_for_path(&cwd);
@@ -509,6 +521,7 @@ impl App {
             storage_receiver: None,
             prefs_dao,
             agent,
+            agent_registry,
             agent_steps,
             provider_timeouts,
             model: active_model,
@@ -833,8 +846,14 @@ impl App {
         }
 
         let mut tabs = Vec::with_capacity(children.len() + 1);
+        let root_agent = self.agent.clone();
+        let root_model = self
+            .session_active_stream_model(&root_id)
+            .unwrap_or_else(|| self.model.clone());
         tabs.push(SubagentTab {
             label: "main".to_string(),
+            agent: root_agent,
+            model: root_model,
             active: current_id == root_id,
             running: root.status.is_active()
                 || self
@@ -847,6 +866,8 @@ impl App {
         let colors = self.get_current_theme_colors();
         for (idx, child) in children.into_iter().enumerate() {
             let label = subagent_tab_label(&child.title, &child.id);
+            let (agent, model) =
+                self.session_agent_model_for_display(&child.id, "Subagent", &self.model);
             let running = child.status.is_active()
                 || self
                     .session_view_states
@@ -854,6 +875,8 @@ impl App {
                     .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some());
             tabs.push(SubagentTab {
                 label,
+                agent,
+                model,
                 active: current_id == child.id,
                 running,
                 color: agent_color_for_tab(idx, &colors),
@@ -863,6 +886,72 @@ impl App {
         Some(SubagentTabs {
             is_child_session: current_id != root_id,
             tabs,
+        })
+    }
+
+    fn current_session_agent_model_for_display(&self) -> (String, String) {
+        let Some(session_id) = self.session_manager.get_current_session_id() else {
+            return (self.agent.clone(), self.model.clone());
+        };
+        if self.session_manager.parent_id_of(session_id).is_none() {
+            return (
+                self.agent.clone(),
+                self.session_active_stream_model(session_id)
+                    .unwrap_or_else(|| self.model.clone()),
+            );
+        }
+        self.session_agent_model_for_display(session_id, &self.agent, &self.model)
+    }
+
+    fn session_agent_model_for_display(
+        &self,
+        session_id: &str,
+        fallback_agent: &str,
+        fallback_model: &str,
+    ) -> (String, String) {
+        let agent = self
+            .session_view_states
+            .get(session_id)
+            .and_then(|state| first_agent_mode(&state.chat.messages))
+            .or_else(|| {
+                self.session_manager
+                    .get_session_ref(session_id)
+                    .and_then(|session| first_agent_mode(&session.messages))
+            })
+            .unwrap_or_else(|| fallback_agent.to_string());
+
+        let model = self.session_model_for_display(session_id, fallback_model);
+
+        (agent, model)
+    }
+
+    fn session_model_for_display(&self, session_id: &str, fallback_model: &str) -> String {
+        self.session_active_stream_model(session_id)
+            .or_else(|| {
+                self.session_view_states
+                    .get(session_id)
+                    .and_then(|state| latest_message_model(&state.chat.messages))
+            })
+            .or_else(|| {
+                self.session_manager
+                    .get_session_ref(session_id)
+                    .and_then(|session| latest_message_model(&session.messages))
+            })
+            .unwrap_or_else(|| fallback_model.to_string())
+    }
+
+    fn session_active_stream_model(&self, session_id: &str) -> Option<String> {
+        self.session_view_states.get(session_id).and_then(|state| {
+            state
+                .stream
+                .as_ref()
+                .and_then(|stream| stream.streaming_model.clone())
+                .or_else(|| {
+                    state
+                        .external_stream
+                        .as_ref()
+                        .and_then(|stream| stream.streaming_model.clone())
+                })
         })
     }
 
@@ -2259,7 +2348,7 @@ impl App {
     }
 
     fn toggle_agent_mode(&mut self) {
-        if self.agent == "Plan" {
+        if self.agent.eq_ignore_ascii_case("plan") {
             self.agent = "Build".to_string();
         } else {
             self.agent = "Plan".to_string();
@@ -2322,6 +2411,16 @@ impl App {
                                 let rt = tokio::runtime::Handle::current();
                                 rt.block_on(self.process_command_input(parsed));
                             });
+                        }
+                        crate::command::parser::InputType::AgentMention(mention) => {
+                            if image_paths.is_empty() {
+                                self.input.save_current_to_history();
+                            }
+                            if !self.is_streaming {
+                                self.handle_agent_mention_input(mention, image_paths);
+                            } else {
+                                return;
+                            }
                         }
                         crate::command::parser::InputType::Message(msg) => {
                             // Only save messages (not commands) to prompt history
@@ -3283,6 +3382,10 @@ impl App {
 
                     self.input.clear();
                 }
+                crate::autocomplete::SuggestionKind::Agent => {
+                    self.input.apply_suggestion(&selected);
+                    self.update_suggestions();
+                }
                 crate::autocomplete::SuggestionKind::File => {
                     self.input.apply_suggestion(&selected);
                     self.update_suggestions();
@@ -3797,6 +3900,9 @@ impl App {
             }
             InputType::Message(msg) => {
                 self.handle_message_input(msg);
+            }
+            InputType::AgentMention(mention) => {
+                self.handle_agent_mention_input(mention, Vec::new());
             }
         }
     }
@@ -5384,6 +5490,8 @@ impl App {
                 session_id,
                 title,
                 subagent_type,
+                model,
+                provider,
                 description,
                 prompt,
             } => {
@@ -5392,6 +5500,8 @@ impl App {
                     session_id,
                     title,
                     subagent_type,
+                    model,
+                    provider,
                     description,
                     prompt,
                 );
@@ -5449,6 +5559,8 @@ impl App {
         session_id: String,
         title: String,
         subagent_type: String,
+        model: Option<String>,
+        provider: Option<String>,
         description: String,
         prompt: String,
     ) {
@@ -5469,6 +5581,8 @@ impl App {
 
         let mut user_message = crate::session::types::Message::user(&user_content);
         user_message.agent_mode = Some(subagent_type.clone());
+        user_message.model = model.clone();
+        user_message.provider = provider.clone();
 
         let mut persist_user = false;
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
@@ -5479,12 +5593,14 @@ impl App {
             if let Some(last_msg) = state.chat.messages.last_mut() {
                 last_msg.is_complete = false;
                 last_msg.agent_mode = Some(subagent_type);
+                last_msg.model = model.clone();
+                last_msg.provider = provider.clone();
             }
             state.chat.mark_render_dirty();
             state.chat.begin_streaming_turn();
             state.external_stream = Some(ExternalStreamState {
-                streaming_model: Some(self.model.clone()),
-                streaming_provider: Some(self.provider_name.clone()),
+                streaming_model: model.or_else(|| Some(self.model.clone())),
+                streaming_provider: provider.or_else(|| Some(self.provider_name.clone())),
                 chat_len_before_assistant: 1,
             });
             state.unread_completed = true;
@@ -5953,7 +6069,7 @@ impl App {
             .get(&self.agent.to_ascii_lowercase())
             .copied();
         let tool_permissions = self.tool_permissions.clone();
-        let agent_steps = self.agent_steps.clone();
+        let agent_registry = self.agent_registry.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -5971,7 +6087,7 @@ impl App {
                     let registry = crate::tools::initialize_tool_registry_with_dynamic(
                         Some(sender.clone()),
                         tool_permissions.clone(),
-                        agent_steps.clone(),
+                        agent_registry.clone(),
                         cancel_token.clone(),
                     )
                     .await;
@@ -5991,7 +6107,8 @@ impl App {
                 is_git_repo,
                 std::env::consts::OS,
             )
-            .with_tool_registry(prompt_registry);
+            .with_tool_registry(prompt_registry)
+            .with_agent_registry(agent_registry.clone());
             let system_prompt = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async { composer.compose().await })
             });
@@ -6008,7 +6125,7 @@ impl App {
                 reasoning_effort,
                 agent_mode,
                 agent_max_steps,
-                agent_steps,
+                agent_registry,
                 tool_permissions,
                 messages,
                 sender_clone.clone(),
@@ -6040,6 +6157,202 @@ impl App {
 
     fn handle_message_input(&mut self, msg: String) {
         self.handle_message_input_with_images(msg, Vec::new());
+    }
+
+    fn handle_agent_mention_input(
+        &mut self,
+        mention: crate::command::parser::ParsedAgentMention,
+        image_paths: Vec<std::path::PathBuf>,
+    ) {
+        if image_paths.is_empty() && mention.prompt.trim().is_empty() {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                format!("Usage: @{} <task>", mention.agent),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        let Some(agent) = self.agent_registry.task_target(&mention.agent).cloned() else {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            let available = self
+                .agent_registry
+                .visible_agent_names_for_mentions()
+                .join(", ");
+            let suffix = if available.is_empty() {
+                String::new()
+            } else {
+                format!(" Available agents: {}", available)
+            };
+            push_toast(Toast::new(
+                format!("Unknown agent: @{}.{}", mention.agent, suffix),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(4)),
+            ));
+            return;
+        };
+
+        if !agent.visible_subagent() {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                format!(
+                    "Agent @{} is not available for direct mention",
+                    mention.agent
+                ),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        if !self
+            .agent_registry
+            .can_agent_invoke(&self.agent, &agent.name)
+        {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                format!("{} cannot invoke @{}", self.agent, agent.name),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        if self.base_focus == BaseFocus::Home
+            && self.session_manager.get_current_session_id().is_none()
+        {
+            let session_title = self
+                .pending_session_title
+                .take()
+                .unwrap_or_else(|| Self::generate_title_from_message(&mention.raw));
+            self.create_new_session(Some(session_title));
+        }
+
+        if self.session_manager.get_current_session_id().is_none() {
+            self.create_new_session(Some(Self::generate_title_from_message(&mention.raw)));
+        }
+
+        self.append_user_message_to_current_session(mention.raw.clone(), image_paths);
+        self.base_focus = BaseFocus::Chat;
+
+        if let Err(err) = self.start_agent_mention_task(agent.name, mention.prompt) {
+            push_toast(Toast::new(
+                format!("Agent error: {}", err),
+                ToastLevel::Error,
+                None,
+            ));
+        }
+    }
+
+    fn start_agent_mention_task(
+        &mut self,
+        agent_name: String,
+        prompt: String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::sync::mpsc;
+
+        let session_id = self
+            .session_manager
+            .get_current_session_id()
+            .cloned()
+            .ok_or_else(|| "No active session".to_string())?;
+        self.ensure_session_view_state(&session_id);
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.is_streaming = true;
+
+        let chat_len_before_assistant = self.chat_state.chat.messages.len();
+        let streaming_model = Some(self.model.clone());
+        let streaming_provider = Some(self.provider_name.clone());
+        self.chat_state
+            .chat
+            .prepare_streaming_token_counter(&self.model);
+        self.chat_state.chat.add_assistant_message("");
+        if let Some(last_msg) = self.chat_state.chat.messages.last_mut() {
+            last_msg.is_complete = false;
+        }
+        self.chat_state.chat.mark_render_dirty();
+        self.chat_state.chat.begin_streaming_turn();
+
+        if let Some(state) = self.session_view_states.get_mut(&session_id) {
+            state.stream = Some(SessionStreamState {
+                chunk_receiver: receiver,
+                cancel_token: cancel_token.clone(),
+                streaming_model,
+                streaming_provider,
+                chat_len_before_assistant,
+            });
+            state.tool_calls = ToolCallViewState::default();
+            state.unread_completed = false;
+        }
+        let _ = self.session_manager.set_session_status(
+            &session_id,
+            crate::session::types::SessionStatus::Streaming,
+            None,
+        );
+
+        let provider_name = self.provider_name.clone();
+        let model = self.model.clone();
+        let reasoning_effort = self.active_reasoning_effort();
+        let parent_agent = self.agent.clone();
+        let tool_permissions = self.tool_permissions.clone();
+        let agent_registry = self.agent_registry.clone();
+        let task_description = format!("{} mention", agent_name);
+        let sender_for_error = sender.clone();
+
+        tokio::spawn(async move {
+            let result = async {
+                crate::llm::client::configure_subagent_llm_session(
+                    &provider_name,
+                    model,
+                    reasoning_effort,
+                    &sender,
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+
+                let registry = crate::tools::initialize_tool_registry_with_dynamic(
+                    Some(sender.clone()),
+                    tool_permissions.clone(),
+                    agent_registry.clone(),
+                    cancel_token.clone(),
+                )
+                .await;
+                let task = crate::tools::TaskTool::new(registry)
+                    .with_sender_opt(Some(sender.clone()))
+                    .with_runtime_options(tool_permissions, agent_registry, cancel_token.clone());
+                let params = serde_json::json!({
+                    "subagent_type": agent_name,
+                    "description": task_description,
+                    "prompt": prompt,
+                });
+                let ctx = crate::tools::ToolContext::from_cancel_token(
+                    session_id.clone(),
+                    "agent-mention",
+                    parent_agent,
+                    cancel_token,
+                );
+
+                task.execute(params, &ctx)
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            .await;
+
+            match result {
+                Ok(tool_result) => {
+                    let _ = sender.send(crate::llm::ChunkMessage::Text(tool_result.output));
+                    let _ = sender.send(crate::llm::ChunkMessage::End);
+                }
+                Err(err) => {
+                    let _ = sender_for_error.send(crate::llm::ChunkMessage::Failed(err));
+                }
+            }
+        });
+
+        Ok(())
     }
 
     fn append_user_message_to_current_session(
@@ -6225,6 +6538,7 @@ impl App {
             BaseFocus::Chat => {
                 let subagent_tabs = self.subagent_tabs_for_current_session();
                 let queued_messages = self.queued_message_previews_for_current_session();
+                let (display_agent, display_model) = self.current_session_agent_model_for_display();
                 render_chat(
                     f,
                     &mut self.chat_state,
@@ -6232,8 +6546,8 @@ impl App {
                     self.version.clone(),
                     status_cwd.clone(),
                     branch,
-                    self.agent.clone(),
-                    self.model.clone(),
+                    display_agent,
+                    display_model,
                     self.provider_name.clone(),
                     reasoning_effort,
                     &colors,
@@ -6592,12 +6906,40 @@ fn subagent_tab_label(title: &str, fallback: &str) -> String {
     }
 }
 
+fn first_agent_mode(messages: &[crate::session::types::Message]) -> Option<String> {
+    messages
+        .iter()
+        .find_map(|message| message.agent_mode.as_deref())
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn latest_message_model(messages: &[crate::session::types::Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| message.model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn titlecase_ascii(value: &str) -> String {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
+    let mut out = String::new();
+    let mut word_start = true;
+    for ch in value.trim().chars() {
+        if matches!(ch, '-' | '_' | ' ') {
+            out.push(ch);
+            word_start = true;
+        } else if word_start {
+            out.push(ch.to_ascii_uppercase());
+            word_start = false;
+        } else {
+            out.push(ch);
+        }
     }
+    out
 }
 
 impl Default for App {
@@ -6661,6 +7003,7 @@ mod tests {
             storage_receiver: None,
             prefs_dao: None,
             agent: "Build".to_string(),
+            agent_registry: crate::agent::definition::AgentRegistry::default(),
             agent_steps: std::collections::HashMap::new(),
             provider_timeouts: std::collections::HashMap::new(),
             model: "test-model".to_string(),
@@ -7884,6 +8227,8 @@ mod tests {
             "child-a".to_string(),
             "Explore task (@explore subagent)".to_string(),
             "explore".to_string(),
+            None,
+            None,
             "Explore task".to_string(),
             "Find files".to_string(),
         );
@@ -7892,6 +8237,8 @@ mod tests {
             "child-b".to_string(),
             "General task (@general subagent)".to_string(),
             "general".to_string(),
+            None,
+            None,
             "General task".to_string(),
             "Check implementation".to_string(),
         );
@@ -7942,6 +8289,8 @@ mod tests {
             "child-a".to_string(),
             "General task (@general subagent)".to_string(),
             "general".to_string(),
+            Some("sub-model".to_string()),
+            Some("sub-provider".to_string()),
             "General task".to_string(),
             "Check implementation".to_string(),
         );
@@ -7958,6 +8307,10 @@ mod tests {
         assert_eq!(
             subagent_tab_label("Find files (@explore subagent)", "fallback"),
             "Explore"
+        );
+        assert_eq!(
+            subagent_tab_label("Analyze image (@vlm-agent subagent)", "fallback"),
+            "Vlm-Agent"
         );
         assert_eq!(subagent_tab_label("", "fallback"), "fallback");
     }

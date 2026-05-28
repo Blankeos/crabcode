@@ -28,6 +28,8 @@ pub struct ChatState {
 #[derive(Debug, Clone)]
 pub struct SubagentTab {
     pub label: String,
+    pub agent: String,
+    pub model: String,
     pub active: bool,
     pub running: bool,
     pub color: ratatui::style::Color,
@@ -442,6 +444,10 @@ fn render_subagent_footer(
         .unwrap_or("Subagent");
     let running = active_tab.is_some_and(|tab| tab.running);
     let active_color = active_tab.map(|tab| tab.color).unwrap_or(colors.primary);
+    let active_agent = active_tab
+        .map(|tab| tab.agent.as_str())
+        .unwrap_or("Subagent");
+    let active_model = active_tab.map(|tab| tab.model.as_str()).unwrap_or("");
 
     let border_set = border::Set {
         vertical_left: "┃",
@@ -462,15 +468,15 @@ fn render_subagent_footer(
         return;
     }
 
-    let mut left_spans = vec![
-        Span::styled(
-            label.to_string(),
-            Style::default()
-                .fg(colors.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(" ({} of {})", active_index + 1, total)),
-    ];
+    let mut left_spans =
+        agent_model_spans_with_color(active_agent, active_model, active_color, colors);
+    left_spans.push(Span::raw("  "));
+    left_spans.push(Span::styled(
+        format!("{} ({} of {})", label, active_index + 1, total),
+        Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM),
+    ));
 
     if running {
         left_spans.push(Span::raw(" "));
@@ -549,6 +555,55 @@ fn render_subagent_footer(
     );
 }
 
+fn agent_model_spans_with_color(
+    agent: &str,
+    model: &str,
+    agent_color: Color,
+    colors: &ThemeColors,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled(
+            "▣  ",
+            Style::default()
+                .fg(agent_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            display_agent_name(agent),
+            Style::default()
+                .fg(agent_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if !model.trim().is_empty() {
+        spans.push(Span::styled(" • ", Style::default().fg(colors.text_weak)));
+        spans.push(Span::styled(
+            model.trim().to_string(),
+            Style::default().fg(colors.text),
+        ));
+    }
+
+    spans
+}
+
+fn display_agent_name(agent: &str) -> String {
+    let mut out = String::new();
+    let mut word_start = true;
+    for ch in agent.trim().chars() {
+        if matches!(ch, '-' | '_' | ' ') {
+            out.push(ch);
+            word_start = true;
+        } else if word_start {
+            out.push(ch.to_ascii_uppercase());
+            word_start = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn centered_subagent_footer_content(area: Rect) -> Rect {
     if area.width <= 3 || area.height == 0 {
         return Rect::new(area.x, area.y, area.width, area.height.min(1));
@@ -559,5 +614,17 @@ fn centered_subagent_footer_content(area: Rect) -> Rect {
         y: area.y + area.height / 2,
         width: area.width.saturating_sub(3),
         height: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_agent_name;
+
+    #[test]
+    fn display_agent_name_title_cases_agent_words() {
+        assert_eq!(display_agent_name("build"), "Build");
+        assert_eq!(display_agent_name("vlm-agent"), "Vlm-Agent");
+        assert_eq!(display_agent_name("general_reviewer"), "General_Reviewer");
     }
 }
