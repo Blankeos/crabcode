@@ -69,6 +69,8 @@ pub struct Chat {
     cached_width: usize,
     cached_colors_hash: u64,
     cached_fingerprint: u64,
+    cached_active_tools_revision: std::cell::Cell<u64>,
+    cached_has_active_tools: std::cell::Cell<bool>,
     tool_marker_animation_phase: bool,
     hovered_image: Option<ChatImageTarget>,
     hovered_hyperlink: Option<ChatHyperlinkHover>,
@@ -705,6 +707,8 @@ impl Chat {
             cached_width: 0,
             cached_colors_hash: 0,
             cached_fingerprint: 0,
+            cached_active_tools_revision: std::cell::Cell::new(0),
+            cached_has_active_tools: std::cell::Cell::new(false),
             tool_marker_animation_phase: false,
             hovered_image: None,
             hovered_hyperlink: None,
@@ -748,6 +752,8 @@ impl Chat {
             cached_width: 0,
             cached_colors_hash: 0,
             cached_fingerprint: 0,
+            cached_active_tools_revision: std::cell::Cell::new(0),
+            cached_has_active_tools: std::cell::Cell::new(false),
             tool_marker_animation_phase: false,
             hovered_image: None,
             hovered_hyperlink: None,
@@ -910,6 +916,8 @@ impl Chat {
         self.cached_width = 0;
         self.cached_colors_hash = 0;
         self.cached_fingerprint = 0;
+        self.cached_active_tools_revision.set(0);
+        self.cached_has_active_tools.set(false);
         self.tool_marker_animation_phase = false;
         self.invalidate_cache();
     }
@@ -917,6 +925,7 @@ impl Chat {
     fn invalidate_cache(&mut self) {
         self.render_revision = self.render_revision.wrapping_add(1).max(1);
         self.cached_fingerprint = 0;
+        self.cached_active_tools_revision.set(0);
     }
 
     fn cache_colors_hash(colors: &ThemeColors) -> u64 {
@@ -1105,12 +1114,20 @@ impl Chat {
     }
 
     pub(crate) fn has_active_tool_messages(&self) -> bool {
-        self.messages.iter().rev().any(|message| {
+        if self.cached_active_tools_revision.get() == self.render_revision {
+            return self.cached_has_active_tools.get();
+        }
+
+        let has_active_tools = self.messages.iter().rev().any(|message| {
             message.role == MessageRole::Tool
                 && parse_tool_message(&message.content)
                     .map(|info| matches!(info.status.as_str(), "running" | "pending"))
                     .unwrap_or(false)
-        })
+        });
+
+        self.cached_has_active_tools.set(has_active_tools);
+        self.cached_active_tools_revision.set(self.render_revision);
+        has_active_tools
     }
 
     pub fn prepare_streaming_token_counter(&mut self, model: &str) {
@@ -1930,6 +1947,7 @@ impl Chat {
             let (message_lines, message_positions) =
                 self.build_all_lines_with_positions(max_width, model, colors);
             self.cached_lines = message_lines.into_iter().map(line_to_static).collect();
+            self.message_line_positions = message_positions.clone();
             self.cached_positions = message_positions;
             self.cached_revision = self.render_revision;
             self.cached_width = max_width;
@@ -2037,7 +2055,6 @@ impl Chat {
         }
 
         self.content_height = content_height;
-        self.message_line_positions = positions.to_vec();
         self.scroll_offset = clamped_scroll;
         self.update_scrollbar();
 
@@ -4107,6 +4124,31 @@ mod tests {
 
         assert_eq!(first_frame[0], "⬡ Webfetch https://example.com");
         assert_eq!(second_frame[0], "⬢ Webfetch https://example.com");
+    }
+
+    #[test]
+    fn test_active_tool_scan_cache_recomputes_after_render_dirty() {
+        let mut chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "bash",
+            "status": "running",
+            "args": { "command": "printf hello" },
+        })
+        .to_string();
+
+        chat.add_message(Message::tool(content));
+        assert!(chat.has_active_tool_messages());
+
+        chat.messages[0].content = serde_json::json!({
+            "name": "bash",
+            "status": "ok",
+            "args": { "command": "printf hello" },
+            "output_preview": "hello",
+        })
+        .to_string();
+        chat.mark_render_dirty();
+
+        assert!(!chat.has_active_tool_messages());
     }
 
     #[test]
