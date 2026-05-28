@@ -2982,10 +2982,8 @@ impl App {
                         }
 
                         if mouse.modifiers.is_empty() {
-                            self.pending_chat_message_click = self
-                                .chat_state
-                                .chat
-                                .message_index_at_position(mouse, chat_area);
+                            self.pending_chat_message_click =
+                                self.message_actions_index_at_position(mouse, chat_area);
                         }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
@@ -4112,6 +4110,25 @@ impl App {
             OverlayFocus::None
         };
         self.show_message_actions_from(idx, return_focus);
+    }
+
+    fn message_actions_index_at_position(
+        &self,
+        mouse: MouseEvent,
+        chat_area: Rect,
+    ) -> Option<usize> {
+        self.chat_state
+            .chat
+            .message_index_at_position(mouse, chat_area)
+            .filter(|idx| {
+                self.chat_state
+                    .chat
+                    .messages
+                    .get(*idx)
+                    .is_some_and(|message| {
+                        message.role != crate::session::types::MessageRole::Assistant
+                    })
+            })
     }
 
     fn show_message_actions_from(&mut self, idx: usize, return_focus: OverlayFocus) {
@@ -6912,6 +6929,42 @@ mod tests {
             scroll_offset_before_click
         );
         assert!(message_action_names(&app).contains(&"Undo".to_string()));
+    }
+
+    #[test]
+    fn clicking_assistant_chat_message_does_not_open_message_actions() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let _session_id = app.create_new_session(Some("Chat click".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let message = crate::session::types::Message::assistant("click me");
+        app.chat_state.chat.add_message(message.clone());
+        app.session_manager
+            .add_message_to_current_session(&message)
+            .unwrap();
+        let colors = app.get_current_theme_colors();
+        let positions = app
+            .chat_state
+            .chat
+            .get_message_line_positions(78, &app.model, &colors);
+        app.chat_state.chat.message_line_positions = positions;
+        app.chat_state.chat.content_height = 4;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+        assert_eq!(
+            app.chat_state.chat.message_index_at_position(
+                mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+                app.current_chat_area(),
+            ),
+            Some(0)
+        );
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), 1, 1));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert_eq!(app.message_actions_index, None);
+        assert_eq!(app.chat_state.chat.highlighted_message_index, None);
     }
 
     #[test]
