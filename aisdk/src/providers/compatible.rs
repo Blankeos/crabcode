@@ -102,28 +102,7 @@ impl Provider for OpenAICompatible {
 
         let include_empty_tool_call_reasoning =
             openai_compatible_requires_tool_call_reasoning_content(self);
-        let chat_messages: Vec<serde_json::Value> = messages
-            .iter()
-            .flat_map(|m| match m {
-                Message::System(s) => vec![serde_json::json!({
-                    "role": "system",
-                    "content": s.content,
-                })],
-                Message::User(u) => vec![serde_json::json!({
-                    "role": "user",
-                    "content": openai_compatible_user_content(u),
-                })],
-                Message::Assistant(a) => vec![serde_json::json!({
-                    "role": "assistant",
-                    "content": a.content,
-                })],
-                Message::ToolCall(t) => vec![openai_compatible_tool_call_message(
-                    t,
-                    include_empty_tool_call_reasoning,
-                )],
-                Message::ToolOutput(t) => openai_compatible_tool_output_messages(t),
-            })
-            .collect();
+        let chat_messages = openai_compatible_messages(messages, include_empty_tool_call_reasoning);
 
         let tool_params: Vec<serde_json::Value> = tools
             .iter()
@@ -222,25 +201,88 @@ fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_j
     serde_json::Value::Array(parts)
 }
 
-fn openai_compatible_tool_call_message(
-    tool: &crate::message::ToolCallMessage,
+fn openai_compatible_messages(
+    messages: &[Message],
+    include_empty_tool_call_reasoning: bool,
+) -> Vec<serde_json::Value> {
+    let mut chat_messages = Vec::new();
+    let mut index = 0;
+
+    while index < messages.len() {
+        match &messages[index] {
+            Message::System(s) => {
+                chat_messages.push(serde_json::json!({
+                    "role": "system",
+                    "content": s.content,
+                }));
+                index += 1;
+            }
+            Message::User(u) => {
+                chat_messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": openai_compatible_user_content(u),
+                }));
+                index += 1;
+            }
+            Message::Assistant(a) => {
+                chat_messages.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": a.content,
+                }));
+                index += 1;
+            }
+            Message::ToolCall(_) => {
+                let mut tool_calls = Vec::new();
+                let mut reasoning_content = None;
+
+                while let Some(Message::ToolCall(tool)) = messages.get(index) {
+                    if reasoning_content.is_none() {
+                        reasoning_content = tool.reasoning_content.clone();
+                    }
+                    tool_calls.push(openai_compatible_tool_call(tool));
+                    index += 1;
+                }
+
+                chat_messages.push(openai_compatible_tool_call_message_from_calls(
+                    tool_calls,
+                    reasoning_content,
+                    include_empty_tool_call_reasoning,
+                ));
+            }
+            Message::ToolOutput(t) => {
+                chat_messages.extend(openai_compatible_tool_output_messages(t));
+                index += 1;
+            }
+        }
+    }
+
+    chat_messages
+}
+
+fn openai_compatible_tool_call(tool: &crate::message::ToolCallMessage) -> serde_json::Value {
+    serde_json::json!({
+        "id": tool.call_id,
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "arguments": tool.arguments,
+        }
+    })
+}
+
+fn openai_compatible_tool_call_message_from_calls(
+    tool_calls: Vec<serde_json::Value>,
+    reasoning_content: Option<String>,
     include_empty_reasoning_content: bool,
 ) -> serde_json::Value {
     let mut message = serde_json::json!({
         "role": "assistant",
         "content": serde_json::Value::Null,
-        "tool_calls": [{
-            "id": tool.call_id,
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "arguments": tool.arguments,
-            }
-        }],
+        "tool_calls": tool_calls,
     });
 
-    if let Some(reasoning_content) = &tool.reasoning_content {
-        message["reasoning_content"] = serde_json::Value::String(reasoning_content.clone());
+    if let Some(reasoning_content) = reasoning_content {
+        message["reasoning_content"] = serde_json::Value::String(reasoning_content);
     } else if include_empty_reasoning_content {
         message["reasoning_content"] = serde_json::Value::String(String::new());
     }
@@ -497,7 +539,11 @@ mod tests {
             panic!("expected tool call message");
         };
 
-        let payload = openai_compatible_tool_call_message(&tool, false);
+        let payload = openai_compatible_tool_call_message_from_calls(
+            vec![openai_compatible_tool_call(&tool)],
+            tool.reasoning_content.clone(),
+            false,
+        );
 
         assert_eq!(payload["reasoning_content"], "plan");
     }
@@ -515,12 +561,36 @@ mod tests {
             panic!("expected tool call message");
         };
 
-        let payload = openai_compatible_tool_call_message(
-            &tool,
+        let payload = openai_compatible_tool_call_message_from_calls(
+            vec![openai_compatible_tool_call(&tool)],
+            tool.reasoning_content.clone(),
             openai_compatible_requires_tool_call_reasoning_content(&provider),
         );
 
         assert_eq!(payload["reasoning_content"], "");
+    }
+
+    #[test]
+    fn groups_adjacent_tool_calls_before_tool_outputs() {
+        let messages = vec![
+            Message::system("system"),
+            Message::user("user"),
+            Message::tool_call("glob:0", "glob", r#"{"pattern":"**/*.jpg"}"#),
+            Message::tool_call("glob:1", "glob", r#"{"pattern":"**/*.png"}"#),
+            Message::tool_output("glob:0", "glob", "jpg result", false),
+            Message::tool_output("glob:1", "glob", "png result", false),
+        ];
+
+        let payload = openai_compatible_messages(&messages, false);
+
+        assert_eq!(payload.len(), 5);
+        assert_eq!(payload[2]["role"], "assistant");
+        assert_eq!(payload[2]["tool_calls"][0]["id"], "glob:0");
+        assert_eq!(payload[2]["tool_calls"][1]["id"], "glob:1");
+        assert_eq!(payload[3]["role"], "tool");
+        assert_eq!(payload[3]["tool_call_id"], "glob:0");
+        assert_eq!(payload[4]["role"], "tool");
+        assert_eq!(payload[4]["tool_call_id"], "glob:1");
     }
 
     #[test]
