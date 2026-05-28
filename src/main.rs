@@ -40,7 +40,7 @@ use ratatui::crossterm::{
     },
 };
 use ratatui::{backend::CrosstermBackend, style::Color, Terminal};
-use std::io;
+use std::io::{self, IsTerminal, Read};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -349,6 +349,36 @@ struct Args {
     prompt: Vec<String>,
 }
 
+fn merge_prompt_with_stdin(prompt: &str, stdin: &str) -> String {
+    if stdin.trim().is_empty() {
+        return prompt.to_string();
+    }
+
+    let mut merged = String::with_capacity(prompt.len() + stdin.len() + 24);
+    merged.push_str(prompt);
+    merged.push_str("\n\n<stdin>\n");
+    merged.push_str(stdin);
+    if !stdin.ends_with('\n') {
+        merged.push('\n');
+    }
+    merged.push_str("</stdin>");
+    merged
+}
+
+fn read_print_mode_prompt(prompt: &str) -> Result<String> {
+    let mut stdin = io::stdin();
+    if stdin.is_terminal() {
+        return Ok(prompt.to_string());
+    }
+
+    let mut stdin_content = Vec::new();
+    stdin.read_to_end(&mut stdin_content)?;
+    Ok(merge_prompt_with_stdin(
+        prompt,
+        &String::from_utf8_lossy(&stdin_content),
+    ))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -361,6 +391,7 @@ async fn main() -> Result<()> {
             eprintln!("Usage: crabcode -p \"<PROMPT>\"");
             std::process::exit(1);
         }
+        let prompt = read_print_mode_prompt(&prompt)?;
         return run_print_mode(
             &prompt,
             args.model.as_deref(),
@@ -518,6 +549,22 @@ mod tests {
             vec!["hi", "--model", "opencode-go/deepseek-v4-flash"]
         );
         assert_eq!(args.model, None);
+    }
+
+    #[test]
+    fn merge_prompt_with_stdin_ignores_empty_input() {
+        assert_eq!(
+            merge_prompt_with_stdin("Generate a commit message.", "\n \t\n"),
+            "Generate a commit message."
+        );
+    }
+
+    #[test]
+    fn merge_prompt_with_stdin_wraps_piped_input() {
+        assert_eq!(
+            merge_prompt_with_stdin("Examine the diff.", "diff --git a/a b/a\n+change"),
+            "Examine the diff.\n\n<stdin>\ndiff --git a/a b/a\n+change\n</stdin>"
+        );
     }
 }
 
