@@ -194,22 +194,22 @@ I want - [x] To do this But I dont want to do this
 
 - [x] Mouse scroll ux just like opencode, when highlighting. Needs to scroll when I reach edges as I drag and click.
 
-- [ ] Sometimes list items that have "bold" characters on them kinda break a new line between the number enum and the actual sentence i.e.
+- [x] Sometimes list items that have "bold" characters on them kinda break a new line between the number enum and the actual sentence i.e.
   - 1. <br/>**Replaced old indicator**.
   - Even though when I copy it looks like
 
-    ```
-    1. **Replaced the old loading indicator** (`SheetCopilot.tsx:757`) with a new shimmer bar that shows unconditionally whenever `loading()` is true. Text reads "Generating Response..." with an animated sweep across a 1px track.
+        ```
+        1. **Replaced the old loading indicator** (`SheetCopilot.tsx:757`) with a new shimmer bar that shows unconditionally whenever `loading()` is true. Text reads "Generating Response..." with an animated sweep across a 1px track.
 
-    2. **Removed the `draftPatch` label** (`SheetCopilot.tsx:1273`) from the tool-call topline — the card now renders without the external label.
-G
-    3. **Added shimmer CSS** (`sheetpilot.css:1165`) with `@keyframes sheetpilot-shimmer-sweep` and the `.sheetpilot-generating*` layout.
+        2. **Removed the `draftPatch` label** (`SheetCopilot.tsx:1273`) from the tool-call topline — the card now renders without the external label.
 
-    Build it with your usual `pnpm dev` / `pnpm build` to see the changes.
-    ```
+    G 3. **Added shimmer CSS** (`sheetpilot.css:1165`) with `@keyframes sheetpilot-shimmer-sweep` and the `.sheetpilot-generating*` layout.
+
+        Build it with your usual `pnpm dev` / `pnpm build` to see the changes.
+        ```
 
 - [ ] Make "▼ 💭 Thinking" rendered like this. And an accordion, so if I click it with my mouse, or with a special hotkey + command palette command. It can be toggled on and off.
 
 - [ ] Subagent UI view is not rendering the full table it seems like.. I always see this.. just the top.
-    - `┌─────────────────────────┬────────────────────────────────────────────────────────────────────────────` - never the full table
-    - Thouh I think the table does have content. I think it's just being weird.
+  - `┌─────────────────────────┬────────────────────────────────────────────────────────────────────────────` - never the full table
+  - Thouh I think the table does have content. I think it's just being weird.

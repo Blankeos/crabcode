@@ -147,14 +147,18 @@ pub fn render_markdown(
     let text = tui_markdown::from_str_with_options(&processed, &options);
 
     // Convert to our ratatui version's Line type and wrap to max_width
-    let mut result = Vec::new();
+    let mut themed_lines = Vec::new();
     let mut in_code_block = false;
 
     for line in text.lines {
         // Convert ratatui-core Line to our ratatui Line
         let mut converted_line = convert_line(line);
         apply_markdown_theme(&mut converted_line, &mut in_code_block, colors);
+        themed_lines.push(converted_line);
+    }
 
+    let mut result = Vec::new();
+    for converted_line in join_detached_list_markers(themed_lines) {
         // Check if line needs wrapping
         let line_str = line_to_string(&converted_line);
         let line_width = unicode_width::UnicodeWidthStr::width(line_str.as_str());
@@ -177,6 +181,54 @@ pub fn render_markdown(
     }
 
     result
+}
+
+fn join_detached_list_markers(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    let mut result = Vec::with_capacity(lines.len());
+    let mut iter = lines.into_iter().peekable();
+
+    while let Some(mut line) = iter.next() {
+        if is_detached_list_marker_line(&line) {
+            if let Some(next) = iter.peek() {
+                let next_text = line_to_string(next);
+                if !next_text.trim().is_empty() && !is_detached_list_marker_text(&next_text) {
+                    let next = iter.next().expect("peeked next line");
+                    ensure_trailing_marker_space(&mut line);
+                    line.spans.extend(next.spans);
+                    result.push(line);
+                    continue;
+                }
+            }
+        }
+
+        result.push(line);
+    }
+
+    result
+}
+
+fn is_detached_list_marker_line(line: &Line<'_>) -> bool {
+    let text = line_to_string(line);
+    text.ends_with(' ') && is_detached_list_marker_text(&text)
+}
+
+fn is_detached_list_marker_text(text: &str) -> bool {
+    let marker = text.trim_end().trim_start();
+
+    matches!(marker, "-" | "*" | "+")
+        || marker.strip_suffix('.').is_some_and(|digits| {
+            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+fn ensure_trailing_marker_space(line: &mut Line<'static>) {
+    let Some(last_span) = line.spans.last_mut() else {
+        return;
+    };
+    if last_span.content.ends_with(' ') {
+        return;
+    }
+    last_span.content.to_mut().push(' ');
 }
 
 fn is_preprocessed_table_line(line: &str) -> bool {
@@ -526,6 +578,36 @@ mod tests {
         );
         // Should produce multiple lines due to wrapping
         assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn test_ordered_list_marker_stays_with_bold_item_text() {
+        let colors = test_colors();
+        let lines = render_markdown(
+            "1. **Replaced the old loading indicator** (`SheetCopilot.tsx:757`) with a new shimmer bar.",
+            10,
+            &colors,
+        );
+        let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
+
+        assert!(rendered[0].starts_with("1. Replace"));
+        assert!(!rendered.iter().any(|line| line.trim_end() == "1."));
+    }
+
+    #[test]
+    fn test_multiple_ordered_list_items_keep_markers_inline() {
+        let colors = test_colors();
+        let lines = render_markdown(
+            "1. **Removed the label** from the topline.\n\n2. **Added shimmer CSS** with keyframes.",
+            80,
+            &colors,
+        );
+        let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
+
+        assert!(rendered.iter().any(|line| line.starts_with("1. Removed")));
+        assert!(rendered.iter().any(|line| line.starts_with("2. Added")));
+        assert!(!rendered.iter().any(|line| line.trim_end() == "1."));
+        assert!(!rendered.iter().any(|line| line.trim_end() == "2."));
     }
 
     #[test]

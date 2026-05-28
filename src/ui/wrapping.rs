@@ -152,8 +152,22 @@ fn wrap_ranges(text: &str, first_width: usize, subsequent_width: usize) -> Vec<R
         }
 
         if let Some((break_start, break_end)) = last_break {
-            ranges.push(start..trim_trailing_whitespace(text, break_start, start));
-            start = skip_breaking_whitespace(text, break_end);
+            if is_leading_list_marker_break(text, start, break_start, break_end) {
+                let end = forced_break
+                    .map(|end| {
+                        if end == start {
+                            next_char_boundary(text, start)
+                        } else {
+                            end
+                        }
+                    })
+                    .unwrap_or_else(|| trim_trailing_whitespace(text, break_start, start));
+                ranges.push(start..end);
+                start = end;
+            } else {
+                ranges.push(start..trim_trailing_whitespace(text, break_start, start));
+                start = skip_breaking_whitespace(text, break_end);
+            }
         } else if let Some(end) = forced_break {
             let end = if end == start {
                 next_char_boundary(text, start)
@@ -172,6 +186,30 @@ fn wrap_ranges(text: &str, first_width: usize, subsequent_width: usize) -> Vec<R
     }
 
     ranges
+}
+
+fn is_leading_list_marker_break(
+    text: &str,
+    start: usize,
+    break_start: usize,
+    break_end: usize,
+) -> bool {
+    if break_end <= start || break_end > text.len() {
+        return false;
+    }
+
+    let prefix = &text[start..break_end];
+    if !prefix.ends_with(' ') {
+        return false;
+    }
+
+    let marker = prefix.trim_end().trim_start();
+    let is_marker = matches!(marker, "-" | "*" | "+")
+        || marker.strip_suffix('.').is_some_and(|digits| {
+            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+        });
+
+    is_marker && break_start + 1 == break_end
 }
 
 fn skip_breaking_whitespace(text: &str, mut byte_idx: usize) -> usize {
@@ -332,6 +370,22 @@ mod tests {
         assert_eq!(line_text(&wrapped[0]), "one two");
         assert_eq!(line_text(&wrapped[1]), "  three");
         assert_eq!(line_text(&wrapped[2]), "  four");
+    }
+
+    #[test]
+    fn keeps_ordered_list_marker_with_first_word_when_wrapping() {
+        let wrapped = wrap_styled_line(&Line::from("1. Replaced old indicator"), 10);
+
+        assert_eq!(line_text(&wrapped[0]), "1. Replace");
+        assert_ne!(line_text(&wrapped[0]), "1.");
+    }
+
+    #[test]
+    fn keeps_unordered_list_marker_with_first_word_when_wrapping() {
+        let wrapped = wrap_styled_line(&Line::from("- Replaced old indicator"), 8);
+
+        assert_eq!(line_text(&wrapped[0]), "- Replac");
+        assert_ne!(line_text(&wrapped[0]), "-");
     }
 
     #[test]
