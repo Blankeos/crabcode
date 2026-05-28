@@ -53,6 +53,51 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
 }
 ```
 
+## Permissions
+
+crabcode reads the OpenCode-compatible `permission` field. Rules resolve to `allow`, `ask`, or `deny`, with later matching rules taking precedence.
+
+```jsonc title="crabcode.jsonc"
+{
+  "permission": {
+    "*": "ask",
+    "bash": {
+      "*": "ask",
+      "git *": "allow",
+      "git push *": "deny"
+    },
+    "edit": "ask",
+    "external_directory": {
+      "~/projects/reference/**": "allow"
+    }
+  }
+}
+```
+
+Permission keys can be concrete tool names, wildcard tool patterns like `mcp_*`, or built-in guard keys such as `external_directory` and `doom_loop`. Bash rules match the command string, so patterns like `git *`, `npm run *`, or `rm *` work as command gates. Path patterns support `~` and `$HOME` at the start.
+
+You can also override permissions per agent. Agent rules are merged after global rules, so they win when both match.
+
+```jsonc title="crabcode.jsonc"
+{
+  "permission": {
+    "bash": "ask"
+  },
+  "agent": {
+    "build": {
+      "permission": {
+        "bash": {
+          "*": "ask",
+          "git status *": "allow"
+        }
+      }
+    }
+  }
+}
+```
+
+Plan mode is read-only by default and does not expose `bash`, `write`, or `edit` unless an explicit agent tool policy enables them. The existing safety prompts for sensitive reads, external paths, and repeated identical tool calls remain active by default.
+
 ## What belongs where
 
 | Need | Put it in |

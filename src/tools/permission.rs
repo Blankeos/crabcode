@@ -1,5 +1,6 @@
 use crate::llm::{ChunkMessage, ChunkSender};
 use crate::tools::ToolError;
+use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -43,6 +44,33 @@ pub enum PermissionResponse {
     AllowAlways,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PermissionPolicyAction {
+    Allow,
+    Deny,
+    Ask,
+}
+
+impl PermissionPolicyAction {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "allow" => Some(Self::Allow),
+            "deny" => Some(Self::Deny),
+            "ask" => Some(Self::Ask),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PermissionRule {
+    pub permission: String,
+    pub pattern: String,
+    pub action: PermissionPolicyAction,
+}
+
+pub type PermissionRules = Vec<PermissionRule>;
+
 #[derive(Debug)]
 pub struct PermissionPrompt {
     pub tool_id: String,
@@ -59,6 +87,7 @@ enum PermissionReasonKind {
     SensitivePath,
     ExternalPath,
     DoomLoop,
+    ConfiguredAsk,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -116,9 +145,9 @@ impl AgentToolPolicies {
         }
 
         if mode == "plan" {
-            // OpenCode plan mode denies file modifications, but keeps other
-            // tools available under the normal permission policy.
-            return !matches!(tool.as_str(), "write" | "edit");
+            // OpenCode plan mode is read-only by default. Custom agent tool
+            // policies above can still opt specific tools back in.
+            return !matches!(tool.as_str(), "bash" | "write" | "edit");
         }
 
         if mode == "build" {
@@ -142,6 +171,8 @@ pub struct ToolPermissions {
     always_grants: Arc<RwLock<HashSet<PermissionFingerprint>>>,
     call_counts: Arc<RwLock<HashMap<ToolCallFingerprint, usize>>>,
     agent_policies: Arc<AgentToolPolicies>,
+    permission_rules: Arc<PermissionRules>,
+    agent_permission_rules: Arc<HashMap<String, PermissionRules>>,
     dangerously_skip_permissions: bool,
 }
 
@@ -152,12 +183,29 @@ impl ToolPermissions {
             always_grants: Arc::new(RwLock::new(HashSet::new())),
             call_counts: Arc::new(RwLock::new(HashMap::new())),
             agent_policies: Arc::new(AgentToolPolicies::default()),
+            permission_rules: Arc::new(Vec::new()),
+            agent_permission_rules: Arc::new(HashMap::new()),
             dangerously_skip_permissions: false,
         }
     }
 
     pub fn with_agent_policies(mut self, policies: AgentToolPolicies) -> Self {
         self.agent_policies = Arc::new(policies);
+        self
+    }
+
+    pub fn with_permission_rules(mut self, rules: PermissionRules) -> Self {
+        self.permission_rules = Arc::new(rules);
+        self
+    }
+
+    pub fn with_agent_permission_rules(mut self, rules: HashMap<String, PermissionRules>) -> Self {
+        let normalized = rules
+            .into_iter()
+            .map(|(agent, rules)| (agent.trim().to_ascii_lowercase(), rules))
+            .filter(|(agent, _)| !agent.is_empty())
+            .collect();
+        self.agent_permission_rules = Arc::new(normalized);
         self
     }
 
@@ -174,6 +222,19 @@ impl ToolPermissions {
         self.agent_policies.is_allowed(agent_mode, tool_id)
     }
 
+    pub fn is_tool_visible_for_agent(&self, agent_mode: &str, tool_id: &str) -> bool {
+        if !self.is_tool_allowed_for_agent(agent_mode, tool_id) {
+            return false;
+        }
+
+        let permission_key = permission_key_for_tool_id(tool_id);
+        let patterns = vec!["*".to_string()];
+        !matches!(
+            self.evaluate_config_decision(agent_mode, &permission_key, tool_id, &patterns),
+            Some(PermissionPolicyAction::Deny)
+        )
+    }
+
     pub async fn preflight(
         &self,
         agent_mode: &str,
@@ -188,10 +249,6 @@ impl ToolPermissions {
             )));
         }
 
-        if self.dangerously_skip_permissions {
-            return Ok(());
-        }
-
         let action = PermissionAction::from_tool_id(tool_id);
         let path = extract_primary_path(action, params, &self.workdir);
         let command = if action == PermissionAction::Bash {
@@ -199,19 +256,121 @@ impl ToolPermissions {
         } else {
             None
         };
+        let permission_key = permission_key_for_tool_id(tool_id);
+        let patterns = permission_patterns_for_tool(
+            tool_id,
+            action,
+            params,
+            path.as_deref(),
+            command.as_deref(),
+            &self.workdir,
+        );
 
-        let reason = self.evaluate_reason(action, path.as_deref());
-        let reason = match reason {
-            Some(reason) => Some(reason),
-            None => self.evaluate_doom_loop(tool_id, params).await,
-        };
+        match self.evaluate_config_decision(agent_mode, &permission_key, tool_id, &patterns) {
+            Some(PermissionPolicyAction::Deny) => {
+                return Err(ToolError::Permission(configured_deny_text(
+                    tool_id, &patterns,
+                )));
+            }
+            Some(PermissionPolicyAction::Ask) if !self.dangerously_skip_permissions => {
+                return self
+                    .ask_permission(
+                        tool_id,
+                        action,
+                        PermissionReasonKind::ConfiguredAsk,
+                        path.as_deref(),
+                        command.clone(),
+                        sender,
+                    )
+                    .await;
+            }
+            _ => {}
+        }
 
-        let Some(reason_kind) = reason else {
+        let mut reason = self.evaluate_reason(action, path.as_deref());
+        if let Some(reason_kind) = reason {
+            match self.evaluate_guard_decision(
+                agent_mode,
+                tool_id,
+                reason_kind,
+                path.as_deref(),
+                &patterns,
+            ) {
+                Some(PermissionPolicyAction::Deny) => {
+                    return Err(ToolError::Permission(guard_deny_text(
+                        reason_kind,
+                        tool_id,
+                        path.as_deref(),
+                    )));
+                }
+                Some(PermissionPolicyAction::Allow) => {
+                    reason = None;
+                }
+                _ => {}
+            }
+        }
+
+        if self.dangerously_skip_permissions {
             return Ok(());
-        };
+        }
 
+        if let Some(reason_kind) = reason {
+            return self
+                .ask_permission(
+                    tool_id,
+                    action,
+                    reason_kind,
+                    path.as_deref(),
+                    command.clone(),
+                    sender,
+                )
+                .await;
+        }
+
+        if let Some(reason_kind) = self.evaluate_doom_loop(tool_id, params).await {
+            match self.evaluate_guard_decision(
+                agent_mode,
+                tool_id,
+                reason_kind,
+                path.as_deref(),
+                &patterns,
+            ) {
+                Some(PermissionPolicyAction::Deny) => {
+                    return Err(ToolError::Permission(guard_deny_text(
+                        reason_kind,
+                        tool_id,
+                        path.as_deref(),
+                    )));
+                }
+                Some(PermissionPolicyAction::Allow) => return Ok(()),
+                _ => {
+                    return self
+                        .ask_permission(
+                            tool_id,
+                            action,
+                            reason_kind,
+                            path.as_deref(),
+                            command,
+                            sender,
+                        )
+                        .await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn ask_permission(
+        &self,
+        tool_id: &str,
+        action: PermissionAction,
+        reason_kind: PermissionReasonKind,
+        path: Option<&Path>,
+        command: Option<String>,
+        sender: Option<&ChunkSender>,
+    ) -> Result<(), ToolError> {
         let target = path
-            .as_ref()
             .map(|p| p.display().to_string())
             .or_else(|| command.clone());
         let prompt_target = if action == PermissionAction::Bash {
@@ -220,7 +379,7 @@ impl ToolPermissions {
             target.clone()
         };
         let workdir = if action == PermissionAction::Bash {
-            path.as_ref().map(|p| p.display().to_string())
+            path.map(|p| p.display().to_string())
         } else {
             None
         };
@@ -271,6 +430,56 @@ impl ToolPermissions {
                 Ok(())
             }
         }
+    }
+
+    fn evaluate_config_decision(
+        &self,
+        agent_mode: &str,
+        permission_key: &str,
+        tool_id: &str,
+        patterns: &[String],
+    ) -> Option<PermissionPolicyAction> {
+        let agent_key = agent_mode.trim().to_ascii_lowercase();
+        let empty: &[PermissionRule] = &[];
+        let agent_rules = self
+            .agent_permission_rules
+            .get(&agent_key)
+            .map(Vec::as_slice)
+            .unwrap_or(empty);
+        evaluate_permission_rules(
+            permission_key,
+            tool_id,
+            patterns,
+            &[self.permission_rules.as_slice(), agent_rules],
+        )
+    }
+
+    fn evaluate_guard_decision(
+        &self,
+        agent_mode: &str,
+        tool_id: &str,
+        reason: PermissionReasonKind,
+        path: Option<&Path>,
+        fallback_patterns: &[String],
+    ) -> Option<PermissionPolicyAction> {
+        let (permission_key, patterns) = match reason {
+            PermissionReasonKind::ExternalPath => (
+                "external_directory".to_string(),
+                path.map(|path| path_patterns(path, &self.workdir))
+                    .filter(|patterns| !patterns.is_empty())
+                    .unwrap_or_else(|| fallback_patterns.to_vec()),
+            ),
+            PermissionReasonKind::DoomLoop => (
+                "doom_loop".to_string(),
+                vec![tool_id.to_string(), "*".to_string()],
+            ),
+            PermissionReasonKind::SensitivePath | PermissionReasonKind::ConfiguredAsk => (
+                permission_key_for_tool_id(tool_id),
+                fallback_patterns.to_vec(),
+            ),
+        };
+
+        self.evaluate_config_decision(agent_mode, &permission_key, tool_id, &patterns)
     }
 
     fn evaluate_reason(
@@ -360,6 +569,61 @@ fn reason_text(reason: PermissionReasonKind, tool_id: &str, target: Option<&str>
                 tool_id
             ),
         },
+        PermissionReasonKind::ConfiguredAsk => match target {
+            Some(target) => format!(
+                "Permission config requires approval before tool '{}' can access '{}'",
+                tool_id, target
+            ),
+            None => format!(
+                "Permission config requires approval before running tool '{}'",
+                tool_id
+            ),
+        },
+    }
+}
+
+fn configured_deny_text(tool_id: &str, patterns: &[String]) -> String {
+    let target = patterns
+        .iter()
+        .find(|pattern| pattern.as_str() != "*")
+        .map(String::as_str)
+        .unwrap_or("*");
+    format!(
+        "Permission config denies tool '{}' for pattern '{}'",
+        tool_id, target
+    )
+}
+
+fn guard_deny_text(reason: PermissionReasonKind, tool_id: &str, path: Option<&Path>) -> String {
+    let target = path.map(|p| p.display().to_string());
+    match reason {
+        PermissionReasonKind::SensitivePath => match target {
+            Some(target) => format!(
+                "Permission config denies tool '{}' access to sensitive file '{}'",
+                tool_id, target
+            ),
+            None => format!(
+                "Permission config denies tool '{}' access to sensitive files",
+                tool_id
+            ),
+        },
+        PermissionReasonKind::ExternalPath => match target {
+            Some(target) => format!(
+                "Permission config denies tool '{}' access outside the working directory: {}",
+                tool_id, target
+            ),
+            None => format!(
+                "Permission config denies tool '{}' access outside the working directory",
+                tool_id
+            ),
+        },
+        PermissionReasonKind::DoomLoop => {
+            format!(
+                "Permission config denies repeated identical tool calls for '{}'",
+                tool_id
+            )
+        }
+        PermissionReasonKind::ConfiguredAsk => configured_deny_text(tool_id, &[]),
     }
 }
 
@@ -368,6 +632,199 @@ fn get_string(params: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn permission_key_for_tool_id(tool_id: &str) -> String {
+    match tool_id.trim().to_ascii_lowercase().as_str() {
+        "write" | "edit" => "edit".to_string(),
+        "read" | "view_image" => "read".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn permission_patterns_for_tool(
+    tool_id: &str,
+    action: PermissionAction,
+    params: &Value,
+    path: Option<&Path>,
+    command: Option<&str>,
+    workdir: &Path,
+) -> Vec<String> {
+    let mut patterns = Vec::new();
+
+    match tool_id {
+        "bash" => {
+            if let Some(command) = command {
+                push_nonempty(&mut patterns, command);
+            }
+        }
+        "glob" => {
+            if let Some(pattern) = get_string(params, "pattern") {
+                push_nonempty(&mut patterns, &pattern);
+            }
+        }
+        "grep" => {
+            if let Some(pattern) = get_string(params, "pattern") {
+                push_nonempty(&mut patterns, &pattern);
+            }
+        }
+        "skill" => {
+            if let Some(name) = get_string(params, "name") {
+                push_nonempty(&mut patterns, &name);
+            }
+        }
+        "task" => {
+            if let Some(subagent) = get_string(params, "subagent_type") {
+                push_nonempty(&mut patterns, &subagent);
+            }
+        }
+        "webfetch" => {
+            if let Some(url) = get_string(params, "url") {
+                push_nonempty(&mut patterns, &url);
+            }
+        }
+        "question" | "update_plan" => patterns.push("*".to_string()),
+        _ => {}
+    }
+
+    if patterns.is_empty() {
+        if let Some(path) = path {
+            patterns.extend(path_patterns(path, workdir));
+        }
+    }
+
+    if patterns.is_empty() {
+        if matches!(
+            action,
+            PermissionAction::Unknown
+                | PermissionAction::Bash
+                | PermissionAction::Glob
+                | PermissionAction::Grep
+        ) {
+            patterns.push("*".to_string());
+        }
+    }
+
+    patterns
+}
+
+fn push_nonempty(patterns: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() {
+        patterns.push(trimmed.to_string());
+    }
+}
+
+fn path_patterns(path: &Path, workdir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let absolute = normalize_path(path);
+
+    if let Ok(relative) = absolute.strip_prefix(workdir) {
+        let relative = normalize_pattern_path(relative);
+        if !relative.is_empty() {
+            out.push(relative);
+        }
+    }
+
+    let absolute = normalize_pattern_path(&absolute);
+    if !absolute.is_empty() && !out.iter().any(|existing| existing == &absolute) {
+        out.push(absolute);
+    }
+
+    if out.is_empty() {
+        out.push("*".to_string());
+    }
+
+    out
+}
+
+fn normalize_pattern_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn evaluate_permission_rules(
+    permission_key: &str,
+    tool_id: &str,
+    patterns: &[String],
+    rulesets: &[&[PermissionRule]],
+) -> Option<PermissionPolicyAction> {
+    let permission_key = permission_key.trim().to_ascii_lowercase();
+    let tool_id = tool_id.trim().to_ascii_lowercase();
+    let patterns = if patterns.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        patterns.to_vec()
+    };
+
+    let mut decision = None;
+    for ruleset in rulesets {
+        for rule in *ruleset {
+            if !wildcard_match(&permission_key, &rule.permission)
+                && !wildcard_match(&tool_id, &rule.permission)
+            {
+                continue;
+            }
+
+            if patterns
+                .iter()
+                .any(|pattern| wildcard_match(pattern, &rule.pattern))
+            {
+                decision = Some(rule.action);
+            }
+        }
+    }
+
+    decision
+}
+
+pub fn expand_permission_pattern(pattern: &str) -> String {
+    let trimmed = pattern.trim();
+    let Some(home) = dirs::home_dir() else {
+        return trimmed.to_string();
+    };
+    let home = home.to_string_lossy();
+
+    if trimmed == "~" {
+        return home.to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return format!("{}/{}", home, rest);
+    }
+    if trimmed == "$HOME" {
+        return home.to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("$HOME/") {
+        return format!("{}/{}", home, rest);
+    }
+    trimmed.to_string()
+}
+
+fn wildcard_match(input: &str, pattern: &str) -> bool {
+    let input = input.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+    let mut escaped = String::new();
+
+    for ch in pattern.chars() {
+        match ch {
+            '*' => escaped.push_str(".*"),
+            '?' => escaped.push('.'),
+            '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '[' | ']' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+
+    if escaped.ends_with(" .*") {
+        escaped.truncate(escaped.len() - 3);
+        escaped.push_str("( .*)?");
+    }
+
+    let pattern = format!("(?s)^{}$", escaped);
+    Regex::new(&pattern)
+        .map(|regex| regex.is_match(&input))
+        .unwrap_or(false)
 }
 
 fn extract_primary_path(
@@ -467,9 +924,18 @@ mod tests {
         let policies = AgentToolPolicies::default();
         assert!(policies.is_allowed("plan", "read"));
         assert!(policies.is_allowed("plan", "glob"));
-        assert!(policies.is_allowed("plan", "bash"));
+        assert!(!policies.is_allowed("plan", "bash"));
         assert!(!policies.is_allowed("plan", "write"));
         assert!(!policies.is_allowed("plan", "edit"));
+    }
+
+    #[test]
+    fn custom_plan_policy_can_explicitly_allow_bash() {
+        let policies = AgentToolPolicies::default()
+            .with_custom_tools("plan", vec!["read".to_string(), "bash".to_string()]);
+
+        assert!(policies.is_allowed("plan", "bash"));
+        assert!(!policies.is_allowed("plan", "write"));
     }
 
     #[test]
@@ -627,6 +1093,133 @@ mod tests {
         });
 
         let result = perms.preflight("build", "bash", &params, Some(&tx)).await;
+
+        assert!(result.is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn configured_bash_patterns_use_last_matching_rule() {
+        let perms = ToolPermissions::new("/tmp/workspace").with_permission_rules(vec![
+            PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionPolicyAction::Ask,
+            },
+            PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "git *".to_string(),
+                action: PermissionPolicyAction::Allow,
+            },
+            PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "git push *".to_string(),
+                action: PermissionPolicyAction::Deny,
+            },
+        ]);
+
+        let allowed = serde_json::json!({
+            "command": "git status --short",
+            "workdir": "/tmp/workspace",
+        });
+        let denied = serde_json::json!({
+            "command": "git push origin main",
+            "workdir": "/tmp/workspace",
+        });
+
+        assert!(perms
+            .preflight("build", "bash", &allowed, None)
+            .await
+            .is_ok());
+        assert!(perms
+            .preflight("build", "bash", &denied, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn configured_ask_prompts_for_matching_tool_pattern() {
+        let perms =
+            ToolPermissions::new("/tmp/workspace").with_permission_rules(vec![PermissionRule {
+                permission: "mcp_*".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionPolicyAction::Ask,
+            }]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({});
+
+        let pending = tokio::spawn({
+            let perms = perms.clone();
+            let params = params.clone();
+            let tx = tx.clone();
+            async move {
+                perms
+                    .preflight("build", "mcp_lookup", &params, Some(&tx))
+                    .await
+            }
+        });
+
+        let prompt = match rx.recv().await {
+            Some(ChunkMessage::PermissionRequest(prompt)) => prompt,
+            _ => panic!("Expected permission prompt"),
+        };
+
+        assert_eq!(prompt.tool_id, "mcp_lookup");
+        assert!(prompt
+            .reason
+            .contains("Permission config requires approval"));
+
+        let _ = prompt.response_tx.send(PermissionResponse::Deny);
+        let result = pending.await.expect("preflight task should complete");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_permission_rules_override_global_rules() {
+        let mut agent_rules = HashMap::new();
+        agent_rules.insert(
+            "build".to_string(),
+            vec![PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "git *".to_string(),
+                action: PermissionPolicyAction::Allow,
+            }],
+        );
+
+        let perms = ToolPermissions::new("/tmp/workspace")
+            .with_permission_rules(vec![PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionPolicyAction::Deny,
+            }])
+            .with_agent_permission_rules(agent_rules);
+        let params = serde_json::json!({
+            "command": "git status",
+            "workdir": "/tmp/workspace",
+        });
+
+        assert!(perms
+            .preflight("build", "bash", &params, None)
+            .await
+            .is_ok());
+        assert!(perms
+            .preflight("plan", "bash", &params, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn external_directory_allow_bypasses_default_prompt() {
+        let perms =
+            ToolPermissions::new("/tmp/workspace").with_permission_rules(vec![PermissionRule {
+                permission: "external_directory".to_string(),
+                pattern: "/tmp/elsewhere/*".to_string(),
+                action: PermissionPolicyAction::Allow,
+            }]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({ "file_path": "/tmp/elsewhere/file.txt" });
+
+        let result = perms.preflight("build", "read", &params, Some(&tx)).await;
 
         assert!(result.is_ok());
         assert!(rx.try_recv().is_err());

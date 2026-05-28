@@ -19,9 +19,12 @@ pub mod webfetch;
 pub use bash::BashTool;
 pub use context::ToolContext;
 pub use edit::EditTool;
-pub use init::{initialize_tool_registry, register_dynamic_tools};
+pub use init::{
+    initialize_tool_registry, initialize_tool_registry_with_dynamic, scope_tool_registry_for_agent,
+};
 pub use permission::{
-    AgentToolPolicies, PermissionAction, PermissionPrompt, PermissionResponse, ToolPermissions,
+    expand_permission_pattern, AgentToolPolicies, PermissionAction, PermissionPolicyAction,
+    PermissionPrompt, PermissionResponse, PermissionRule, PermissionRules, ToolPermissions,
 };
 pub use question::QuestionTool;
 pub use registry::ToolRegistry;

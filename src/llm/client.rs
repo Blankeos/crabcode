@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tools::aisdk_bridge::convert_to_aisdk_tools;
 
-const MAX_STEPS_REACHED_PROMPT: &str = r#"CRITICAL - MAXIMUM STEPS REACHED
+pub(crate) const MAX_STEPS_REACHED_PROMPT: &str = r#"CRITICAL - MAXIMUM STEPS REACHED
 
 The maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.
 
@@ -365,6 +365,7 @@ pub async fn stream_llm_with_cancellation(
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     agent_mode: String,
     agent_max_steps: Option<usize>,
+    agent_steps: HashMap<String, usize>,
     tool_permissions: crate::tools::ToolPermissions,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
@@ -383,9 +384,13 @@ pub async fn stream_llm_with_cancellation(
 
     let aisdk_messages = convert_messages_for_model(&messages, request_config.supports_image_input);
 
-    let tool_registry = crate::tools::initialize_tool_registry().await;
-
-    crate::tools::register_dynamic_tools(&tool_registry, Some(sender.clone())).await;
+    let tool_registry = crate::tools::initialize_tool_registry_with_dynamic(
+        Some(sender.clone()),
+        tool_permissions.clone(),
+        agent_steps,
+        cancel_token.clone(),
+    )
+    .await;
 
     // Set LLM session config for subagent use
     crate::agent::config::set_llm_session(crate::agent::config::LlmSessionConfig {
@@ -410,6 +415,7 @@ pub async fn stream_llm_with_cancellation(
         Some(session_id.clone()),
         None,
         request_config.supports_image_input,
+        cancel_token.clone(),
     )
     .await;
 

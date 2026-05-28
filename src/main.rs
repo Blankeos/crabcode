@@ -149,6 +149,7 @@ async fn run_print_mode(
 
     // Load config and model preferences
     let loaded_config = crate::config::ConfigLoader::load()?;
+    crate::skill::init_skill_store(&loaded_config.xdg_config_home, &loaded_config.project_root);
     let prefs_dao = crate::persistence::PrefsDAO::new().ok();
 
     let (provider_name, model_id) = {
@@ -197,33 +198,55 @@ async fn run_print_mode(
 
     let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+
+    let mut agent_policies = crate::tools::AgentToolPolicies::default();
+    for (mode, tools) in &loaded_config.merged_config.agent_tool_policies {
+        agent_policies = agent_policies.with_custom_tools(mode.clone(), tools.clone());
+    }
+    let tool_permissions = crate::tools::ToolPermissions::new(std::path::PathBuf::from(&cwd))
+        .with_agent_policies(agent_policies)
+        .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
+        .with_agent_permission_rules(loaded_config.merged_config.agent_permission_rules.clone())
+        .dangerously_skip_permissions(dangerously_skip_permissions);
+    let agent_steps = loaded_config.merged_config.agent_steps.clone();
+    let agent_max_steps = loaded_config
+        .merged_config
+        .agent_steps
+        .get(&agent_mode.to_ascii_lowercase())
+        .copied();
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    let prompt_registry = crate::tools::initialize_tool_registry_with_dynamic(
+        Some(sender.clone()),
+        tool_permissions.clone(),
+        agent_steps.clone(),
+        cancel_token.clone(),
+    )
+    .await;
+    let prompt_registry = crate::tools::scope_tool_registry_for_agent(
+        &prompt_registry,
+        &tool_permissions,
+        &agent_mode,
+    )
+    .await;
+
     // Build messages with system prompt
     let composer = crate::prompt::SystemPromptComposer::new(
         &model_id,
         &cwd,
         is_git_repo,
         std::env::consts::OS,
-    );
+    )
+    .with_tool_registry(prompt_registry);
     let system_prompt = composer.compose().await;
     let messages = vec![Message::system(system_prompt), Message::user(prompt)];
-
-    let (sender, mut receiver) = mpsc::unbounded_channel();
-
-    let tool_permissions = crate::tools::ToolPermissions::new(std::path::PathBuf::from(&cwd))
-        .dangerously_skip_permissions(dangerously_skip_permissions);
-
-    let agent_max_steps = loaded_config
-        .merged_config
-        .agent_steps
-        .get(&agent_mode.to_ascii_lowercase())
-        .copied();
 
     let provider_name_clone = provider_name.clone();
     let model_clone = model_id.clone();
     let completion_sender = sender.clone();
 
     tokio::spawn(async move {
-        let cancel_token = tokio_util::sync::CancellationToken::new();
         if let Err(err) = stream_llm_with_cancellation(
             cancel_token,
             cuid2::create_id(),
@@ -232,6 +255,7 @@ async fn run_print_mode(
             reasoning_effort,
             agent_mode.clone(),
             agent_max_steps,
+            agent_steps,
             tool_permissions,
             messages,
             sender,

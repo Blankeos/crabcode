@@ -133,21 +133,19 @@ pub async fn run_subagent(
     full_registry: &ToolRegistry,
     sender: Option<crate::llm::ChunkSender>,
     session_id: String,
+    cancel_token: tokio_util::sync::CancellationToken,
+    permissions: crate::tools::ToolPermissions,
+    max_steps: Option<usize>,
 ) -> Result<SubAgentRunResult, String> {
     use aisdk::core::{
-        chunk::ChunkType,
-        response::{stream_with_tools, StreamTextResponse},
-        Message as AisdkMessage,
+        chunk::ChunkType, response::StreamTextResponse, stop::StopReason, Message as AisdkMessage,
     };
-    use aisdk::{Anthropic, OpenAI, OpenAICompatible};
     use futures::StreamExt;
     use std::collections::HashMap;
 
     let session = get_llm_session().ok_or("LLM session not configured")?;
-    let cwd = crate::utils::cwd::current_dir_or_dot();
 
     let scoped_registry = build_scoped_registry(full_registry, &subagent_type).await;
-    let permissions = crate::tools::ToolPermissions::new(cwd.clone());
 
     let aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
         &scoped_registry,
@@ -157,6 +155,7 @@ pub async fn run_subagent(
         Some(session_id.clone()),
         None,
         session.supports_image_input,
+        cancel_token.clone(),
     )
     .await;
 
@@ -174,73 +173,37 @@ pub async fn run_subagent(
     let headers = HashMap::new();
     let stream_started_at = std::time::Instant::now();
     crate::emit_log!(
-        "[SUBAGENT] stream_start session_id={} subagent_type={} tools={} description_bytes={} prompt_bytes={} sender_present={}",
+        "[SUBAGENT] stream_start session_id={} subagent_type={} tools={} description_bytes={} prompt_bytes={} max_steps={:?} sender_present={}",
         session_id,
         subagent_type.name(),
         aisdk_tools.len(),
         description.len(),
         prompt.len(),
+        max_steps,
         sender.is_some()
     );
 
-    let mut response: StreamTextResponse = match session.provider_kind {
-        ProviderKind::OpenAICompatible => {
-            let mut builder = OpenAICompatible::builder()
-                .base_url(&session.base_url)
-                .model_name(&session.model)
-                .provider_name(&session.provider_name)
-                .api_key(session.api_key.as_deref().unwrap_or(""));
-            if let Some(effort) = session.reasoning_effort {
-                builder = builder.reasoning_effort(effort.as_str());
-            }
-            let provider = builder
-                .build()
-                .map_err(|e| format!("Failed to build OpenAICompatible provider: {}", e))?;
-
-            stream_with_tools(provider, messages, aisdk_tools, None, None, headers)
-                .await
-                .map_err(|e| format!("Stream error: {}", e))?
-        }
-        ProviderKind::Anthropic => {
-            let mut builder = Anthropic::builder()
-                .base_url(&session.base_url)
-                .model_name(&session.model)
-                .provider_name(&session.provider_name)
-                .api_key(session.api_key.as_deref().unwrap_or(""));
-            if let Some(effort) = session.reasoning_effort {
-                builder = builder.reasoning_effort(effort.as_str());
-            }
-            let provider = builder
-                .build()
-                .map_err(|e| format!("Failed to build Anthropic provider: {}", e))?;
-
-            stream_with_tools(provider, messages, aisdk_tools, None, None, headers)
-                .await
-                .map_err(|e| format!("Stream error: {}", e))?
-        }
-        ProviderKind::OpenAI => {
-            let mut builder = OpenAI::builder()
-                .base_url(&session.base_url)
-                .model_name(&session.model)
-                .provider_name(&session.provider_name)
-                .api_key(session.api_key.as_deref().unwrap_or(""));
-            if let Some(effort) = session.reasoning_effort {
-                builder = builder.reasoning_effort(effort.as_str());
-            }
-            let provider = builder
-                .build()
-                .map_err(|e| format!("Failed to build OpenAI provider: {}", e))?;
-
-            stream_with_tools(provider, messages, aisdk_tools, None, None, headers)
-                .await
-                .map_err(|e| format!("Stream error: {}", e))?
-        }
-    };
+    let mut response: StreamTextResponse =
+        start_subagent_stream(&session, messages, aisdk_tools, max_steps, headers).await?;
 
     let mut collected_text = String::new();
     let mut tool_call_count = 0usize;
 
-    while let Some(chunk) = response.stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
+                }
+                return Err("Subagent cancelled".to_string());
+            }
+            chunk = response.stream.next() => chunk,
+        };
+
+        let Some(chunk) = chunk else {
+            break;
+        };
+
         match chunk {
             ChunkType::Text(text) => {
                 collected_text.push_str(&text);
@@ -292,6 +255,72 @@ pub async fn run_subagent(
     }
 
     let stop_reason = response.stop_reason().await;
+    if max_steps.is_some() && matches!(stop_reason, Some(StopReason::Hook)) {
+        if let Some(sender) = sender.as_ref() {
+            let _ = sender.send(crate::llm::ChunkMessage::Warning(
+                "Maximum configured steps reached. Sending text-only subagent summary.".to_string(),
+            ));
+        }
+
+        let mut follow_up_messages = response.messages().await;
+        follow_up_messages.push(AisdkMessage::assistant(
+            crate::llm::client::MAX_STEPS_REACHED_PROMPT,
+        ));
+        let mut summary_response = start_subagent_stream(
+            &session,
+            follow_up_messages,
+            Vec::new(),
+            None,
+            HashMap::new(),
+        )
+        .await?;
+
+        loop {
+            let chunk = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender.send(crate::llm::ChunkMessage::Cancelled);
+                    }
+                    return Err("Subagent cancelled".to_string());
+                }
+                chunk = summary_response.stream.next() => chunk,
+            };
+
+            let Some(chunk) = chunk else {
+                break;
+            };
+
+            match chunk {
+                ChunkType::Text(text) => {
+                    collected_text.push_str(&text);
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender.send(crate::llm::ChunkMessage::Text(text));
+                    }
+                }
+                ChunkType::Reasoning(reasoning) => {
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
+                    }
+                }
+                ChunkType::Failed(err) => {
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender.send(crate::llm::ChunkMessage::Failed(err.clone()));
+                    }
+                    return Err(format!("Subagent max-step summary failed: {}", err));
+                }
+                ChunkType::End { .. } | ChunkType::ResponseCompleted { .. } => break,
+                ChunkType::Metadata(message) => {
+                    crate::emit_log!(
+                        "[SUBAGENT_METADATA] session_id={} subagent_type={} {}",
+                        session_id,
+                        subagent_type.name(),
+                        message
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
     crate::emit_log!(
         "[SUBAGENT] stream_finish session_id={} subagent_type={} duration_ms={} stop_reason={:?} text_bytes={} tool_call_count={}",
         session_id,
@@ -306,6 +335,71 @@ pub async fn run_subagent(
         output: normalize_subagent_output(collected_text),
         tool_call_count,
     })
+}
+
+async fn start_subagent_stream(
+    session: &crate::agent::config::LlmSessionConfig,
+    messages: Vec<aisdk::core::Message>,
+    tools: Vec<aisdk::core::Tool>,
+    max_steps: Option<usize>,
+    headers: std::collections::HashMap<String, String>,
+) -> Result<aisdk::core::response::StreamTextResponse, String> {
+    use aisdk::core::response::stream_with_tools;
+    use aisdk::{Anthropic, OpenAI, OpenAICompatible};
+
+    match session.provider_kind {
+        ProviderKind::OpenAICompatible => {
+            let mut builder = OpenAICompatible::builder()
+                .base_url(&session.base_url)
+                .model_name(&session.model)
+                .provider_name(&session.provider_name)
+                .api_key(session.api_key.as_deref().unwrap_or(""));
+            if let Some(effort) = session.reasoning_effort {
+                builder = builder.reasoning_effort(effort.as_str());
+            }
+            let provider = builder
+                .build()
+                .map_err(|e| format!("Failed to build OpenAICompatible provider: {}", e))?;
+
+            stream_with_tools(provider, messages, tools, max_steps, None, headers)
+                .await
+                .map_err(|e| format!("Stream error: {}", e))
+        }
+        ProviderKind::Anthropic => {
+            let mut builder = Anthropic::builder()
+                .base_url(&session.base_url)
+                .model_name(&session.model)
+                .provider_name(&session.provider_name)
+                .api_key(session.api_key.as_deref().unwrap_or(""));
+            if let Some(effort) = session.reasoning_effort {
+                builder = builder.reasoning_effort(effort.as_str());
+            }
+            let provider = builder
+                .build()
+                .map_err(|e| format!("Failed to build Anthropic provider: {}", e))?;
+
+            stream_with_tools(provider, messages, tools, max_steps, None, headers)
+                .await
+                .map_err(|e| format!("Stream error: {}", e))
+        }
+        ProviderKind::OpenAI => {
+            let mut builder = OpenAI::builder()
+                .base_url(&session.base_url)
+                .model_name(&session.model)
+                .provider_name(&session.provider_name)
+                .api_key(session.api_key.as_deref().unwrap_or(""));
+            if let Some(effort) = session.reasoning_effort {
+                builder = builder.reasoning_effort(effort.as_str());
+            }
+            let provider = builder
+                .build()
+                .map_err(|e| format!("Failed to build OpenAI provider: {}", e))?;
+
+            stream_with_tools(provider, messages, tools, max_steps, None, headers)
+                .await
+                .map_err(|e| format!("Stream error: {}", e))
+        }
+    }
 }
 
 fn normalize_subagent_output(output: String) -> String {

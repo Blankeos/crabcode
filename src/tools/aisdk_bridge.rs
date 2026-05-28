@@ -5,6 +5,7 @@ use schemars::Schema;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::llm::ChunkSender;
 
@@ -21,12 +22,13 @@ pub async fn convert_to_aisdk_tools(
     session_id: Option<String>,
     message_id: Option<String>,
     supports_image_input: bool,
+    cancel_token: CancellationToken,
 ) -> Vec<Tool> {
     let mut aisdk_tools = Vec::new();
     let tools = registry.list().await;
 
     for tool_def in tools {
-        if !permissions.is_tool_allowed_for_agent(&agent_mode, &tool_def.id) {
+        if !permissions.is_tool_visible_for_agent(&agent_mode, &tool_def.id) {
             crate::emit_log!(
                 "[AISDK_TOOLS] Skipping '{}': not allowed in {} mode",
                 tool_def.id,
@@ -42,6 +44,7 @@ pub async fn convert_to_aisdk_tools(
         let permissions = permissions.clone();
         let session_id = session_id.clone();
         let message_id = message_id.clone();
+        let cancel_token = cancel_token.clone();
 
         let execute = ToolExecute::new(move |input: Value| {
             let tool_id = tool_id.clone();
@@ -54,6 +57,7 @@ pub async fn convert_to_aisdk_tools(
             let permissions = permissions.clone();
             let session_id = session_id.clone();
             let message_id = message_id.clone();
+            let cancel_token = cancel_token.clone();
             let supports_image_input = supports_image_input;
 
             async move {
@@ -154,12 +158,11 @@ pub async fn convert_to_aisdk_tools(
                     return Err(err);
                 }
 
-                let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
-                let ctx = ToolContext::new(
+                let ctx = ToolContext::from_cancel_token(
                     session_id.clone().unwrap_or_else(|| "session".to_string()),
                     message_id.clone().unwrap_or_else(|| "message".to_string()),
                     agent_mode.clone(),
-                    abort_rx,
+                    cancel_token.clone(),
                 )
                 .with_call_id(call_id.clone());
 

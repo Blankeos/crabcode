@@ -5,11 +5,16 @@ use crate::tools::{
 };
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 pub struct TaskTool {
     tool_registry: Arc<ToolRegistry>,
     sender: Option<crate::llm::ChunkSender>,
+    permissions: Option<crate::tools::ToolPermissions>,
+    agent_steps: HashMap<String, usize>,
+    cancel_token: CancellationToken,
 }
 
 impl TaskTool {
@@ -17,11 +22,26 @@ impl TaskTool {
         Self {
             tool_registry: Arc::new(tool_registry),
             sender: None,
+            permissions: None,
+            agent_steps: HashMap::new(),
+            cancel_token: CancellationToken::new(),
         }
     }
 
     pub fn with_sender_opt(mut self, sender: Option<crate::llm::ChunkSender>) -> Self {
         self.sender = sender;
+        self
+    }
+
+    pub fn with_runtime_options(
+        mut self,
+        permissions: crate::tools::ToolPermissions,
+        agent_steps: HashMap<String, usize>,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        self.permissions = Some(permissions);
+        self.agent_steps = agent_steps;
+        self.cancel_token = cancel_token;
         self
     }
 }
@@ -81,6 +101,18 @@ impl ToolHandler for TaskTool {
         if ctx.is_aborted() {
             return Err(ToolError::Execution("Subagent cancelled".to_string()));
         }
+        let subagent_cancel_token = ctx.cancel_token.clone();
+        let permissions = self.permissions.clone().unwrap_or_else(|| {
+            crate::tools::ToolPermissions::new(crate::utils::cwd::current_dir_or_dot())
+        });
+        let max_steps = self
+            .agent_steps
+            .get(subagent_type.name())
+            .or_else(|| {
+                self.agent_steps
+                    .get(&subagent_type.name().to_ascii_lowercase())
+            })
+            .copied();
 
         let child_session_id = cuid2::create_id();
         let title = format!(
@@ -121,6 +153,9 @@ impl ToolHandler for TaskTool {
             &self.tool_registry,
             child_sender.clone(),
             child_session_id.clone(),
+            subagent_cancel_token,
+            permissions,
+            max_steps,
         )
         .await
         {

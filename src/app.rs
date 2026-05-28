@@ -460,7 +460,11 @@ impl App {
             agent_policies = agent_policies.with_custom_tools(mode.clone(), tools.clone());
         }
         let tool_permissions = crate::tools::ToolPermissions::new(cwd_path.clone())
-            .with_agent_policies(agent_policies);
+            .with_agent_policies(agent_policies)
+            .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
+            .with_agent_permission_rules(
+                loaded_config.merged_config.agent_permission_rules.clone(),
+            );
 
         let discovery = crate::model::discovery::Discovery::new().ok();
         let cached_git_branch = git::get_branch_for_path(&cwd);
@@ -5932,6 +5936,7 @@ impl App {
             .get(&self.agent.to_ascii_lowercase())
             .copied();
         let tool_permissions = self.tool_permissions.clone();
+        let agent_steps = self.agent_steps.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -5944,14 +5949,32 @@ impl App {
             .any(|m| m.role == crate::session::types::MessageRole::System);
 
         if !has_system {
+            let prompt_registry = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let registry = crate::tools::initialize_tool_registry_with_dynamic(
+                        Some(sender.clone()),
+                        tool_permissions.clone(),
+                        agent_steps.clone(),
+                        cancel_token.clone(),
+                    )
+                    .await;
+                    crate::tools::scope_tool_registry_for_agent(
+                        &registry,
+                        &tool_permissions,
+                        &agent_mode,
+                    )
+                    .await
+                })
+            });
+
             // Create system prompt with tools
             let composer = crate::prompt::SystemPromptComposer::new(
                 &model,
                 &cwd,
                 is_git_repo,
                 std::env::consts::OS,
-            );
-
+            )
+            .with_tool_registry(prompt_registry);
             let system_prompt = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async { composer.compose().await })
             });
@@ -5968,6 +5991,7 @@ impl App {
                 reasoning_effort,
                 agent_mode,
                 agent_max_steps,
+                agent_steps,
                 tool_permissions,
                 messages,
                 sender_clone.clone(),

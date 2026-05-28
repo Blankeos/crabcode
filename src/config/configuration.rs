@@ -1,3 +1,6 @@
+use crate::tools::{
+    expand_permission_pattern, PermissionPolicyAction, PermissionRule, PermissionRules,
+};
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use serde_json::Value;
@@ -247,6 +250,8 @@ pub struct MergedConfig {
     pub default_agent: Option<String>,
     pub commands: Vec<crate::command::custom::CustomCommand>,
     pub agent_tool_policies: HashMap<String, Vec<String>>,
+    pub permission_rules: PermissionRules,
+    pub agent_permission_rules: HashMap<String, PermissionRules>,
     pub agent_steps: HashMap<String, usize>,
     pub provider_timeouts: HashMap<String, ProviderTimeout>,
     pub notifications: NotificationsConfig,
@@ -990,7 +995,9 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
         }
     }
 
+    out.permission_rules = parse_permission_rules(obj.get("permission"), diagnostics, "permission");
     out.agent_tool_policies = parse_agent_tool_policies(obj.get("agent"), diagnostics);
+    out.agent_permission_rules = parse_agent_permission_rules(obj.get("agent"), diagnostics);
     out.agent_steps = parse_agent_steps(obj.get("agent"), diagnostics);
     out.provider_timeouts = parse_provider_timeouts(obj.get("provider"), diagnostics);
 
@@ -1049,6 +1056,147 @@ fn parse_agent_tool_policies(
 
         if !tools.is_empty() {
             out.insert(name.trim().to_ascii_lowercase(), tools);
+        }
+    }
+
+    out
+}
+
+fn parse_agent_permission_rules(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+) -> HashMap<String, PermissionRules> {
+    let mut out = HashMap::new();
+    let Some(Value::Object(agents)) = value else {
+        return out;
+    };
+
+    for (name, val) in agents {
+        let Some(agent_obj) = val.as_object() else {
+            continue;
+        };
+
+        let Some(permission) = agent_obj.get("permission") else {
+            continue;
+        };
+
+        let key = name.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+
+        let rules = parse_permission_rules(
+            Some(permission),
+            diagnostics,
+            &format!("agent.{}.permission", name),
+        );
+        if !rules.is_empty() {
+            out.insert(key, rules);
+        }
+    }
+
+    out
+}
+
+fn parse_permission_rules(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+    context: &str,
+) -> PermissionRules {
+    let mut out = Vec::new();
+    let Some(value) = value else {
+        return out;
+    };
+
+    if value.is_null() {
+        return out;
+    }
+
+    if let Some(action) = value.as_str() {
+        match PermissionPolicyAction::parse(action) {
+            Some(action) => out.push(PermissionRule {
+                permission: "*".to_string(),
+                pattern: "*".to_string(),
+                action,
+            }),
+            None => diagnostics.warnings.push(format!(
+                "{} must be one of allow, ask, or deny; got '{}'",
+                context, action
+            )),
+        }
+        return out;
+    }
+
+    let Some(map) = value.as_object() else {
+        diagnostics
+            .warnings
+            .push(format!("{} must be a string or object", context));
+        return out;
+    };
+
+    for (permission, value) in map {
+        let permission = permission.trim().to_ascii_lowercase();
+        if permission.is_empty() {
+            diagnostics
+                .warnings
+                .push(format!("{} contains an empty permission key", context));
+            continue;
+        }
+
+        if let Some(action) = value.as_str() {
+            match PermissionPolicyAction::parse(action) {
+                Some(action) => out.push(PermissionRule {
+                    permission,
+                    pattern: "*".to_string(),
+                    action,
+                }),
+                None => diagnostics.warnings.push(format!(
+                    "{}.{} must be one of allow, ask, or deny; got '{}'",
+                    context, permission, action
+                )),
+            }
+            continue;
+        }
+
+        let Some(patterns) = value.as_object() else {
+            diagnostics.warnings.push(format!(
+                "{}.{} must be one of allow, ask, deny, or an object of pattern rules",
+                context, permission
+            ));
+            continue;
+        };
+
+        for (pattern, action_value) in patterns {
+            let Some(action_text) = action_value.as_str() else {
+                diagnostics.warnings.push(format!(
+                    "{}.{}.{} must be one of allow, ask, or deny",
+                    context, permission, pattern
+                ));
+                continue;
+            };
+
+            let Some(action) = PermissionPolicyAction::parse(action_text) else {
+                diagnostics.warnings.push(format!(
+                    "{}.{}.{} must be one of allow, ask, or deny; got '{}'",
+                    context, permission, pattern, action_text
+                ));
+                continue;
+            };
+
+            let pattern = expand_permission_pattern(pattern);
+            if pattern.trim().is_empty() {
+                diagnostics.warnings.push(format!(
+                    "{}.{} contains an empty permission pattern",
+                    context, permission
+                ));
+                continue;
+            }
+
+            out.push(PermissionRule {
+                permission: permission.clone(),
+                pattern,
+                action,
+            });
         }
     }
 
@@ -1857,6 +2005,76 @@ mod tests {
                 args: vec!["{path}".to_string()],
             })
         );
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_global_permission_rules_in_order() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "permission": {
+                    "bash": {
+                        "*": "ask",
+                        "git *": "allow",
+                        "git push *": "deny"
+                    },
+                    "mcp_*": "deny"
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.permission_rules.len(), 4);
+        assert_eq!(config.permission_rules[0].permission, "bash");
+        assert_eq!(config.permission_rules[0].pattern, "*");
+        assert_eq!(
+            config.permission_rules[0].action,
+            PermissionPolicyAction::Ask
+        );
+        assert_eq!(config.permission_rules[3].permission, "mcp_*");
+        assert_eq!(
+            config.permission_rules[3].action,
+            PermissionPolicyAction::Deny
+        );
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_agent_permission_overrides() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "permission": "ask",
+                "agent": {
+                    "build": {
+                        "permission": {
+                            "bash": {
+                                "*": "ask",
+                                "git status *": "allow"
+                            },
+                            "edit": "deny"
+                        }
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.permission_rules.len(), 1);
+        assert_eq!(config.permission_rules[0].permission, "*");
+        assert_eq!(
+            config.permission_rules[0].action,
+            PermissionPolicyAction::Ask
+        );
+
+        let build_rules = config
+            .agent_permission_rules
+            .get("build")
+            .expect("build agent permission rules");
+        assert_eq!(build_rules.len(), 3);
+        assert_eq!(build_rules[2].permission, "edit");
+        assert_eq!(build_rules[2].action, PermissionPolicyAction::Deny);
         assert!(diagnostics.warnings.is_empty());
     }
 
