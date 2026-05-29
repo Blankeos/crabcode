@@ -1,5 +1,7 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
+
+const MAX_TERMINAL_TITLE_CHARS: usize = 240;
 
 pub fn is_supported() -> bool {
     #[cfg(target_os = "macos")]
@@ -85,6 +87,80 @@ pub fn notify_terminal_bell() {
 
 pub fn terminal_bell_supported() -> bool {
     env_eq("ZED_TERM", "true") || env_eq("TERM_PROGRAM", "zed")
+}
+
+pub fn terminal_title_supported() -> bool {
+    terminal_bell_supported()
+}
+
+pub fn set_terminal_title(title: &str) -> io::Result<()> {
+    if !io::stdout().is_terminal() {
+        return Ok(());
+    }
+
+    write_terminal_title(&sanitize_terminal_title(title))
+}
+
+pub fn clear_terminal_title() -> io::Result<()> {
+    if !io::stdout().is_terminal() {
+        return Ok(());
+    }
+
+    write_terminal_title("")
+}
+
+fn write_terminal_title(title: &str) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b]0;{}\x07", title)?;
+    stdout.flush()
+}
+
+fn sanitize_terminal_title(title: &str) -> String {
+    let mut sanitized = String::new();
+    let mut chars_written = 0;
+    let mut pending_space = false;
+
+    for ch in title.chars() {
+        if ch.is_whitespace() {
+            pending_space = !sanitized.is_empty();
+            continue;
+        }
+
+        if is_disallowed_terminal_title_char(ch) {
+            continue;
+        }
+
+        if pending_space {
+            let remaining = MAX_TERMINAL_TITLE_CHARS.saturating_sub(chars_written);
+            if remaining > 1 {
+                sanitized.push(' ');
+                chars_written += 1;
+            }
+            pending_space = false;
+        }
+
+        if chars_written >= MAX_TERMINAL_TITLE_CHARS {
+            break;
+        }
+
+        sanitized.push(ch);
+        chars_written += 1;
+    }
+
+    sanitized
+}
+
+fn is_disallowed_terminal_title_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0000}'..='\u{001F}'
+            | '\u{007F}'..='\u{009F}'
+            | '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+    )
 }
 
 fn env_eq(key: &str, expected: &str) -> bool {
@@ -201,4 +277,25 @@ fn escape_xml(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_terminal_title;
+    use super::MAX_TERMINAL_TITLE_CHARS;
+
+    #[test]
+    fn terminal_title_sanitizer_strips_controls_and_collapses_space() {
+        let sanitized = sanitize_terminal_title("  crab\tcode\n\x1b\x07\u{202E} running  ");
+
+        assert_eq!(sanitized, "crab code running");
+    }
+
+    #[test]
+    fn terminal_title_sanitizer_truncates_long_titles() {
+        let title = "x".repeat(MAX_TERMINAL_TITLE_CHARS + 10);
+        let sanitized = sanitize_terminal_title(&title);
+
+        assert_eq!(sanitized.len(), MAX_TERMINAL_TITLE_CHARS);
+    }
 }

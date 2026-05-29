@@ -1690,6 +1690,33 @@ impl Input {
         self.hovered_image_placeholder = None;
     }
 
+    pub fn set_text_with_local_images(&mut self, text: &str, image_paths: Vec<PathBuf>) {
+        let mut text = text.to_string();
+        let local_images = image_paths
+            .into_iter()
+            .enumerate()
+            .map(|(idx, path)| {
+                let placeholder = Self::image_placeholder(idx + 1);
+                if !text.contains(&placeholder) {
+                    if !text.is_empty() && !text.chars().last().is_some_and(char::is_whitespace) {
+                        text.push(' ');
+                    }
+                    text.push_str(&placeholder);
+                }
+                LocalImageAttachment { placeholder, path }
+            })
+            .collect::<Vec<_>>();
+
+        self.reset_textarea();
+        self.textarea.insert_str(&text);
+        self.viewport_top = 0;
+        self.preferred_visual_col = None;
+        self.local_images = local_images;
+        self.pending_pastes.clear();
+        self.hovered_image_placeholder = None;
+        self.sync_image_placeholders();
+    }
+
     pub fn insert_char(&mut self, c: char) {
         self.preferred_visual_col = None;
         self.textarea.insert_str(c.to_string().as_str());
@@ -1950,6 +1977,20 @@ mod tests {
 
         assert_eq!(input.get_text(), "[Image #1]");
         assert_eq!(input.local_image_paths_for_submission(), vec![path]);
+    }
+
+    #[test]
+    fn test_set_text_with_local_images_restores_attachment_state() {
+        let mut input = Input::new();
+        let paths = vec![
+            PathBuf::from("/tmp/example-1.png"),
+            PathBuf::from("/tmp/example-2.png"),
+        ];
+
+        input.set_text_with_local_images("see [Image #1] and [Image #2]", paths.clone());
+
+        assert_eq!(input.get_text(), "see [Image #1] and [Image #2]");
+        assert_eq!(input.local_image_paths_for_submission(), paths);
     }
 
     #[test]

@@ -213,3 +213,7 @@ I want - [x] To do this But I dont want to do this
 - [x] Subagent UI view is not rendering the full table it seems like.. I always see this.. just the top.
   - `┌─────────────────────────┬────────────────────────────────────────────────────────────────────────────` - never the full table
   - Thouh I think the table does have content. I think it's just being weird.
+
+- [x] When I do "Undo" on a message that had an attachment / image. It goes back to my input, but it isn't highlighted anymore, meaning that image is probably not visible anymore right? Is there a way to persist that?
+
+- [x] Emit the same Loading stuff that codex does. So that Zed knows when the agent is "in progress".

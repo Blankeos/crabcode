@@ -204,6 +204,10 @@ enum SelectionAction {
     Dismiss,
 }
 
+const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const TERMINAL_TITLE_SPINNER_INTERVAL_MS: u128 = 100;
+
 #[derive(Debug)]
 struct ClientSessionState {
     chat: Chat,
@@ -306,6 +310,9 @@ pub struct App {
     discovery: Option<crate::model::discovery::Discovery>,
     cached_usage_text: String,
     cached_usage_check: (usize, u64),
+    terminal_title_enabled: bool,
+    terminal_title_last: Option<String>,
+    terminal_title_animation_origin: std::time::Instant,
 }
 
 impl App {
@@ -554,6 +561,9 @@ impl App {
             discovery,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0),
+            terminal_title_enabled: crate::notify::terminal_title_supported(),
+            terminal_title_last: None,
+            terminal_title_animation_origin: now,
         })
     }
 
@@ -604,6 +614,96 @@ impl App {
         if should_emit {
             crate::notify::notify_terminal_bell();
         }
+    }
+
+    pub fn update_terminal_title_signal(&mut self) {
+        if !self.terminal_title_enabled {
+            return;
+        }
+
+        let title = self.terminal_title_text();
+        if self.terminal_title_last.as_deref() == Some(title.as_str()) {
+            return;
+        }
+
+        if crate::notify::set_terminal_title(&title).is_ok() {
+            self.terminal_title_last = Some(title);
+        }
+    }
+
+    pub fn clear_terminal_title_signal(&mut self) {
+        if self.terminal_title_last.take().is_some() {
+            let _ = crate::notify::clear_terminal_title();
+        }
+    }
+
+    fn terminal_title_text(&self) -> String {
+        let project = self.terminal_title_project_name();
+
+        if self.terminal_title_requires_action() {
+            return format!("[!] {}", project);
+        }
+
+        if self.terminal_title_has_active_progress() {
+            return format!("{} {}", self.terminal_title_spinner_frame(), project);
+        }
+
+        project
+    }
+
+    fn terminal_title_project_name(&self) -> String {
+        let workspace = self.active_workspace_path();
+        let name = std::path::Path::new(&workspace)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+            .unwrap_or("crabcode");
+
+        Self::truncate_terminal_title_part(name, 48)
+    }
+
+    fn terminal_title_requires_action(&self) -> bool {
+        if matches!(
+            self.overlay_focus,
+            OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+        ) {
+            return true;
+        }
+
+        self.session_manager
+            .get_current_session_id()
+            .and_then(|id| self.session_manager.get_session_ref(id))
+            .is_some_and(|session| session.status == crate::session::types::SessionStatus::Waiting)
+    }
+
+    fn terminal_title_has_active_progress(&self) -> bool {
+        self.compaction_receiver.is_some()
+            || self
+                .session_view_states
+                .values()
+                .any(|state| state.stream.is_some() || state.external_stream.is_some())
+    }
+
+    fn terminal_title_spinner_frame(&self) -> &'static str {
+        let frame_index = self.terminal_title_animation_origin.elapsed().as_millis()
+            / TERMINAL_TITLE_SPINNER_INTERVAL_MS;
+        TERMINAL_TITLE_SPINNER_FRAMES[frame_index as usize % TERMINAL_TITLE_SPINNER_FRAMES.len()]
+    }
+
+    fn truncate_terminal_title_part(value: &str, max_chars: usize) -> String {
+        if max_chars == 0 {
+            return String::new();
+        }
+
+        let head = value.chars().take(max_chars).collect::<String>();
+        if value.chars().count() <= max_chars || max_chars <= 3 {
+            return head;
+        }
+
+        let mut truncated = head.chars().take(max_chars - 3).collect::<String>();
+        truncated.push_str("...");
+        truncated
     }
 
     fn completion_notification_stats(&self) -> Option<String> {
@@ -4374,11 +4474,11 @@ impl App {
                     return;
                 }
 
-                let undone_content: Option<String> = {
+                let undone_message: Option<crate::session::types::Message> = {
                     if let Some(session) = self.session_manager.get_current_session() {
-                        let content = session.messages.get(idx).map(|m| m.content.clone());
+                        let message = session.messages.get(idx).cloned();
                         session.messages.truncate(idx);
-                        content
+                        message
                     } else {
                         return;
                     }
@@ -4396,8 +4496,14 @@ impl App {
                 self.chat_state.chat.scroll_offset = usize::MAX;
                 self.chat_state.chat.clear_highlighted_message();
 
-                if let Some(content) = undone_content {
-                    self.input.set_text(&content);
+                if let Some(message) = undone_message {
+                    let image_paths = message
+                        .local_image_paths
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                    self.input
+                        .set_text_with_local_images(&message.content, image_paths);
                 }
 
                 push_toast(Toast::new(
@@ -7035,6 +7141,9 @@ mod tests {
             discovery: None,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0),
+            terminal_title_enabled: false,
+            terminal_title_last: None,
+            terminal_title_animation_origin: std::time::Instant::now(),
         }
     }
 
@@ -7043,6 +7152,44 @@ mod tests {
             .as_ref()
             .map(|dialog| dialog.items.iter().map(|item| item.name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn terminal_title_uses_workspace_leaf_when_idle() {
+        let mut app = test_app();
+        app.cwd = "/tmp/sheetpilot".to_string();
+
+        assert_eq!(app.terminal_title_text(), "sheetpilot");
+    }
+
+    #[test]
+    fn terminal_title_prefixes_spinner_while_streaming() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("test".to_string()));
+        if let Some(session) = app.session_manager.sessions.get_mut(&session_id) {
+            session.workspace_path = "/tmp/sheetpilot".to_string();
+        }
+        if let Some(state) = app.session_view_states.get_mut(&session_id) {
+            state.external_stream = Some(ExternalStreamState {
+                streaming_model: Some("test-model".to_string()),
+                streaming_provider: Some("test-provider".to_string()),
+                chat_len_before_assistant: 0,
+            });
+        }
+
+        let title = app.terminal_title_text();
+        assert!(TERMINAL_TITLE_SPINNER_FRAMES
+            .iter()
+            .any(|frame| title == format!("{frame} sheetpilot")));
+    }
+
+    #[test]
+    fn terminal_title_marks_action_required() {
+        let mut app = test_app();
+        app.cwd = "/tmp/sheetpilot".to_string();
+        app.overlay_focus = OverlayFocus::PermissionDialog;
+
+        assert_eq!(app.terminal_title_text(), "[!] sheetpilot");
     }
 
     fn add_current_session_message(app: &mut App, message: crate::session::types::Message) {
@@ -7385,6 +7532,29 @@ mod tests {
         app.show_message_actions(0);
 
         assert!(message_action_names(&app).contains(&"Undo".to_string()));
+    }
+
+    #[test]
+    fn undo_user_message_restores_local_image_attachments_to_input() {
+        let mut app = test_app();
+        app.create_new_session(Some("Timeline".to_string()));
+        let mut user_message = crate::session::types::Message::user("see [Image #1]");
+        user_message.local_image_paths = vec!["/tmp/example.png".to_string()];
+        add_current_session_message(&mut app, user_message);
+        add_current_session_message(
+            &mut app,
+            crate::session::types::Message::assistant("Answer"),
+        );
+        app.message_actions_index = Some(0);
+
+        app.execute_message_action("undo");
+
+        assert_eq!(app.input.get_text(), "see [Image #1]");
+        assert_eq!(
+            app.input.local_image_paths_for_submission(),
+            vec![std::path::PathBuf::from("/tmp/example.png")]
+        );
+        assert!(app.chat_state.chat.messages.is_empty());
     }
 
     #[test]

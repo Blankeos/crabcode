@@ -458,6 +458,7 @@ async fn main() -> Result<()> {
     };
 
     let post_close_colors = app.get_current_theme_colors();
+    app.clear_terminal_title_signal();
 
     disable_raw_mode()?;
     if supports_keyboard_enhancement().unwrap_or(false) {
@@ -586,6 +587,7 @@ async fn run_event_loop(
 
         app.process_streaming_chunks();
         app.update_animations();
+        app.update_terminal_title_signal();
         remove_expired_toasts();
         if needs_redraw || animation_needed {
             terminal.draw(|f| app.render(f))?;
