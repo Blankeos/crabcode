@@ -90,6 +90,7 @@ if (!Number.isFinite(runs) || runs <= 0) {
 const plannedPrompts = selectedTasks.length * agents.length * runs
 const estimatedInputTokens = selectedTasks.reduce((sum, task) => sum + estimateTokens(benchmarkPrompt(task.prompt)), 0) * agents.length * runs
 const plannedCost = estimateCost(estimatedInputTokens, 0, inputPrice, outputPrice)
+const maxRunTimeoutMs = Math.max(timeoutMs, ...selectedTasks.map((task) => Number(task.timeoutMs ?? timeoutMs)))
 
 printIntro()
 
@@ -424,7 +425,9 @@ function printIntro() {
   console.log(`  tasks:        ${selectedTasks.map((task) => task.id).join(', ')}`)
   console.log(`  runs:         ${runs}`)
   console.log(`  prompts:      ${plannedPrompts}`)
-  console.log(`  timeout:      ${formatDuration(timeoutMs)}`)
+  console.log(
+    `  timeout:      ${formatDuration(timeoutMs)}${maxRunTimeoutMs === timeoutMs ? '' : ` default, ${formatDuration(maxRunTimeoutMs)} max`}`,
+  )
   console.log(`  prompt cost:  ${formatUsd(plannedCost)} estimated`)
   console.log('')
   console.log('Agent model args')
@@ -491,4 +494,3 @@ function printSummary(results: RunResult[]) {
   console.log('\nMetric: Score is the percent of task runs where the command exited successfully and every deterministic check passed.')
   console.log('Cost is an estimate from prompt/output text tokens only; provider dashboards are the source of truth.')
 }
-

@@ -13,6 +13,7 @@ Useful filters:
 ```sh
 just bench-agents --list-tasks
 just bench-agents --tasks workflow-planner-ts
+just bench-agents --tasks issue-triage-pipeline-ts --agents crabcode,opencode,codex
 just bench-agents --tags typescript,hidden-tests
 just bench-agents --difficulty hard
 just bench-agents --estimate --agents crabcode,codex
@@ -63,4 +64,3 @@ export const myTasks = [
 ```
 
 Keep prompts direct and checks deterministic. For harder tasks, prefer visible tests plus hidden tests injected by `bunTestWithHiddenFileCheck`.
-
