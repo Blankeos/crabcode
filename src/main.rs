@@ -205,9 +205,11 @@ async fn run_print_mode(
     for (mode, tools) in agent_registry.tool_policy_map() {
         agent_policies = agent_policies.with_custom_tools(mode, tools);
     }
+    let permission_rules =
+        print_mode_permission_rules(loaded_config.merged_config.permission_rules.clone());
     let tool_permissions = crate::tools::ToolPermissions::new(std::path::PathBuf::from(&cwd))
         .with_agent_policies(agent_policies)
-        .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
+        .with_permission_rules(permission_rules)
         .with_agent_permission_rules(agent_registry.permission_rules_map())
         .dangerously_skip_permissions(dangerously_skip_permissions);
     let agent_max_steps = agent_registry
@@ -237,7 +239,8 @@ async fn run_print_mode(
         std::env::consts::OS,
     )
     .with_tool_registry(prompt_registry)
-    .with_agent_registry(agent_registry.clone());
+    .with_agent_registry(agent_registry.clone())
+    .with_print_mode(true);
     let system_prompt = composer.compose().await;
     let messages = vec![Message::system(system_prompt), Message::user(prompt)];
 
@@ -295,12 +298,31 @@ async fn run_print_mode(
                     .response_tx
                     .send(crate::tools::PermissionResponse::Deny);
             }
+            crate::llm::ChunkMessage::QuestionRequest { response_tx, .. } => {
+                let _ = response_tx.send(serde_json::json!({
+                    "skipped": true,
+                    "reason": "Question prompts are unavailable in non-interactive print mode"
+                }));
+            }
             _ => {}
         }
     }
 
     let _ = no_session_persistence;
     Ok(())
+}
+
+fn print_mode_permission_rules(
+    mut rules: crate::tools::PermissionRules,
+) -> crate::tools::PermissionRules {
+    for tool_id in ["question", "update_plan"] {
+        rules.push(crate::tools::PermissionRule {
+            permission: tool_id.to_string(),
+            pattern: "*".to_string(),
+            action: crate::tools::PermissionPolicyAction::Deny,
+        });
+    }
+    rules
 }
 
 lazy_static::lazy_static! {
@@ -566,6 +588,22 @@ mod tests {
             merge_prompt_with_stdin("Examine the diff.", "diff --git a/a b/a\n+change"),
             "Examine the diff.\n\n<stdin>\ndiff --git a/a b/a\n+change\n</stdin>"
         );
+    }
+
+    #[test]
+    fn print_mode_denies_interactive_tools() {
+        let rules = print_mode_permission_rules(Vec::new());
+
+        assert!(rules.iter().any(|rule| {
+            rule.permission == "question"
+                && rule.pattern == "*"
+                && rule.action == crate::tools::PermissionPolicyAction::Deny
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.permission == "update_plan"
+                && rule.pattern == "*"
+                && rule.action == crate::tools::PermissionPolicyAction::Deny
+        }));
     }
 }
 

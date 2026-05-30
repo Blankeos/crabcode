@@ -85,7 +85,7 @@ Options:
   --difficulty hard                  Run tasks by difficulty: smoke, medium, hard.
   --list-tasks                       Print available tasks and exit.
   --runs 1                           Repetitions per agent/task.
-  --timeout-ms 45000                 Timeout per run.
+  --timeout-ms ${DEFAULT_TIMEOUT_MS}                 Default timeout per run.
   --estimate                         Print planned prompt count and prompt-only cost, then exit.
   --input-price 1.25                 Input USD per 1M tokens for rough cost estimates.
   --output-price 10                  Output USD per 1M tokens for rough cost estimates.
@@ -116,7 +116,7 @@ Stop behavior:
   Ctrl+C stops the active agent process tree and removes temporary workspaces unless --keep is set.
 
 Command overrides:
-  BENCH_CRABCODE_CMD='crabcode -p --no-session-persistence --dangerously-skip-permissions {prompt}'
+  BENCH_CRABCODE_CMD='crabcode -p -m {model} --no-session-persistence --dangerously-skip-permissions {prompt}'
   BENCH_OPENCODE_CMD='opencode run --dangerously-skip-permissions -m {model} {prompt}'
   BENCH_CODEX_CMD='codex exec --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m {model} {prompt}'
 

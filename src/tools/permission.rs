@@ -26,7 +26,7 @@ impl PermissionAction {
     pub fn from_tool_id(tool_id: &str) -> Self {
         match tool_id {
             "read" | "view_image" => Self::Read,
-            "write" => Self::Write,
+            "write" | "write_files" => Self::Write,
             "edit" => Self::Edit,
             "list" => Self::List,
             "glob" => Self::Glob,
@@ -147,7 +147,7 @@ impl AgentToolPolicies {
         if mode == "plan" {
             // OpenCode plan mode is read-only by default. Custom agent tool
             // policies above can still opt specific tools back in.
-            return !matches!(tool.as_str(), "bash" | "write" | "edit");
+            return !matches!(tool.as_str(), "bash" | "write" | "write_files" | "edit");
         }
 
         if mode == "build" {
@@ -250,7 +250,8 @@ impl ToolPermissions {
         }
 
         let action = PermissionAction::from_tool_id(tool_id);
-        let path = extract_primary_path(action, params, &self.workdir);
+        let paths = extract_primary_paths(tool_id, action, params, &self.workdir);
+        let path = paths.first().cloned();
         let command = if action == PermissionAction::Bash {
             get_string(params, "command").map(|s| s.trim().to_string())
         } else {
@@ -287,24 +288,26 @@ impl ToolPermissions {
             _ => {}
         }
 
-        let mut reason = self.evaluate_reason(action, path.as_deref());
+        let (mut reason, mut reason_path) = self.evaluate_reasons(action, &paths);
+        let prompt_path = reason_path.as_deref().or(path.as_deref());
         if let Some(reason_kind) = reason {
             match self.evaluate_guard_decision(
                 agent_mode,
                 tool_id,
                 reason_kind,
-                path.as_deref(),
+                prompt_path,
                 &patterns,
             ) {
                 Some(PermissionPolicyAction::Deny) => {
                     return Err(ToolError::Permission(guard_deny_text(
                         reason_kind,
                         tool_id,
-                        path.as_deref(),
+                        prompt_path,
                     )));
                 }
                 Some(PermissionPolicyAction::Allow) => {
                     reason = None;
+                    reason_path = None;
                 }
                 _ => {}
             }
@@ -320,7 +323,7 @@ impl ToolPermissions {
                     tool_id,
                     action,
                     reason_kind,
-                    path.as_deref(),
+                    reason_path.as_deref().or(path.as_deref()),
                     command.clone(),
                     sender,
                 )
@@ -515,6 +518,19 @@ impl ToolPermissions {
         None
     }
 
+    fn evaluate_reasons(
+        &self,
+        action: PermissionAction,
+        paths: &[PathBuf],
+    ) -> (Option<PermissionReasonKind>, Option<PathBuf>) {
+        for path in paths {
+            if let Some(reason) = self.evaluate_reason(action, Some(path.as_path())) {
+                return (Some(reason), Some(path.clone()));
+            }
+        }
+        (None, None)
+    }
+
     async fn evaluate_doom_loop(
         &self,
         tool_id: &str,
@@ -636,7 +652,7 @@ fn get_string(params: &Value, key: &str) -> Option<String> {
 
 fn permission_key_for_tool_id(tool_id: &str) -> String {
     match tool_id.trim().to_ascii_lowercase().as_str() {
-        "write" | "edit" => "edit".to_string(),
+        "write" | "write_files" | "edit" => "edit".to_string(),
         "read" | "view_image" => "read".to_string(),
         other => other.to_string(),
     }
@@ -684,6 +700,18 @@ fn permission_patterns_for_tool(
             }
         }
         "question" | "update_plan" => patterns.push("*".to_string()),
+        "write_files" => {
+            if let Some(files) = params.get("files").and_then(Value::as_array) {
+                for file in files {
+                    if let Some(path) = get_string(file, "file_path")
+                        .or_else(|| get_string(file, "filePath"))
+                        .or_else(|| get_string(file, "path"))
+                    {
+                        push_nonempty(&mut patterns, &path);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 
@@ -837,6 +865,7 @@ fn extract_primary_path(
             get_string(params, "file_path")
                 .or_else(|| get_string(params, "filePath"))
                 .or_else(|| get_string(params, "path"))
+                .or_else(|| first_write_files_path(params))
         }
         PermissionAction::List | PermissionAction::Glob | PermissionAction::Grep => {
             get_string(params, "path").or_else(|| Some(".".to_string()))
@@ -848,6 +877,53 @@ fn extract_primary_path(
     }?;
 
     Some(resolve_path(&raw, workdir))
+}
+
+fn extract_primary_paths(
+    tool_id: &str,
+    action: PermissionAction,
+    params: &Value,
+    workdir: &Path,
+) -> Vec<PathBuf> {
+    if tool_id == "write_files" {
+        return write_files_paths(params)
+            .into_iter()
+            .map(|path| resolve_path(&path, workdir))
+            .collect();
+    }
+
+    extract_primary_path(action, params, workdir)
+        .into_iter()
+        .collect()
+}
+
+fn write_files_paths(params: &Value) -> Vec<String> {
+    params
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|file| {
+                    get_string(file, "file_path")
+                        .or_else(|| get_string(file, "filePath"))
+                        .or_else(|| get_string(file, "path"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn first_write_files_path(params: &Value) -> Option<String> {
+    params
+        .get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(|file| {
+            get_string(file, "file_path")
+                .or_else(|| get_string(file, "filePath"))
+                .or_else(|| get_string(file, "path"))
+        })
 }
 
 pub fn resolve_path(raw: &str, workdir: &Path) -> PathBuf {
@@ -926,6 +1002,7 @@ mod tests {
         assert!(policies.is_allowed("plan", "glob"));
         assert!(!policies.is_allowed("plan", "bash"));
         assert!(!policies.is_allowed("plan", "write"));
+        assert!(!policies.is_allowed("plan", "write_files"));
         assert!(!policies.is_allowed("plan", "edit"));
     }
 
@@ -968,6 +1045,27 @@ mod tests {
             .expect("expected path to be extracted");
 
         assert_eq!(extracted, PathBuf::from("/tmp/workspace/.env"));
+    }
+
+    #[test]
+    fn extract_primary_paths_collects_all_write_files_paths() {
+        let wd = PathBuf::from("/tmp/workspace");
+        let params = serde_json::json!({
+            "files": [
+                { "file_path": "src/a.ts", "content": "a" },
+                { "file_path": "/tmp/elsewhere/b.ts", "content": "b" }
+            ]
+        });
+
+        let extracted = extract_primary_paths("write_files", PermissionAction::Write, &params, &wd);
+
+        assert_eq!(
+            extracted,
+            vec![
+                PathBuf::from("/tmp/workspace/src/a.ts"),
+                PathBuf::from("/tmp/elsewhere/b.ts")
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1062,6 +1160,43 @@ mod tests {
         assert_eq!(prompt.tool_id, "read");
         assert_eq!(prompt.action, PermissionAction::Read);
         assert_eq!(prompt.target.as_deref(), Some("/tmp/elsewhere/file.txt"));
+        assert!(prompt.reason.contains("outside working directory"));
+
+        let _ = prompt.response_tx.send(PermissionResponse::Deny);
+        let result = pending.await.expect("preflight task should complete");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_files_prompts_for_external_secondary_path() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({
+            "files": [
+                { "file_path": "/tmp/workspace/src/a.ts", "content": "a" },
+                { "file_path": "/tmp/elsewhere/b.ts", "content": "b" }
+            ]
+        });
+
+        let pending = tokio::spawn({
+            let perms = perms.clone();
+            let params = params.clone();
+            let tx = tx.clone();
+            async move {
+                perms
+                    .preflight("build", "write_files", &params, Some(&tx))
+                    .await
+            }
+        });
+
+        let prompt = match rx.recv().await {
+            Some(ChunkMessage::PermissionRequest(prompt)) => prompt,
+            _ => panic!("Expected permission prompt"),
+        };
+
+        assert_eq!(prompt.tool_id, "write_files");
+        assert_eq!(prompt.action, PermissionAction::Write);
+        assert_eq!(prompt.target.as_deref(), Some("/tmp/elsewhere/b.ts"));
         assert!(prompt.reason.contains("outside working directory"));
 
         let _ = prompt.response_tx.send(PermissionResponse::Deny);

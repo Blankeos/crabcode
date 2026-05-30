@@ -9,7 +9,7 @@ export const triageTasks = [
     title: 'Implement a multi-file issue triage pipeline',
     difficulty: 'hard',
     tags: ['typescript', 'cli', 'multi-file', 'hidden-tests'],
-    timeoutMs: 120_000,
+    timeoutMs: 240_000,
     files: {
       'package.json': JSON.stringify({ type: 'module', scripts: { test: 'bun test' } }, null, 2) + '\n',
       'README.md': `# Triage Pipeline Fixture

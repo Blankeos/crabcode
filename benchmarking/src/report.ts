@@ -57,7 +57,13 @@ export function writeMarkdownReport(
   lines.push(`Tasks: ${report.tasks.map((task) => `\`${task.id}\``).join(', ')}`)
   lines.push(`Runs per agent/task: ${report.runs}`)
   lines.push(`Completed runs: ${report.results.length}/${report.plannedPrompts}`)
-  lines.push(`Timeout per run: ${report.timeoutMs}ms`)
+  lines.push(`Default timeout per run: ${report.timeoutMs}ms`)
+  const timeoutOverrides = report.tasks
+    .filter((task) => task.timeoutMs !== undefined && task.timeoutMs !== report.timeoutMs)
+    .map((task) => `${task.id}=${task.timeoutMs}ms`)
+  if (timeoutOverrides.length) {
+    lines.push(`Task timeout overrides: ${timeoutOverrides.map((override) => `\`${override}\``).join(', ')}`)
+  }
   lines.push(`Benchmark run directory: \`${report.runRoot}\``)
   lines.push(`Agents ran in: \`${report.workspacesRoot}\``)
   lines.push(`Logs: \`${report.logsRoot}\``)
@@ -128,4 +134,3 @@ export function writeMarkdownReport(
 
   writeFileSync(path, lines.join('\n') + '\n')
 }
-

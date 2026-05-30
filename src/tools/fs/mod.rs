@@ -10,4 +10,4 @@ pub use grep::GrepTool;
 pub use list::ListTool;
 pub use read::ReadTool;
 pub use view_image::ViewImageTool;
-pub use write::WriteTool;
+pub use write::{WriteFilesTool, WriteTool};

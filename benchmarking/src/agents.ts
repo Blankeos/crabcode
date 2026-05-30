@@ -1,5 +1,5 @@
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { accessSync, constants, existsSync } from 'node:fs'
+import { delimiter, join } from 'node:path'
 import { DEFAULT_AGENTS, REPO_ROOT } from './defaults.ts'
 import { shellQuote } from './format.ts'
 import type { AgentName, BenchmarkTask } from './types.ts'
@@ -36,6 +36,8 @@ export function benchmarkPrompt(prompt: string) {
     'Keep the change minimal. When the task is complete, stop.',
     'If the task names exact file paths, inspect those paths directly instead of listing directories first.',
     'Do not repeat identical tool calls or run optional extra checks after the requested change is complete.',
+    'After verification, give a final answer in at most two short lines: what changed and what validation ran.',
+    'Do not enumerate every edited file or continue explaining once the task is complete.',
     '',
     `Task: ${prompt}`,
   ].join('\n')
@@ -54,11 +56,38 @@ export function modelForAgent(agent: AgentName, modelRef: string) {
 }
 
 function defaultCrabcodeCommand() {
+  const configuredBinary = process.env.BENCH_CRABCODE_BIN?.trim()
+  if (configuredBinary) {
+    return `${shellQuote(configuredBinary)} -p -m {model} --no-session-persistence --dangerously-skip-permissions {prompt}`
+  }
+
+  const installedBinary = findExecutableOnPath('crabcode')
+  if (installedBinary) {
+    return `${shellQuote(installedBinary)} -p -m {model} --no-session-persistence --dangerously-skip-permissions {prompt}`
+  }
+
+  const releaseBinary = join(REPO_ROOT, 'target', 'release', 'crabcode')
+  if (existsSync(releaseBinary)) {
+    return `${shellQuote(releaseBinary)} -p -m {model} --no-session-persistence --dangerously-skip-permissions {prompt}`
+  }
+
   const binary = join(REPO_ROOT, 'target', 'debug', 'crabcode')
   if (existsSync(binary)) {
-    return `${shellQuote(binary)} -p --no-session-persistence --dangerously-skip-permissions {prompt}`
+    return `${shellQuote(binary)} -p -m {model} --no-session-persistence --dangerously-skip-permissions {prompt}`
   }
-  return `cargo run --quiet --manifest-path ${shellQuote(join(REPO_ROOT, 'Cargo.toml'))} -- -p --no-session-persistence --dangerously-skip-permissions {prompt}`
+  return `cargo run --quiet --manifest-path ${shellQuote(join(REPO_ROOT, 'Cargo.toml'))} -- -p -m {model} --no-session-persistence --dangerously-skip-permissions {prompt}`
+}
+
+function findExecutableOnPath(name: string) {
+  const pathValue = process.env.PATH ?? ''
+  for (const dir of pathValue.split(delimiter).filter(Boolean)) {
+    const candidate = join(dir, name)
+    try {
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {}
+  }
+  return null
 }
 
 export function assertAgentName(value: string): asserts value is AgentName {
@@ -66,4 +95,3 @@ export function assertAgentName(value: string): asserts value is AgentName {
     throw new Error(`Unknown agent: ${value}. Expected one of ${DEFAULT_AGENTS.join(', ')}`)
   }
 }
-

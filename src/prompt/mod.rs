@@ -34,6 +34,7 @@ pub struct SystemPromptComposer {
     working_directory: String,
     is_git_repo: bool,
     platform: String,
+    print_mode: bool,
     tool_registry: Option<ToolRegistry>,
     agent_registry: Option<crate::agent::definition::AgentRegistry>,
 }
@@ -50,6 +51,7 @@ impl SystemPromptComposer {
             working_directory: working_directory.into(),
             is_git_repo,
             platform: platform.into(),
+            print_mode: false,
             tool_registry: None,
             agent_registry: None,
         }
@@ -68,11 +70,19 @@ impl SystemPromptComposer {
         self
     }
 
+    pub fn with_print_mode(mut self, print_mode: bool) -> Self {
+        self.print_mode = print_mode;
+        self
+    }
+
     pub async fn compose(&self) -> String {
         let mut parts = Vec::new();
 
         parts.push(self.get_header());
         parts.push(self.get_core_prompt());
+        if self.print_mode {
+            parts.push(self.get_print_mode_context());
+        }
         parts.push(self.get_environment_context());
 
         if let Some(ref registry) = self.tool_registry {
@@ -219,6 +229,8 @@ Progress Updates and Final Answers:
 - If work remains, continue with tools instead of sending a final answer.
 - Use final answers only when the requested work is complete, verified when practical, and ready to hand back.
 - Keep final answers concise and focused on what changed, validation run, and any real blocker.
+- For routine code changes, prefer one or two compact sentences plus validation; do not list every edited file unless that detail is needed.
+- Once the final answer is complete, stop instead of continuing with extra explanation.
 
 Planning:
 - Use update_plan for non-trivial, multi-phase work
@@ -266,6 +278,15 @@ Your output will be displayed on a command line interface. Your responses should
  </env>"#,
             self.working_directory, git_status, self.platform, date
         )
+    }
+
+    fn get_print_mode_context(&self) -> String {
+        r#"Non-Interactive Print Mode:
+- Keep planning internal; do not call update_plan.
+- Do not ask the user questions or wait for interactive input.
+- Prefer direct read/edit/write/bash tool use, and prefer write_files when replacing complete contents of multiple files.
+- After requested validation passes, send a compact final answer and stop."#
+            .to_string()
     }
 
     async fn get_tools_context(&self, registry: &ToolRegistry) -> String {
@@ -397,5 +418,16 @@ mod tests {
         );
         assert!(prompt.contains("do not call update_plan again unless the plan content"));
         assert!(prompt.contains("do not stop at a proposed solution in chat"));
+    }
+
+    #[test]
+    fn print_mode_context_disables_interactive_planning() {
+        let composer = SystemPromptComposer::new("gpt-5", ".", true, "test").with_print_mode(true);
+        let context = composer.get_print_mode_context();
+
+        assert!(context.contains("do not call update_plan"));
+        assert!(context.contains("Do not ask the user questions"));
+        assert!(context.contains("write_files"));
+        assert!(context.contains("stop"));
     }
 }
