@@ -110,13 +110,14 @@ Default params:
 Environment overrides:
   BENCH_MODEL, BENCH_AGENTS, BENCH_TASKS, BENCH_TAGS, BENCH_DIFFICULTY,
   BENCH_RUNS, BENCH_TIMEOUT_MS, BENCH_INPUT_USD_PER_MTOK,
-  BENCH_OUTPUT_USD_PER_MTOK, BENCH_DIR, BENCH_REPORT_DIR
+  BENCH_OUTPUT_USD_PER_MTOK, BENCH_DIR, BENCH_REPORT_DIR,
+  BENCH_CRABCODE_REASONING
 
 Stop behavior:
   Ctrl+C stops the active agent process tree and removes temporary workspaces unless --keep is set.
 
 Command overrides:
-  BENCH_CRABCODE_CMD='crabcode -p -m {model} --no-session-persistence --dangerously-skip-permissions {prompt}'
+  BENCH_CRABCODE_CMD='crabcode -p -m {model} --reasoning-effort medium --no-session-persistence --dangerously-skip-permissions {prompt}'
   BENCH_OPENCODE_CMD='opencode run --dangerously-skip-permissions -m {model} {prompt}'
   BENCH_CODEX_CMD='codex exec --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m {model} {prompt}'
 

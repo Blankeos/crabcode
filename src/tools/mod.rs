@@ -7,6 +7,7 @@ pub mod context;
 pub mod edit;
 pub mod fs;
 pub mod init;
+pub mod patch;
 pub mod permission;
 pub mod question;
 pub mod registry;
@@ -22,6 +23,7 @@ pub use edit::EditTool;
 pub use init::{
     initialize_tool_registry, initialize_tool_registry_with_dynamic, scope_tool_registry_for_agent,
 };
+pub use patch::ApplyPatchTool;
 pub use permission::{
     expand_permission_pattern, AgentToolPolicies, PermissionAction, PermissionPolicyAction,
     PermissionPrompt, PermissionResponse, PermissionRule, PermissionRules, ToolPermissions,

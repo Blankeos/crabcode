@@ -1,7 +1,7 @@
 use crate::tools::{
     fs::{GlobTool, GrepTool, ListTool, ReadTool, ViewImageTool, WriteFilesTool, WriteTool},
-    BashTool, EditTool, QuestionTool, SkillTool, TaskTool, ToolPermissions, ToolRegistry,
-    UpdatePlanTool, WebfetchTool,
+    ApplyPatchTool, BashTool, EditTool, QuestionTool, SkillTool, TaskTool, ToolPermissions,
+    ToolRegistry, UpdatePlanTool, WebfetchTool,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -14,6 +14,7 @@ pub async fn initialize_tool_registry() -> ToolRegistry {
     registry.register(Arc::new(ListTool::new())).await;
     registry.register(Arc::new(ReadTool::new())).await;
     registry.register(Arc::new(ViewImageTool::new())).await;
+    registry.register(Arc::new(ApplyPatchTool::new())).await;
     registry.register(Arc::new(WriteTool::new())).await;
     registry.register(Arc::new(WriteFilesTool::new())).await;
     registry.register(Arc::new(BashTool::new())).await;
@@ -107,6 +108,7 @@ mod tests {
         assert!(scoped.get("read").await.is_some());
         assert!(scoped.get("task").await.is_some());
         assert!(scoped.get("bash").await.is_none());
+        assert!(scoped.get("apply_patch").await.is_none());
         assert!(scoped.get("write").await.is_none());
         assert!(scoped.get("edit").await.is_none());
     }

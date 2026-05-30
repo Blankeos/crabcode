@@ -27,7 +27,7 @@ impl PermissionAction {
         match tool_id {
             "read" | "view_image" => Self::Read,
             "write" | "write_files" => Self::Write,
-            "edit" => Self::Edit,
+            "edit" | "apply_patch" => Self::Edit,
             "list" => Self::List,
             "glob" => Self::Glob,
             "grep" => Self::Grep,
@@ -147,7 +147,10 @@ impl AgentToolPolicies {
         if mode == "plan" {
             // OpenCode plan mode is read-only by default. Custom agent tool
             // policies above can still opt specific tools back in.
-            return !matches!(tool.as_str(), "bash" | "write" | "write_files" | "edit");
+            return !matches!(
+                tool.as_str(),
+                "bash" | "write" | "write_files" | "edit" | "apply_patch"
+            );
         }
 
         if mode == "build" {
@@ -652,7 +655,7 @@ fn get_string(params: &Value, key: &str) -> Option<String> {
 
 fn permission_key_for_tool_id(tool_id: &str) -> String {
     match tool_id.trim().to_ascii_lowercase().as_str() {
-        "write" | "write_files" | "edit" => "edit".to_string(),
+        "write" | "write_files" | "edit" | "apply_patch" => "edit".to_string(),
         "read" | "view_image" => "read".to_string(),
         other => other.to_string(),
     }
@@ -710,6 +713,11 @@ fn permission_patterns_for_tool(
                         push_nonempty(&mut patterns, &path);
                     }
                 }
+            }
+        }
+        "apply_patch" => {
+            for path in crate::tools::patch::patch_paths_from_params(params) {
+                push_nonempty(&mut patterns, &path);
             }
         }
         _ => {}
@@ -892,6 +900,13 @@ fn extract_primary_paths(
             .collect();
     }
 
+    if tool_id == "apply_patch" {
+        return crate::tools::patch::patch_paths_as_pathbufs(params, workdir)
+            .into_iter()
+            .map(|path| normalize_path(&path))
+            .collect();
+    }
+
     extract_primary_path(action, params, workdir)
         .into_iter()
         .collect()
@@ -1004,6 +1019,7 @@ mod tests {
         assert!(!policies.is_allowed("plan", "write"));
         assert!(!policies.is_allowed("plan", "write_files"));
         assert!(!policies.is_allowed("plan", "edit"));
+        assert!(!policies.is_allowed("plan", "apply_patch"));
     }
 
     #[test]
@@ -1064,6 +1080,24 @@ mod tests {
             vec![
                 PathBuf::from("/tmp/workspace/src/a.ts"),
                 PathBuf::from("/tmp/elsewhere/b.ts")
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_primary_paths_collects_all_apply_patch_paths() {
+        let wd = PathBuf::from("/tmp/workspace");
+        let params = serde_json::json!({
+            "patch": "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+new\n"
+        });
+
+        let extracted = extract_primary_paths("apply_patch", PermissionAction::Edit, &params, &wd);
+
+        assert_eq!(
+            extracted,
+            vec![
+                PathBuf::from("/tmp/workspace/src/a.ts"),
+                PathBuf::from("/tmp/workspace/src/b.ts")
             ]
         );
     }

@@ -51,6 +51,7 @@ mod tests {
 
         assert!(permissions.is_tool_allowed_for_agent("explore", "read"));
         assert!(!permissions.is_tool_allowed_for_agent("explore", "bash"));
+        assert!(!permissions.is_tool_allowed_for_agent("explore", "apply_patch"));
         assert!(!permissions.is_tool_allowed_for_agent("explore", "write"));
         assert!(!permissions.is_tool_allowed_for_agent("explore", "edit"));
     }

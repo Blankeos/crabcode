@@ -140,6 +140,7 @@ fn format_post_close_message(
 async fn run_print_mode(
     prompt: &str,
     model_override: Option<&str>,
+    reasoning_override: Option<crate::model::reasoning::ReasoningEffort>,
     no_session_persistence: bool,
     dangerously_skip_permissions: bool,
 ) -> Result<()> {
@@ -175,18 +176,19 @@ async fn run_print_mode(
         .clone()
         .unwrap_or_else(|| "Build".to_string());
 
+    let saved_reasoning = prefs_dao
+        .as_ref()
+        .and_then(|dao| {
+            dao.get_model_reasoning_effort(&provider_name, &model_id)
+                .ok()
+        })
+        .flatten();
+    let requested_reasoning = reasoning_override.or(saved_reasoning);
     let reasoning_effort = crate::model::discovery::Discovery::new()
         .ok()
         .and_then(|discovery| discovery.get_model_reasoning_capability(&provider_name, &model_id))
         .and_then(|capability| {
-            let saved = prefs_dao
-                .as_ref()
-                .and_then(|dao| {
-                    dao.get_model_reasoning_effort(&provider_name, &model_id)
-                        .ok()
-                })
-                .flatten()?;
-            let resolved = capability.resolve(Some(saved))?;
+            let resolved = capability.resolve(requested_reasoning)?;
             if resolved == crate::model::reasoning::ReasoningEffort::None {
                 None
             } else {
@@ -325,6 +327,15 @@ fn print_mode_permission_rules(
     rules
 }
 
+fn parse_reasoning_effort_arg(
+    value: &str,
+) -> Result<crate::model::reasoning::ReasoningEffort, String> {
+    value.parse().map_err(|_| {
+        "reasoning effort must be one of none, minimal, low, medium, high, xhigh, or max"
+            .to_string()
+    })
+}
+
 lazy_static::lazy_static! {
     static ref TOAST_MANAGER: Mutex<ToastManager> = Mutex::new(ToastManager::new());
 }
@@ -359,6 +370,10 @@ struct Args {
     /// Model to use for this invocation, formatted as provider/model
     #[arg(short = 'm', long = "model")]
     model: Option<String>,
+
+    /// Reasoning effort to use for this invocation: none, minimal, low, medium, high, xhigh, or max
+    #[arg(long = "reasoning-effort", value_parser = parse_reasoning_effort_arg)]
+    reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
 
     /// Skip permission prompts in print mode. Intended for isolated benchmark/CI workspaces.
     #[arg(long = "dangerously-skip-permissions")]
@@ -417,6 +432,7 @@ async fn main() -> Result<()> {
         return run_print_mode(
             &prompt,
             args.model.as_deref(),
+            args.reasoning_effort,
             args.no_session_persistence,
             args.dangerously_skip_permissions,
         )
@@ -553,6 +569,17 @@ mod tests {
 
         assert_eq!(args.prompt, vec!["hi"]);
         assert_eq!(args.model.as_deref(), Some("openai/gpt-5.2"));
+    }
+
+    #[test]
+    fn parses_print_reasoning_effort_override() {
+        let args =
+            Args::try_parse_from(["crabcode", "-p", "hi", "--reasoning-effort", "medium"]).unwrap();
+
+        assert_eq!(
+            args.reasoning_effort,
+            Some(crate::model::reasoning::ReasoningEffort::Medium)
+        );
     }
 
     #[test]

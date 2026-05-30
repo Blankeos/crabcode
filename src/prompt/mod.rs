@@ -284,7 +284,9 @@ Your output will be displayed on a command line interface. Your responses should
         r#"Non-Interactive Print Mode:
 - Keep planning internal; do not call update_plan.
 - Do not ask the user questions or wait for interactive input.
-- Prefer direct read/edit/write/bash tool use, and prefer write_files when replacing complete contents of multiple files.
+- Prefer direct read/apply_patch/edit/bash tool use.
+- For existing-file edits, prefer apply_patch or edit over rewriting whole files; use write_files mainly for new files or true full rewrites.
+- After tests pass, do not run optional one-off formatters or package-manager commands unless the project has an explicit formatter script or the user asked for it.
 - After requested validation passes, send a compact final answer and stop."#
             .to_string()
     }
@@ -427,7 +429,9 @@ mod tests {
 
         assert!(context.contains("do not call update_plan"));
         assert!(context.contains("Do not ask the user questions"));
+        assert!(context.contains("apply_patch"));
         assert!(context.contains("write_files"));
+        assert!(context.contains("one-off formatters"));
         assert!(context.contains("stop"));
     }
 }
