@@ -458,11 +458,20 @@ impl App {
                 ("big-pickle".to_string(), "opencode".to_string())
             };
 
+        let configured_theme_id = loaded_config.merged_config.theme.as_deref();
+        let persisted_theme_id = if configured_theme_id.is_none() {
+            prefs_dao
+                .as_ref()
+                .and_then(|dao| dao.get_active_theme().ok().flatten())
+        } else {
+            None
+        };
+        let selected_theme_id = configured_theme_id.or(persisted_theme_id.as_deref());
         let (themes, current_theme_index) = crate::config::discover_themes(
             &loaded_config.xdg_config_home,
             &loaded_config.project_root,
             &loaded_config.cwd,
-            loaded_config.merged_config.theme.as_deref(),
+            selected_theme_id,
         );
         let agent_steps = agent_registry.max_steps_map();
         let provider_timeouts = loaded_config.merged_config.provider_timeouts.clone();
@@ -1581,6 +1590,46 @@ impl App {
     pub fn cycle_theme(&mut self) {
         if !self.themes.is_empty() {
             self.current_theme_index = (self.current_theme_index + 1) % self.themes.len();
+            if let Some(theme_id) = self
+                .themes
+                .get(self.current_theme_index)
+                .map(|theme| theme.id.clone())
+            {
+                self.persist_theme_selection(&theme_id);
+            }
+        }
+    }
+
+    fn preview_theme_by_id(&mut self, theme_id: &str) {
+        if let Some((idx, _)) = self
+            .themes
+            .iter()
+            .enumerate()
+            .find(|(_, theme)| theme.id == theme_id)
+        {
+            self.current_theme_index = idx;
+        }
+    }
+
+    fn commit_theme_by_id(&mut self, theme_id: &str) -> Option<String> {
+        let (idx, selected_theme_id) = self
+            .themes
+            .iter()
+            .enumerate()
+            .find(|(_, theme)| theme.id == theme_id)
+            .map(|(idx, theme)| (idx, theme.id.clone()))?;
+
+        self.current_theme_index = idx;
+        self.themes_dialog_committed = true;
+        self.persist_theme_selection(&selected_theme_id);
+        Some(selected_theme_id)
+    }
+
+    fn persist_theme_selection(&self, theme_id: &str) {
+        if let Some(ref dao) = self.prefs_dao {
+            if let Err(e) = dao.set_active_theme(theme_id.to_string()) {
+                eprintln!("Failed to save active theme: {}", e);
+            }
         }
     }
 
@@ -1944,26 +1993,12 @@ impl App {
 
                 match action {
                     crate::views::themes_dialog::ThemesDialogAction::PreviewTheme { theme_id } => {
-                        if let Some((idx, _)) = self
-                            .themes
-                            .iter()
-                            .enumerate()
-                            .find(|(_, t)| t.id == theme_id)
-                        {
-                            self.current_theme_index = idx;
-                        }
+                        self.preview_theme_by_id(&theme_id);
                     }
                     crate::views::themes_dialog::ThemesDialogAction::SelectTheme { theme_id } => {
-                        if let Some((idx, theme)) = self
-                            .themes
-                            .iter()
-                            .enumerate()
-                            .find(|(_, t)| t.id == theme_id)
-                        {
-                            self.current_theme_index = idx;
-                            self.themes_dialog_committed = true;
+                        if let Some(selected_theme_id) = self.commit_theme_by_id(&theme_id) {
                             push_toast(Toast::new(
-                                format!("Theme: {}", theme.id),
+                                format!("Theme: {}", selected_theme_id),
                                 ToastLevel::Info,
                                 None,
                             ));
@@ -2981,26 +3016,12 @@ impl App {
 
             match action {
                 crate::views::themes_dialog::ThemesDialogAction::PreviewTheme { theme_id } => {
-                    if let Some((idx, _)) = self
-                        .themes
-                        .iter()
-                        .enumerate()
-                        .find(|(_, t)| t.id == theme_id)
-                    {
-                        self.current_theme_index = idx;
-                    }
+                    self.preview_theme_by_id(&theme_id);
                 }
                 crate::views::themes_dialog::ThemesDialogAction::SelectTheme { theme_id } => {
-                    if let Some((idx, theme)) = self
-                        .themes
-                        .iter()
-                        .enumerate()
-                        .find(|(_, t)| t.id == theme_id)
-                    {
-                        self.current_theme_index = idx;
-                        self.themes_dialog_committed = true;
+                    if let Some(selected_theme_id) = self.commit_theme_by_id(&theme_id) {
                         push_toast(Toast::new(
-                            format!("Theme: {}", theme.id),
+                            format!("Theme: {}", selected_theme_id),
                             ToastLevel::Info,
                             None,
                         ));
@@ -3466,14 +3487,7 @@ impl App {
                     .get_selected()
                     .map(|it| it.id.clone())
                 {
-                    if let Some((idx, _)) = self
-                        .themes
-                        .iter()
-                        .enumerate()
-                        .find(|(_, t)| t.id == theme_id)
-                    {
-                        self.current_theme_index = idx;
-                    }
+                    self.preview_theme_by_id(&theme_id);
                 }
             }
             (_, OverlayFocus::ConnectDialog) => {

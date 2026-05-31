@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::{ensure_data_dir, get_data_dir};
 
 const MODEL_PREFS_KEY: &str = "model_preferences";
+const ACTIVE_THEME_KEY: &str = "active_theme";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRef {
@@ -191,6 +192,17 @@ impl PrefsDAO {
         self.set_model_preferences(&prefs)
     }
 
+    pub fn get_active_theme(&self) -> Result<Option<String>> {
+        Ok(self
+            .get_pref(ACTIVE_THEME_KEY)?
+            .map(|theme| theme.trim().to_string())
+            .filter(|theme| !theme.is_empty()))
+    }
+
+    pub fn set_active_theme(&self, theme_id: String) -> Result<()> {
+        self.set_pref(ACTIVE_THEME_KEY, theme_id.trim())
+    }
+
     pub fn toggle_favorite(&self, provider_id: String, model_id: String) -> Result<bool> {
         let mut prefs = self.get_model_preferences()?;
         let was_favorite = prefs.is_favorite(&provider_id, &model_id);
@@ -316,5 +328,19 @@ mod tests {
 
         assert_eq!(ref1, ref2);
         assert_ne!(ref1, ref3);
+    }
+
+    #[test]
+    fn test_active_theme_round_trip() {
+        let dao = setup_test_dao();
+
+        assert_eq!(dao.get_active_theme().unwrap(), None);
+
+        dao.set_active_theme("tokyonight".to_string()).unwrap();
+
+        assert_eq!(
+            dao.get_active_theme().unwrap(),
+            Some("tokyonight".to_string())
+        );
     }
 }

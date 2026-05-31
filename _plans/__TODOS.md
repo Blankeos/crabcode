@@ -36,7 +36,7 @@
 
 - [x] Feature: Rename command `/rename` - parity with opencode.
 
-- [ ] Bug: theme is not persisted? Or is it by config? Just make theme be based on state now, no more config for it.. Actually not a bug.. Just warn that it must be configured, this is not your configured theme, configure it in your config. Or just a VERY MINOR warning that says 'You're only trying out this theme, set it in your theme'.???
+- [x] Let's make the 'theme' selection persisted somewhere in the 'state' (outside the config). So whatever I select, it gets selected. But this 'state' is the 2nd source of theme data, so it becomes a fallback. The primary is the config.. If the config is set, don't get the data from the persisted theme data state. But if it's not configured. Whatever is set, in persisted theme, that's what we use.
 
 - [x] Bug: skill loading on conflict. i.e. duplicate frontend-design skill. Warning: duplicate skill name 'frontend-design' (existing: /Users/carlo/.claude/skills/frontend-design/SKILL.md, duplicate: /Users/carlo/.config/opencode/skill/frontend-design/SKILL.md)
 
