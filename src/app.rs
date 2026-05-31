@@ -1124,6 +1124,14 @@ impl App {
             .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some())
     }
 
+    fn session_has_active_compaction(&self, session_id: &str) -> bool {
+        self.compaction_receiver.is_some()
+            && self
+                .compaction_pending
+                .as_ref()
+                .is_some_and(|pending| pending.session_id == session_id)
+    }
+
     fn queued_message_previews_for_current_session(&self) -> Vec<String> {
         let Some(session_id) = self.session_manager.get_current_session_id() else {
             return Vec::new();
@@ -1184,6 +1192,85 @@ impl App {
             .get_mut(session_id)
             .map(|state| state.queued_messages.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    fn combine_queued_messages(queued_messages: Vec<QueuedUserMessage>) -> QueuedUserMessage {
+        let mut text_parts = Vec::with_capacity(queued_messages.len());
+        let mut image_paths = Vec::new();
+
+        for queued in queued_messages {
+            let image_offset = image_paths.len();
+            let image_count = queued.image_paths.len();
+            let text = Self::queued_message_text_for_combined_submission(
+                &queued.text,
+                image_offset,
+                image_count,
+            );
+
+            if !text.is_empty() {
+                text_parts.push(text);
+            }
+            image_paths.extend(queued.image_paths);
+        }
+
+        QueuedUserMessage {
+            text: text_parts.join("\n"),
+            image_paths,
+        }
+    }
+
+    fn queued_message_text_for_combined_submission(
+        text: &str,
+        image_offset: usize,
+        image_count: usize,
+    ) -> String {
+        let text = Self::renumber_image_placeholders(text, image_offset, image_count);
+        if !text.trim().is_empty() || image_count == 0 {
+            return text;
+        }
+
+        (0..image_count)
+            .map(|idx| format!("[Image #{}]", image_offset + idx + 1))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn renumber_image_placeholders(text: &str, image_offset: usize, image_count: usize) -> String {
+        if image_offset == 0 || image_count == 0 || !text.contains("[Image #") {
+            return text.to_string();
+        }
+
+        let mut output = String::with_capacity(text.len());
+        let mut remaining = text;
+
+        while let Some(start) = remaining.find("[Image #") {
+            output.push_str(&remaining[..start]);
+
+            let placeholder_start = &remaining[start..];
+            let Some(end_offset) = placeholder_start.find(']') else {
+                output.push_str(placeholder_start);
+                return output;
+            };
+            let end = start + end_offset + 1;
+            let placeholder = &remaining[start..end];
+
+            let image_number = placeholder
+                .strip_prefix("[Image #")
+                .and_then(|value| value.strip_suffix(']'))
+                .and_then(|value| value.parse::<usize>().ok());
+
+            match image_number {
+                Some(number) if (1..=image_count).contains(&number) => {
+                    output.push_str(&format!("[Image #{}]", image_offset + number));
+                }
+                _ => output.push_str(placeholder),
+            }
+
+            remaining = &remaining[end..];
+        }
+
+        output.push_str(remaining);
+        output
     }
 
     fn streaming_boundary_for_session(
@@ -2527,11 +2614,14 @@ impl App {
                             if image_paths.is_empty() {
                                 self.input.save_current_to_history();
                             }
-                            let active_session_streaming = self
+                            let active_session_can_queue = self
                                 .session_manager
                                 .get_current_session_id()
-                                .is_some_and(|id| self.session_has_active_stream(id));
-                            if self.is_streaming && active_session_streaming {
+                                .is_some_and(|id| {
+                                    self.session_has_active_stream(id)
+                                        || self.session_has_active_compaction(id)
+                                });
+                            if self.is_streaming && active_session_can_queue {
                                 self.queue_message_for_current_session(
                                     msg.to_string(),
                                     image_paths,
@@ -5264,6 +5354,11 @@ impl App {
     fn process_compaction_events(&mut self) {
         let mut events = Vec::new();
         let mut disconnected = false;
+        let disconnected_session_id = self
+            .compaction_pending
+            .as_ref()
+            .filter(|_| self.compaction_receiver.is_some())
+            .map(|pending| pending.session_id.clone());
 
         if let Some(receiver) = &mut self.compaction_receiver {
             loop {
@@ -5284,6 +5379,8 @@ impl App {
             self.cached_usage_check = (usize::MAX, u64::MAX);
         }
 
+        let mut completed_compaction_sessions = Vec::new();
+
         for event in events {
             match event {
                 CompactionTaskMessage::Success {
@@ -5291,6 +5388,7 @@ impl App {
                     messages,
                     stats,
                 } => {
+                    let completed_session_id = session_id.clone();
                     match self
                         .session_manager
                         .replace_session_messages(&session_id, messages.clone())
@@ -5344,8 +5442,10 @@ impl App {
                             ));
                         }
                     }
+                    completed_compaction_sessions.push(completed_session_id);
                 }
                 CompactionTaskMessage::Failed { session_id, error } => {
+                    let completed_session_id = session_id.clone();
                     let _ = self.session_manager.set_session_status(
                         &session_id,
                         crate::session::types::SessionStatus::Idle,
@@ -5357,8 +5457,19 @@ impl App {
                         ToastLevel::Error,
                         Some(std::time::Duration::from_secs(3)),
                     ));
+                    completed_compaction_sessions.push(completed_session_id);
                 }
             }
+        }
+
+        if disconnected && completed_compaction_sessions.is_empty() {
+            if let Some(session_id) = disconnected_session_id {
+                completed_compaction_sessions.push(session_id);
+            }
+        }
+
+        for session_id in completed_compaction_sessions {
+            self.submit_queued_messages_for_session(&session_id);
         }
 
         self.sync_active_streaming_flag();
@@ -6525,13 +6636,11 @@ impl App {
         }
 
         self.base_focus = BaseFocus::Chat;
-        let mut last_text = String::new();
-        for queued in queued_messages {
-            last_text = queued.text.clone();
-            self.append_user_message_to_current_session(queued.text, queued.image_paths);
-        }
+        let queued = Self::combine_queued_messages(queued_messages);
+        let prompt = queued.text.clone();
+        self.append_user_message_to_current_session(queued.text, queued.image_paths);
 
-        if let Err(e) = self.start_llm_streaming(&last_text) {
+        if let Err(e) = self.start_llm_streaming(&prompt) {
             push_toast(Toast::new(
                 format!("LLM error: {}", e),
                 ToastLevel::Error,
@@ -7739,6 +7848,33 @@ mod tests {
         assert!(app.chat_state.chat.messages.is_empty());
     }
 
+    #[test]
+    fn messages_entered_while_compacting_are_queued() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Compact queue".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.compaction_receiver = Some(receiver);
+        app.compaction_pending = Some(CompactionPending {
+            session_id: session_id.clone(),
+            before_tokens: 1_000,
+        });
+        app.sync_active_streaming_flag();
+        app.input.insert_str("Then about eevee");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert_eq!(state.queued_messages.len(), 1);
+        assert_eq!(state.queued_messages[0].text, "Then about eevee");
+        assert_eq!(
+            app.queued_message_previews_for_current_session(),
+            vec!["Then about eevee".to_string()]
+        );
+        assert!(app.input.is_empty());
+        assert!(app.chat_state.chat.messages.is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn queued_messages_cancel_stream_after_next_tool_result() {
         let mut app = test_app();
@@ -7833,6 +7969,74 @@ mod tests {
                 |message| message.role == crate::session::types::MessageRole::User
                     && message.content == "Then about riolu"
             ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_messages_submit_as_single_user_record_with_line_breaks() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Queue batch".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        for text in ["nice", "nice", "nice"] {
+            state.queued_messages.push_back(QueuedUserMessage {
+                text: text.to_string(),
+                image_paths: Vec::new(),
+            });
+        }
+
+        assert!(app.submit_queued_messages_for_session(&session_id));
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert!(state.queued_messages.is_empty());
+        assert!(state.stream.is_some());
+        assert_eq!(
+            app.chat_state
+                .chat
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["nice\nnice\nnice", ""]
+        );
+
+        let persisted_messages = &app
+            .session_manager
+            .get_session_ref(&session_id)
+            .unwrap()
+            .messages;
+        assert_eq!(persisted_messages.len(), 1);
+        assert_eq!(persisted_messages[0].content, "nice\nnice\nnice");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_image_messages_submit_as_single_record_with_renumbered_placeholders() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Queue images".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.queued_messages.push_back(QueuedUserMessage {
+            text: "first [Image #1]".to_string(),
+            image_paths: vec![std::path::PathBuf::from("/tmp/first.png")],
+        });
+        state.queued_messages.push_back(QueuedUserMessage {
+            text: "second [Image #1]".to_string(),
+            image_paths: vec![std::path::PathBuf::from("/tmp/second.png")],
+        });
+
+        assert!(app.submit_queued_messages_for_session(&session_id));
+
+        let user_message = app
+            .chat_state
+            .chat
+            .messages
+            .iter()
+            .find(|message| message.role == crate::session::types::MessageRole::User)
+            .unwrap();
+        assert_eq!(user_message.content, "first [Image #1]\nsecond [Image #2]");
+        assert_eq!(
+            user_message.local_image_paths,
+            vec!["/tmp/first.png".to_string(), "/tmp/second.png".to_string()]
+        );
     }
 
     #[test]
@@ -8267,6 +8471,60 @@ mod tests {
                 .get_session_ref(&session_id)
                 .map(|session| session.messages.clone()),
             Some(compacted_messages)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_messages_submit_after_compaction_result() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Compact queue submit".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.session_view_states
+            .get_mut(&session_id)
+            .unwrap()
+            .queued_messages
+            .push_back(QueuedUserMessage {
+                text: "Then about jolteon".to_string(),
+                image_paths: Vec::new(),
+            });
+
+        let stats = crate::session::types::CompactionStats {
+            before_tokens: 1_000,
+            after_tokens: 120,
+            before_messages: 5,
+            after_messages: 1,
+        };
+        let compacted_messages = vec![crate::session::types::Message::assistant("summary")];
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender
+            .send(CompactionTaskMessage::Success {
+                session_id: session_id.clone(),
+                messages: compacted_messages,
+                stats,
+            })
+            .unwrap();
+        drop(sender);
+        app.compaction_receiver = Some(receiver);
+        app.compaction_pending = Some(CompactionPending {
+            session_id: session_id.clone(),
+            before_tokens: stats.before_tokens,
+        });
+        app.is_streaming = true;
+
+        app.process_compaction_events();
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert!(state.queued_messages.is_empty());
+        assert!(state.stream.is_some());
+        assert!(app.is_streaming);
+        assert_eq!(
+            app.chat_state
+                .chat
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["summary", "Then about jolteon", ""]
         );
     }
 
