@@ -273,7 +273,7 @@ fn core_palette_items(registry: &Registry, is_chat: bool) -> Vec<DialogItem> {
             group: group.to_string(),
             description: description.to_string(),
             tip: command_palette_tip(command),
-            provider_id: String::new(),
+            provider_id: registered.hidden_tokens.join(" "),
         });
     }
 
@@ -441,6 +441,27 @@ mod tests {
 
         assert!(state.dialog.items.iter().any(|item| item.id == "copy"));
         assert!(state.dialog.items.iter().any(|item| item.id == "fork"));
+    }
+
+    #[test]
+    fn palette_search_matches_hidden_command_tokens() {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+        let mut state = init_command_palette();
+
+        state.refresh_items(&registry, true);
+        state.dialog.set_search_query("branch");
+
+        let matches = state
+            .dialog
+            .filtered_items
+            .iter()
+            .flat_map(|(_, items)| items.iter())
+            .map(|item| (item.id.as_str(), item.name.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(matches.contains(&("fork", "Fork Session")));
+        assert!(!matches.iter().any(|(_, name)| name.contains("branch")));
     }
 
     #[test]
