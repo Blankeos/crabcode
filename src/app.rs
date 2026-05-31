@@ -3609,8 +3609,12 @@ impl App {
         }
 
         clear_suggestions(&mut self.suggestions_popup_state);
-        self.command_palette_state
-            .refresh_items(&self.command_registry, self.base_focus == BaseFocus::Chat);
+        let thinking_visible = self.chat_state.chat.thinking_visible();
+        self.command_palette_state.refresh_items(
+            &self.command_registry,
+            self.base_focus == BaseFocus::Chat,
+            thinking_visible,
+        );
         self.command_palette_state.show();
         self.overlay_focus = OverlayFocus::CommandPalette;
     }
@@ -3697,6 +3701,9 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
                 match action {
                     CommandPaletteAppAction::ToggleAgentMode => self.toggle_agent_mode(),
+                    CommandPaletteAppAction::SetThinkingVisible(visible) => {
+                        self.chat_state.chat.set_thinking_visible(visible);
+                    }
                     CommandPaletteAppAction::CycleReasoningEffort => {
                         let _ = self.cycle_active_reasoning_effort();
                     }

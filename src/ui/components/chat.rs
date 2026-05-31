@@ -51,6 +51,8 @@ pub struct Chat {
     streaming_renderer: Option<SimpleStreamingRenderer>,
     /// Index of the message currently being rendered by streaming_renderer
     streaming_message_idx: Option<usize>,
+    /// Whether assistant reasoning/thinking text is expanded in chat.
+    thinking_visible: bool,
     /// Starting line positions for each message in the rendered content
     pub message_line_positions: Vec<usize>,
     /// Text selection state for copy-on-select
@@ -695,6 +697,7 @@ impl Chat {
             last_tps_calculated: None,
             streaming_renderer: None,
             streaming_message_idx: None,
+            thinking_visible: true,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
             selection_edge_scroll: None,
@@ -740,6 +743,7 @@ impl Chat {
             last_tps_calculated: None,
             streaming_renderer: None,
             streaming_message_idx: None,
+            thinking_visible: true,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
             selection_edge_scroll: None,
@@ -787,6 +791,19 @@ impl Chat {
 
     pub fn render_revision(&self) -> u64 {
         self.render_revision
+    }
+
+    pub fn thinking_visible(&self) -> bool {
+        self.thinking_visible
+    }
+
+    pub fn set_thinking_visible(&mut self, visible: bool) {
+        if self.thinking_visible == visible {
+            return;
+        }
+
+        self.thinking_visible = visible;
+        self.invalidate_cache();
     }
 
     fn should_autoscroll(&self) -> bool {
@@ -939,9 +956,10 @@ impl Chat {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Bump this whenever rendering logic changes (tables, markdown, etc.)
-        const RENDER_VERSION: u64 = 8;
+        const RENDER_VERSION: u64 = 9;
         RENDER_VERSION.hash(&mut h);
         colors.hash(&mut h);
+        self.thinking_visible.hash(&mut h);
         self.messages.len().hash(&mut h);
         for msg in &self.messages {
             std::mem::discriminant(&msg.role).hash(&mut h);
@@ -2484,25 +2502,29 @@ impl Chat {
                     let reasoning_trimmed = reasoning.trim();
                     if !reasoning_trimmed.is_empty() {
                         emitted_anything = true;
-                        let reasoning_prefix = "💭 Thinking...";
-                        lines.push(Line::from(vec![Span::styled(
-                            reasoning_prefix,
-                            Style::default()
-                                .fg(colors.text_weak)
-                                .add_modifier(Modifier::ITALIC),
-                        )]));
-
                         let reasoning_style = Style::default()
                             .fg(colors.text_weak)
                             .add_modifier(Modifier::ITALIC);
-                        let reasoning_line = Line::from(Span::styled(
-                            reasoning_trimmed.to_string(),
+                        let reasoning_prefix = if self.thinking_visible {
+                            "💭 Thinking..."
+                        } else {
+                            "💭 Thinking collapsed"
+                        };
+                        lines.push(Line::from(vec![Span::styled(
+                            reasoning_prefix,
                             reasoning_style,
-                        ));
-                        lines.extend(wrap_styled_line(
-                            &reasoning_line,
-                            WrapOptions::new(max_width.max(1)),
-                        ));
+                        )]));
+
+                        if self.thinking_visible {
+                            let reasoning_line = Line::from(Span::styled(
+                                reasoning_trimmed.to_string(),
+                                reasoning_style,
+                            ));
+                            lines.extend(wrap_styled_line(
+                                &reasoning_line,
+                                WrapOptions::new(max_width.max(1)),
+                            ));
+                        }
 
                         // Add separator between reasoning and content (only if there's content)
                         if has_visible_content {
@@ -3875,6 +3897,38 @@ mod tests {
         assert_eq!(chat.messages.len(), 2);
         assert_eq!(chat.messages[0].content, "hello");
         assert_eq!(chat.messages[1].content, "hi there");
+        assert!(chat.thinking_visible());
+    }
+
+    #[test]
+    fn assistant_reasoning_can_be_collapsed() {
+        let mut assistant = Message::assistant("Final answer");
+        assistant.reasoning = Some("Private reasoning".to_string());
+        let mut chat = Chat::with_messages(vec![assistant]);
+        let colors = test_colors();
+
+        let expanded = chat
+            .build_all_lines(100, "model", &colors)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(expanded
+            .iter()
+            .any(|line| line.contains("Private reasoning")));
+
+        chat.set_thinking_visible(false);
+        let collapsed = chat
+            .build_all_lines(100, "model", &colors)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(collapsed
+            .iter()
+            .any(|line| line.contains("Thinking collapsed")));
+        assert!(!collapsed
+            .iter()
+            .any(|line| line.contains("Private reasoning")));
     }
 
     #[test]

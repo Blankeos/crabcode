@@ -18,6 +18,7 @@ pub enum CommandPaletteAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPaletteAppAction {
     ToggleAgentMode,
+    SetThinkingVisible(bool),
     CycleReasoningEffort,
     OpenStorage,
     OpenSkillsDialog,
@@ -35,7 +36,7 @@ impl CommandPaletteState {
         }
     }
 
-    pub fn refresh_items(&mut self, registry: &Registry, is_chat: bool) {
+    pub fn refresh_items(&mut self, registry: &Registry, is_chat: bool, thinking_visible: bool) {
         let was_visible = self.dialog.is_visible();
         let search_query = self.dialog.search_query.clone();
         let selected = self
@@ -43,7 +44,7 @@ impl CommandPaletteState {
             .get_selected()
             .map(|item| (item.id.clone(), item.provider_id.clone()));
 
-        let mut items = core_palette_items(registry, is_chat);
+        let mut items = core_palette_items(registry, is_chat, thinking_visible);
         items.insert(
             items
                 .iter()
@@ -55,6 +56,7 @@ impl CommandPaletteState {
                 "Model",
                 "View and select available skills",
                 None,
+                &[],
             ),
         );
 
@@ -171,11 +173,17 @@ fn command_palette_tip(command_name: &str) -> Option<String> {
 }
 
 fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
-    if item.provider_id == APP_ACTION_PROVIDER {
+    if is_app_action(item) {
         return match item.id.as_str() {
             "toggle-agent-mode" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::ToggleAgentMode)
             }
+            "collapse-thinking" => CommandPaletteAction::RunAppAction(
+                CommandPaletteAppAction::SetThinkingVisible(false),
+            ),
+            "expand-thinking" => CommandPaletteAction::RunAppAction(
+                CommandPaletteAppAction::SetThinkingVisible(true),
+            ),
             "cycle-reasoning-effort" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::CycleReasoningEffort)
             }
@@ -192,7 +200,18 @@ fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
     CommandPaletteAction::RunCommand(item.id.clone())
 }
 
-fn core_palette_items(registry: &Registry, is_chat: bool) -> Vec<DialogItem> {
+fn is_app_action(item: &DialogItem) -> bool {
+    item.provider_id
+        .split_whitespace()
+        .next()
+        .is_some_and(|provider_id| provider_id == APP_ACTION_PROVIDER)
+}
+
+fn core_palette_items(
+    registry: &Registry,
+    is_chat: bool,
+    thinking_visible: bool,
+) -> Vec<DialogItem> {
     let mut items = Vec::new();
 
     for (command, name, group, description) in [
@@ -285,8 +304,35 @@ fn core_palette_items(registry: &Registry, is_chat: bool) -> Vec<DialogItem> {
             "Workspace",
             "Switch between Build and Plan",
             Some("tab"),
+            &[],
         ),
     );
+
+    if is_chat {
+        let (id, name, description, hidden_tokens) = if thinking_visible {
+            (
+                "collapse-thinking",
+                "Collapse Thinking",
+                "Collapse assistant reasoning details",
+                ["Hide thinking"],
+            )
+        } else {
+            (
+                "expand-thinking",
+                "Expand Thinking",
+                "Expand assistant reasoning details",
+                ["Show thinking"],
+            )
+        };
+
+        items.insert(
+            items
+                .iter()
+                .position(|item| item.group == "Appearance")
+                .unwrap_or(items.len()),
+            app_action_item(id, name, "Appearance", description, None, &hidden_tokens),
+        );
+    }
 
     items.insert(
         items
@@ -299,6 +345,7 @@ fn core_palette_items(registry: &Registry, is_chat: bool) -> Vec<DialogItem> {
             "Model",
             "Switch reasoning effort for the active model",
             Some("ctrl+t"),
+            &[],
         ),
     );
 
@@ -313,6 +360,7 @@ fn core_palette_items(registry: &Registry, is_chat: bool) -> Vec<DialogItem> {
             "Application",
             "Inspect Crabcode disk usage",
             None,
+            &[],
         ),
     );
 
@@ -374,14 +422,20 @@ fn app_action_item(
     group: &str,
     description: &str,
     tip: Option<&str>,
+    hidden_tokens: &[&str],
 ) -> DialogItem {
+    let provider_id = std::iter::once(APP_ACTION_PROVIDER)
+        .chain(hidden_tokens.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
+
     DialogItem {
         id: id.to_string(),
         name: name.to_string(),
         group: group.to_string(),
         description: description.to_string(),
         tip: tip.map(str::to_string),
-        provider_id: APP_ACTION_PROVIDER.to_string(),
+        provider_id,
     }
 }
 
@@ -424,11 +478,16 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, false);
+        state.refresh_items(&registry, false, true);
 
         assert!(state.dialog.items.iter().any(|item| item.id == "models"));
         assert!(!state.dialog.items.iter().any(|item| item.id == "copy"));
         assert!(!state.dialog.items.iter().any(|item| item.id == "fork"));
+        assert!(!state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "collapse-thinking" || item.id == "expand-thinking"));
     }
 
     #[test]
@@ -437,7 +496,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true);
+        state.refresh_items(&registry, true, true);
 
         assert!(state.dialog.items.iter().any(|item| item.id == "copy"));
         assert!(state.dialog.items.iter().any(|item| item.id == "fork"));
@@ -449,7 +508,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true);
+        state.refresh_items(&registry, true, true);
         state.dialog.set_search_query("branch");
 
         let matches = state
@@ -465,12 +524,120 @@ mod tests {
     }
 
     #[test]
+    fn palette_shows_collapse_thinking_when_thinking_is_visible() {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+        let mut state = init_command_palette();
+
+        state.refresh_items(&registry, true, true);
+
+        assert!(state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "collapse-thinking" && item.name == "Collapse Thinking"));
+        assert!(!state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "expand-thinking"));
+    }
+
+    #[test]
+    fn palette_shows_expand_thinking_when_thinking_is_hidden() {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+        let mut state = init_command_palette();
+
+        state.refresh_items(&registry, true, false);
+
+        assert!(state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "expand-thinking" && item.name == "Expand Thinking"));
+        assert!(!state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "collapse-thinking"));
+    }
+
+    #[test]
+    fn palette_search_matches_hidden_thinking_tokens() {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+        let mut state = init_command_palette();
+
+        state.refresh_items(&registry, true, false);
+        state.dialog.set_search_query("show thinking");
+
+        let matches = state
+            .dialog
+            .filtered_items
+            .iter()
+            .flat_map(|(_, items)| items.iter())
+            .map(|item| (item.id.as_str(), item.name.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(matches.contains(&("expand-thinking", "Expand Thinking")));
+        assert!(!matches
+            .iter()
+            .any(|(_, name)| name.contains("Show thinking")));
+
+        state.refresh_items(&registry, true, true);
+        state.dialog.set_search_query("hide thinking");
+
+        let matches = state
+            .dialog
+            .filtered_items
+            .iter()
+            .flat_map(|(_, items)| items.iter())
+            .map(|item| (item.id.as_str(), item.name.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(matches.contains(&("collapse-thinking", "Collapse Thinking")));
+        assert!(!matches
+            .iter()
+            .any(|(_, name)| name.contains("Hide thinking")));
+    }
+
+    #[test]
+    fn palette_thinking_items_map_to_visibility_actions() {
+        let collapse = app_action_item(
+            "collapse-thinking",
+            "Collapse Thinking",
+            "Appearance",
+            "Collapse assistant reasoning details",
+            None,
+            &["Hide thinking"],
+        );
+        let expand = app_action_item(
+            "expand-thinking",
+            "Expand Thinking",
+            "Appearance",
+            "Expand assistant reasoning details",
+            None,
+            &["Show thinking"],
+        );
+
+        assert_eq!(
+            action_for_item(&collapse),
+            CommandPaletteAction::RunAppAction(CommandPaletteAppAction::SetThinkingVisible(false))
+        );
+        assert_eq!(
+            action_for_item(&expand),
+            CommandPaletteAction::RunAppAction(CommandPaletteAppAction::SetThinkingVisible(true))
+        );
+    }
+
+    #[test]
     fn palette_uses_command_center_labels_without_slashes() {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true);
+        state.refresh_items(&registry, true, true);
 
         assert!(state
             .dialog
@@ -501,7 +668,7 @@ mod tests {
         });
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true);
+        state.refresh_items(&registry, true, true);
 
         let custom = state
             .dialog
