@@ -177,7 +177,7 @@ I want - [x] To do this But I dont want to do this
     - Should it be configurable?
     - Autodetected depending on the tool used: i.e. if Wezterm, other terminals "open w/ Finder on mac, or native image opener". If inside Zed, open image with Zed. If inside VSCode/Cursor, open with that IDE. (Ambitious but idk if possible)
 
-- [ ] Make the permissions, config-driven customizable behavior. Make it like OpenCode, so we just link the docs for it in OpenCode.
+- [x] Make the permissions, config-driven customizable behavior. Make it like OpenCode, so we just link the docs for it in OpenCode.
 
 - [x] View image locally tool, instead of read image.
 - [x] Clickable paths.
