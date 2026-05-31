@@ -228,6 +228,12 @@ fn core_palette_items(registry: &Registry, is_chat: bool) -> Vec<DialogItem> {
             "Summarize this session to reduce context",
         ),
         (
+            "fork",
+            "Fork Session",
+            "Workspace",
+            "Create a new session from this transcript",
+        ),
+        (
             "home",
             "Go Home",
             "Workspace",
@@ -422,6 +428,7 @@ mod tests {
 
         assert!(state.dialog.items.iter().any(|item| item.id == "models"));
         assert!(!state.dialog.items.iter().any(|item| item.id == "copy"));
+        assert!(!state.dialog.items.iter().any(|item| item.id == "fork"));
     }
 
     #[test]
@@ -433,6 +440,7 @@ mod tests {
         state.refresh_items(&registry, true);
 
         assert!(state.dialog.items.iter().any(|item| item.id == "copy"));
+        assert!(state.dialog.items.iter().any(|item| item.id == "fork"));
     }
 
     #[test]

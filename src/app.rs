@@ -3691,6 +3691,30 @@ impl App {
         true
     }
 
+    fn command_matches(&self, command_name: &str, canonical_name: &str) -> bool {
+        self.command_registry
+            .get(command_name)
+            .is_some_and(|command| command.name.as_str() == canonical_name)
+    }
+
+    fn push_command_error(&mut self, message: impl Into<String>) {
+        self.play_sound_event(crate::sound::SoundEvent::Error);
+        push_toast(Toast::new(
+            message.into(),
+            ToastLevel::Error,
+            Some(std::time::Duration::from_secs(3)),
+        ));
+    }
+
+    fn handle_fork_command(&mut self, args: &[String]) {
+        if !args.is_empty() {
+            self.push_command_error("Usage: /fork");
+            return;
+        }
+
+        let _ = self.fork_current_session(None);
+    }
+
     async fn compact_current_session(&mut self) {
         if self.compaction_receiver.is_some() {
             push_toast(Toast::new(
@@ -3900,6 +3924,11 @@ impl App {
                     }
                     return;
                 }
+                if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat
+                {
+                    self.handle_fork_command(&parsed.args);
+                    return;
+                }
                 if self.reject_chat_only_command_outside_chat(&parsed.name) {
                     return;
                 }
@@ -4094,6 +4123,10 @@ impl App {
             } else {
                 self.compact_current_session().await;
             }
+            return;
+        }
+        if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat {
+            self.handle_fork_command(&parsed.args);
             return;
         }
         if self.reject_chat_only_command_outside_chat(&parsed.name) {
@@ -4392,6 +4425,53 @@ impl App {
             .unwrap_or(false)
     }
 
+    fn current_session_messages_to_fork(
+        &mut self,
+        through_idx: Option<usize>,
+    ) -> Option<Vec<crate::session::types::Message>> {
+        let session = self.session_manager.get_current_session()?;
+        let end = through_idx
+            .map(|idx| {
+                crate::session::types::logical_message_block_range(&session.messages, idx)
+                    .map(|range| range.end)
+                    .unwrap_or_else(|| idx.saturating_add(1).min(session.messages.len()))
+            })
+            .unwrap_or(session.messages.len());
+
+        Some(session.messages.iter().take(end).cloned().collect())
+    }
+
+    fn fork_current_session(&mut self, through_idx: Option<usize>) -> bool {
+        let Some(messages_to_fork) = self.current_session_messages_to_fork(through_idx) else {
+            self.push_command_error("No active session to fork");
+            return false;
+        };
+
+        if messages_to_fork.is_empty() {
+            self.push_command_error("Nothing to fork");
+            return false;
+        }
+
+        let fork_title = fork_title_from_messages(&messages_to_fork);
+
+        let _ = self.create_new_session(Some(fork_title));
+        for msg in &messages_to_fork {
+            let _ = self.session_manager.add_message_to_current_session(msg);
+        }
+
+        self.chat_state.chat.clear();
+        self.chat_state.chat.replace_messages(messages_to_fork);
+        self.chat_state.chat.scroll_offset = usize::MAX;
+        self.chat_state.chat.clear_highlighted_message();
+        self.base_focus = BaseFocus::Chat;
+
+        let toast = through_idx
+            .map(|idx| format!("Forked session from message {}", idx + 1))
+            .unwrap_or_else(|| "Forked session".to_string());
+        push_toast(Toast::new(toast, ToastLevel::Info, None));
+        true
+    }
+
     fn execute_message_action(&mut self, action: &str) {
         let idx = match self.message_actions_index {
             Some(i) => i,
@@ -4415,58 +4495,11 @@ impl App {
                 self.close_message_actions();
             }
             "fork" => {
-                let messages_to_fork: Vec<crate::session::types::Message> = {
-                    if let Some(session) = self.session_manager.get_current_session() {
-                        let end = crate::session::types::logical_message_block_range(
-                            &session.messages,
-                            idx,
-                        )
-                        .map(|range| range.end)
-                        .unwrap_or_else(|| idx.saturating_add(1).min(session.messages.len()));
-
-                        session.messages.iter().take(end).cloned().collect()
-                    } else {
-                        return;
-                    }
-                };
-
-                let fork_title = messages_to_fork
-                    .last()
-                    .map(|msg| {
-                        let preview = msg
-                            .content
-                            .lines()
-                            .find(|line| !line.trim().is_empty())
-                            .unwrap_or("fork");
-                        let truncated: String = preview.chars().take(40).collect();
-                        if truncated.len() < preview.len() {
-                            format!("{}...", truncated)
-                        } else {
-                            truncated
-                        }
-                    })
-                    .unwrap_or_default();
-
-                let _ = self.create_new_session(Some(fork_title));
-                for msg in &messages_to_fork {
-                    let _ = self.session_manager.add_message_to_current_session(msg);
+                if self.fork_current_session(Some(idx)) {
+                    self.close_message_actions();
+                    self.timeline_dialog_state.hide();
+                    self.overlay_focus = OverlayFocus::None;
                 }
-
-                self.chat_state.chat.clear();
-                self.chat_state.chat.replace_messages(messages_to_fork);
-                self.chat_state.chat.scroll_offset = usize::MAX;
-                self.chat_state.chat.clear_highlighted_message();
-                self.base_focus = BaseFocus::Chat;
-
-                push_toast(Toast::new(
-                    format!("Forked session from message {}", idx + 1),
-                    ToastLevel::Info,
-                    None,
-                ));
-
-                self.close_message_actions();
-                self.timeline_dialog_state.hide();
-                self.overlay_focus = OverlayFocus::None;
             }
             "undo" => {
                 if !self.selected_message_can_undo(idx) {
@@ -6982,6 +7015,25 @@ fn message_clipboard_sections(message: &crate::session::types::Message) -> Vec<S
     sections
 }
 
+fn fork_title_from_messages(messages: &[crate::session::types::Message]) -> String {
+    messages
+        .last()
+        .map(|msg| {
+            let preview = msg
+                .content
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("fork");
+            let truncated: String = preview.chars().take(40).collect();
+            if truncated.len() < preview.len() {
+                format!("{}...", truncated)
+            } else {
+                truncated
+            }
+        })
+        .unwrap_or_default()
+}
+
 fn append_usage_suffix(mut text: String, suffix: String) -> String {
     if text.is_empty() {
         suffix
@@ -7573,6 +7625,76 @@ mod tests {
         assert!(!message_action_names(&app).contains(&"Undo".to_string()));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fork_command_clones_current_session() {
+        let mut app = test_app();
+        let original_id = app.create_new_session(Some("Original".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        add_current_session_message(&mut app, crate::session::types::Message::user("Prompt"));
+        add_current_session_message(
+            &mut app,
+            crate::session::types::Message::assistant("Answer"),
+        );
+
+        app.process_input("/fork").await;
+
+        let forked_id = app
+            .session_manager
+            .get_current_session_id()
+            .cloned()
+            .expect("forked session should be active");
+        assert_ne!(forked_id, original_id);
+        assert_eq!(app.base_focus, BaseFocus::Chat);
+        assert_eq!(app.chat_state.chat.messages.len(), 2);
+        assert_eq!(app.chat_state.chat.messages[0].content, "Prompt");
+        assert_eq!(app.chat_state.chat.messages[1].content, "Answer");
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&original_id)
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&forked_id)
+                .unwrap()
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Prompt", "Answer"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branch_alias_forks_current_session() {
+        let mut app = test_app();
+        let original_id = app.create_new_session(Some("Original".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        add_current_session_message(&mut app, crate::session::types::Message::user("Prompt"));
+
+        app.process_input("/branch").await;
+
+        let forked_id = app
+            .session_manager
+            .get_current_session_id()
+            .cloned()
+            .expect("forked session should be active");
+        assert_ne!(forked_id, original_id);
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&forked_id)
+                .unwrap()
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Prompt"]
+        );
+    }
+
     #[test]
     fn commands_can_submit_while_streaming() {
         let input_type = parse_input("/models");
@@ -8096,9 +8218,11 @@ mod tests {
         let mut app = test_app();
 
         assert!(app.reject_chat_only_command_outside_chat("compact"));
+        assert!(app.reject_chat_only_command_outside_chat("branch"));
 
         app.base_focus = BaseFocus::Chat;
         assert!(!app.reject_chat_only_command_outside_chat("compact"));
+        assert!(!app.reject_chat_only_command_outside_chat("branch"));
     }
 
     #[test]

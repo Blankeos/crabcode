@@ -219,3 +219,5 @@ I want - [x] To do this But I dont want to do this
 - [x] Emit the same Loading stuff that codex does. So that Zed knows when the agent is "in progress".
 
 - [ ] During /compact, i can't queue a message, the same way I can usually queue messages while streaming. Btw except in compact, compaction has to be completely done before it registers my queued message until it's fully processed.
+
+- [x] /fork command like codex.

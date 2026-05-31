@@ -508,6 +508,22 @@ pub fn handle_compact<'a>(
     })
 }
 
+pub fn handle_fork<'a>(
+    parsed: &'a ParsedCommand<'a>,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error("Usage: /fork".to_string());
+        }
+
+        // The app intercepts /fork because it needs access to chat view state.
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_skills<'a>(
     parsed: &'a ParsedCommand<'a>,
     _sm: &'a mut SessionManager,
@@ -753,6 +769,14 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "Summarize this session to reduce context".to_string(),
         handler: handle_compact,
         hidden_tokens: vec![],
+        chat_only: true,
+    });
+
+    registry.register(Command {
+        name: "fork".to_string(),
+        description: "Fork the current session".to_string(),
+        handler: handle_fork,
+        hidden_tokens: vec!["branch".to_string()],
         chat_only: true,
     });
 
@@ -1108,7 +1132,7 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
@@ -1119,8 +1143,12 @@ mod tests {
         assert!(names.contains(&"refreshmodels".to_string()));
         assert!(names.contains(&"timeline".to_string()));
         assert!(names.contains(&"compact".to_string()));
+        assert!(names.contains(&"fork".to_string()));
         assert!(names.contains(&"skills".to_string()));
         assert!(registry.is_chat_only("compact"));
+        assert!(registry.is_chat_only("fork"));
+        assert!(registry.is_chat_only("branch"));
+        assert_eq!(registry.get("branch").unwrap().name, "fork");
     }
 
     #[tokio::test]
