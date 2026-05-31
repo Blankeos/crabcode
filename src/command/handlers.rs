@@ -556,6 +556,7 @@ pub fn register_skill_commands(registry: &mut Registry) {
                 hidden_tokens: vec![],
                 chat_only: false,
             });
+            registry.hide_from_autocomplete(skill.name.clone());
         }
     }
 }

@@ -47,6 +47,7 @@ pub struct DialogItem {
 pub struct Registry {
     commands: HashMap<String, Command>,
     custom_commands: HashMap<String, crate::command::custom::CustomCommand>,
+    hidden_from_autocomplete: std::collections::HashSet<String>,
 }
 
 impl Registry {
@@ -54,6 +55,7 @@ impl Registry {
         Self {
             commands: HashMap::new(),
             custom_commands: HashMap::new(),
+            hidden_from_autocomplete: std::collections::HashSet::new(),
         }
     }
 
@@ -85,6 +87,14 @@ impl Registry {
 
     pub fn custom_command(&self, name: &str) -> Option<&crate::command::custom::CustomCommand> {
         self.custom_commands.get(name)
+    }
+
+    pub fn hide_from_autocomplete(&mut self, name: impl Into<String>) {
+        self.hidden_from_autocomplete.insert(name.into());
+    }
+
+    pub fn is_hidden_from_autocomplete(&self, name: &str) -> bool {
+        self.hidden_from_autocomplete.contains(name)
     }
 
     pub fn get(&self, name: &str) -> Option<&Command> {

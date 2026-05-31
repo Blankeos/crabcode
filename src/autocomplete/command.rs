@@ -76,12 +76,14 @@ impl CommandAuto {
         let commands: Vec<Suggestion> = registry
             .list_commands()
             .iter()
+            .filter(|cmd| !registry.is_hidden_from_autocomplete(&cmd.name))
             .map(|cmd| Suggestion::command(cmd.name.clone(), cmd.description.clone()))
             .collect();
 
         let hidden_token_map: Vec<(String, String)> = registry
             .list_commands()
             .iter()
+            .filter(|cmd| !registry.is_hidden_from_autocomplete(&cmd.name))
             .flat_map(|cmd| {
                 cmd.hidden_tokens
                     .iter()
@@ -215,6 +217,16 @@ mod tests {
 
         let chat_suggestions = auto.get_suggestions("c", true);
         assert!(chat_suggestions.iter().any(|s| s.name == "compact"));
+    }
+
+    #[test]
+    fn test_hidden_from_autocomplete_command_is_not_suggested() {
+        let mut registry = setup_registry();
+        registry.hide_from_autocomplete("sessions");
+        let auto = CommandAuto::new(&registry);
+
+        assert!(auto.get_suggestions("s", true).is_empty());
+        assert!(auto.get_suggestions("res", true).is_empty());
     }
 
     #[test]
