@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 pub type CommandHandler =
     for<'a> fn(
-        &'a ParsedCommand<'a>,
+        &'a ParsedCommand,
         &'a mut SessionManager,
     ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>>;
 
@@ -116,7 +116,7 @@ impl Registry {
 
     pub async fn execute<'a>(
         &self,
-        parsed: &'a ParsedCommand<'a>,
+        parsed: &'a ParsedCommand,
         session_manager: &'a mut SessionManager,
     ) -> CommandResult {
         if let Some(command) = self.custom_commands.get(&parsed.name) {
@@ -153,7 +153,7 @@ impl Registry {
 }
 
 fn handle_custom_command<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let name = parsed.name.clone();
@@ -171,14 +171,14 @@ mod tests {
     use super::*;
 
     fn dummy_handler<'a>(
-        _parsed: &'a ParsedCommand<'a>,
+        _parsed: &'a ParsedCommand,
         _sm: &'a mut SessionManager,
     ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
         Box::pin(async { CommandResult::Success("ok".to_string()) })
     }
 
     fn dummy_error_handler<'a>(
-        _parsed: &'a ParsedCommand<'a>,
+        _parsed: &'a ParsedCommand,
         _sm: &'a mut SessionManager,
     ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
         Box::pin(async { CommandResult::Error("error".to_string()) })
@@ -292,7 +292,7 @@ mod tests {
             name: "test".to_string(),
             args: vec![],
             raw: "/test".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -308,7 +308,7 @@ mod tests {
             name: "unknown".to_string(),
             args: vec![],
             raw: "/unknown".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -346,7 +346,7 @@ mod tests {
             name: "test".to_string(),
             args: vec!["unit".to_string()],
             raw: "/test unit".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -447,7 +447,7 @@ mod tests {
             name: "test".to_string(),
             args: vec!["arg1".to_string(), "arg2".to_string()],
             raw: "/test arg1 arg2".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();

@@ -1,9 +1,9 @@
 #[derive(Debug, Clone)]
-pub struct ParsedCommand<'a> {
+pub struct ParsedCommand {
     pub name: String,
     pub args: Vec<String>,
     pub raw: String,
-    pub prefs_dao: Option<&'a crate::persistence::PrefsDAO>,
+    pub prefs_data: Option<crate::persistence::prefs::ModelPreferences>,
     pub active_model_id: Option<String>,
 }
 
@@ -14,7 +14,7 @@ pub struct ParsedAgentMention {
     pub raw: String,
 }
 
-impl<'a> ParsedCommand<'a> {
+impl ParsedCommand {
     pub fn raw_args(&self) -> &str {
         let Some(without_slash) = self.raw.trim().strip_prefix('/') else {
             return "";
@@ -26,20 +26,20 @@ impl<'a> ParsedCommand<'a> {
     }
 }
 
-impl<'a> PartialEq for ParsedCommand<'a> {
+impl PartialEq for ParsedCommand {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.args == other.args
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum InputType<'a> {
-    Command(ParsedCommand<'a>),
+pub enum InputType {
+    Command(ParsedCommand),
     AgentMention(ParsedAgentMention),
     Message(String),
 }
 
-pub fn parse_input(input: &str) -> InputType<'_> {
+pub fn parse_input(input: &str) -> InputType {
     let trimmed = input.trim();
 
     if trimmed.starts_with('/') {
@@ -79,7 +79,7 @@ fn parse_agent_mention(input: &str) -> Option<ParsedAgentMention> {
     })
 }
 
-fn parse_command(input: &str) -> Option<ParsedCommand<'_>> {
+fn parse_command(input: &str) -> Option<ParsedCommand> {
     let without_slash = input.strip_prefix('/')?;
     let parts = shlex::split(without_slash).unwrap_or_else(|| {
         without_slash
@@ -99,7 +99,7 @@ fn parse_command(input: &str) -> Option<ParsedCommand<'_>> {
         name,
         args,
         raw: input.to_string(),
-        prefs_dao: None,
+        prefs_data: None,
         active_model_id: None,
     })
 }
@@ -118,7 +118,7 @@ mod tests {
                 name: "exit".to_string(),
                 args: vec![],
                 raw: "/exit".to_string(),
-                prefs_dao: None,
+                prefs_data: None,
                 active_model_id: None,
             })
         );
@@ -134,7 +134,7 @@ mod tests {
                 name: "new".to_string(),
                 args: vec!["my-session".to_string()],
                 raw: "/new my-session".to_string(),
-                prefs_dao: None,
+                prefs_data: None,
                 active_model_id: None,
             })
         );
@@ -150,7 +150,7 @@ mod tests {
                 name: "connect".to_string(),
                 args: vec!["nano-gpt".to_string(), "gpt-4".to_string()],
                 raw: "/connect nano-gpt gpt-4".to_string(),
-                prefs_dao: None,
+                prefs_data: None,
                 active_model_id: None,
             })
         );
@@ -170,7 +170,7 @@ mod tests {
                     r#"{ "key": "value" }"#.to_string()
                 ],
                 raw: input.to_string(),
-                prefs_dao: None,
+                prefs_data: None,
                 active_model_id: None,
             })
         );
@@ -207,7 +207,7 @@ mod tests {
                 name: "exit".to_string(),
                 args: vec![],
                 raw: "/exit".to_string(),
-                prefs_dao: None,
+                prefs_data: None,
                 active_model_id: None,
             })
         );
@@ -258,7 +258,7 @@ mod tests {
                 name: "sessions".to_string(),
                 args: vec![],
                 raw: "/sessions".to_string(),
-                prefs_dao: None,
+                prefs_data: None,
                 active_model_id: None,
             })
         );

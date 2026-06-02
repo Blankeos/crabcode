@@ -651,7 +651,7 @@ async fn prepare_request_config(
             .ok_or_else(|| anyhow::anyhow!("Provider not found: {}", provider_name))?
     };
 
-    let supports_image_input = model_supports_image_input(provider.models.get(&model));
+    let supports_image_input = model_supports_image_input(&model, provider.models.get(&model));
     let model_route = resolve_model_route(&provider, model);
     let provider_kind = ProviderKind::from_provider(provider_name, &model_route.npm_package);
     let mut request_config = ProviderRequestConfig::new(
@@ -740,16 +740,32 @@ fn resolve_model_route(
     }
 }
 
-fn model_supports_image_input(model: Option<&crate::model::discovery::Model>) -> bool {
+fn model_supports_image_input(
+    requested_model: &str,
+    model: Option<&crate::model::discovery::Model>,
+) -> bool {
+    if is_text_only_image_model(requested_model) {
+        return false;
+    }
+
     let Some(model) = model else {
         return true;
     };
+
+    if is_text_only_image_model(&model.id) || is_text_only_image_model(&model.name) {
+        return false;
+    }
 
     if let Some(modalities) = model.modalities.as_ref() {
         return modalities.input.iter().any(|item| item == "image");
     }
 
     model.attachment
+}
+
+fn is_text_only_image_model(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    normalized == "gpt-5.3-codex-spark" || normalized.ends_with("/gpt-5.3-codex-spark")
 }
 
 fn configured_api_key(auth_config: Option<&crate::persistence::AuthConfig>) -> Option<String> {
@@ -1798,11 +1814,41 @@ mod tests {
             }))
             .unwrap();
 
-        assert!(model_supports_image_input(Some(&image_model)));
-        assert!(!model_supports_image_input(Some(&text_model)));
-        assert!(model_supports_image_input(Some(&attachment_model)));
-        assert!(!model_supports_image_input(Some(&no_attachment_model)));
-        assert!(model_supports_image_input(None));
+        assert!(model_supports_image_input("vision", Some(&image_model)));
+        assert!(!model_supports_image_input("text", Some(&text_model)));
+        assert!(model_supports_image_input(
+            "legacy-vision",
+            Some(&attachment_model)
+        ));
+        assert!(!model_supports_image_input(
+            "legacy-text",
+            Some(&no_attachment_model)
+        ));
+        assert!(model_supports_image_input("unknown", None));
+    }
+
+    #[test]
+    fn codex_spark_is_text_only_for_image_input_even_with_missing_or_stale_metadata() {
+        let stale_image_model: crate::model::discovery::Model =
+            serde_json::from_value(serde_json::json!({
+                "id": "gpt-5.3-codex-spark",
+                "name": "GPT-5.3 Codex Spark",
+                "attachment": true,
+                "modalities": {
+                    "input": ["text", "image"],
+                    "output": ["text"]
+                }
+            }))
+            .unwrap();
+
+        assert!(!model_supports_image_input(
+            "gpt-5.3-codex-spark",
+            Some(&stale_image_model)
+        ));
+        assert!(!model_supports_image_input(
+            "openai/gpt-5.3-codex-spark",
+            None
+        ));
     }
 
     #[test]

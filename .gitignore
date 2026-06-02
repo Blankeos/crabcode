@@ -10,6 +10,9 @@ _dev_reference1
 _dev_reference2
 .env
 node_modules
+remote-client/dist/assets.json
+remote-client/dist/client/.vite/
+remote-client/dist/server/
 .devrefs/references
 .benchmarks/
 benchmark-reports/

@@ -499,6 +499,7 @@ dependencies = [
  "lazy_static",
  "nucleo-matcher",
  "pulldown-cmark",
+ "qrcode",
  "rand",
  "ratatui",
  "ratatui-core",
@@ -2406,6 +2407,12 @@ name = "pxfm"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quick-error"

@@ -212,6 +212,11 @@ impl ToolPermissions {
         self
     }
 
+    pub fn with_workdir(mut self, workdir: impl Into<PathBuf>) -> Self {
+        self.workdir = normalize_path(&workdir.into());
+        self
+    }
+
     pub fn dangerously_skip_permissions(mut self, enabled: bool) -> Self {
         self.dangerously_skip_permissions = enabled;
         self

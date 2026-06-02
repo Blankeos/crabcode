@@ -60,6 +60,8 @@
 
 - [x] A single AI response, is considered 1 message. So combine all its parts into a single message record. Not that every message part becomes a separate message in the timeline dialog.
 
+- [ ] Message model refactor: persist one logical assistant response as one assistant message with ordered parts (`reasoning`, `text`, `tool_call`, `tool_result`) instead of protocol-shaped `assistant/tool/assistant` rows. Keep provider replay as a flattening step, and make interrupted/error turns durable while streaming.
+
 - [x] Allow me to paste images i.e. [Image #1] [Image #2] [Image #3]. When I click on them, the image would be opened with my Finder (OS-specific)
 
 - [x] Let's make the 'questions' a bit more mouse-driven.
@@ -223,3 +225,5 @@ I want - [x] To do this But I dont want to do this
 - [x] If I queue multiple messages for example 3x of nice. Let's make them a single message.
 
 - [x] /fork command like codex.
+
+- [ ] TUI: When very last item in /models. If the very last item is a "Thinking" model, then I can't really see the "currently selected/focused" item (the last item), because the thinking left and right key covers it.

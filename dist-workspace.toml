@@ -7,6 +7,8 @@ members = ["cargo:."]
 cargo-dist-version = "0.30.3"
 # CI backends to support
 ci = "github"
+# Build the embedded browser client before cargo-dist compiles the Rust binary.
+github-build-setup = "../dist-build-setup.yml"
 # The installers to generate for each app
 installers = []
 # Target platforms to build apps for (Rust target-triple syntax)

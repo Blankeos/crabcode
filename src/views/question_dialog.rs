@@ -38,6 +38,27 @@ struct QuestionAnswerState {
     custom_selected: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionDialogSnapshot {
+    pub questions: Vec<QuestionSnapshot>,
+    pub queued_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionSnapshot {
+    pub header: String,
+    pub question: String,
+    pub options: Vec<QuestionOptionSnapshot>,
+    pub multiple: bool,
+    pub custom: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionOptionSnapshot {
+    pub label: String,
+    pub description: String,
+}
+
 fn char_kind(c: char) -> u8 {
     if c.is_whitespace() {
         0
@@ -202,9 +223,42 @@ impl QuestionDialogState {
         self.current.is_some()
     }
 
+    pub fn current_snapshot(&self) -> Option<QuestionDialogSnapshot> {
+        let request = self.current.as_ref()?;
+        Some(QuestionDialogSnapshot {
+            questions: request
+                .questions
+                .iter()
+                .map(|question| QuestionSnapshot {
+                    header: question.header.clone(),
+                    question: question.question.clone(),
+                    options: question
+                        .options
+                        .iter()
+                        .map(|option| QuestionOptionSnapshot {
+                            label: option.label.clone(),
+                            description: option.description.clone(),
+                        })
+                        .collect(),
+                    multiple: question.multiple,
+                    custom: question.custom,
+                })
+                .collect(),
+            queued_count: self.queue.len(),
+        })
+    }
+
     pub fn submit_current(&mut self) {
         if let Some(request) = self.current.take() {
             let response = request.response();
+            let _ = request.response_tx.send(response);
+        }
+        self.current = self.queue.pop_front();
+        self.tab_hitboxes.clear();
+    }
+
+    pub fn respond_current(&mut self, response: Value) {
+        if let Some(request) = self.current.take() {
             let _ = request.response_tx.send(response);
         }
         self.current = self.queue.pop_front();
@@ -2259,6 +2313,34 @@ mod tests {
 
         assert!(request.questions[0].custom);
         assert_eq!(option_row_count(&request.questions[0]), 3);
+    }
+
+    #[test]
+    fn current_snapshot_exposes_questions_for_remote_clients() {
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([
+                {
+                    "question": "Pick an approach",
+                    "header": "Approach",
+                    "options": [
+                        { "label": "Small", "description": "Minimal change" },
+                        { "label": "Full", "description": "Complete change" }
+                    ]
+                }
+            ]),
+            tx,
+        );
+
+        let snapshot = state.current_snapshot().unwrap();
+        assert_eq!(snapshot.questions.len(), 1);
+        assert_eq!(snapshot.questions[0].header, "Approach");
+        assert_eq!(snapshot.questions[0].question, "Pick an approach");
+        assert_eq!(snapshot.questions[0].options.len(), 2);
+        assert_eq!(snapshot.questions[0].options[0].label, "Small");
+        assert!(snapshot.questions[0].custom);
+        assert_eq!(snapshot.queued_count, 0);
     }
 
     #[test]

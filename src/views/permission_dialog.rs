@@ -17,6 +17,17 @@ pub struct PermissionDialogState {
     selected_action: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PermissionPromptSnapshot {
+    pub tool_id: String,
+    pub action: String,
+    pub target: Option<String>,
+    pub command: Option<String>,
+    pub workdir: Option<String>,
+    pub reason: String,
+    pub queued_count: usize,
+}
+
 impl PermissionDialogState {
     pub fn new() -> Self {
         Self {
@@ -37,6 +48,19 @@ impl PermissionDialogState {
 
     pub fn has_active(&self) -> bool {
         self.current.is_some()
+    }
+
+    pub fn current_snapshot(&self) -> Option<PermissionPromptSnapshot> {
+        let prompt = self.current.as_ref()?;
+        Some(PermissionPromptSnapshot {
+            tool_id: prompt.tool_id.clone(),
+            action: permission_action_label(prompt.action).to_string(),
+            target: prompt.target.clone(),
+            command: prompt.command.clone(),
+            workdir: prompt.workdir.clone(),
+            reason: prompt.reason.clone(),
+            queued_count: self.queue.len(),
+        })
     }
 
     pub fn next_action(&mut self) {
@@ -84,6 +108,19 @@ impl PermissionDialogState {
         }
 
         self.selected_action = 1;
+    }
+}
+
+fn permission_action_label(action: PermissionAction) -> &'static str {
+    match action {
+        PermissionAction::Read => "read",
+        PermissionAction::Write => "write",
+        PermissionAction::Edit => "edit",
+        PermissionAction::List => "list",
+        PermissionAction::Glob => "glob",
+        PermissionAction::Grep => "grep",
+        PermissionAction::Bash => "bash",
+        PermissionAction::Unknown => "unknown",
     }
 }
 
@@ -382,5 +419,26 @@ mod tests {
             ]
         );
         assert!(!rendered.iter().any(|line| line.contains("Target")));
+    }
+
+    #[test]
+    fn current_snapshot_exposes_remote_safe_prompt_details() {
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let mut state = PermissionDialogState::new();
+        state.enqueue(PermissionPrompt {
+            tool_id: "bash".to_string(),
+            action: PermissionAction::Bash,
+            target: Some("cargo test".to_string()),
+            command: Some("cargo test".to_string()),
+            workdir: Some("/tmp/workspace".to_string()),
+            reason: "Bash command execution requires permission".to_string(),
+            response_tx,
+        });
+
+        let snapshot = state.current_snapshot().unwrap();
+        assert_eq!(snapshot.tool_id, "bash");
+        assert_eq!(snapshot.action, "bash");
+        assert_eq!(snapshot.command.as_deref(), Some("cargo test"));
+        assert_eq!(snapshot.queued_count, 0);
     }
 }

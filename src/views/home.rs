@@ -12,24 +12,8 @@ use crate::theme::ThemeColors;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
 
-const LOGO: &str = r#"
- ▄▄▄▄ ▄▄▄▄   ▄▄▄  ▄▄▄▄   ▄▄▄▄  ▄▄▄  ▄▄▄▄  ▄▄▄▄▄
-██▀▀▀ ██▄█▄ ██▀██ ██▄██ ██▀▀▀ ██▀██ ██▀██ ██▄▄
-▀████ ██ ██ ██▀██ ██▄█▀ ▀████ ▀███▀ ████▀ ██▄▄▄
-"#;
-
-const MASCO: [&str; 2] = [
-    r#"
-    ▃▃▛████▜▃▃
- █▟▟▜████████▛▙▙█
-    ▞ ▘    ▝ ▚
-"#,
-    r#"
-    ▃▃▛████▜▃▃
- █▙▟▜████████▛▙▟█
-    ▞ ▘    ▝ ▚
-"#,
-];
+const LOGO: &str = include_str!("../../crabcode-logo.txt");
+const MASCOT: &str = include_str!("../../mascot.txt");
 
 #[derive(Debug, Clone)]
 pub struct HomeState {
@@ -101,7 +85,7 @@ pub fn render_home(
         .split(main_chunks[0]);
 
     let is_wide = size.width >= 80;
-    let logo_area_height = if is_wide { 5 } else { 7 };
+    let logo_area_height = if is_wide { 7 } else { 7 };
 
     let logo_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -112,14 +96,22 @@ pub fn render_home(
         ])
         .split(home_chunks[0]);
 
-    let mascot_raw: Vec<&str> = MASCO[home_state.frame()]
-        .lines()
-        .filter(|l| !l.is_empty())
-        .collect();
+    let mascot_frame = MASCOT
+        .trim_end()
+        .split("\n\n")
+        .nth(home_state.frame())
+        .or_else(|| MASCOT.trim_end().split("\n\n").next())
+        .unwrap_or("");
+    let mascot_raw: Vec<&str> = mascot_frame.lines().filter(|l| !l.is_empty()).collect();
 
-    let logo_lines: Vec<Line> = LOGO
-        .lines()
-        .filter(|l| !l.is_empty())
+    let logo_raw: Vec<&str> = LOGO.lines().filter(|l| !l.is_empty()).collect();
+    let logo_width = logo_raw
+        .iter()
+        .map(|line| UnicodeWidthStr::width(*line))
+        .max()
+        .unwrap_or(0);
+    let logo_lines: Vec<Line> = logo_raw
+        .iter()
         .enumerate()
         .map(|(i, line)| {
             let color = if i == 2 {
@@ -127,29 +119,42 @@ pub fn render_home(
             } else {
                 colors.primary
             };
-            Line::styled(
+            let padded = format!(
+                "{}{}",
                 line,
+                " ".repeat(logo_width.saturating_sub(UnicodeWidthStr::width(*line)))
+            );
+            Line::styled(
+                padded,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )
         })
         .collect();
 
     if is_wide {
-        let logo_row = Layout::default()
-            .direction(Direction::Horizontal)
+        let stack = Layout::default()
+            .direction(Direction::Vertical)
             .constraints([
-                Constraint::Fill(1),
-                Constraint::Length(22),
-                Constraint::Min(55),
-                Constraint::Fill(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(3),
             ])
             .split(logo_chunks[1]);
+
+        let max_mascot_width = mascot_raw
+            .iter()
+            .map(|l| UnicodeWidthStr::width(*l))
+            .max()
+            .unwrap_or(0);
+        let left_pad = ((stack[0].width as usize).saturating_sub(max_mascot_width)) / 2;
+        let padding = " ".repeat(left_pad);
 
         let mascot_lines: Vec<Line> = mascot_raw
             .iter()
             .map(|line| {
+                let padded = format!("{}{}", padding, line);
                 Line::styled(
-                    *line,
+                    padded,
                     Style::default()
                         .fg(colors.primary)
                         .add_modifier(Modifier::BOLD),
@@ -159,8 +164,8 @@ pub fn render_home(
         let mascot = Paragraph::new(Text::from(mascot_lines));
         let logo = Paragraph::new(Text::from(logo_lines)).alignment(Alignment::Center);
 
-        f.render_widget(mascot, logo_row[1]);
-        f.render_widget(logo, logo_row[2]);
+        f.render_widget(mascot, stack[0]);
+        f.render_widget(logo, stack[2]);
     } else {
         let stack = Layout::default()
             .direction(Direction::Vertical)

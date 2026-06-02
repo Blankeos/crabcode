@@ -4,6 +4,13 @@ default:
 dev:
     cargo r
 
+remote-client-build:
+    cd remote-client && bun install && bun run build
+
+dist-build *args:
+    just remote-client-build
+    dist build {{ args }}
+
 preview:
     ./target/release/crabcode
 

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -126,17 +126,27 @@ impl HistoryDAO {
         name: String,
         parent_identifier: Option<&str>,
     ) -> Result<i64> {
+        self.create_session_with_parent_in_workspace(
+            identifier,
+            name,
+            parent_identifier,
+            self.current_workspace_id,
+        )
+    }
+
+    pub fn create_session_with_parent_in_workspace(
+        &self,
+        identifier: &str,
+        name: String,
+        parent_identifier: Option<&str>,
+        workspace_id: i64,
+    ) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO sessions (
                  session_identifier, parent_session_identifier, name, workspace_id, status
              )
              VALUES (?1, ?2, ?3, ?4, 'idle')",
-            params![
-                identifier,
-                parent_identifier,
-                name,
-                self.current_workspace_id
-            ],
+            params![identifier, parent_identifier, name, workspace_id],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -173,6 +183,80 @@ impl HistoryDAO {
 
         let result: Result<Vec<_>, _> = iter.collect();
         result.map_err(Into::into)
+    }
+
+    pub fn ensure_workspace_path(&self, root_path: &str) -> Result<Workspace> {
+        let display_name = workspace_display_name(root_path);
+        let id = ensure_workspace(&self.conn, root_path, &display_name)?;
+        self.conn.execute(
+            "UPDATE workspaces
+             SET archived_at = NULL,
+                 last_opened_at = strftime('%s', 'now')
+             WHERE id = ?1",
+            params![id],
+        )?;
+
+        self.workspace_by_id(id)
+    }
+
+    fn workspace_by_id(&self, id: i64) -> Result<Workspace> {
+        self.conn
+            .query_row(
+                "SELECT id, root_path, display_name, sort_order, archived_at, last_opened_at
+                 FROM workspaces
+                 WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(Workspace {
+                        id: row.get(0)?,
+                        root_path: row.get(1)?,
+                        display_name: row.get(2)?,
+                        sort_order: row.get(3)?,
+                        archived_at: row.get(4)?,
+                        last_opened_at: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn set_workspace_archived(&self, root_path: &str, archived: bool) -> Result<bool> {
+        let Some(id) = self
+            .conn
+            .query_row(
+                "SELECT id FROM workspaces WHERE root_path = ?1",
+                params![root_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+
+        if archived {
+            self.conn.execute(
+                "UPDATE workspaces
+                 SET archived_at = strftime('%s', 'now')
+                 WHERE id = ?1",
+                params![id],
+            )?;
+            self.conn.execute(
+                "UPDATE sessions
+                 SET archived_at = COALESCE(archived_at, strftime('%s', 'now')),
+                     updated_at = strftime('%s', 'now')
+                 WHERE workspace_id = ?1",
+                params![id],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE workspaces
+                 SET archived_at = NULL
+                 WHERE id = ?1",
+                params![id],
+            )?;
+        }
+
+        Ok(true)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {

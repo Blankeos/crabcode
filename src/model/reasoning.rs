@@ -304,6 +304,7 @@ fn has_reasoning_without_selectable_effort(haystack: &str) -> bool {
         "glm",
         "kimi",
         "k2p",
+        "mimo",
         "qwen",
         "big-pickle",
     ]
@@ -721,6 +722,22 @@ mod tests {
             "kimi-k2.6",
             "Kimi K2.6",
             "kimi-k2.6",
+            "",
+            true,
+        );
+        assert_eq!(capability.values(), &[]);
+        assert_eq!(capability.cycle_next(None), None);
+    }
+
+    #[test]
+    fn mimo_reasoning_has_no_selectable_effort() {
+        let capability = capability_for_model(
+            "xiaomi-token-plan-sgp",
+            "@ai-sdk/openai-compatible",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro",
+            "Mimo V2.5 Pro",
+            "mimo-v2.5-pro",
             "",
             true,
         );

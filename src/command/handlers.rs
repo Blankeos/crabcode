@@ -6,14 +6,14 @@ use crate::toast::{Toast, ToastLevel};
 use std::pin::Pin;
 
 pub fn handle_exit<'a>(
-    _parsed: &'a ParsedCommand<'a>,
+    _parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async { CommandResult::Success("Exiting...".to_string()) })
 }
 
 pub fn handle_sessions<'a>(
-    _parsed: &'a ParsedCommand<'a>,
+    _parsed: &'a ParsedCommand,
     sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
@@ -60,14 +60,14 @@ pub fn handle_sessions<'a>(
 }
 
 pub fn handle_new<'a>(
-    _parsed: &'a ParsedCommand<'a>,
+    _parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move { CommandResult::Success("".to_string()) })
 }
 
 pub fn handle_connect<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let args = parsed.args.clone();
@@ -178,7 +178,7 @@ pub fn handle_connect<'a>(
 }
 
 pub fn handle_models<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     use crate::command::registry::DialogItem;
@@ -193,15 +193,7 @@ pub fn handle_models<'a>(
     };
 
     let active_model_id = parsed.active_model_id.clone();
-    let prefs_data = parsed
-        .prefs_dao
-        .and_then(|dao| match dao.get_model_preferences() {
-            Ok(p) => Some(p),
-            Err(e) => {
-                eprintln!("DEBUG: Failed to get prefs: {}", e);
-                None
-            }
-        });
+    let prefs_data = parsed.prefs_data.clone();
 
     Box::pin(async move {
         let auth_dao = match AuthDAO::new() {
@@ -460,7 +452,7 @@ pub fn handle_models<'a>(
 }
 
 pub fn handle_themes<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let args = parsed.args.clone();
@@ -478,7 +470,7 @@ pub fn handle_themes<'a>(
 }
 
 pub fn handle_timeline<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let args = parsed.args.clone();
@@ -493,7 +485,7 @@ pub fn handle_timeline<'a>(
 }
 
 pub fn handle_compact<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let args = parsed.args.clone();
@@ -509,7 +501,7 @@ pub fn handle_compact<'a>(
 }
 
 pub fn handle_fork<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let args = parsed.args.clone();
@@ -525,7 +517,7 @@ pub fn handle_fork<'a>(
 }
 
 pub fn handle_skills<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let args = parsed.args.clone();
@@ -543,7 +535,7 @@ pub fn handle_skills<'a>(
 }
 
 pub fn handle_skill_command<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let skill_name = parsed.name.clone();
@@ -578,7 +570,7 @@ pub fn register_skill_commands(registry: &mut Registry) {
 }
 
 pub fn handle_rename<'a>(
-    parsed: &'a ParsedCommand<'a>,
+    parsed: &'a ParsedCommand,
     sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     let session_id = sm.get_current_session_id().cloned();
@@ -600,14 +592,14 @@ pub fn handle_rename<'a>(
 }
 
 pub fn handle_copy<'a>(
-    _parsed: &'a ParsedCommand<'a>,
+    _parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move { CommandResult::Success("copy".to_string()) })
 }
 
 pub fn handle_refreshmodels<'a>(
-    _parsed: &'a ParsedCommand<'a>,
+    _parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
@@ -806,7 +798,7 @@ mod tests {
             name: "exit".to_string(),
             args: vec![],
             raw: "/exit".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -820,7 +812,7 @@ mod tests {
             name: "sessions".to_string(),
             args: vec![],
             raw: "/sessions".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -844,7 +836,7 @@ mod tests {
             name: "sessions".to_string(),
             args: vec![],
             raw: "/sessions".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let result = handle_sessions(&parsed, &mut session_manager).await;
@@ -877,7 +869,7 @@ mod tests {
             name: "sessions".to_string(),
             args: vec![],
             raw: "/sessions".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let result = handle_sessions(&parsed, &mut session_manager).await;
@@ -900,7 +892,7 @@ mod tests {
             name: "new".to_string(),
             args: vec![],
             raw: "/new".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -919,7 +911,7 @@ mod tests {
             name: "new".to_string(),
             args: vec!["my-session".to_string()],
             raw: "/new my-session".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -938,7 +930,7 @@ mod tests {
             name: "home".to_string(),
             args: vec![],
             raw: "/home".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -960,7 +952,7 @@ mod tests {
             name: "connect".to_string(),
             args: vec![],
             raw: "/connect".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -995,7 +987,7 @@ mod tests {
             name: "connect".to_string(),
             args: vec!["nano-gpt".to_string()],
             raw: "/connect nano-gpt".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -1015,7 +1007,7 @@ mod tests {
             name: "models".to_string(),
             args: vec![],
             raw: "/models".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -1043,7 +1035,7 @@ mod tests {
             name: "models".to_string(),
             args: vec![],
             raw: "/models".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -1071,7 +1063,7 @@ mod tests {
             name: "models".to_string(),
             args: vec!["open".to_string()],
             raw: "/models open".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -1095,7 +1087,7 @@ mod tests {
             name: "models".to_string(),
             args: vec![],
             raw: "/models".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -1119,7 +1111,7 @@ mod tests {
             name: "refreshmodels".to_string(),
             args: vec![],
             raw: "/refreshmodels".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -1158,7 +1150,7 @@ mod tests {
             name: "exit".to_string(),
             args: vec![],
             raw: "/exit".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();
@@ -1173,7 +1165,7 @@ mod tests {
             name: "unknown".to_string(),
             args: vec![],
             raw: "/unknown".to_string(),
-            prefs_dao: None,
+            prefs_data: None,
             active_model_id: None,
         };
         let mut session_manager = SessionManager::new();

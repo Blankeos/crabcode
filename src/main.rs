@@ -12,6 +12,7 @@ mod model;
 mod notify;
 mod persistence;
 mod prompt;
+mod remote;
 mod session;
 mod skill;
 mod sound;
@@ -26,7 +27,7 @@ mod views;
 use crate::toast::{Toast, ToastManager};
 use anyhow::Result;
 use app::App;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use ratatui::crossterm::{
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -355,6 +356,9 @@ pub fn get_toast_manager() -> &'static Mutex<ToastManager> {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Resume a session by ID
     #[arg(short = 's', long = "session")]
     session: Option<String>,
@@ -362,6 +366,10 @@ struct Args {
     /// Run in print mode (non-interactive, streams output to stdout)
     #[arg(short = 'p', long = "print")]
     print_mode: bool,
+
+    /// Attach print mode or interactive attach to a remote crabcode host
+    #[arg(long = "attach", value_name = "URL_OR_ALIAS")]
+    attach: Option<String>,
 
     /// Do not persist session data to disk
     #[arg(long = "no-session-persistence")]
@@ -384,6 +392,29 @@ struct Args {
 
     /// The prompt to run (positional, used in print mode)
     prompt: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Host the current workspace for browser and CLI clients
+    Serve {
+        /// Address to bind, for example 127.0.0.1:8421 or 0.0.0.0:8421
+        #[arg(long = "bind", default_value = "127.0.0.1:8421")]
+        bind: String,
+
+        /// Require pairing with this code, or use "random" to generate one
+        #[arg(long = "paircode", alias = "pair-code", value_name = "CODE_OR_RANDOM")]
+        pair_code: Option<String>,
+    },
+
+    /// Attach to a remote crabcode host
+    Attach {
+        /// Host URL or remembered alias
+        target: String,
+    },
+
+    /// List remembered remote hosts
+    Hosts,
 }
 
 fn merge_prompt_with_stdin(prompt: &str, stdin: &str) -> String {
@@ -420,6 +451,46 @@ fn read_print_mode_prompt(prompt: &str) -> Result<String> {
 async fn main() -> Result<()> {
     let args = Args::parse();
     crate::logging::set_enabled(args.emit_logs);
+
+    match &args.command {
+        Some(Command::Serve { bind, pair_code }) => {
+            return crate::remote::serve(crate::remote::ServeOptions {
+                bind: bind.clone(),
+                model_override: args.model.clone(),
+                pair_code: pair_code.clone(),
+            })
+            .await;
+        }
+        Some(Command::Attach { target }) => {
+            return crate::remote::attach(target).await;
+        }
+        Some(Command::Hosts) => {
+            crate::remote::list_hosts()?;
+            return Ok(());
+        }
+        None => {}
+    }
+
+    if let Some(target) = args.attach.as_deref() {
+        if args.print_mode {
+            let prompt = args.prompt.join(" ");
+            if prompt.trim().is_empty() {
+                eprintln!("Error: No prompt provided for remote print mode.");
+                eprintln!("Usage: crabcode -p --attach <URL_OR_ALIAS> \"<PROMPT>\"");
+                std::process::exit(1);
+            }
+            let prompt = read_print_mode_prompt(&prompt)?;
+            return crate::remote::print_attach(target, &prompt).await;
+        }
+
+        if !args.prompt.is_empty() {
+            eprintln!("Error: --attach with a prompt requires -p.");
+            eprintln!("Usage: crabcode -p --attach <URL_OR_ALIAS> \"<PROMPT>\"");
+            std::process::exit(1);
+        }
+
+        return crate::remote::attach(target).await;
+    }
 
     if args.print_mode {
         let prompt = args.prompt.join(" ");
@@ -580,6 +651,53 @@ mod tests {
             args.reasoning_effort,
             Some(crate::model::reasoning::ReasoningEffort::Medium)
         );
+    }
+
+    #[test]
+    fn parses_serve_command() {
+        let args = Args::try_parse_from(["crabcode", "serve", "--bind", "0.0.0.0:8421"]).unwrap();
+
+        match args.command {
+            Some(Command::Serve { bind, pair_code }) => {
+                assert_eq!(bind, "0.0.0.0:8421");
+                assert_eq!(pair_code.as_deref(), None);
+            }
+            other => panic!("expected serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_serve_paircode() {
+        let args = Args::try_parse_from(["crabcode", "serve", "--paircode", "random"]).unwrap();
+
+        match args.command {
+            Some(Command::Serve { pair_code, .. }) => {
+                assert_eq!(pair_code.as_deref(), Some("random"));
+            }
+            other => panic!("expected serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_attach_command() {
+        let args = Args::try_parse_from(["crabcode", "attach", "http://127.0.0.1:8421"]).unwrap();
+
+        match args.command {
+            Some(Command::Attach { target }) => assert_eq!(target, "http://127.0.0.1:8421"),
+            other => panic!("expected attach command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_print_attach_flag() {
+        let args = Args::try_parse_from([
+            "crabcode", "-p", "--attach", "devbox", "continue", "the", "refactor",
+        ])
+        .unwrap();
+
+        assert!(args.print_mode);
+        assert_eq!(args.attach.as_deref(), Some("devbox"));
+        assert_eq!(args.prompt, vec!["continue", "the", "refactor"]);
     }
 
     #[test]

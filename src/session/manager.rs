@@ -32,6 +32,14 @@ pub struct SessionInfo {
     pub archived_at: Option<SystemTime>,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkspaceInfo {
+    pub id: i64,
+    pub path: String,
+    pub name: String,
+    pub sort_order: i64,
+}
+
 pub struct SessionManager {
     pub sessions: HashMap<String, Session>,
     children_by_parent: HashMap<String, Vec<String>>,
@@ -262,7 +270,12 @@ impl SessionManager {
 
         if let Some(ref dao) = self.history_dao {
             let db_id = dao
-                .create_session_with_parent(&session_id, title.clone(), parent_id.as_deref())
+                .create_session_with_parent_in_workspace(
+                    &session_id,
+                    title.clone(),
+                    parent_id.as_deref(),
+                    self.current_workspace_id,
+                )
                 .unwrap_or_else(|_| self.session_counter as i64);
             self.id_mapping.insert(session_id.clone(), db_id);
             self.db_id_to_id.insert(db_id, session_id.clone());
@@ -349,6 +362,77 @@ impl SessionManager {
 
     pub fn current_workspace_name(&self) -> &str {
         &self.current_workspace_name
+    }
+
+    pub fn list_workspaces(&self) -> Vec<WorkspaceInfo> {
+        let mut workspaces = self
+            .history_dao
+            .as_ref()
+            .and_then(|dao| dao.list_workspaces().ok())
+            .map(|workspaces| {
+                workspaces
+                    .into_iter()
+                    .filter(|workspace| workspace.archived_at.is_none())
+                    .map(|workspace| WorkspaceInfo {
+                        id: workspace.id,
+                        path: workspace.root_path,
+                        name: workspace.display_name,
+                        sort_order: workspace.sort_order,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if !workspaces
+            .iter()
+            .any(|workspace| workspace.path == self.current_workspace_path)
+        {
+            workspaces.push(WorkspaceInfo {
+                id: self.current_workspace_id,
+                path: self.current_workspace_path.clone(),
+                name: self.current_workspace_name.clone(),
+                sort_order: self.workspace_sort_order(self.current_workspace_id),
+            });
+        }
+
+        workspaces.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.id.cmp(&b.id))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        workspaces
+    }
+
+    pub fn switch_current_workspace_path(&mut self, root_path: &str) -> Result<(), SessionError> {
+        let root_path = root_path.trim();
+        if root_path.is_empty() {
+            return Err(SessionError::PersistenceError(
+                "workspace path cannot be empty".to_string(),
+            ));
+        }
+
+        if let Some(ref dao) = self.history_dao {
+            let workspace = dao
+                .ensure_workspace_path(root_path)
+                .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+            let workspaces = dao
+                .list_workspaces()
+                .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+            self.workspace_sort_orders = workspaces
+                .into_iter()
+                .map(|workspace| (workspace.id, workspace.sort_order))
+                .collect();
+            self.current_workspace_id = workspace.id;
+            self.current_workspace_path = workspace.root_path;
+            self.current_workspace_name = workspace.display_name;
+        } else {
+            self.current_workspace_id = 0;
+            self.current_workspace_path = root_path.to_string();
+            self.current_workspace_name = workspace_display_name(root_path);
+        }
+
+        Ok(())
     }
 
     pub fn workspace_sort_order(&self, workspace_id: i64) -> i64 {
@@ -535,6 +619,70 @@ impl SessionManager {
         }
 
         Ok(())
+    }
+
+    pub fn set_workspace_archived(
+        &mut self,
+        root_path: &str,
+        archived: bool,
+    ) -> Result<bool, SessionError> {
+        let root_path = root_path.trim();
+        if root_path.is_empty() {
+            return Err(SessionError::PersistenceError(
+                "workspace path cannot be empty".to_string(),
+            ));
+        }
+
+        let archived_at = if archived {
+            Some(SystemTime::now())
+        } else {
+            None
+        };
+        let mut changed = false;
+
+        if let Some(ref dao) = self.history_dao {
+            changed = dao
+                .set_workspace_archived(root_path, archived)
+                .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+            let workspaces = dao
+                .list_workspaces()
+                .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+            self.workspace_sort_orders = workspaces
+                .iter()
+                .map(|workspace| (workspace.id, workspace.sort_order))
+                .collect();
+
+            if archived && self.current_workspace_path == root_path {
+                if let Some(workspace) = workspaces
+                    .iter()
+                    .find(|workspace| {
+                        workspace.archived_at.is_none() && workspace.root_path != root_path
+                    })
+                    .cloned()
+                {
+                    self.current_workspace_id = workspace.id;
+                    self.current_workspace_path = workspace.root_path;
+                    self.current_workspace_name = workspace.display_name;
+                }
+            }
+        }
+
+        let current_session_id = self.current_session_id.clone();
+        let mut current_session_archived = false;
+        for session in self.sessions.values_mut() {
+            if session.workspace_path == root_path {
+                session.archived_at = archived_at;
+                if current_session_id.as_deref() == Some(session.id.as_str()) && archived {
+                    current_session_archived = true;
+                }
+            }
+        }
+
+        if current_session_archived {
+            self.current_session_id = None;
+        }
+
+        Ok(changed)
     }
 
     pub fn rename_session(&mut self, id: &str, new_title: String) -> Result<(), SessionError> {

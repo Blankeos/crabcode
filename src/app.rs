@@ -14,7 +14,7 @@ use crate::command::parser::InputType;
 use crate::command::registry::Registry;
 use crate::llm::client::stream_llm_with_cancellation;
 use crate::session::manager::SessionManager;
-use crate::tools::ToolHandler;
+use crate::tools::{PermissionResponse, ToolHandler};
 
 use crate::push_toast;
 use crate::toast::{self, Toast, ToastLevel};
@@ -85,7 +85,7 @@ use crate::{
     theme::{self, Theme},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 pub fn parse_model_ref(model: &str) -> (String, String) {
     let model = model.trim();
@@ -97,6 +97,24 @@ pub fn parse_model_ref(model: &str) -> (String, String) {
         }
     }
     ("opencode".to_string(), model.to_string())
+}
+
+fn titlecase_agent_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return "Build".to_string();
+    }
+
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return "Build".to_string();
+    };
+
+    format!(
+        "{}{}",
+        first.to_uppercase().collect::<String>(),
+        chars.as_str()
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1559,6 +1577,98 @@ impl App {
             .unwrap_or_else(|| self.cwd.clone())
     }
 
+    pub fn remote_workspace_path(&self) -> String {
+        self.session_manager
+            .get_current_session_id()
+            .and_then(|id| self.session_manager.get_session_ref(id))
+            .map(|session| session.workspace_path.trim())
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let path = self.session_manager.current_workspace_path().trim();
+                if path.is_empty() {
+                    self.cwd.clone()
+                } else {
+                    path.to_string()
+                }
+            })
+    }
+
+    pub fn remote_workspace_name(&self) -> String {
+        self.session_manager
+            .get_current_session_id()
+            .and_then(|id| self.session_manager.get_session_ref(id))
+            .map(|session| session.workspace_name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let name = self.session_manager.current_workspace_name().trim();
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+
+                std::path::Path::new(&self.remote_workspace_path())
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or("Workspace")
+                    .to_string()
+            })
+    }
+
+    fn resolve_remote_workspace_path(&self, raw: &str) -> Result<std::path::PathBuf> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            anyhow::bail!("folder path cannot be empty");
+        }
+
+        let expanded = if raw == "~" {
+            dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(raw))
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            dirs::home_dir()
+                .map(|home| home.join(rest))
+                .unwrap_or_else(|| std::path::PathBuf::from(raw))
+        } else {
+            std::path::PathBuf::from(raw)
+        };
+
+        let absolute = if expanded.is_absolute() {
+            expanded
+        } else {
+            std::path::PathBuf::from(self.remote_workspace_path()).join(expanded)
+        };
+        let canonical = std::fs::canonicalize(&absolute).with_context(|| {
+            format!("folder not found or not accessible: {}", absolute.display())
+        })?;
+
+        if !canonical.is_dir() {
+            anyhow::bail!("folder path is not a directory: {}", canonical.display());
+        }
+
+        Ok(canonical)
+    }
+
+    fn set_remote_workspace_path(&mut self, path: std::path::PathBuf) -> Result<()> {
+        let path = std::fs::canonicalize(&path)
+            .with_context(|| format!("folder not found or not accessible: {}", path.display()))?;
+        if !path.is_dir() {
+            anyhow::bail!("folder path is not a directory: {}", path.display());
+        }
+
+        let path_text = path.to_string_lossy().to_string();
+        std::env::set_current_dir(&path)
+            .with_context(|| format!("failed to switch to {}", path.display()))?;
+        self.cwd = path_text.clone();
+        self.cached_git_branch_path.clear();
+        self.tool_permissions = self.tool_permissions.clone().with_workdir(path);
+        self.session_manager
+            .switch_current_workspace_path(&path_text)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        self.refresh_sessions_dialog();
+
+        Ok(())
+    }
+
     fn current_selection_action_bar_area(&self) -> Option<Rect> {
         self.selection_action_bar.map(|state| match state.target {
             SelectionActionTarget::Chat => chat_selection_action_bar_area(
@@ -2581,6 +2691,86 @@ impl App {
         self.chat_state.wave_spinner.set_color(agent_color);
     }
 
+    pub fn remote_toggle_agent_mode(&mut self) {
+        self.toggle_agent_mode();
+    }
+
+    pub fn remote_set_agent_mode(&mut self, agent: String) -> bool {
+        let agent = agent.trim();
+        let Some(definition) = self.agent_registry.primary_agent(agent) else {
+            return false;
+        };
+
+        self.agent = titlecase_agent_name(&definition.name);
+        let colors = self.get_current_theme_colors();
+        let agent_color = crate::theme::agent_color(&self.agent, &colors);
+        self.chat_state.wave_spinner.set_color(agent_color);
+        true
+    }
+
+    pub fn remote_reasoning_effort_label(&self) -> Option<String> {
+        if self.remote_reasoning_effort_options().is_empty() {
+            return None;
+        }
+
+        self.active_reasoning_effort_label()
+    }
+
+    pub fn remote_reasoning_effort_options(&self) -> Vec<String> {
+        let Some(capability) =
+            self.reasoning_capability_for_model(&self.provider_name, &self.model)
+        else {
+            return Vec::new();
+        };
+
+        let supported = capability
+            .values()
+            .iter()
+            .filter(|effort| **effort != crate::model::reasoning::ReasoningEffort::None)
+            .map(|effort| effort.as_str().to_string())
+            .collect::<Vec<_>>();
+        if supported.is_empty() {
+            return Vec::new();
+        }
+
+        let mut options = vec!["off".to_string()];
+        options.extend(supported);
+        options.dedup();
+        options
+    }
+
+    pub fn remote_set_reasoning_effort(&mut self, effort: Option<String>) -> Result<bool> {
+        let Some(capability) =
+            self.reasoning_capability_for_model(&self.provider_name, &self.model)
+        else {
+            return Ok(false);
+        };
+
+        let effort = effort.unwrap_or_default();
+        let effort = effort.trim();
+        if effort.is_empty() || effort.eq_ignore_ascii_case("off") {
+            if let Some(ref dao) = self.prefs_dao {
+                dao.clear_model_reasoning_effort(&self.provider_name, &self.model)?;
+            }
+            return Ok(true);
+        }
+
+        let parsed = effort
+            .parse::<crate::model::reasoning::ReasoningEffort>()
+            .map_err(|_| anyhow::anyhow!("unknown reasoning effort: {effort}"))?;
+        if !capability.values().contains(&parsed)
+            || parsed == crate::model::reasoning::ReasoningEffort::None
+        {
+            return Ok(false);
+        }
+
+        if let Some(ref dao) = self.prefs_dao {
+            dao.set_model_reasoning_effort(self.provider_name.clone(), self.model.clone(), parsed)?;
+        }
+
+        Ok(true)
+    }
+
     fn reset_esc_timeline_state(&mut self) {
         self.esc_timeline_primed = false;
     }
@@ -2680,7 +2870,7 @@ impl App {
         }
     }
 
-    fn can_submit_input(input_type: &InputType<'_>, is_streaming: bool) -> bool {
+    fn can_submit_input(input_type: &InputType, is_streaming: bool) -> bool {
         matches!(input_type, InputType::Command(_)) || !is_streaming
     }
 
@@ -3948,7 +4138,10 @@ impl App {
         match parse_input(input) {
             InputType::Command(mut parsed) => {
                 if self.command_registry.is_custom_command(&parsed.name) {
-                    parsed.prefs_dao = self.prefs_dao.as_ref();
+                    parsed.prefs_data = self
+                        .prefs_dao
+                        .as_ref()
+                        .and_then(|dao| dao.get_model_preferences().ok());
                     parsed.active_model_id = Some(self.model.clone());
                     let result = self
                         .command_registry
@@ -4043,7 +4236,10 @@ impl App {
                 if self.reject_chat_only_command_outside_chat(&parsed.name) {
                     return;
                 }
-                parsed.prefs_dao = self.prefs_dao.as_ref();
+                parsed.prefs_data = self
+                    .prefs_dao
+                    .as_ref()
+                    .and_then(|dao| dao.get_model_preferences().ok());
                 parsed.active_model_id = Some(self.model.clone());
 
                 let result = self
@@ -4147,12 +4343,12 @@ impl App {
         }
     }
 
-    async fn process_command_input(
-        &mut self,
-        mut parsed: crate::command::parser::ParsedCommand<'_>,
-    ) {
+    async fn process_command_input(&mut self, mut parsed: crate::command::parser::ParsedCommand) {
         if self.command_registry.is_custom_command(&parsed.name) {
-            parsed.prefs_dao = self.prefs_dao.as_ref();
+            parsed.prefs_data = self
+                .prefs_dao
+                .as_ref()
+                .and_then(|dao| dao.get_model_preferences().ok());
             parsed.active_model_id = Some(self.model.clone());
             let result = self
                 .command_registry
@@ -4243,7 +4439,10 @@ impl App {
         if self.reject_chat_only_command_outside_chat(&parsed.name) {
             return;
         }
-        parsed.prefs_dao = self.prefs_dao.as_ref();
+        parsed.prefs_data = self
+            .prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_model_preferences().ok());
         parsed.active_model_id = Some(self.model.clone());
 
         let result = self
@@ -6430,6 +6629,363 @@ impl App {
         self.handle_message_input_with_images(msg, Vec::new());
     }
 
+    pub async fn remote_submit_input(&mut self, prompt: String) -> Result<String> {
+        self.remote_submit_input_with_images(prompt, Vec::new())
+            .await
+    }
+
+    fn resume_remote_wait_if_clear(&mut self) {
+        self.chat_state.chat.resume_streaming_tps_timer();
+        if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
+            let _ = self.session_manager.set_session_status(
+                &session_id,
+                crate::session::types::SessionStatus::Streaming,
+                None,
+            );
+        }
+        self.overlay_focus = OverlayFocus::None;
+    }
+
+    pub fn remote_respond_permission(&mut self, response: PermissionResponse) -> bool {
+        if !self.permission_dialog_state.has_active() {
+            return false;
+        }
+
+        self.permission_dialog_state.respond_current(response);
+        if self.permission_dialog_state.has_active() {
+            self.overlay_focus = OverlayFocus::PermissionDialog;
+        } else {
+            self.resume_remote_wait_if_clear();
+        }
+        true
+    }
+
+    pub fn remote_answer_question(&mut self, answers: serde_json::Value) -> bool {
+        if !self.question_dialog_state.has_active() {
+            return false;
+        }
+
+        self.question_dialog_state.respond_current(answers);
+        if self.question_dialog_state.has_active() {
+            self.overlay_focus = OverlayFocus::QuestionDialog;
+        } else {
+            self.resume_remote_wait_if_clear();
+        }
+        true
+    }
+
+    pub fn remote_cancel_question(&mut self) -> bool {
+        if !self.question_dialog_state.has_active() {
+            return false;
+        }
+
+        self.question_dialog_state.clear_with_empty();
+        self.resume_remote_wait_if_clear();
+        self.cancel_streaming();
+        true
+    }
+
+    pub async fn remote_submit_input_with_images(
+        &mut self,
+        prompt: String,
+        image_paths: Vec<std::path::PathBuf>,
+    ) -> Result<String> {
+        let prompt = Self::remote_prompt_with_image_placeholders(prompt, image_paths.len());
+        if prompt.trim().is_empty() {
+            anyhow::bail!("prompt cannot be empty");
+        }
+
+        let input = prompt.trim();
+        let parsed_input = crate::command::parser::parse_input(input);
+        let is_message = matches!(parsed_input, crate::command::parser::InputType::Message(_));
+        let agent_mention = match &parsed_input {
+            crate::command::parser::InputType::AgentMention(mention) => {
+                Some((mention.agent.clone(), mention.prompt.trim().is_empty()))
+            }
+            _ => None,
+        };
+
+        if let crate::command::parser::InputType::Command(parsed) = &parsed_input {
+            if !image_paths.is_empty() {
+                anyhow::bail!("Images can only be attached to chat prompts");
+            }
+            let command = self
+                .command_registry
+                .get(&parsed.name)
+                .ok_or_else(|| anyhow::anyhow!("Unknown command: {}", parsed.name))?;
+            if is_remote_browser_unsupported_command(&command.name) {
+                anyhow::bail!(
+                    "Command /{} is not available in the browser UI",
+                    command.name
+                );
+            }
+            if self.base_focus != BaseFocus::Chat
+                && self.command_registry.is_chat_only(&parsed.name)
+            {
+                anyhow::bail!("Command /{} requires an active chat", command.name);
+            }
+        }
+
+        if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
+            self.ensure_session_view_state(&session_id);
+            let active_session_can_queue = self.session_has_active_stream(&session_id)
+                || self.session_has_active_compaction(&session_id);
+
+            if is_message && self.is_streaming && active_session_can_queue {
+                if self.queue_message_for_current_session(prompt.clone(), image_paths.clone()) {
+                    return Ok(session_id);
+                }
+            }
+        }
+
+        match parsed_input {
+            crate::command::parser::InputType::Command(_) => {
+                self.process_input(input).await;
+            }
+            crate::command::parser::InputType::Message(msg) => {
+                self.handle_message_input_with_images(msg, image_paths);
+            }
+            crate::command::parser::InputType::AgentMention(mention) => {
+                if self.is_streaming {
+                    anyhow::bail!("Cannot start @{} while streaming", mention.agent);
+                }
+                self.handle_agent_mention_input(mention, image_paths);
+            }
+        }
+
+        let session_id = self.session_manager.get_current_session_id().cloned();
+
+        if is_message {
+            let Some(session_id) = session_id.as_deref() else {
+                anyhow::bail!("failed to create or select a session");
+            };
+            if !self.session_has_active_stream(session_id) {
+                anyhow::bail!("failed to start generation");
+            }
+        }
+
+        if let Some((agent, prompt_empty)) = agent_mention {
+            if prompt_empty {
+                anyhow::bail!("Usage: @{} <task>", agent);
+            }
+            if session_id
+                .as_deref()
+                .is_none_or(|id| !self.session_has_active_stream(id))
+            {
+                anyhow::bail!("failed to start @{} agent", agent);
+            }
+        }
+
+        Ok(session_id.unwrap_or_default())
+    }
+
+    fn remote_prompt_with_image_placeholders(prompt: String, image_count: usize) -> String {
+        if image_count == 0 {
+            return prompt;
+        }
+
+        let mut output = prompt;
+        for index in 1..=image_count {
+            let placeholder = format!("[Image #{}]", index);
+            if !output.contains(&placeholder) {
+                if !output.is_empty() && !output.chars().last().is_some_and(char::is_whitespace) {
+                    output.push(' ');
+                }
+                output.push_str(&placeholder);
+            }
+        }
+        output
+    }
+
+    pub fn remote_autocomplete_suggestions(
+        &self,
+        trigger: &str,
+        query: &str,
+        is_chat: bool,
+    ) -> Vec<crate::autocomplete::Suggestion> {
+        match trigger {
+            "slash" => crate::autocomplete::CommandAuto::new(&self.command_registry)
+                .get_suggestions(query, is_chat)
+                .into_iter()
+                .filter(|suggestion| !is_remote_browser_unsupported_command(&suggestion.name))
+                .collect(),
+            "mention" => {
+                let query_lower = query.to_ascii_lowercase();
+                let mut suggestions = self
+                    .agent_registry
+                    .visible_subagents()
+                    .into_iter()
+                    .filter(|agent| agent.name.to_ascii_lowercase().starts_with(&query_lower))
+                    .map(|agent| {
+                        crate::autocomplete::Suggestion::agent(
+                            agent.name.clone(),
+                            agent.description.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                suggestions.extend(
+                    crate::autocomplete::FileAuto::new_at(&self.cwd).get_suggestions(query),
+                );
+                suggestions
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn remote_skills(&self) -> Vec<crate::skill::SkillInfo> {
+        crate::skill::get_skill_store()
+            .map(|store| store.all().into_iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn remote_cancel_current(&mut self) -> bool {
+        let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
+            return false;
+        };
+
+        if !self.session_has_active_stream(&session_id) {
+            return false;
+        }
+
+        self.cancel_streaming_for_session(&session_id);
+        true
+    }
+
+    pub fn remote_start_blank_session(&mut self, workspace_path: Option<String>) -> Result<()> {
+        if let Some(workspace_path) = workspace_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            let path = self.resolve_remote_workspace_path(workspace_path)?;
+            self.set_remote_workspace_path(path)?;
+        }
+        self.start_blank_session(None);
+        Ok(())
+    }
+
+    pub fn remote_select_workspace(&mut self, workspace_path: String) -> Result<()> {
+        let path = self.resolve_remote_workspace_path(&workspace_path)?;
+        self.set_remote_workspace_path(path)?;
+        self.start_blank_session(None);
+        Ok(())
+    }
+
+    pub fn remote_archive_session(&mut self, session_id: &str) -> Result<()> {
+        let was_current = self
+            .session_manager
+            .get_current_session_id()
+            .map_or(false, |current| current == session_id);
+        self.session_manager
+            .set_session_archived(session_id, true)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        if was_current {
+            self.save_active_session_view_state();
+            self.pending_session_title = None;
+            self.session_manager.clear_current_session();
+            self.chat_state.chat.clear();
+            self.input.clear();
+            self.base_focus = BaseFocus::Home;
+            self.sync_active_streaming_flag();
+            self.cached_usage_check = (usize::MAX, u64::MAX);
+        }
+        self.refresh_sessions_dialog();
+        Ok(())
+    }
+
+    pub fn remote_archive_workspace(&mut self, workspace_path: String) -> Result<()> {
+        let path_text = workspace_path.trim().to_string();
+        if path_text.is_empty() {
+            anyhow::bail!("workspace path cannot be empty");
+        }
+        let active_workspace = self.remote_workspace_path() == path_text;
+        let _ = self
+            .session_manager
+            .set_workspace_archived(&path_text, true)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+
+        if active_workspace {
+            self.save_active_session_view_state();
+            self.pending_session_title = None;
+            self.session_manager.clear_current_session();
+            self.chat_state.chat.clear();
+            self.input.clear();
+            self.base_focus = BaseFocus::Home;
+            self.sync_active_streaming_flag();
+            self.cached_usage_check = (usize::MAX, u64::MAX);
+
+            let fallback_path = self.session_manager.current_workspace_path().to_string();
+            if fallback_path != path_text && !fallback_path.trim().is_empty() {
+                let _ = self.set_remote_workspace_path(std::path::PathBuf::from(fallback_path));
+            }
+        }
+
+        self.refresh_sessions_dialog();
+        Ok(())
+    }
+
+    pub fn remote_switch_session(&mut self, session_id: &str) -> bool {
+        let workspace_path = self
+            .session_manager
+            .get_session_ref(session_id)
+            .map(|session| session.workspace_path.clone());
+
+        if !self.switch_to_session(session_id) {
+            return false;
+        }
+
+        if let Some(workspace_path) = workspace_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            if let Ok(path) = self.resolve_remote_workspace_path(workspace_path) {
+                let _ = self.set_remote_workspace_path(path);
+            }
+        }
+
+        true
+    }
+
+    pub fn remote_model_items(&mut self) -> Vec<crate::ui::components::dialog::DialogItem> {
+        self.refresh_models_dialog();
+        self.models_dialog_state.dialog.items.clone()
+    }
+
+    pub fn remote_set_model(&mut self, provider_id: String, model_id: String) -> bool {
+        let exists = self
+            .remote_model_items()
+            .into_iter()
+            .any(|item| item.provider_id == provider_id && item.id == model_id);
+
+        if !exists {
+            return false;
+        }
+
+        self.model = model_id.clone();
+        self.provider_name = provider_id.clone();
+        self.cached_usage_check = (usize::MAX, u64::MAX);
+
+        if let Some(ref dao) = self.prefs_dao {
+            let _ = dao.set_active_model(provider_id, model_id);
+        }
+
+        true
+    }
+
+    pub fn remote_recover_after_client_quit(&mut self) {
+        self.running = true;
+
+        if self.session_manager.get_current_session_id().is_none() {
+            self.base_focus = BaseFocus::Home;
+            self.overlay_focus = OverlayFocus::None;
+            self.pending_session_title = None;
+            self.input.clear();
+            self.chat_state.chat.clear();
+            self.clear_suggestions_and_blur();
+        }
+    }
+
     fn handle_agent_mention_input(
         &mut self,
         mention: crate::command::parser::ParsedAgentMention,
@@ -7120,6 +7676,13 @@ fn message_block_clipboard_text(
         .join("\n\n")
 }
 
+fn is_remote_browser_unsupported_command(name: &str) -> bool {
+    matches!(
+        name,
+        "connect" | "exit" | "home" | "sessions" | "skills" | "themes" | "timeline"
+    )
+}
+
 fn message_clipboard_sections(message: &crate::session::types::Message) -> Vec<String> {
     let mut sections = Vec::new();
 
@@ -7737,6 +8300,18 @@ mod tests {
             vec![std::path::PathBuf::from("/tmp/example.png")]
         );
         assert!(app.chat_state.chat.messages.is_empty());
+    }
+
+    #[test]
+    fn remote_prompt_adds_missing_image_placeholders() {
+        assert_eq!(
+            App::remote_prompt_with_image_placeholders("look here".to_string(), 2),
+            "look here [Image #1] [Image #2]"
+        );
+        assert_eq!(
+            App::remote_prompt_with_image_placeholders("[Image #1] describe".to_string(), 1),
+            "[Image #1] describe"
+        );
     }
 
     #[test]
