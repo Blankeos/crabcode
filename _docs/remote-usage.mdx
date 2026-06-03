@@ -131,15 +131,15 @@ Recommended shape:
 
 1. Install Tailscale on the host machine and the client device.
 2. Sign both devices into the same tailnet.
-3. Start crabcode on the host's Tailscale IP or hostname.
-4. Open the tailnet URL from your phone browser or attach from another laptop.
+3. Start crabcode on the host, listening on all interfaces.
+4. Copy the host's Tailscale IP or MagicDNS name.
+5. Open `http://<tailscale-ip-or-name>:8421` from your phone.
 
 On the host:
 
 ```bash
 cd ~/code/my-project
-TAILNET_IP=$(tailscale ip -4)
-crabcode serve --bind "$TAILNET_IP:8421" --paircode random
+crabcode serve --bind 0.0.0.0:8421 --paircode random
 ```
 
 From a phone browser:
@@ -168,13 +168,14 @@ crabcode -p --attach http://devbox:8421 "summarize the current state and keep go
 
 This is the "off grid for lunch" workflow: the project stays on your laptop, Mac mini, homelab box, or VPS, while your phone reaches it over Tailscale. Your provider credentials stay on the host.
 
-If binding directly to the Tailscale IP is awkward on your machine, this also works:
+For a tighter bind that listens only on the host's Tailscale interface, use the host's Tailscale IPv4 address:
 
 ```bash
-crabcode serve --bind 0.0.0.0:8421 --paircode random
+TAILNET_IP=$(tailscale ip -4)
+crabcode serve --bind "$TAILNET_IP:8421" --paircode random
 ```
 
-Then use the Tailscale IP or MagicDNS name from your clients. Binding to `0.0.0.0` also listens on LAN interfaces, so prefer the specific tailnet IP when you can.
+Binding to `0.0.0.0` is usually the most convenient setup and still lets you connect through Tailscale, but it also listens on LAN interfaces. Keep the pair code enabled and stop the host with `Ctrl+C` when you are done.
 
 ## Choosing a server
 
@@ -184,7 +185,9 @@ The server is simply the device that owns the checkout and runs `crabcode serve`
 | --- | --- | --- |
 | Your laptop | Continuing a local coding run from your phone. | The laptop must stay awake and online. |
 | Mac mini or desktop | Always-on home or office workstation. | Best when paired with Tailscale or another private network. |
-| VPS | Remote development from anywhere. | Use key-based SSH, a firewall, and a private network if possible. |
+| VPS | Remote development from anywhere. | Install Tailscale on the VPS too; use key-based SSH and firewall public ports. |
+
+A VPS can join your tailnet like any other device. In that setup, Tailscale is the private network.
 
 Do not expose a write-capable crabcode host directly to the public internet. Put it behind Tailscale, another private network, SSH forwarding, or a hardened access layer.
 

@@ -34,7 +34,7 @@ export function ComposerDock(props: { composer: ComposerController }) {
   const composer = props.composer
 
   return (
-    <div class="pointer-events-none absolute right-0 bottom-0 left-0 z-30 grid flex-none gap-3 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] max-[900px]:px-3">
+    <div class="pointer-events-none absolute right-0 bottom-0 left-0 z-30 grid grid-cols-[minmax(0,1fr)] flex-none gap-3 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] max-[900px]:px-3">
       <Show when={composer.pendingPermission()}>
         {(permission) => (
           <PermissionRequestPanel
