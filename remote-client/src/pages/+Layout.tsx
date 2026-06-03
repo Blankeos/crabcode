@@ -4,6 +4,10 @@ import { useMetadata } from "vike-metadata-solid"
 
 useMetadata.setGlobalDefaults({
   title: "CrabCode",
+  icons: {
+    icon: { url: "/favicon.png", type: "image/png" },
+    shortcut: { url: "/favicon.png", type: "image/png" },
+  },
 })
 
 export default function Layout(props: { children: JSX.Element }) {

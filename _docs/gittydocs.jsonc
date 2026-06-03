@@ -5,6 +5,7 @@
   },
   "site": {
     "name": "crabcode",
+    "favicon": "/static/favicon.png",
     "repo": {
       "owner": "blankeos",
       "name": "crabcode",
