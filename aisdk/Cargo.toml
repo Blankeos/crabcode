@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Minimal LLM SDK for crabcode"
 license = "MIT"
+repository = "https://github.com/blankeos/crabcode"
+authors = ["Carlo Taleon"]
+keywords = ["ai", "llm", "sdk", "streaming", "tools"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json", "stream"] }

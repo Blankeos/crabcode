@@ -12,7 +12,7 @@ repository = "https://github.com/blankeos/crabcode"
 readme = "README.md"
 keywords = ["ai", "cli", "coding", "agent", "tui"]
 categories = ["command-line-utilities", "development-tools", "api-bindings"]
-authors = ["Carlo Taleon <carloantonioct@gmail.com>"]
+authors = ["Carlo Taleon"]
 include = [
     "/Cargo.toml",
     "/Cargo.lock",
