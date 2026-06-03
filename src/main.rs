@@ -185,8 +185,9 @@ async fn run_print_mode(
         })
         .flatten();
     let requested_reasoning = reasoning_override.or(saved_reasoning);
-    let reasoning_effort = crate::model::discovery::Discovery::new()
-        .ok()
+    let discovery = crate::model::discovery::Discovery::new().ok();
+    let reasoning_effort = discovery
+        .as_ref()
         .and_then(|discovery| discovery.get_model_reasoning_capability(&provider_name, &model_id))
         .and_then(|capability| {
             let resolved = capability.resolve(requested_reasoning)?;
@@ -246,6 +247,7 @@ async fn run_print_mode(
     .with_print_mode(true);
     let system_prompt = composer.compose().await;
     let messages = vec![Message::system(system_prompt), Message::user(prompt)];
+    preflight_print_mode_prompt_size(discovery.as_ref(), &provider_name, &model_id, &messages)?;
 
     let provider_name_clone = provider_name.clone();
     let model_clone = model_id.clone();
@@ -286,8 +288,7 @@ async fn run_print_mode(
                 break;
             }
             crate::llm::ChunkMessage::Failed(error) => {
-                eprintln!("\nError: {}", error);
-                break;
+                return Err(anyhow::anyhow!(error));
             }
             crate::llm::ChunkMessage::Warning(warning) => {
                 eprintln!("Warning: {}", warning);
@@ -313,6 +314,56 @@ async fn run_print_mode(
 
     let _ = no_session_persistence;
     Ok(())
+}
+
+fn preflight_print_mode_prompt_size(
+    discovery: Option<&crate::model::discovery::Discovery>,
+    provider_id: &str,
+    model_id: &str,
+    messages: &[crate::session::types::Message],
+) -> Result<()> {
+    let Some(context_limit) =
+        discovery.and_then(|discovery| discovery.get_model_limit(provider_id, model_id))
+    else {
+        return Ok(());
+    };
+
+    ensure_estimated_prompt_fits_context(
+        provider_id,
+        model_id,
+        estimate_prompt_tokens(messages),
+        context_limit,
+    )
+}
+
+fn ensure_estimated_prompt_fits_context(
+    provider_id: &str,
+    model_id: &str,
+    estimated_tokens: usize,
+    context_limit: u32,
+) -> Result<()> {
+    if context_limit == 0 || estimated_tokens < context_limit as usize {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Prompt is too large for {}/{}: estimated input is {} tokens, model context limit is {} tokens. Reduce the staged diff or choose a larger-context model.",
+        provider_id,
+        model_id,
+        estimated_tokens,
+        context_limit
+    )
+}
+
+fn estimate_prompt_tokens(messages: &[crate::session::types::Message]) -> usize {
+    messages
+        .iter()
+        .map(|message| estimate_text_tokens(&message.content) + 4)
+        .sum()
+}
+
+fn estimate_text_tokens(content: &str) -> usize {
+    content.chars().count().max(1) / 4
 }
 
 fn print_mode_permission_rules(
@@ -733,6 +784,31 @@ mod tests {
             merge_prompt_with_stdin("Examine the diff.", "diff --git a/a b/a\n+change"),
             "Examine the diff.\n\n<stdin>\ndiff --git a/a b/a\n+change\n</stdin>"
         );
+    }
+
+    #[test]
+    fn estimate_prompt_tokens_includes_all_messages() {
+        let messages = vec![
+            crate::session::types::Message::system("a".repeat(8)),
+            crate::session::types::Message::user("b".repeat(4)),
+        ];
+
+        assert_eq!(estimate_prompt_tokens(&messages), 11);
+    }
+
+    #[test]
+    fn prompt_size_preflight_rejects_context_overflow() {
+        let err =
+            ensure_estimated_prompt_fits_context("openai", "gpt-5.3-codex-spark", 128_000, 128_000)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("Prompt is too large"));
+        assert!(err.to_string().contains("openai/gpt-5.3-codex-spark"));
+    }
+
+    #[test]
+    fn prompt_size_preflight_allows_unknown_context() {
+        ensure_estimated_prompt_fits_context("provider", "model", usize::MAX, 0).unwrap();
     }
 
     #[test]
