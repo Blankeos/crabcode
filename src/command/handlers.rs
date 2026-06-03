@@ -326,7 +326,7 @@ pub fn handle_models<'a>(
                 None
             };
 
-            let description = model.provider_name.clone();
+            let description = model.dialog_description();
 
             items.push(DialogItem {
                 id: model.id.clone(),

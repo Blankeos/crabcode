@@ -4999,15 +4999,7 @@ impl App {
                 None
             };
 
-            let description = if group == "Favorite" || group == "Recent" {
-                model.provider_name.clone()
-            } else {
-                format!(
-                    "{} | {}",
-                    model.provider_name,
-                    model.capabilities.join(", ")
-                )
-            };
+            let description = model.dialog_description();
 
             items.push(DialogItem {
                 id: model.id.clone(),

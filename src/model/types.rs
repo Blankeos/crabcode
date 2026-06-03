@@ -11,6 +11,12 @@ pub struct Model {
     pub reasoning: bool,
 }
 
+impl Model {
+    pub fn dialog_description(&self) -> String {
+        self.provider_name.clone()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub provider_id: String,
@@ -90,5 +96,25 @@ mod tests {
         assert_eq!(deserialized.api_key, config.api_key);
         assert_eq!(deserialized.temperature, config.temperature);
         assert_eq!(deserialized.max_tokens, config.max_tokens);
+    }
+
+    #[test]
+    fn model_dialog_description_omits_capabilities() {
+        let model = Model {
+            id: "gpt-5".to_string(),
+            name: "GPT-5".to_string(),
+            family: "gpt".to_string(),
+            provider_id: "openai".to_string(),
+            provider_name: "OpenAI".to_string(),
+            capabilities: vec!["attachment".to_string(), "reasoning".to_string()],
+            reasoning: true,
+        };
+
+        let description = model.dialog_description();
+
+        assert_eq!(description, "OpenAI");
+        assert!(!description.contains('|'));
+        assert!(!description.contains("attachment"));
+        assert!(!description.contains("reasoning"));
     }
 }
