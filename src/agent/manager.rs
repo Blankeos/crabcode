@@ -1,9 +1,6 @@
 use crate::prompt::SystemPromptComposer;
-use crate::session::types::{Message, MessageRole};
-use crate::tools::{
-    initialize_tool_registry, ToolContext, ToolError, ToolHandler, ToolRegistry, ToolResult,
-};
-use std::sync::Arc;
+use crate::session::types::Message;
+use crate::tools::{initialize_tool_registry, ToolContext, ToolError, ToolRegistry, ToolResult};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 

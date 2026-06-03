@@ -160,6 +160,8 @@ mod tests {
         }
     }
 
+    const CENTER_DIALOG_LIST_Y: u16 = 6;
+
     #[test]
     fn mouse_click_on_item_selects_theme() {
         let mut state = init_themes_dialog(
@@ -179,7 +181,11 @@ mod tests {
 
         let action = handle_themes_dialog_mouse_event(
             &mut state,
-            mouse(MouseEventKind::Down(MouseButton::Left), 4, 9),
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                4,
+                CENTER_DIALOG_LIST_Y + 2,
+            ),
         );
 
         assert_eq!(
@@ -208,8 +214,10 @@ mod tests {
             height: 30,
         };
 
-        let action =
-            handle_themes_dialog_mouse_event(&mut state, mouse(MouseEventKind::Moved, 4, 9));
+        let action = handle_themes_dialog_mouse_event(
+            &mut state,
+            mouse(MouseEventKind::Moved, 4, CENTER_DIALOG_LIST_Y + 2),
+        );
 
         assert_eq!(
             action,

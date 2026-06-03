@@ -13,7 +13,6 @@ pub mod providers;
 
 pub use auth::{AuthConfig, AuthDAO};
 pub use conversions::persistence_to_session;
-pub use db::{get_db_conn, DbConn};
 pub use history::{HistoryDAO, Message, MessagePart, Session};
 pub use prefs::PrefsDAO;
 pub use prompt_history::PromptHistoryCache;

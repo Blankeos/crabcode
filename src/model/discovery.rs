@@ -451,6 +451,19 @@ impl Default for Discovery {
 mod tests {
     use super::*;
 
+    fn unique_test_cache_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        PathBuf::from(format!(
+            "/tmp/crabcode_test_cache/{}_{}_{}.json",
+            name,
+            std::process::id(),
+            nanos
+        ))
+    }
+
     #[tokio::test]
     async fn test_discovery_creation() {
         let discovery = Discovery::new();
@@ -571,9 +584,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_persistence() {
-        let discovery = Discovery::new().unwrap();
-
-        let cache_path = discovery.get_cache_path().clone();
+        let mut discovery = Discovery::new().unwrap();
+        let cache_path = unique_test_cache_path("models_dev_cache_persistence");
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        discovery.cache_path = cache_path.clone();
 
         let test_data = {
             let mut providers = HashMap::new();

@@ -1118,6 +1118,10 @@ impl Dialog {
             .split(content_area);
 
         let list_area = chunks[3];
+        if list_area.height > 0 && self.visible_row_count != list_area.height as usize {
+            self.visible_row_count = list_area.height as usize;
+            self.update_scrollbar();
+        }
         let scrollbar_area = Rect {
             x: list_area.x + list_area.width.saturating_sub(1),
             y: list_area.y,
@@ -1957,7 +1961,7 @@ mod tests {
         let handled = dialog.handle_mouse_event(MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
             column: 80,
-            row: 14,
+            row: 100,
             modifiers: KeyModifiers::NONE,
         });
 

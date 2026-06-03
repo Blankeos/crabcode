@@ -32,7 +32,7 @@ pub use question::QuestionTool;
 pub use registry::ToolRegistry;
 pub use skill::SkillTool;
 pub use task::TaskTool;
-pub use types::{ParameterSchema, ParameterType, Tool, ToolError, ToolId, ToolResult};
+pub use types::{ParameterSchema, ParameterType, Tool, ToolError, ToolResult};
 pub use update_plan::UpdatePlanTool;
 pub use webfetch::WebfetchTool;
 

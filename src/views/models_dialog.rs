@@ -302,6 +302,8 @@ mod tests {
         }
     }
 
+    const CENTER_DIALOG_LIST_Y: u16 = 6;
+
     #[test]
     fn mouse_click_on_item_selects_model() {
         let mut state = init_models_dialog(
@@ -319,7 +321,8 @@ mod tests {
             height: 30,
         };
 
-        let action = handle_models_dialog_mouse_event(&mut state, left_click(4, 9));
+        let action =
+            handle_models_dialog_mouse_event(&mut state, left_click(4, CENTER_DIALOG_LIST_Y + 2));
 
         assert_eq!(
             action,
@@ -342,7 +345,8 @@ mod tests {
             height: 30,
         };
 
-        let action = handle_models_dialog_mouse_event(&mut state, left_click(4, 7));
+        let action =
+            handle_models_dialog_mouse_event(&mut state, left_click(4, CENTER_DIALOG_LIST_Y));
 
         assert_eq!(action, ModelsDialogAction::None);
         assert!(state.dialog.is_visible());
