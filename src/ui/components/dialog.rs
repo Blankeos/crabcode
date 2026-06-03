@@ -840,7 +840,8 @@ impl Dialog {
             const DIALOG_HEIGHT_CENTER: u16 = 25;
 
             let footer_height = self.footer_height();
-            let total_fixed_height = 1 + 1 + SEARCH_AREA_HEIGHT + 1 + footer_height;
+            let total_fixed_height =
+                1 + 1 + SEARCH_AREA_HEIGHT + self.bottom_gap_height + footer_height;
             let (_, padding_y) = self.content_padding();
             let padding_total = padding_y * 2;
 
@@ -1606,8 +1607,13 @@ impl Dialog {
             }
         }
 
+        let previous_visible_row_count = self.visible_row_count;
         self.visible_row_count = chunks[3].height as usize;
-        self.update_scrollbar();
+        if previous_visible_row_count != self.visible_row_count {
+            self.adjust_scroll();
+        } else {
+            self.update_scrollbar();
+        }
 
         let list_content_area = Rect {
             x: chunks[3].x,

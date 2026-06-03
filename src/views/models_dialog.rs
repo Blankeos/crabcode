@@ -429,4 +429,47 @@ mod tests {
         assert!(rendered.ends_with('>'));
         assert_eq!(rendered.find("xhigh"), Some((21 - "xhigh".len()) / 2));
     }
+
+    #[test]
+    fn selected_last_reasoning_model_stays_visible_above_control() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let mut state = init_models_dialog(
+            "Models",
+            (0..24)
+                .map(|idx| model_item(&idx.to_string(), &format!("Model {idx}"), "openai"))
+                .collect(),
+        );
+        state.dialog.show();
+        state.dialog.select_index_clamped(23);
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_models_dialog(
+                    frame,
+                    &mut state,
+                    Rect::new(0, 0, 80, 30),
+                    colors,
+                    Some("high"),
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let selected_row = (0..buffer.area.height)
+            .find(|&y| {
+                let row_text = (0..buffer.area.width)
+                    .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>();
+                row_text.contains("Model 23")
+            })
+            .expect("last model row should be visible");
+
+        assert!((0..buffer.area.width).any(|x| buffer
+            .cell((x, selected_row))
+            .is_some_and(|cell| cell.style().bg == Some(colors.primary))));
+    }
 }

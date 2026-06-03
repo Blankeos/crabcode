@@ -72,7 +72,7 @@
 
 - [x] Highlight enhancements, if I click 1 place, then shift+click another. Treat it like the highlight in the browser that doesn't need a drag. Whatever I last clicked (without shift+click), treat it as the anchor for the "select start", and then whatever I shift+click after, treat it as a "select end" and autohighlight that part. (not supported)
 
-- [ ] Remote usage. Also talk about how to use for remote usages in the docs later. I can imagine multiple usecases. But this stands out in particular:
+- [x] Remote usage. Also talk about how to use for remote usages in the docs later. I can imagine multiple usecases. But this stands out in particular:
   - Remotely accessing crabcode on VPS / another device.
     - via another PC.
     - via phone.
@@ -226,4 +226,4 @@ I want - [x] To do this But I dont want to do this
 
 - [x] /fork command like codex.
 
-- [ ] TUI: When very last item in /models. If the very last item is a "Thinking" model, then I can't really see the "currently selected/focused" item (the last item), because the thinking left and right key covers it.
+- [x] TUI: When very last item in /models. If the very last item is a "Thinking" model, then I can't really see the "currently selected/focused" item (the last item), because the thinking left and right key covers it.
