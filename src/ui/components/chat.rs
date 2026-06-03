@@ -190,6 +190,52 @@ fn parse_tool_message(content: &str) -> Option<ParsedToolMessage> {
     })
 }
 
+fn assistant_tool_result_ids(message: &Message) -> std::collections::HashSet<String> {
+    message
+        .parts
+        .iter()
+        .filter(|part| part.part_type == "tool_result")
+        .filter_map(|part| part.tool_id().map(|id| id.to_string()))
+        .collect()
+}
+
+fn assistant_tool_part_content(
+    message: &Message,
+    part: &crate::session::types::MessagePart,
+    result_ids: &std::collections::HashSet<String>,
+) -> Option<String> {
+    match part.part_type.as_str() {
+        "tool_call" => {
+            let id = part.tool_id()?;
+            if result_ids.contains(id) {
+                return None;
+            }
+
+            let mut payload = part.data.clone();
+            if payload.get("status").is_none() {
+                payload["status"] = JsonValue::String("running".to_string());
+            }
+            serde_json::to_string(&payload).ok()
+        }
+        "tool_result" => {
+            let mut payload = part.data.clone();
+            if payload.get("args").is_none() {
+                if let Some(id) = part.tool_id() {
+                    if let Some(args) = message
+                        .tool_call_part_data(id)
+                        .and_then(|call| call.get("args"))
+                        .cloned()
+                    {
+                        payload["args"] = args;
+                    }
+                }
+            }
+            serde_json::to_string(&payload).ok()
+        }
+        _ => None,
+    }
+}
+
 fn arg_string<'a>(
     obj: Option<&'a serde_json::Map<String, JsonValue>>,
     keys: &[&str],
@@ -965,6 +1011,10 @@ impl Chat {
             std::mem::discriminant(&msg.role).hash(&mut h);
             msg.content.hash(&mut h);
             msg.reasoning.hash(&mut h);
+            for part in &msg.parts {
+                part.part_type.hash(&mut h);
+                part.data.to_string().hash(&mut h);
+            }
             msg.is_complete.hash(&mut h);
             msg.agent_mode.hash(&mut h);
             msg.token_count.hash(&mut h);
@@ -1137,10 +1187,11 @@ impl Chat {
         }
 
         let has_active_tools = self.messages.iter().rev().any(|message| {
-            message.role == MessageRole::Tool
-                && parse_tool_message(&message.content)
-                    .map(|info| matches!(info.status.as_str(), "running" | "pending"))
-                    .unwrap_or(false)
+            message.has_running_tool_parts()
+                || (message.role == MessageRole::Tool
+                    && parse_tool_message(&message.content)
+                        .map(|info| matches!(info.status.as_str(), "running" | "pending"))
+                        .unwrap_or(false))
         });
 
         self.cached_has_active_tools.set(has_active_tools);
@@ -2489,6 +2540,117 @@ impl Chat {
                 lines.push(Line::from(""));
             }
             MessageRole::Assistant => {
+                let has_ordered_parts = message
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part.part_type.as_str(), "tool_call" | "tool_result"));
+                let is_streaming = streaming_idx == Some(idx) && !message.is_complete;
+
+                if has_ordered_parts {
+                    let result_ids = assistant_tool_result_ids(message);
+                    let mut emitted_anything = false;
+
+                    for part in &message.parts {
+                        match part.part_type.as_str() {
+                            "reasoning" => {
+                                let Some(reasoning) = part
+                                    .text_value()
+                                    .map(str::trim)
+                                    .filter(|reasoning| !reasoning.is_empty())
+                                else {
+                                    continue;
+                                };
+
+                                emitted_anything = true;
+                                let reasoning_style = Style::default()
+                                    .fg(colors.text_weak)
+                                    .add_modifier(Modifier::ITALIC);
+                                let reasoning_prefix = if self.thinking_visible {
+                                    "💭 Thinking..."
+                                } else {
+                                    "💭 Thinking collapsed"
+                                };
+                                lines.push(Line::from(vec![Span::styled(
+                                    reasoning_prefix,
+                                    reasoning_style,
+                                )]));
+
+                                if self.thinking_visible {
+                                    let reasoning_line = Line::from(Span::styled(
+                                        reasoning.to_string(),
+                                        reasoning_style,
+                                    ));
+                                    lines.extend(wrap_styled_line(
+                                        &reasoning_line,
+                                        WrapOptions::new(max_width.max(1)),
+                                    ));
+                                }
+                                lines.push(Line::from(""));
+                            }
+                            "text" => {
+                                let Some(text) = part.text_value() else {
+                                    continue;
+                                };
+                                let visible_text = if is_synthetic_tool_result_text(text) {
+                                    ""
+                                } else {
+                                    text
+                                };
+                                if visible_text.trim().is_empty() {
+                                    continue;
+                                }
+
+                                emitted_anything = true;
+                                lines.extend(render_markdown(visible_text, max_width, colors));
+                                lines.push(Line::from(""));
+                            }
+                            "tool_call" | "tool_result" => {
+                                let Some(content) =
+                                    assistant_tool_part_content(message, part, &result_ids)
+                                else {
+                                    continue;
+                                };
+
+                                emitted_anything = true;
+                                let tool_message = Message::tool(content);
+                                let tool_lines =
+                                    self.format_tool_row(&tool_message, max_width, colors, true);
+                                for line in tool_lines.into_iter().map(line_to_static) {
+                                    lines.push(line);
+                                }
+                                lines.push(Line::from(""));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if !emitted_anything {
+                        if is_streaming || (message.is_complete && message.was_interrupted) {
+                            let metadata =
+                                self.format_metadata(message, model, colors, !is_streaming);
+                            lines.push(Line::from(metadata));
+                            lines.push(Line::from(""));
+                        }
+                        return lines;
+                    }
+
+                    let next_role = self.messages.get(idx + 1).map(|m| m.role.clone());
+                    let show_metadata = is_streaming
+                        || (message.is_complete
+                            && (message.was_interrupted
+                                || !matches!(
+                                    next_role,
+                                    Some(MessageRole::Tool) | Some(MessageRole::Assistant)
+                                )));
+
+                    if show_metadata {
+                        let metadata = self.format_metadata(message, model, colors, !is_streaming);
+                        lines.push(Line::from(metadata));
+                        lines.push(Line::from(""));
+                    }
+                    return lines;
+                }
+
                 let visible_content = if is_synthetic_tool_result_text(&message.content) {
                     ""
                 } else {
@@ -2532,8 +2694,6 @@ impl Chat {
                         }
                     }
                 }
-
-                let is_streaming = streaming_idx == Some(idx) && !message.is_complete;
 
                 if has_visible_content && is_streaming {
                     // Use the streaming renderer content for markdown

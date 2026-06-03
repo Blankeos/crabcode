@@ -1311,10 +1311,20 @@ fn convert_messages_for_model(
                 }
             }
             crate::session::types::MessageRole::Assistant => {
-                if msg.content.trim().is_empty() {
-                    continue;
+                if msg.parts.iter().any(|part| {
+                    matches!(
+                        part.part_type.as_str(),
+                        "text" | "reasoning" | "tool_call" | "tool_result"
+                    )
+                }) {
+                    append_assistant_parts_for_model(
+                        &mut aisdk_messages,
+                        msg,
+                        supports_image_input,
+                    );
+                } else if !msg.content.trim().is_empty() {
+                    aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));
                 }
-                aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));
             }
             crate::session::types::MessageRole::Tool => {
                 if let Some(tool_messages) =
@@ -1331,10 +1341,98 @@ fn convert_messages_for_model(
     aisdk_messages
 }
 
+fn append_assistant_parts_for_model(
+    aisdk_messages: &mut Vec<AisdkMessage>,
+    msg: &crate::session::types::Message,
+    supports_image_input: bool,
+) {
+    let mut emitted_text = false;
+    let mut seen_tool_calls = std::collections::HashSet::new();
+
+    for part in &msg.parts {
+        match part.part_type.as_str() {
+            "text" => {
+                let Some(text) = part.text_value().filter(|text| !text.trim().is_empty()) else {
+                    continue;
+                };
+
+                emitted_text = true;
+                aisdk_messages.push(AisdkMessage::assistant(text.to_string()));
+            }
+            "tool_call" => {
+                let Some(obj) = part.data.as_object() else {
+                    continue;
+                };
+                if let Some(message) = tool_call_message_from_model_obj(obj) {
+                    if let Some(id) = part.tool_id() {
+                        seen_tool_calls.insert(id.to_string());
+                    }
+                    aisdk_messages.push(message);
+                }
+            }
+            "tool_result" => {
+                let Some(obj) = part.data.as_object() else {
+                    continue;
+                };
+
+                if let Some(id) = part.tool_id() {
+                    if !seen_tool_calls.contains(id) {
+                        if let Some(call) = tool_call_message_from_model_obj(obj) {
+                            seen_tool_calls.insert(id.to_string());
+                            aisdk_messages.push(call);
+                        }
+                    }
+                }
+
+                if let Some(output) = tool_output_message_from_model_obj(obj, supports_image_input)
+                {
+                    aisdk_messages.push(output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !emitted_text && msg.parts.is_empty() && !msg.content.trim().is_empty() {
+        aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));
+    }
+}
+
 fn tool_messages_for_model(content: &str, supports_image_input: bool) -> Option<Vec<AisdkMessage>> {
     let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
     let obj = value.as_object()?;
 
+    Some(vec![
+        tool_call_message_from_model_obj(obj)?,
+        tool_output_message_from_model_obj(obj, supports_image_input)?,
+    ])
+}
+
+fn tool_call_message_from_model_obj(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<AisdkMessage> {
+    let call_id = obj
+        .get("id")
+        .or_else(|| obj.get("call_id"))
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())?;
+    let name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())?;
+
+    let arguments = obj
+        .get("args")
+        .map(|args| serde_json::to_string(args).unwrap_or_else(|_| args.to_string()))
+        .unwrap_or_else(|| "{}".to_string());
+
+    Some(AisdkMessage::tool_call(call_id, name, arguments))
+}
+
+fn tool_output_message_from_model_obj(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    supports_image_input: bool,
+) -> Option<AisdkMessage> {
     let call_id = obj
         .get("id")
         .or_else(|| obj.get("call_id"))
@@ -1349,10 +1447,6 @@ fn tool_messages_for_model(content: &str, supports_image_input: bool) -> Option<
         .and_then(|v| v.as_str())
         .filter(|value| !value.trim().is_empty())?;
 
-    let arguments = obj
-        .get("args")
-        .map(|args| serde_json::to_string(args).unwrap_or_else(|_| args.to_string()))
-        .unwrap_or_else(|| "{}".to_string());
     let status = obj.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
     let is_error = status.eq_ignore_ascii_case("error");
 
@@ -1367,10 +1461,9 @@ fn tool_messages_for_model(content: &str, supports_image_input: bool) -> Option<
         output.to_string()
     };
 
-    Some(vec![
-        AisdkMessage::tool_call(call_id, name, arguments),
-        AisdkMessage::tool_output_with_images(call_id, name, output, images, is_error),
-    ])
+    Some(AisdkMessage::tool_output_with_images(
+        call_id, name, output, images, is_error,
+    ))
 }
 
 fn content_with_unsupported_image_note(content: &str, image_count: usize) -> String {
@@ -1694,6 +1787,60 @@ mod tests {
                 assert!(!output.is_error);
             }
             other => panic!("expected tool output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_ordered_parts_flatten_for_provider_replay() {
+        let mut assistant = crate::session::types::Message::incomplete("");
+        assistant.append("I will inspect.");
+        assistant.add_tool_call_part(
+            "call_edit",
+            "edit",
+            serde_json::json!({
+                "file_path": "src/lib.rs",
+                "old_string": "old line",
+                "new_string": "new line"
+            }),
+        );
+        assistant.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_edit",
+            "name": "edit",
+            "status": "ok",
+            "args": {
+                "file_path": "src/lib.rs",
+                "old_string": "old line",
+                "new_string": "new line"
+            },
+            "output_preview": "Replaced at line 7"
+        }));
+        assistant.append("Done.");
+
+        let messages = convert_messages(&[assistant]);
+
+        assert_eq!(messages.len(), 4);
+        match &messages[0] {
+            AisdkMessage::Assistant(message) => assert_eq!(message.content, "I will inspect."),
+            other => panic!("expected assistant text, got {other:?}"),
+        }
+        match &messages[1] {
+            AisdkMessage::ToolCall(call) => {
+                assert_eq!(call.call_id, "call_edit");
+                assert_eq!(call.name, "edit");
+                assert!(call.arguments.contains("\"old_string\":\"old line\""));
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+        match &messages[2] {
+            AisdkMessage::ToolOutput(output) => {
+                assert_eq!(output.call_id, "call_edit");
+                assert_eq!(output.output, "Replaced at line 7");
+            }
+            other => panic!("expected tool output, got {other:?}"),
+        }
+        match &messages[3] {
+            AisdkMessage::Assistant(message) => assert_eq!(message.content, "Done."),
+            other => panic!("expected assistant text, got {other:?}"),
         }
     }
 

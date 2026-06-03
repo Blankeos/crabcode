@@ -36,10 +36,24 @@ export type RemoteWorkspace = {
   sort_order: number
 }
 
+export type RemoteJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | RemoteJsonValue[]
+  | { [key: string]: RemoteJsonValue }
+
+export type RemoteMessagePart = {
+  type: string
+  [key: string]: RemoteJsonValue
+}
+
 export type RemoteMessage = {
   role: "user" | "assistant" | "system" | "tool" | string
   content: string
   reasoning: string | null
+  parts?: RemoteMessagePart[]
   is_complete: boolean
   agent_mode: string | null
   token_count: number | null

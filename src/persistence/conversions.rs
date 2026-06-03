@@ -1,17 +1,35 @@
-use crate::persistence::{Message, MessagePart, Session as PersistenceSession};
-use crate::session::types::{CompactionStats, Message as SessionMessage, MessageRole, Session};
+use crate::persistence::{
+    Message, MessagePart as PersistenceMessagePart, Session as PersistenceSession,
+};
+use crate::session::types::{
+    CompactionStats, Message as SessionMessage, MessagePart as SessionMessagePart, MessageRole,
+    Session,
+};
 
 impl From<SessionMessage> for Message {
     fn from(msg: SessionMessage) -> Self {
-        let mut parts = vec![MessagePart {
-            part_type: "text".to_string(),
-            data: serde_json::json!({ "text": msg.content }),
-        }];
+        let mut parts: Vec<PersistenceMessagePart> = if msg.parts.is_empty() {
+            let mut parts = Vec::new();
+            if !msg.content.is_empty() {
+                parts.push(PersistenceMessagePart {
+                    part_type: "text".to_string(),
+                    data: serde_json::json!({ "text": msg.content }),
+                });
+            }
+            parts
+        } else {
+            msg.parts
+                .iter()
+                .map(|part| PersistenceMessagePart {
+                    part_type: part.part_type.clone(),
+                    data: part.data.clone(),
+                })
+                .collect()
+        };
 
-        // Add reasoning as a separate part if present
         if let Some(ref reasoning) = msg.reasoning {
-            if !reasoning.is_empty() {
-                parts.push(MessagePart {
+            if !reasoning.is_empty() && !parts.iter().any(|part| part.part_type == "reasoning") {
+                parts.push(PersistenceMessagePart {
                     part_type: "reasoning".to_string(),
                     data: serde_json::json!({ "text": reasoning }),
                 });
@@ -19,7 +37,7 @@ impl From<SessionMessage> for Message {
         }
 
         for path in &msg.local_image_paths {
-            parts.push(MessagePart {
+            parts.push(PersistenceMessagePart {
                 part_type: "local_image".to_string(),
                 data: serde_json::json!({ "path": path }),
             });
@@ -27,15 +45,24 @@ impl From<SessionMessage> for Message {
 
         if let Some(stats) = msg.compaction_stats {
             if let Ok(data) = serde_json::to_value(stats) {
-                parts.push(MessagePart {
+                parts.push(PersistenceMessagePart {
                     part_type: "compaction_stats".to_string(),
                     data,
                 });
             }
         }
 
-        if msg.was_interrupted {
-            parts.push(MessagePart {
+        if msg.was_interrupted
+            && !parts.iter().any(|part| {
+                part.part_type == "status"
+                    && part
+                        .data
+                        .get("state")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|state| state == "interrupted")
+            })
+        {
+            parts.push(PersistenceMessagePart {
                 part_type: "status".to_string(),
                 data: serde_json::json!({ "state": "interrupted" }),
             });
@@ -73,9 +100,16 @@ impl TryFrom<Message> for SessionMessage {
     type Error = anyhow::Error;
 
     fn try_from(msg: Message) -> Result<Self, Self::Error> {
-        // Extract content from text parts
-        let content = msg
+        let session_parts: Vec<SessionMessagePart> = msg
             .parts
+            .iter()
+            .map(|part| SessionMessagePart {
+                part_type: part.part_type.clone(),
+                data: part.data.clone(),
+            })
+            .collect();
+
+        let content = session_parts
             .iter()
             .filter_map(|p| {
                 if p.part_type == "text" {
@@ -85,18 +119,22 @@ impl TryFrom<Message> for SessionMessage {
                 }
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n\n");
 
-        // Extract reasoning from reasoning parts
-        let reasoning = msg
-            .parts
+        let reasoning = session_parts
             .iter()
-            .find(|p| p.part_type == "reasoning")
-            .and_then(|p| p.data.get("text").and_then(|v| v.as_str()))
-            .map(|s| s.to_string());
+            .filter_map(|p| {
+                if p.part_type == "reasoning" {
+                    p.data.get("text").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let reasoning = (!reasoning.is_empty()).then_some(reasoning);
 
-        let local_image_paths = msg
-            .parts
+        let local_image_paths = session_parts
             .iter()
             .filter_map(|p| {
                 if p.part_type == "local_image" {
@@ -108,13 +146,12 @@ impl TryFrom<Message> for SessionMessage {
             .map(|path| path.to_string())
             .collect();
 
-        let compaction_stats = msg
-            .parts
+        let compaction_stats = session_parts
             .iter()
             .find(|p| p.part_type == "compaction_stats")
             .and_then(|p| serde_json::from_value::<CompactionStats>(p.data.clone()).ok());
 
-        let was_interrupted = msg.parts.iter().any(|p| {
+        let was_interrupted = session_parts.iter().any(|p| {
             p.part_type == "status"
                 && p.data
                     .get("state")
@@ -134,6 +171,7 @@ impl TryFrom<Message> for SessionMessage {
             role,
             content,
             reasoning,
+            parts: session_parts,
             timestamp: std::time::UNIX_EPOCH + std::time::Duration::from_secs(msg.timestamp as u64),
             is_complete: true,
             agent_mode: msg.agent_mode.clone(),
@@ -223,5 +261,39 @@ mod tests {
 
         let restored = SessionMessage::try_from(persistence_message).unwrap();
         assert!(restored.was_interrupted);
+    }
+
+    #[test]
+    fn assistant_ordered_parts_round_trip_without_reordering() {
+        let mut session_message = SessionMessage::incomplete("");
+        session_message.append_reasoning("thinking");
+        session_message.append("I will inspect.");
+        session_message.add_tool_call_part(
+            "call_read",
+            "read",
+            serde_json::json!({ "path": "src/lib.rs" }),
+        );
+        session_message.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_read",
+            "name": "read",
+            "status": "ok",
+            "args": { "path": "src/lib.rs" },
+            "output_preview": "contents",
+        }));
+        session_message.append("Done.");
+
+        let persistence_message: Message = session_message.into();
+        let restored = SessionMessage::try_from(persistence_message).unwrap();
+
+        assert_eq!(
+            restored
+                .parts
+                .iter()
+                .map(|part| part.part_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reasoning", "text", "tool_call", "tool_result", "text"]
+        );
+        assert_eq!(restored.reasoning.as_deref(), Some("thinking"));
+        assert_eq!(restored.content, "I will inspect.\n\nDone.");
     }
 }

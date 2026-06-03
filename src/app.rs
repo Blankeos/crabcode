@@ -1139,6 +1139,19 @@ impl App {
         }
     }
 
+    fn persist_chat_messages_for_session(&mut self, session_id: &str) -> bool {
+        let Some(messages) = self
+            .chat_for_session(session_id)
+            .map(|chat| chat.messages.clone())
+        else {
+            return false;
+        };
+
+        self.session_manager
+            .replace_session_messages(session_id, messages)
+            .is_ok()
+    }
+
     fn stream_for_session_mut(&mut self, session_id: &str) -> Option<&mut SessionStreamState> {
         self.session_view_states
             .get_mut(session_id)
@@ -5915,12 +5928,14 @@ impl App {
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.append_to_last_assistant(&text);
                 }
+                self.persist_chat_messages_for_session(session_id);
                 true
             }
             crate::llm::ChunkMessage::Reasoning(reasoning) => {
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.append_reasoning_to_last_assistant(&reasoning);
                 }
+                self.persist_chat_messages_for_session(session_id);
                 true
             }
             crate::llm::ChunkMessage::Warning(msg) => {
@@ -6046,7 +6061,6 @@ impl App {
         user_message.model = model.clone();
         user_message.provider = provider.clone();
 
-        let mut persist_user = false;
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
             state.chat = Chat::with_messages(Vec::new());
             state.tool_calls = ToolCallViewState::default();
@@ -6066,14 +6080,9 @@ impl App {
                 chat_len_before_assistant: 1,
             });
             state.unread_completed = true;
-            persist_user = true;
         }
 
-        if persist_user {
-            let _ = self
-                .session_manager
-                .add_message_to_session(&session_id, &user_message);
-        }
+        self.persist_chat_messages_for_session(&session_id);
 
         let _ = self.session_manager.set_session_status(
             &session_id,
@@ -6167,6 +6176,10 @@ impl App {
     }
 
     fn is_running_tool_message(message: &crate::session::types::Message) -> bool {
+        if message.has_running_tool_parts() {
+            return true;
+        }
+
         if message.role != crate::session::types::MessageRole::Tool {
             return false;
         }
@@ -6188,7 +6201,6 @@ impl App {
         terminal_error: Option<&str>,
     ) -> Option<Option<String>> {
         let (start, model, provider) = self.streaming_boundary_for_session(session_id)?;
-        let mut messages_to_persist = Vec::new();
         let completion_stats = if let Some(chat) = self.chat_for_session_mut(session_id) {
             chat.mark_streaming_end();
             chat.finalize_streaming_metrics();
@@ -6205,10 +6217,6 @@ impl App {
                         }
                         msg.model = model.clone();
                         msg.provider = provider.clone();
-                        messages_to_persist.push(msg.clone());
-                    }
-                    crate::session::types::MessageRole::Tool => {
-                        messages_to_persist.push(msg.clone());
                     }
                     _ => {}
                 }
@@ -6220,15 +6228,15 @@ impl App {
             None
         };
 
-        for msg in &messages_to_persist {
-            let _ = self.session_manager.add_message_to_session(session_id, msg);
-        }
+        self.persist_chat_messages_for_session(session_id);
 
         Some(completion_stats)
     }
 
     fn mark_running_tool_messages_failed(chat: &mut Chat, start: usize, error: &str) {
         for msg in chat.messages.iter_mut().skip(start) {
+            msg.mark_running_tool_parts_failed(error);
+
             if msg.role != crate::session::types::MessageRole::Tool {
                 continue;
             }
@@ -6329,30 +6337,18 @@ impl App {
                 .rposition(|m| m.role == crate::session::types::MessageRole::Assistant)
             {
                 if let Some(msg) = chat.messages.get_mut(idx) {
-                    if !msg.is_complete {
-                        msg.mark_complete();
-                        chat.mark_render_dirty();
+                    for call in tool_calls {
+                        let args_value: serde_json::Value =
+                            serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| {
+                                serde_json::Value::String(call.function.arguments.clone())
+                            });
+
+                        let call_id = call.id.clone();
+                        msg.add_tool_call_part(call.id, call.function.name, args_value);
+                        inserted.push((call_id, idx));
                     }
+                    chat.mark_render_dirty();
                 }
-            }
-
-            for call in tool_calls {
-                let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
-                    .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()));
-
-                let call_id = call.id.clone();
-                let content = serde_json::json!({
-                    "id": call.id,
-                    "name": call.function.name,
-                    "status": "running",
-                    "args": args_value,
-                })
-                .to_string();
-
-                chat.add_message(crate::session::types::Message::tool(content));
-
-                let idx = chat.messages.len().saturating_sub(1);
-                inserted.push((call_id, idx));
             }
         }
 
@@ -6365,6 +6361,7 @@ impl App {
                 state.tool_calls.tool_call_order.push(call_id);
             }
         }
+        self.persist_chat_messages_for_session(session_id);
     }
 
     fn add_tool_result_to_session(
@@ -6385,8 +6382,15 @@ impl App {
         if let Some(chat) = self.chat_for_session_mut(session_id) {
             if let Some(idx) = target_idx {
                 if let Some(msg) = chat.messages.get_mut(idx) {
-                    let mut v: serde_json::Value = serde_json::from_str(&msg.content)
-                        .unwrap_or_else(|_| serde_json::json!({}));
+                    let mut v = if msg.role == crate::session::types::MessageRole::Assistant {
+                        msg.tool_result_part_data(&result.tool_call_id)
+                            .or_else(|| msg.tool_call_part_data(&result.tool_call_id))
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}))
+                    } else {
+                        serde_json::from_str::<serde_json::Value>(&msg.content)
+                            .unwrap_or_else(|_| serde_json::json!({}))
+                    };
                     v["id"] = serde_json::Value::String(result.tool_call_id.clone());
                     v["name"] = serde_json::Value::String(result.name.clone());
 
@@ -6430,7 +6434,11 @@ impl App {
                         v["output_preview"] = serde_json::Value::String(result.content.clone());
                     }
 
-                    msg.content = v.to_string();
+                    if msg.role == crate::session::types::MessageRole::Assistant {
+                        msg.add_or_update_tool_result_part(v);
+                    } else {
+                        msg.content = v.to_string();
+                    }
                     chat.mark_render_dirty();
                     handled = true;
                 }
@@ -6438,15 +6446,26 @@ impl App {
 
             if !handled {
                 let content = serde_json::json!({
-                    "id": result.tool_call_id,
-                    "name": result.name,
+                    "id": result.tool_call_id.clone(),
+                    "name": result.name.clone(),
                     "status": "ok",
-                    "output_preview": result.content,
-                })
-                .to_string();
-                chat.add_message(crate::session::types::Message::tool(content));
+                    "output_preview": result.content.clone(),
+                });
+
+                if let Some(msg) =
+                    chat.messages.iter_mut().rev().find(|message| {
+                        message.role == crate::session::types::MessageRole::Assistant
+                    })
+                {
+                    msg.add_or_update_tool_result_part(content);
+                    chat.mark_render_dirty();
+                } else {
+                    chat.add_message(crate::session::types::Message::tool(content.to_string()));
+                }
             }
         }
+
+        self.persist_chat_messages_for_session(session_id);
 
         if self.finish_deferred_streaming_session_if_ready(session_id) {
             return false;
@@ -6512,6 +6531,7 @@ impl App {
             state.tool_calls = ToolCallViewState::default();
             state.unread_completed = false;
         }
+        self.persist_chat_messages_for_session(&session_id);
         let _ = self.session_manager.set_session_status(
             &session_id,
             crate::session::types::SessionStatus::Streaming,
@@ -7106,6 +7126,7 @@ impl App {
             state.tool_calls = ToolCallViewState::default();
             state.unread_completed = false;
         }
+        self.persist_chat_messages_for_session(&session_id);
         let _ = self.session_manager.set_session_status(
             &session_id,
             crate::session::types::SessionStatus::Streaming,
@@ -7694,6 +7715,23 @@ fn message_clipboard_sections(message: &crate::session::types::Message) -> Vec<S
             sections.push(format!("Tool:\n{}", content));
         } else {
             sections.push(message.content.clone());
+        }
+    }
+
+    if matches!(message.role, crate::session::types::MessageRole::Assistant) {
+        for part in &message.parts {
+            if !matches!(part.part_type.as_str(), "tool_call" | "tool_result") {
+                continue;
+            }
+
+            let content =
+                serde_json::to_string_pretty(&part.data).unwrap_or_else(|_| part.data.to_string());
+            let label = if part.part_type == "tool_call" {
+                "Tool Call"
+            } else {
+                "Tool Result"
+            };
+            sections.push(format!("{label}:\n{content}"));
         }
     }
 
@@ -8592,8 +8630,13 @@ mod tests {
             .get_session_ref(&session_id)
             .unwrap()
             .messages;
-        assert_eq!(persisted_messages.len(), 1);
+        assert_eq!(persisted_messages.len(), 2);
         assert_eq!(persisted_messages[0].content, "nice\nnice\nnice");
+        assert_eq!(
+            persisted_messages[1].role,
+            crate::session::types::MessageRole::Assistant
+        );
+        assert!(!persisted_messages[1].is_complete);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8773,6 +8816,87 @@ mod tests {
         assert_eq!(
             tool_payload["output_preview"],
             "Streaming cancelled by user"
+        );
+    }
+
+    #[test]
+    fn streamed_tool_call_and_result_persist_as_single_assistant_message() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Logical assistant".to_string()));
+
+        let user_message = crate::session::types::Message::user("Prompt");
+        app.chat_state.chat.add_message(user_message.clone());
+        app.session_manager
+            .add_message_to_current_session(&user_message)
+            .unwrap();
+
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Checking."));
+        app.chat_state.chat.begin_streaming_turn();
+
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState {
+            chunk_receiver: receiver,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            streaming_model: Some("test-model".to_string()),
+            streaming_provider: Some("test-provider".to_string()),
+            chat_len_before_assistant: 1,
+        });
+        app.is_streaming = true;
+
+        app.add_tool_calls_to_session(
+            &session_id,
+            vec![crate::llm::ToolCall {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({ "path": "Cargo.toml" }).to_string(),
+                },
+            }],
+        );
+        app.add_tool_result_to_session(
+            &session_id,
+            crate::llm::ToolCallResult {
+                tool_call_id: "call_1".to_string(),
+                role: "tool".to_string(),
+                name: "read".to_string(),
+                content: serde_json::json!({
+                    "status": "ok",
+                    "title": "Read",
+                    "output_preview": "contents"
+                })
+                .to_string(),
+            },
+        );
+        app.finish_streaming_session(&session_id);
+
+        assert_eq!(app.chat_state.chat.messages.len(), 2);
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(session.messages.len(), 2);
+        let assistant = &session.messages[1];
+        assert_eq!(
+            assistant.role,
+            crate::session::types::MessageRole::Assistant
+        );
+        assert_eq!(
+            assistant
+                .parts
+                .iter()
+                .map(|part| part.part_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["text", "tool_call", "tool_result"]
+        );
+        assert_eq!(assistant.content, "Checking.");
+        assert!(assistant.tool_call_part_data("call_1").is_some());
+        assert_eq!(
+            assistant
+                .tool_result_part_data("call_1")
+                .and_then(|payload| payload.get("output_preview"))
+                .and_then(|value| value.as_str()),
+            Some("contents")
         );
     }
 

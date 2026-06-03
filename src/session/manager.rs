@@ -1,5 +1,5 @@
 use crate::persistence::HistoryDAO;
-use crate::session::types::{Session, SessionStatus};
+use crate::session::types::{MessageRole, Session, SessionStatus};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
@@ -130,7 +130,30 @@ impl SessionManager {
             session.status = SessionStatus::from_str(&db_session.status);
             if session.status.is_active() {
                 session.status = SessionStatus::Interrupted;
+                if let Some(message) = session
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|message| message.role == MessageRole::Assistant)
+                {
+                    message.mark_complete();
+                    message.mark_interrupted();
+                    message.mark_running_tool_parts_failed(
+                        "Session interrupted before the tool returned a result",
+                    );
+                }
                 let _ = dao.set_session_status(db_session.id, session.status.as_str(), None);
+                let persistence_messages: Vec<crate::persistence::Message> = session
+                    .messages
+                    .clone()
+                    .into_iter()
+                    .map(|message| {
+                        let mut db_message: crate::persistence::Message = message.into();
+                        db_message.session_id = db_session.id;
+                        db_message
+                    })
+                    .collect();
+                let _ = dao.replace_messages(db_session.id, &persistence_messages);
             }
             session.pinned_at = db_session
                 .pinned_at

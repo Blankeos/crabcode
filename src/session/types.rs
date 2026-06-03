@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::ops::Range;
 use std::time::SystemTime;
 
@@ -45,6 +46,72 @@ pub enum MessageRole {
     Tool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagePart {
+    #[serde(rename = "type")]
+    pub part_type: String,
+    #[serde(flatten)]
+    pub data: JsonValue,
+}
+
+impl MessagePart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            part_type: "text".to_string(),
+            data: serde_json::json!({ "text": text.into() }),
+        }
+    }
+
+    pub fn reasoning(text: impl Into<String>) -> Self {
+        Self {
+            part_type: "reasoning".to_string(),
+            data: serde_json::json!({ "text": text.into() }),
+        }
+    }
+
+    pub fn tool_call(id: impl Into<String>, name: impl Into<String>, args: JsonValue) -> Self {
+        Self {
+            part_type: "tool_call".to_string(),
+            data: serde_json::json!({
+                "id": id.into(),
+                "name": name.into(),
+                "status": "running",
+                "args": args,
+            }),
+        }
+    }
+
+    pub fn tool_result(data: JsonValue) -> Self {
+        Self {
+            part_type: "tool_result".to_string(),
+            data,
+        }
+    }
+
+    pub fn text_value(&self) -> Option<&str> {
+        self.data.get("text").and_then(|value| value.as_str())
+    }
+
+    pub fn tool_id(&self) -> Option<&str> {
+        self.data
+            .get("id")
+            .or_else(|| self.data.get("call_id"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    pub fn tool_name(&self) -> Option<&str> {
+        self.data
+            .get("name")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    pub fn tool_status(&self) -> Option<&str> {
+        self.data.get("status").and_then(|value| value.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CompactionStats {
     pub before_tokens: usize,
@@ -72,6 +139,7 @@ pub struct Message {
     pub role: MessageRole,
     pub content: String,
     pub reasoning: Option<String>,
+    pub parts: Vec<MessagePart>,
     pub timestamp: SystemTime,
     pub is_complete: bool,
     pub agent_mode: Option<String>,
@@ -92,10 +160,18 @@ pub struct Message {
 
 impl Message {
     pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
+        let content = content.into();
+        let parts = if content.is_empty() {
+            Vec::new()
+        } else {
+            vec![MessagePart::text(content.clone())]
+        };
+
         Self {
             role,
-            content: content.into(),
+            content,
             reasoning: None,
+            parts,
             timestamp: SystemTime::now(),
             is_complete: true,
             agent_mode: None,
@@ -130,10 +206,18 @@ impl Message {
     }
 
     pub fn incomplete(content: impl Into<String>) -> Self {
+        let content = content.into();
+        let parts = if content.is_empty() {
+            Vec::new()
+        } else {
+            vec![MessagePart::text(content.clone())]
+        };
+
         Self {
             role: MessageRole::Assistant,
-            content: content.into(),
+            content,
             reasoning: None,
+            parts,
             timestamp: SystemTime::now(),
             is_complete: false,
             agent_mode: None,
@@ -152,14 +236,170 @@ impl Message {
     }
 
     pub fn append(&mut self, chunk: impl AsRef<str>) {
-        self.content.push_str(chunk.as_ref());
+        let chunk = chunk.as_ref();
+        if chunk.is_empty() {
+            return;
+        }
+
+        let starts_new_text_part = !self
+            .parts
+            .last()
+            .is_some_and(|part| part.part_type == "text");
+
+        if starts_new_text_part && !self.content.trim().is_empty() {
+            self.content.push_str("\n\n");
+        }
+        self.content.push_str(chunk);
+
+        if let Some(part) = self
+            .parts
+            .last_mut()
+            .filter(|part| part.part_type == "text")
+        {
+            let current = part.data.get("text").and_then(|value| value.as_str());
+            let mut text = current.unwrap_or_default().to_string();
+            text.push_str(chunk);
+            part.data = serde_json::json!({ "text": text });
+        } else {
+            self.parts.push(MessagePart::text(chunk));
+        }
     }
 
     pub fn append_reasoning(&mut self, chunk: impl AsRef<str>) {
+        let chunk = chunk.as_ref();
+        if chunk.is_empty() {
+            return;
+        }
+
         if let Some(ref mut reasoning) = self.reasoning {
-            reasoning.push_str(chunk.as_ref());
+            reasoning.push_str(chunk);
         } else {
-            self.reasoning = Some(chunk.as_ref().to_string());
+            self.reasoning = Some(chunk.to_string());
+        }
+
+        if let Some(part) = self
+            .parts
+            .last_mut()
+            .filter(|part| part.part_type == "reasoning")
+        {
+            let current = part.data.get("text").and_then(|value| value.as_str());
+            let mut text = current.unwrap_or_default().to_string();
+            text.push_str(chunk);
+            part.data = serde_json::json!({ "text": text });
+        } else {
+            self.parts.push(MessagePart::reasoning(chunk));
+        }
+    }
+
+    pub fn add_tool_call_part(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        args: JsonValue,
+    ) {
+        self.parts.push(MessagePart::tool_call(id, name, args));
+    }
+
+    pub fn add_or_update_tool_result_part(&mut self, payload: JsonValue) {
+        let Some(call_id) = payload
+            .get("id")
+            .or_else(|| payload.get("call_id"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.to_string())
+        else {
+            self.parts.push(MessagePart::tool_result(payload));
+            return;
+        };
+
+        if let Some(part) = self.parts.iter_mut().find(|part| {
+            part.part_type == "tool_result" && part.tool_id() == Some(call_id.as_str())
+        }) {
+            part.data = payload;
+        } else {
+            self.parts.push(MessagePart::tool_result(payload));
+        }
+    }
+
+    pub fn tool_call_part_data(&self, call_id: &str) -> Option<&JsonValue> {
+        self.parts.iter().find_map(|part| {
+            (part.part_type == "tool_call" && part.tool_id() == Some(call_id)).then_some(&part.data)
+        })
+    }
+
+    pub fn tool_result_part_data(&self, call_id: &str) -> Option<&JsonValue> {
+        self.parts.iter().find_map(|part| {
+            (part.part_type == "tool_result" && part.tool_id() == Some(call_id))
+                .then_some(&part.data)
+        })
+    }
+
+    pub fn has_running_tool_parts(&self) -> bool {
+        if self.role != MessageRole::Assistant {
+            return false;
+        }
+
+        let completed_ids = self
+            .parts
+            .iter()
+            .filter(|part| part.part_type == "tool_result")
+            .filter_map(MessagePart::tool_id)
+            .collect::<std::collections::HashSet<_>>();
+
+        self.parts.iter().any(|part| match part.part_type.as_str() {
+            "tool_call" => part.tool_id().is_some_and(|id| !completed_ids.contains(id)),
+            "tool_result" => part
+                .tool_status()
+                .map(|status| matches!(status, "running" | "pending"))
+                .unwrap_or(false),
+            _ => false,
+        })
+    }
+
+    pub fn mark_running_tool_parts_failed(&mut self, error: &str) {
+        if self.role != MessageRole::Assistant {
+            return;
+        }
+
+        let running_calls = self
+            .parts
+            .iter()
+            .filter(|part| part.part_type == "tool_call")
+            .filter_map(|part| {
+                let id = part.tool_id()?.to_string();
+                let name = part.tool_name().unwrap_or("tool").to_string();
+                let args = part.data.get("args").cloned();
+                Some((id, name, args))
+            })
+            .collect::<Vec<_>>();
+
+        for (id, name, args) in running_calls {
+            let mut payload = self
+                .tool_result_part_data(&id)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+
+            let is_running = payload
+                .get("status")
+                .and_then(|status| status.as_str())
+                .map(|status| matches!(status, "running" | "pending"))
+                .unwrap_or(true);
+
+            if !is_running {
+                continue;
+            }
+
+            payload["id"] = JsonValue::String(id.clone());
+            payload["name"] = JsonValue::String(name);
+            if payload.get("args").is_none() {
+                if let Some(args) = args {
+                    payload["args"] = args;
+                }
+            }
+            payload["status"] = JsonValue::String("error".to_string());
+            payload["title"] = JsonValue::String("Tool failed".to_string());
+            payload["output_preview"] = JsonValue::String(error.to_string());
+            self.add_or_update_tool_result_part(payload);
         }
     }
 

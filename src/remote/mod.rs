@@ -207,6 +207,7 @@ struct RemoteMessage {
     provider: Option<String>,
     local_image_paths: Vec<String>,
     was_interrupted: bool,
+    parts: Vec<crate::session::types::MessagePart>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2361,6 +2362,7 @@ fn remote_message(message: &Message) -> RemoteMessage {
         provider: message.provider.clone(),
         local_image_paths: message.local_image_paths.clone(),
         was_interrupted: message.was_interrupted,
+        parts: message.parts.clone(),
     }
 }
 

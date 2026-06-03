@@ -223,6 +223,9 @@ pub fn format_compaction_stats(stats: CompactionStats) -> String {
 fn message_content_for_prompt(message: &Message) -> String {
     let mut content = match message.role {
         MessageRole::Tool => tool_content_for_prompt(&message.content),
+        MessageRole::Assistant if !message.parts.is_empty() => {
+            assistant_parts_content_for_prompt(message)
+        }
         _ => message.content.clone(),
     };
 
@@ -239,6 +242,50 @@ fn message_content_for_prompt(message: &Message) -> String {
     }
 
     content
+}
+
+fn assistant_parts_content_for_prompt(message: &Message) -> String {
+    let result_ids = message
+        .parts
+        .iter()
+        .filter(|part| part.part_type == "tool_result")
+        .filter_map(|part| part.tool_id().map(|id| id.to_string()))
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut sections = Vec::new();
+    for part in &message.parts {
+        match part.part_type.as_str() {
+            "text" => {
+                if let Some(text) = part.text_value().filter(|text| !text.trim().is_empty()) {
+                    sections.push(text.to_string());
+                }
+            }
+            "reasoning" => {}
+            "tool_call" => {
+                let Some(id) = part.tool_id() else {
+                    continue;
+                };
+                if result_ids.contains(id) {
+                    continue;
+                }
+                if let Ok(content) = serde_json::to_string(&part.data) {
+                    sections.push(tool_content_for_prompt(&content));
+                }
+            }
+            "tool_result" => {
+                if let Ok(content) = serde_json::to_string(&part.data) {
+                    sections.push(tool_content_for_prompt(&content));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if sections.is_empty() {
+        message.content.clone()
+    } else {
+        sections.join("\n\n")
+    }
 }
 
 fn tool_content_for_prompt(content: &str) -> String {

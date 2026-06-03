@@ -74,6 +74,7 @@ import {
   createRemoteApi,
   RemoteApiError,
   type RemoteMessage,
+  type RemoteMessagePart,
   type RemoteModel,
   type RemotePendingPermission,
   type RemotePendingQuestion,
@@ -3178,6 +3179,16 @@ function buildThreadItems(messages: RemoteMessage[], cwd: string): ThreadItem[] 
       const item: ThreadItem = { type: "message", message, activityTools: [] }
       items.push(item)
       activeAssistantItem = message.role === "assistant" ? item : null
+      if (activeAssistantItem) {
+        for (const tool of assistantPartToolMessages(message, cwd)) {
+          if (isActivityTool(tool)) {
+            activeAssistantItem.activityTools.push(tool)
+          } else {
+            flushOrphanActivity()
+            items.push({ type: "action", tool })
+          }
+        }
+      }
       continue
     }
 
@@ -3198,11 +3209,75 @@ function buildThreadItems(messages: RemoteMessage[], cwd: string): ThreadItem[] 
   return items
 }
 
+function assistantPartToolMessages(message: RemoteMessage, cwd: string): ToolMessage[] {
+  const parts = Array.isArray(message.parts) ? message.parts : []
+  if (parts.length === 0) return []
+
+  const resultIds = new Set(
+    parts
+      .filter((part) => part.type === "tool_result")
+      .map(toolPartId)
+      .filter((id): id is string => Boolean(id))
+  )
+  const callsById = new Map<string, RemoteMessagePart>()
+  const tools: ToolMessage[] = []
+
+  for (const part of parts) {
+    if (part.type === "tool_call") {
+      const id = toolPartId(part)
+      if (id) callsById.set(id, part)
+      if (!id || resultIds.has(id)) continue
+      const payload = { ...toolPartPayload(part), status: stringValue(part.status) || "running" }
+      tools.push(toolMessageFromPayload(message, payload, cwd))
+      continue
+    }
+
+    if (part.type === "tool_result") {
+      const id = toolPartId(part)
+      const call = id ? callsById.get(id) : undefined
+      const payload = toolPartPayload(part)
+      if (payload.args === undefined && call?.args !== undefined) payload.args = call.args
+      tools.push(toolMessageFromPayload(message, payload, cwd))
+    }
+  }
+
+  return tools
+}
+
+function toolPartId(part: RemoteMessagePart): string | null {
+  return stringValue(part.id) || stringValue(part.call_id)
+}
+
+function toolPartPayload(part: RemoteMessagePart): JsonObject {
+  const payload: JsonObject = {}
+  for (const [key, value] of Object.entries(part)) {
+    if (key === "type") continue
+    payload[key] = value
+  }
+  return payload
+}
+
+function toolMessageFromPayload(
+  baseMessage: RemoteMessage,
+  payload: JsonObject,
+  cwd: string
+): ToolMessage {
+  const toolMessage: RemoteMessage = {
+    ...baseMessage,
+    role: "tool",
+    content: JSON.stringify(payload),
+    reasoning: null,
+    parts: [],
+  }
+  return parseToolMessage(toolMessage, cwd)
+}
+
 function mergeAssistantTurnMessages(base: RemoteMessage, next: RemoteMessage): RemoteMessage {
   return {
     ...base,
     content: joinMessageParts(base.content, next.content),
     reasoning: joinOptionalMessageParts(base.reasoning, next.reasoning),
+    parts: [...(base.parts || []), ...(next.parts || [])],
     is_complete: next.is_complete,
     agent_mode: next.agent_mode ?? base.agent_mode,
     token_count: next.token_count ?? base.token_count,
