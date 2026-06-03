@@ -814,7 +814,7 @@ export default function RemoteClient() {
     const cursor = event.currentTarget.selectionStart
 
     if (direction === "up") {
-      if (!isCursorOnFirstLogicalLine(text, cursor)) return false
+      if (!isCursorOnFirstPromptLine(event.currentTarget, text, cursor)) return false
 
       const currentIndex = promptHistoryIndex()
       const nextIndex = currentIndex == null ? 0 : Math.min(currentIndex + 1, entries.length - 1)
@@ -827,7 +827,7 @@ export default function RemoteClient() {
       return true
     }
 
-    if (!isCursorOnLastLogicalLine(text, cursor)) return false
+    if (!isCursorOnLastPromptLine(event.currentTarget, text, cursor)) return false
 
     const currentIndex = promptHistoryIndex()
     if (currentIndex == null) return false
@@ -3245,7 +3245,7 @@ function assistantPartToolMessages(message: RemoteMessage, cwd: string): ToolMes
 }
 
 function toolPartId(part: RemoteMessagePart): string | null {
-  return stringValue(part.id) || stringValue(part.call_id)
+  return stringValue(part.id) || stringValue(part.call_id) || null
 }
 
 function toolPartPayload(part: RemoteMessagePart): JsonObject {
@@ -4140,12 +4140,104 @@ function normalizePromptHistoryEntry(text: string) {
   return text.trim()
 }
 
+function isCursorOnFirstPromptLine(textarea: HTMLTextAreaElement, text: string, cursor: number) {
+  const visualLine = promptCursorVisualLine(textarea, text, cursor)
+  if (!visualLine) return isCursorOnFirstLogicalLine(text, cursor)
+  return sameVisualLine(visualLine.cursorTop, visualLine.firstTop, visualLine.lineHeight)
+}
+
+function isCursorOnLastPromptLine(textarea: HTMLTextAreaElement, text: string, cursor: number) {
+  const visualLine = promptCursorVisualLine(textarea, text, cursor)
+  if (!visualLine) return isCursorOnLastLogicalLine(text, cursor)
+  return sameVisualLine(visualLine.cursorTop, visualLine.lastTop, visualLine.lineHeight)
+}
+
 function isCursorOnFirstLogicalLine(text: string, cursor: number) {
   return !text.slice(0, Math.max(0, cursor)).includes("\n")
 }
 
 function isCursorOnLastLogicalLine(text: string, cursor: number) {
   return !text.slice(Math.max(0, cursor)).includes("\n")
+}
+
+function promptCursorVisualLine(textarea: HTMLTextAreaElement, text: string, cursor: number) {
+  if (typeof document === "undefined") return null
+
+  // Mirror textarea wrapping so history navigation does not steal ArrowUp/Down from visual rows.
+  const style = window.getComputedStyle(textarea)
+  const mirror = document.createElement("div")
+  const firstMarker = document.createElement("span")
+  const cursorMarker = document.createElement("span")
+  const lastMarker = document.createElement("span")
+  const clampedCursor = Math.max(0, Math.min(cursor, text.length))
+
+  for (const property of [
+    "box-sizing",
+    "border-bottom-width",
+    "border-left-width",
+    "border-right-width",
+    "border-top-width",
+    "font-family",
+    "font-feature-settings",
+    "font-kerning",
+    "font-size",
+    "font-stretch",
+    "font-style",
+    "font-variant",
+    "font-variant-ligatures",
+    "font-weight",
+    "letter-spacing",
+    "line-height",
+    "padding-bottom",
+    "padding-left",
+    "padding-right",
+    "padding-top",
+    "tab-size",
+    "text-align",
+    "text-indent",
+    "text-rendering",
+    "text-transform",
+    "width",
+    "word-break",
+  ]) {
+    mirror.style.setProperty(property, style.getPropertyValue(property))
+  }
+
+  mirror.style.position = "absolute"
+  mirror.style.visibility = "hidden"
+  mirror.style.pointerEvents = "none"
+  mirror.style.top = "0"
+  mirror.style.left = "-9999px"
+  mirror.style.overflow = "hidden"
+  mirror.style.whiteSpace = "pre-wrap"
+  mirror.style.overflowWrap = "break-word"
+
+  firstMarker.textContent = "\u200b"
+  cursorMarker.textContent = "\u200b"
+  lastMarker.textContent = "\u200b"
+
+  mirror.append(
+    firstMarker,
+    document.createTextNode(text.slice(0, clampedCursor)),
+    cursorMarker,
+    document.createTextNode(text.slice(clampedCursor)),
+    lastMarker
+  )
+
+  document.body.append(mirror)
+  const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2 || 16
+  const result = {
+    cursorTop: cursorMarker.offsetTop,
+    firstTop: firstMarker.offsetTop,
+    lastTop: lastMarker.offsetTop,
+    lineHeight,
+  }
+  mirror.remove()
+  return result
+}
+
+function sameVisualLine(leftTop: number, rightTop: number, lineHeight: number) {
+  return Math.abs(leftTop - rightTop) <= Math.max(1, lineHeight / 4)
 }
 
 function displayAgentMode(agent: string) {
