@@ -41,7 +41,7 @@ use ratatui::crossterm::{
     },
 };
 use ratatui::{backend::CrosstermBackend, style::Color, Terminal};
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read, Write};
 use std::process::Command as ProcessCommand;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -49,6 +49,56 @@ use std::time::Duration;
 const POST_CLOSE_LOGO: &str = include_str!("../crabcode-logo.txt");
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_DIM: &str = "\x1b[2m";
+const EVENT_DRAIN_LIMIT: usize = 256;
+
+fn drain_pending_terminal_events(idle_timeout: Duration) {
+    for _ in 0..EVENT_DRAIN_LIMIT {
+        match event::poll(idle_timeout) {
+            Ok(true) => {
+                if event::read().is_err() {
+                    break;
+                }
+            }
+            Ok(false) | Err(_) => break,
+        }
+    }
+}
+
+fn restore_terminal_modes(
+    backend: &mut CrosstermBackend<io::Stdout>,
+    keyboard_enhancement: bool,
+) -> Result<()> {
+    drain_pending_terminal_events(Duration::from_millis(0));
+
+    let restore_result = if keyboard_enhancement {
+        execute!(
+            backend,
+            DisableMouseCapture,
+            DisableFocusChange,
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        )
+    } else {
+        execute!(
+            backend,
+            DisableMouseCapture,
+            DisableFocusChange,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        )
+    };
+    let flush_result = backend.flush();
+
+    drain_pending_terminal_events(Duration::from_millis(25));
+    let raw_mode_result = disable_raw_mode();
+
+    restore_result.context("failed to restore terminal modes")?;
+    flush_result.context("failed to flush terminal restore commands")?;
+    raw_mode_result.context("failed to disable raw mode")?;
+
+    Ok(())
+}
 
 pub fn push_startup_diag(msg: String) {
     if crate::logging::enabled() {
@@ -595,7 +645,8 @@ async fn main() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
 
-    if supports_keyboard_enhancement()? {
+    let keyboard_enhancement = supports_keyboard_enhancement()?;
+    if keyboard_enhancement {
         execute!(
             stdout,
             EnterAlternateScreen,
@@ -638,25 +689,7 @@ async fn main() -> Result<()> {
     let post_close_colors = app.get_current_theme_colors();
     app.clear_terminal_title_signal();
 
-    disable_raw_mode()?;
-    if supports_keyboard_enhancement().unwrap_or(false) {
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            DisableFocusChange,
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste
-        )?;
-    } else {
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            DisableFocusChange,
-            DisableBracketedPaste
-        )?;
-    }
+    restore_terminal_modes(terminal.backend_mut(), keyboard_enhancement)?;
     terminal.show_cursor()?;
 
     if let Some(request) = remote_launch_request {
@@ -940,6 +973,9 @@ async fn run_event_loop(
                                 }
                                 event::Event::Key(key) => {
                                     app.handle_keys(key);
+                                    if app.take_just_closed_overlay() {
+                                        drain_pending_terminal_events(Duration::from_millis(12));
+                                    }
                                 }
                                 event::Event::Paste(text) => {
                                     app.handle_paste(text);
@@ -965,6 +1001,9 @@ async fn run_event_loop(
                 }
                 event::Event::Key(key) => {
                     app.handle_keys(key);
+                    if app.take_just_closed_overlay() {
+                        drain_pending_terminal_events(Duration::from_millis(12));
+                    }
                     needs_redraw = true;
                 }
                 event::Event::Paste(text) => {

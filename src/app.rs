@@ -8054,6 +8054,7 @@ mod tests {
             cwd: ".".to_string(),
             base_focus: BaseFocus::Home,
             overlay_focus: OverlayFocus::None,
+            just_closed_overlay: false,
             ctrl_c_press_count: 0,
             last_ctrl_c_time: std::time::Instant::now(),
             themes: vec![theme],

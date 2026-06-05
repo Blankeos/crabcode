@@ -631,12 +631,50 @@ impl Dialog {
         let visible_rows = self.get_visible_row_count().max(1);
         let max_offset = total_lines.saturating_sub(visible_rows);
         self.scroll_offset = (self.scroll_offset + 1).min(max_offset);
+        self.sync_focus_after_scroll(1);
         self.update_scrollbar();
     }
 
     pub fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.sync_focus_after_scroll(-1);
         self.update_scrollbar();
+    }
+
+    fn sync_focus_after_scroll(&mut self, direction: isize) {
+        let visible_rows = self.get_visible_row_count().max(1);
+        let start_line = self.scroll_offset;
+        let end_line = start_line.saturating_add(visible_rows);
+
+        let mut fallback_group: Option<String> = None;
+        let mut fallback_item: Option<usize> = None;
+
+        let line_range: Box<dyn Iterator<Item = usize>> = if direction >= 0 {
+            Box::new(start_line..end_line)
+        } else {
+            Box::new((start_line..end_line).rev())
+        };
+
+        for line in line_range {
+            if fallback_group.is_none() {
+                fallback_group = self.get_group_from_line(line);
+            }
+            if fallback_item.is_none() {
+                fallback_item = self.get_item_index_from_line(line);
+            }
+            if fallback_group.is_some() || fallback_item.is_some() {
+                break;
+            }
+        }
+
+        if let Some(item_index) = fallback_item {
+            self.selected_index = item_index;
+            self.focused_group_header = None;
+        } else if let Some(group) = fallback_group {
+            if self.focusable_group_headers {
+                self.focused_group_header = Some(group);
+            }
+        }
     }
 
     fn move_focus_wrapping(&mut self, delta: isize) {

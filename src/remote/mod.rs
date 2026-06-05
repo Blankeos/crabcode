@@ -39,6 +39,20 @@ const DEFAULT_PAIR_TTL_SECS: i64 = 10 * 60;
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REMOTE_PROMPT_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const EVENT_DRAIN_LIMIT: usize = 256;
+
+fn drain_pending_terminal_events(idle_timeout: Duration) {
+    for _ in 0..EVENT_DRAIN_LIMIT {
+        match event::poll(idle_timeout) {
+            Ok(true) => {
+                if event::read().is_err() {
+                    break;
+                }
+            }
+            Ok(false) | Err(_) => break,
+        }
+    }
+}
 const MAX_REMOTE_PROMPT_IMAGES: usize = 8;
 const MAX_REMOTE_SESSIONS_PER_WORKSPACE: usize = 24;
 const HOSTS_FILE: &str = "remote-hosts.json";
@@ -666,26 +680,31 @@ impl TerminalModeGuard {
 
 impl Drop for TerminalModeGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
+        drain_pending_terminal_events(Duration::from_millis(0));
+
         let mut stdout = io::stdout();
         if self.keyboard_enhancement {
             let _ = execute!(
                 stdout,
-                LeaveAlternateScreen,
                 DisableMouseCapture,
                 DisableFocusChange,
                 PopKeyboardEnhancementFlags,
-                DisableBracketedPaste
+                DisableBracketedPaste,
+                LeaveAlternateScreen
             );
         } else {
             let _ = execute!(
                 stdout,
-                LeaveAlternateScreen,
                 DisableMouseCapture,
                 DisableFocusChange,
-                DisableBracketedPaste
+                DisableBracketedPaste,
+                LeaveAlternateScreen
             );
         }
+        let _ = stdout.flush();
+
+        drain_pending_terminal_events(Duration::from_millis(25));
+        let _ = disable_raw_mode();
     }
 }
 

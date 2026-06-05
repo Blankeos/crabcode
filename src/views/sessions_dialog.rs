@@ -71,6 +71,7 @@ impl SessionsDialogState {
         let selected_index = self.dialog.selected_index;
         let focused_group = self.dialog.get_focused_group_header().map(str::to_string);
         let scroll_offset = self.dialog.scroll_offset;
+        let visible_row_count = self.dialog.visible_row_count;
         let items_clone = items.clone();
         let search_query = self.dialog.search_query.clone();
         let collapsed_groups = self.dialog.collapsed_groups();
@@ -93,6 +94,7 @@ impl SessionsDialogState {
         } else if selected_index < items_clone.len() {
             self.dialog.selected_index = selected_index;
         }
+        self.dialog.visible_row_count = visible_row_count;
         self.dialog.scroll_offset = scroll_offset;
         self.dialog
             .preserve_scrollbar_drag_state_from(&previous_dialog);
@@ -711,6 +713,37 @@ mod tests {
 
         assert_eq!(action, SessionsDialogAction::Handled);
         assert!(state.dialog.scroll_offset > 0);
+    }
+
+    #[test]
+    fn mouse_wheel_scroll_through_grouped_sessions_survives_refresh() {
+        let items: Vec<_> = (0..30)
+            .map(|idx| {
+                session_item_in_group(
+                    &format!("session-{idx}"),
+                    &format!("Session {idx}"),
+                    if idx < 15 {
+                        "Workspace A"
+                    } else {
+                        "Workspace B"
+                    },
+                )
+            })
+            .collect();
+        let mut state = init_sessions_dialog("Sessions", items.clone());
+        state.dialog.show();
+        state.dialog.visible_row_count = 5;
+
+        for _ in 0..18 {
+            state.dialog.scroll_down();
+        }
+        let scroll_offset = state.dialog.scroll_offset;
+
+        state.refresh_items(items);
+
+        assert!(scroll_offset > 15);
+        assert_eq!(state.dialog.scroll_offset, scroll_offset);
+        assert_eq!(state.dialog.visible_row_count, 5);
     }
 
     #[test]
