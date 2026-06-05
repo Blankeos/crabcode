@@ -1,12 +1,8 @@
 # 🦀 crabcode
 
-> [!WARNING]  
-> This ambitious project is very very early (like experiment-early) don't expect it to get to OpenCode level anytime soon.
-> Like it literally doesn't even work yet.
-
 A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interactive "agentic engineering".
 
-> In the words of the buildwithpi.ai creator, 'There are many coding agents, this one is mine'.
+> In the words of the buildwithpi.ai creators, 'There are many coding agents, this one is mine'.
 >
 > It's OpenCode but in pure Rust 🦀 w/ my personal flavors.
 >
@@ -100,13 +96,15 @@ Read the [configuration docs here](/_docs/config/index.mdx).
 
 I tried crabcode specifically for these providers:
 
-- [x] **opencode-zen**
+- [x] **openai** (both API key and OAuth, thank you OpenAI for supporting harnesses!)
+- [x] **opencode-zen** and **opencode-go**
 - [x] **nano-gpt**
 - [x] **zai**
+- [x] **ollama-cloud**
+- [x] **xiaomi-token-plan-sgp**
 - [x] **minimax**
 - [x] **fireworks**
 - [x] **baseten**
-- [x] **ollama**
 
 > Feel free to create an issue / add to this list if you tried
 
@@ -114,7 +112,6 @@ I tried crabcode specifically for these providers:
 
 > I might work harder to support these in the future.
 
-- ChatGPT/Codex Subscription (Though they have good-will to support OpenCode, so maybe CrabCode can as well). **might support later**.
 - Kimi For Coding Subscription - I keep getting 401 but it works in OpenCode, I may have to contact them first. **might support later**
 - Gemini - It's OAuth + also very unsure. So currently no.
 - Claude Code Subscription - Known to explicitly not like harnesses. So never will, sorry.
@@ -149,12 +146,11 @@ This project was inspired by [anomalyco/opencode](https://github.com/anomalyco/o
 - [x] Exception: ChatGPT oauth (because I use it)
 - [x] Copy chat contents, copy the chat input
 - [x] Image inputs
-- [ ] Possibly ralphy? (very far, idk how to do that)
+- [x] Personal remote usage + Browser client equivalent.
 - [ ] ACP w/ Zed? (very far, idk how to do that)
 - [x] No Claude Code oauth spoofing.
-- [x] No plugin ecosystem (If I think it's worth building, just make it built-in and configurable)
+- [x] No plugin ecosystem (If I think it's worth building, just make it built-in and configurable i.e. sounds)
 - [x] No desktop app
-- [x] No web sharing thing (Might be a dealbreaker for vibecoders w/ tailscale, but I haven't reached these levels yet, when I do, I might)
 
 ## Why?
 

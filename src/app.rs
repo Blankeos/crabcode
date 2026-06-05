@@ -316,6 +316,7 @@ pub struct App {
     pub cwd: String,
     pub base_focus: BaseFocus,
     pub overlay_focus: OverlayFocus,
+    just_closed_overlay: bool,
     ctrl_c_press_count: u8,
     last_ctrl_c_time: std::time::Instant,
     pub themes: Vec<Theme>,
@@ -578,6 +579,7 @@ impl App {
             cwd: cwd.clone(),
             base_focus: BaseFocus::Home,
             overlay_focus: OverlayFocus::None,
+            just_closed_overlay: false,
             ctrl_c_press_count: 0,
             last_ctrl_c_time: std::time::Instant::now(),
             themes,
@@ -1974,6 +1976,12 @@ impl App {
     }
 
     pub fn handle_keys(&mut self, key: KeyEvent) {
+        let overlay_before_key = if key.code == KeyCode::Esc {
+            self.overlay_focus
+        } else {
+            OverlayFocus::None
+        };
+
         if key.code != KeyCode::Esc {
             self.reset_esc_timeline_state();
         }
@@ -1986,10 +1994,12 @@ impl App {
             )
         {
             self.open_command_palette();
+            self.record_overlay_close_after_key(overlay_before_key);
             return;
         }
 
         if self.handle_selection_action_key(key) {
+            self.record_overlay_close_after_key(overlay_before_key);
             return;
         }
 
@@ -2001,13 +2011,16 @@ impl App {
                         OverlayFocus::None | OverlayFocus::SuggestionsPopup
                     )
                 {
+                    self.record_overlay_close_after_key(overlay_before_key);
                     return;
                 }
                 self.handle_clipboard_image_paste();
+                self.record_overlay_close_after_key(overlay_before_key);
                 return;
             }
             KeyCode::Char('c') if key.modifiers == event::KeyModifiers::CONTROL => {
                 if self.try_copy_selection() {
+                    self.record_overlay_close_after_key(overlay_before_key);
                     return;
                 }
                 let now = std::time::Instant::now();
@@ -2023,6 +2036,7 @@ impl App {
                 if self.ctrl_c_press_count == 1 {
                     self.input.clear();
                 }
+                self.record_overlay_close_after_key(overlay_before_key);
                 return;
             }
             _ => {}
@@ -2058,6 +2072,7 @@ impl App {
                             rt.block_on(self.process_command_input(parsed));
                         });
                     }
+                    self.record_overlay_close_after_key(overlay_before_key);
                     return;
                 }
                 let action = handle_models_dialog_key_event(&mut self.models_dialog_state, key);
@@ -2157,10 +2172,12 @@ impl App {
             OverlayFocus::ConnectDialog => {
                 if key.code == KeyCode::Char('d') && key.modifiers == event::KeyModifiers::CONTROL {
                     self.disconnect_selected_provider();
+                    self.record_overlay_close_after_key(overlay_before_key);
                     return;
                 }
 
                 if handle_connect_dialog_key_event(&mut self.connect_dialog_state, key) {
+                    self.record_overlay_close_after_key(overlay_before_key);
                     return;
                 }
                 if !self.connect_dialog_state.dialog.is_visible() {
@@ -2168,6 +2185,7 @@ impl App {
                         get_pending_selection(&mut self.connect_dialog_state)
                     {
                         self.handle_connect_dialog_selection(selected_item);
+                        self.record_overlay_close_after_key(overlay_before_key);
                         return;
                     }
                     self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
@@ -2617,6 +2635,7 @@ impl App {
             }
             OverlayFocus::None => {
                 if self.handle_base_keys(key) {
+                    self.record_overlay_close_after_key(overlay_before_key);
                     return;
                 }
                 false
@@ -2624,12 +2643,28 @@ impl App {
         };
 
         if handled {
+            self.record_overlay_close_after_key(overlay_before_key);
             return;
         }
 
         if self.overlay_focus == OverlayFocus::None {
             self.handle_input_and_app_keys(key);
         }
+        self.record_overlay_close_after_key(overlay_before_key);
+    }
+
+    fn record_overlay_close_after_key(&mut self, overlay_before_key: OverlayFocus) {
+        if !matches!(
+            overlay_before_key,
+            OverlayFocus::None | OverlayFocus::SuggestionsPopup
+        ) && self.overlay_focus == OverlayFocus::None
+        {
+            self.just_closed_overlay = true;
+        }
+    }
+
+    pub fn take_just_closed_overlay(&mut self) -> bool {
+        std::mem::take(&mut self.just_closed_overlay)
     }
 
     fn handle_suggestions_popup_keys(&mut self, key: KeyEvent) -> bool {

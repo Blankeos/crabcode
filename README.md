@@ -97,13 +97,14 @@ Read the [configuration docs here](/_docs/config/index.mdx).
 I tried crabcode specifically for these providers:
 
 - [x] **openai** (both API key and OAuth, thank you OpenAI for supporting harnesses!)
-- [x] **opencode-zen**
+- [x] **opencode-zen** and **opencode-go**
 - [x] **nano-gpt**
 - [x] **zai**
+- [x] **ollama-cloud**
+- [x] **xiaomi-token-plan-sgp**
 - [x] **minimax**
 - [x] **fireworks**
 - [x] **baseten**
-- [x] **ollama**
 
 > Feel free to create an issue / add to this list if you tried
 
