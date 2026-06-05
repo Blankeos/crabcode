@@ -144,19 +144,19 @@ pub fn handle_permission_dialog_key_event(
 
     match event.code {
         KeyCode::Esc => PermissionDialogAction::Respond(PermissionResponse::Deny),
-        KeyCode::Left => {
+        KeyCode::Left | KeyCode::Up => {
             state.previous_action();
             PermissionDialogAction::Handled
         }
-        KeyCode::Right | KeyCode::Tab => {
+        KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
             state.next_action();
             PermissionDialogAction::Handled
         }
-        KeyCode::Char('h') => {
+        KeyCode::Char('h') | KeyCode::Char('k') => {
             state.previous_action();
             PermissionDialogAction::Handled
         }
-        KeyCode::Char('l') => {
+        KeyCode::Char('l') | KeyCode::Char('j') => {
             state.next_action();
             PermissionDialogAction::Handled
         }
@@ -225,6 +225,50 @@ fn permission_detail_lines(prompt: &PermissionPrompt, colors: ThemeColors) -> Ve
     details
 }
 
+fn permission_action_lines(colors: ThemeColors, selected_action: usize) -> Vec<Line<'static>> {
+    let actions = [
+        (1usize, "Allow once", "Approve this single request", "1"),
+        (
+            2usize,
+            "Allow always",
+            "Remember this exact permission",
+            "2",
+        ),
+        (0usize, "Reject", "Deny and return to the agent", "3"),
+    ];
+    let selected_style = Style::default()
+        .bg(colors.info)
+        .fg(contrast_text(colors.info))
+        .add_modifier(Modifier::BOLD);
+
+    actions
+        .into_iter()
+        .map(|(action_index, label, description, key)| {
+            let is_selected = action_index == selected_action;
+            let label_style = if is_selected {
+                selected_style
+            } else {
+                Style::default().fg(colors.text)
+            };
+            let weak_style = if is_selected {
+                selected_style
+            } else {
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM)
+            };
+
+            Line::from(vec![
+                Span::styled("( ) ", weak_style),
+                Span::styled(label.to_string(), label_style),
+                Span::styled(format!(" ({})", key), weak_style),
+                Span::styled(" - ", weak_style),
+                Span::styled(description.to_string(), weak_style),
+            ])
+        })
+        .collect()
+}
+
 pub fn render_permission_dialog(
     f: &mut Frame,
     state: &mut PermissionDialogState,
@@ -237,7 +281,7 @@ pub fn render_permission_dialog(
 
     let details = permission_detail_lines(prompt, colors);
     let detail_line_count = details.len() as u16;
-    let desired_height = (detail_line_count + 5).clamp(8, 10);
+    let desired_height = (detail_line_count + 8).clamp(11, 14);
     let panel_height = area.height.min(desired_height);
     let dialog_area = Rect {
         x: area.x,
@@ -269,7 +313,10 @@ pub fn render_permission_dialog(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Min(detail_line_count),
+            Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Length(1),
         ])
         .split(content_area);
@@ -311,71 +358,39 @@ pub fn render_permission_dialog(
     let detail_block = Paragraph::new(details)
         .style(Style::default().bg(colors.dialog_background))
         .wrap(Wrap { trim: true });
-    f.render_widget(detail_block, chunks[1]);
+    f.render_widget(detail_block, chunks[2]);
 
-    let actions = [
-        (1usize, "Allow once", "1"),
-        (2usize, "Allow always", "2"),
-        (0usize, "Reject", "3"),
-    ];
-    let mut action_spans = Vec::new();
-    for (idx, (action_index, label, key)) in actions.iter().enumerate() {
-        if idx > 0 {
-            action_spans.push(Span::raw("  "));
-        }
-
-        let option_text = format!(" {} ({}) ", label, key);
-        let is_selected = *action_index == state.selected_action;
-        if is_selected {
-            let selected = Style::default()
-                .bg(colors.warning)
-                .fg(contrast_text(colors.warning))
-                .add_modifier(Modifier::BOLD);
-            action_spans.push(Span::styled(option_text, selected));
-        } else {
-            action_spans.push(Span::raw(" "));
-            action_spans.push(Span::styled(
-                *label,
-                Style::default()
-                    .fg(colors.primary)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            action_spans.push(Span::raw(" "));
-            action_spans.push(Span::styled(
-                format!("({})", key),
-                Style::default()
-                    .fg(colors.text_weak)
-                    .add_modifier(Modifier::DIM),
-            ));
-            action_spans.push(Span::raw(" "));
-        }
-    }
+    let action_lines = permission_action_lines(colors, state.selected_action);
 
     let help = Line::from(vec![
-        Span::styled("⇆", Style::default().fg(colors.info)),
-        Span::raw(" select  "),
+        Span::styled("↑↓", Style::default().fg(colors.info)),
+        Span::raw(" move  "),
         Span::styled("enter", Style::default().fg(colors.info)),
         Span::raw(" confirm"),
     ]);
 
-    let actions_line = Paragraph::new(Line::from(action_spans)).alignment(Alignment::Left);
+    let actions_block = Paragraph::new(action_lines)
+        .style(Style::default().bg(colors.dialog_background))
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true });
     let help_width = help.width() as u16;
-    let can_render_help = chunks[2].width > 42;
+    f.render_widget(actions_block, chunks[4]);
+
+    let can_render_help = chunks[5].width > 42;
     if can_render_help {
         let footer_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(0),
-                Constraint::Length(help_width.min(chunks[2].width.saturating_sub(20))),
+                Constraint::Length(help_width.min(chunks[5].width.saturating_sub(20))),
             ])
-            .split(chunks[2]);
-        f.render_widget(actions_line, footer_chunks[0]);
+            .split(chunks[5]);
         f.render_widget(
             Paragraph::new(help).alignment(Alignment::Right),
             footer_chunks[1],
         );
     } else {
-        f.render_widget(actions_line, chunks[2]);
+        f.render_widget(Paragraph::new(help).alignment(Alignment::Left), chunks[5]);
     }
 }
 
@@ -383,6 +398,7 @@ pub fn render_permission_dialog(
 mod tests {
     use super::*;
     use crate::theme::Theme;
+    use ratatui::crossterm::event::KeyModifiers;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans
@@ -440,5 +456,51 @@ mod tests {
         assert_eq!(snapshot.action, "bash");
         assert_eq!(snapshot.command.as_deref(), Some("cargo test"));
         assert_eq!(snapshot.queued_count, 0);
+    }
+
+    #[test]
+    fn action_lines_render_as_vertical_radio_options() {
+        let colors = Theme::load_builtin_default().get_colors(true);
+        let rendered = permission_action_lines(colors, 1)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 3);
+        assert_eq!(
+            rendered,
+            vec![
+                "( ) Allow once (1) - Approve this single request",
+                "( ) Allow always (2) - Remember this exact permission",
+                "( ) Reject (3) - Deny and return to the agent"
+            ]
+        );
+    }
+
+    #[test]
+    fn vertical_keys_move_selected_action() {
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let mut state = PermissionDialogState::new();
+        state.enqueue(PermissionPrompt {
+            tool_id: "read".to_string(),
+            action: PermissionAction::Read,
+            target: Some("/tmp/file".to_string()),
+            command: None,
+            workdir: None,
+            reason: "explicit approval required".to_string(),
+            response_tx,
+        });
+
+        handle_permission_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        );
+        assert_eq!(state.selected_action, 2);
+
+        handle_permission_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        );
+        assert_eq!(state.selected_action, 1);
     }
 }

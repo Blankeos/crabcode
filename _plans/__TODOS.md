@@ -228,4 +228,4 @@ I want - [x] To do this But I dont want to do this
 
 - [x] TUI: When very last item in /models. If the very last item is a "Thinking" model, then I can't really see the "currently selected/focused" item (the last item), because the thinking left and right key covers it.
 
-- [ ] Improve the look of the "Permission required" dialog. Make it look more fitting for vertically aligned. Right now it's like on a flex row so the options are right to left. I like the look of "Question tool" dialog though. Any way we can get an inspired look out of that and use that for the "Permission required" dialog?
+- [x] Improve the look of the "Permission required" dialog. Make it look more fitting for vertically aligned. Right now it's like on a flex row so the options are right to left. I like the look of "Question tool" dialog though. Any way we can get an inspired look out of that and use that for the "Permission required" dialog?
