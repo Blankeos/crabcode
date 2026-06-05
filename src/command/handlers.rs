@@ -177,6 +177,23 @@ pub fn handle_connect<'a>(
     })
 }
 
+pub fn handle_remote<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error(
+                "This command only opens the remote dialog. Usage: /remote".to_string(),
+            );
+        }
+
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_models<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
@@ -705,6 +722,14 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "Connect to a model provider".to_string(),
         handler: handle_connect,
         hidden_tokens: vec![],
+        chat_only: false,
+    });
+
+    registry.register(Command {
+        name: "remote".to_string(),
+        description: "Start a remote host".to_string(),
+        handler: handle_remote,
+        hidden_tokens: vec!["serve".to_string()],
         chat_only: false,
     });
 

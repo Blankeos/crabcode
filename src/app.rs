@@ -53,6 +53,10 @@ use crate::views::question_dialog::{
     handle_question_dialog_key_event, handle_question_dialog_mouse_event, init_question_dialog,
     render_question_dialog, QuestionDialogAction,
 };
+use crate::views::remote_dialog::{
+    handle_remote_dialog_key_event, handle_remote_dialog_mouse_event, init_remote_dialog,
+    render_remote_dialog, RemoteDialogAction, RemoteDialogSubmission,
+};
 use crate::views::session_rename_dialog::{
     handle_session_rename_dialog_key_event, init_session_rename_dialog,
     render_session_rename_dialog, RenameAction,
@@ -76,8 +80,8 @@ use crate::views::themes_dialog::{
 };
 use crate::views::{
     ChatState, ConnectDialogState, HomeState, ModelsDialogState, OpenAIOAuthFlowState,
-    PermissionDialogState, QuestionDialogState, SessionRenameDialogState, SessionsDialogState,
-    StorageDialogState, SuggestionsPopupState, ThemesDialogState,
+    PermissionDialogState, QuestionDialogState, RemoteDialogState, SessionRenameDialogState,
+    SessionsDialogState, StorageDialogState, SuggestionsPopupState, ThemesDialogState,
 };
 
 use crate::{
@@ -136,6 +140,7 @@ pub enum OverlayFocus {
     SessionRenameDialog,
     PermissionDialog,
     QuestionDialog,
+    RemoteDialog,
     SkillsDialog,
     TimelineDialog,
     MessageActions,
@@ -173,6 +178,12 @@ enum CompactionTaskMessage {
 #[derive(Debug)]
 enum StorageTaskMessage {
     Loaded(crate::utils::storage::StorageReport),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteLaunchRequest {
+    pub bind: String,
+    pub pair_code: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +288,7 @@ pub struct App {
     pub session_rename_dialog_state: SessionRenameDialogState,
     pub permission_dialog_state: PermissionDialogState,
     pub question_dialog_state: QuestionDialogState,
+    pub remote_dialog_state: RemoteDialogState,
     pub skills_dialog_state: crate::views::SkillsDialogState,
     pub command_palette_state: crate::views::command_palette::CommandPaletteState,
     pub storage_dialog_state: StorageDialogState,
@@ -331,6 +343,7 @@ pub struct App {
     terminal_title_enabled: bool,
     terminal_title_last: Option<String>,
     terminal_title_animation_origin: std::time::Instant,
+    remote_launch_request: Option<RemoteLaunchRequest>,
 }
 
 impl App {
@@ -364,6 +377,7 @@ impl App {
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
         let permission_dialog_state = init_permission_dialog();
         let question_dialog_state = init_question_dialog();
+        let remote_dialog_state = init_remote_dialog();
         let skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
         let which_key_state = crate::views::which_key::init_which_key();
         let timeline_dialog_state = crate::views::timeline_dialog::init_timeline_dialog();
@@ -536,6 +550,7 @@ impl App {
             session_rename_dialog_state,
             permission_dialog_state,
             question_dialog_state,
+            remote_dialog_state,
             skills_dialog_state,
             command_palette_state,
             storage_dialog_state,
@@ -591,6 +606,7 @@ impl App {
             terminal_title_enabled: crate::notify::terminal_title_supported(),
             terminal_title_last: None,
             terminal_title_animation_origin: now,
+            remote_launch_request: None,
         })
     }
 
@@ -2433,6 +2449,15 @@ impl App {
                     QuestionDialogAction::NotHandled => true,
                 }
             }
+            OverlayFocus::RemoteDialog => {
+                let submit_enabled = self.can_launch_remote_now();
+                let action = handle_remote_dialog_key_event(
+                    &mut self.remote_dialog_state,
+                    key,
+                    submit_enabled,
+                );
+                self.handle_remote_dialog_action(action)
+            }
             OverlayFocus::SkillsDialog => {
                 let action = crate::views::skills_dialog::handle_skills_dialog_key_event(
                     &mut self.skills_dialog_state,
@@ -3214,6 +3239,9 @@ impl App {
             }
         } else if self.overlay_focus == OverlayFocus::QuestionDialog {
             let _ = handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse);
+        } else if self.overlay_focus == OverlayFocus::RemoteDialog {
+            let action = handle_remote_dialog_mouse_event(&mut self.remote_dialog_state, mouse);
+            let _ = self.handle_remote_dialog_action(action);
         } else if self.overlay_focus == OverlayFocus::ThemesDialog {
             let action = handle_themes_dialog_mouse_event(&mut self.themes_dialog_state, mouse);
 
@@ -3772,6 +3800,9 @@ impl App {
             (_, OverlayFocus::QuestionDialog) => {
                 self.question_dialog_state.insert_text(&text);
             }
+            (_, OverlayFocus::RemoteDialog) => {
+                self.remote_dialog_state.insert_text(&text);
+            }
             _ => {}
         }
     }
@@ -4208,6 +4239,10 @@ impl App {
                     self.show_skills_dialog();
                     return;
                 }
+                if parsed.name == "remote" {
+                    self.handle_remote_command_args(&parsed.args);
+                    return;
+                }
                 if parsed.name == "rename"
                     && parsed.args.is_empty()
                     && self.base_focus == BaseFocus::Chat
@@ -4413,6 +4448,10 @@ impl App {
         }
         if parsed.name == "skills" {
             self.show_skills_dialog();
+            return;
+        }
+        if parsed.name == "remote" {
+            self.handle_remote_command_args(&parsed.args);
             return;
         }
         if parsed.name == "rename" && parsed.args.is_empty() && self.base_focus == BaseFocus::Chat {
@@ -4878,6 +4917,75 @@ impl App {
 
     fn quit(&mut self) {
         self.running = false;
+    }
+
+    pub fn take_remote_launch_request(&mut self) -> Option<RemoteLaunchRequest> {
+        self.remote_launch_request.take()
+    }
+
+    fn open_remote_dialog(&mut self) {
+        self.remote_dialog_state.show();
+        self.overlay_focus = OverlayFocus::RemoteDialog;
+    }
+
+    fn handle_remote_command_args(&mut self, args: &[String]) {
+        if !args.is_empty() {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "Usage: /remote",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        self.open_remote_dialog();
+    }
+
+    fn can_launch_remote_now(&self) -> bool {
+        !self.is_streaming
+            && self.compaction_receiver.is_none()
+            && self
+                .session_view_states
+                .values()
+                .all(|state| state.stream.is_none() && state.external_stream.is_none())
+    }
+
+    fn handle_remote_dialog_action(&mut self, action: RemoteDialogAction) -> bool {
+        match action {
+            RemoteDialogAction::Submit(submission) => {
+                self.submit_remote_launch(submission);
+                true
+            }
+            RemoteDialogAction::BlockedStreaming => {
+                push_toast(Toast::new(
+                    "Wait for the current response to finish before starting remote mode",
+                    ToastLevel::Warning,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+                true
+            }
+            RemoteDialogAction::Cancel => {
+                self.overlay_focus = OverlayFocus::None;
+                true
+            }
+            RemoteDialogAction::Handled => true,
+            RemoteDialogAction::NotHandled => false,
+        }
+    }
+
+    fn submit_remote_launch(&mut self, submission: RemoteDialogSubmission) {
+        if !self.can_launch_remote_now() {
+            self.handle_remote_dialog_action(RemoteDialogAction::BlockedStreaming);
+            return;
+        }
+
+        self.remote_launch_request = Some(RemoteLaunchRequest {
+            bind: submission.bind,
+            pair_code: submission.pair_code,
+        });
+        self.overlay_focus = OverlayFocus::None;
+        self.quit();
     }
 
     fn close_message_actions(&mut self) {
@@ -7499,6 +7607,18 @@ impl App {
             render_question_dialog(f, &mut self.question_dialog_state, size, colors);
         }
 
+        if self.overlay_focus == OverlayFocus::RemoteDialog && self.remote_dialog_state.is_visible()
+        {
+            let submit_enabled = self.can_launch_remote_now();
+            render_remote_dialog(
+                f,
+                &mut self.remote_dialog_state,
+                size,
+                colors,
+                submit_enabled,
+            );
+        }
+
         if self.overlay_focus == OverlayFocus::CommandPalette
             && self.command_palette_state.dialog.is_visible()
         {
@@ -7692,7 +7812,7 @@ fn message_block_clipboard_text(
 fn is_remote_browser_unsupported_command(name: &str) -> bool {
     matches!(
         name,
-        "connect" | "exit" | "home" | "sessions" | "skills" | "themes" | "timeline"
+        "connect" | "exit" | "home" | "remote" | "sessions" | "skills" | "themes" | "timeline"
     )
 }
 
@@ -7865,6 +7985,7 @@ mod tests {
             session_rename_dialog_state: init_session_rename_dialog(colors),
             permission_dialog_state: init_permission_dialog(),
             question_dialog_state: init_question_dialog(),
+            remote_dialog_state: init_remote_dialog(),
             skills_dialog_state: crate::views::skills_dialog::init_skills_dialog("Skills", vec![]),
             command_palette_state: init_command_palette(),
             storage_dialog_state: init_storage_dialog(),
@@ -7919,6 +8040,7 @@ mod tests {
             terminal_title_enabled: false,
             terminal_title_last: None,
             terminal_title_animation_origin: std::time::Instant::now(),
+            remote_launch_request: None,
         }
     }
 
@@ -7965,6 +8087,30 @@ mod tests {
         app.overlay_focus = OverlayFocus::PermissionDialog;
 
         assert_eq!(app.terminal_title_text(), "[!] sheetpilot");
+    }
+
+    #[tokio::test]
+    async fn remote_command_opens_dialog() {
+        let mut app = test_app();
+
+        app.process_input("/remote").await;
+
+        assert_eq!(app.overlay_focus, OverlayFocus::RemoteDialog);
+        assert!(app.remote_dialog_state.is_visible());
+        assert!(app.take_remote_launch_request().is_none());
+    }
+
+    #[test]
+    fn remote_dialog_enter_is_blocked_while_streaming() {
+        let mut app = test_app();
+        app.open_remote_dialog();
+        app.is_streaming = true;
+
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.running);
+        assert!(app.remote_dialog_state.is_visible());
+        assert!(app.take_remote_launch_request().is_none());
     }
 
     fn add_current_session_message(app: &mut App, message: crate::session::types::Message) {

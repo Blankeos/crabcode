@@ -25,7 +25,7 @@ mod utils;
 mod views;
 
 use crate::toast::{Toast, ToastManager};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use app::App;
 use clap::{Parser, Subcommand};
 use ratatui::crossterm::{
@@ -42,6 +42,7 @@ use ratatui::crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, style::Color, Terminal};
 use std::io::{self, IsTerminal, Read};
+use std::process::Command as ProcessCommand;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -498,6 +499,22 @@ fn read_print_mode_prompt(prompt: &str) -> Result<String> {
     ))
 }
 
+fn launch_remote_serve(request: app::RemoteLaunchRequest) -> Result<()> {
+    let exe = std::env::current_exe().context("failed to locate crabcode executable")?;
+    let mut command = ProcessCommand::new(exe);
+    command.arg("serve").arg("--bind").arg(request.bind);
+    if let Some(pair_code) = request.pair_code {
+        command.arg("--paircode").arg(pair_code);
+    }
+
+    let status = command.status().context("failed to start crabcode serve")?;
+    if !status.success() {
+        anyhow::bail!("crabcode serve exited with {}", status);
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -601,6 +618,7 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_event_loop(&mut terminal, &mut app).await;
+    let remote_launch_request = app.take_remote_launch_request();
 
     let close_info = {
         let session_id = app.session_manager.get_current_session_id().cloned();
@@ -640,6 +658,13 @@ async fn main() -> Result<()> {
         )?;
     }
     terminal.show_cursor()?;
+
+    if let Some(request) = remote_launch_request {
+        if let Err(err) = result {
+            return Err(err);
+        }
+        return launch_remote_serve(request);
+    }
 
     print!(
         "{}",

@@ -2548,7 +2548,84 @@ impl Chat {
 
                 if has_ordered_parts {
                     let result_ids = assistant_tool_result_ids(message);
+                    let mut pending_exploration: Vec<ExplorationToolItem> = Vec::new();
+                    let mut pending_tasks: Vec<TaskToolItem> = Vec::new();
                     let mut emitted_anything = false;
+
+                    fn flush_pending_exploration<'a>(
+                        chat: &Chat,
+                        pending: &mut Vec<ExplorationToolItem>,
+                        lines: &mut Vec<Line<'a>>,
+                        max_width: usize,
+                        colors: &ThemeColors,
+                        emitted_anything: &mut bool,
+                    ) {
+                        if pending.is_empty() {
+                            return;
+                        }
+
+                        for line in chat
+                            .format_exploration_group(pending, max_width, colors)
+                            .into_iter()
+                            .map(line_to_static)
+                        {
+                            lines.push(line);
+                        }
+                        lines.push(Line::from(""));
+                        pending.clear();
+                        *emitted_anything = true;
+                    }
+
+                    fn flush_pending_tasks<'a>(
+                        chat: &Chat,
+                        pending: &mut Vec<TaskToolItem>,
+                        lines: &mut Vec<Line<'a>>,
+                        max_width: usize,
+                        colors: &ThemeColors,
+                        emitted_anything: &mut bool,
+                    ) {
+                        if pending.is_empty() {
+                            return;
+                        }
+
+                        for line in chat
+                            .format_task_group(pending, max_width, colors)
+                            .into_iter()
+                            .map(line_to_static)
+                        {
+                            lines.push(line);
+                        }
+                        lines.push(Line::from(""));
+                        pending.clear();
+                        *emitted_anything = true;
+                    }
+
+                    fn flush_pending_tool_groups<'a>(
+                        chat: &Chat,
+                        pending_exploration: &mut Vec<ExplorationToolItem>,
+                        pending_tasks: &mut Vec<TaskToolItem>,
+                        lines: &mut Vec<Line<'a>>,
+                        max_width: usize,
+                        colors: &ThemeColors,
+                        emitted_anything: &mut bool,
+                    ) {
+                        flush_pending_exploration(
+                            chat,
+                            pending_exploration,
+                            lines,
+                            max_width,
+                            colors,
+                            emitted_anything,
+                        );
+                        flush_pending_tasks(
+                            chat,
+                            pending_tasks,
+                            lines,
+                            max_width,
+                            colors,
+                            emitted_anything,
+                        );
+                    }
 
                     for part in &message.parts {
                         match part.part_type.as_str() {
@@ -2561,6 +2638,15 @@ impl Chat {
                                     continue;
                                 };
 
+                                flush_pending_tool_groups(
+                                    self,
+                                    &mut pending_exploration,
+                                    &mut pending_tasks,
+                                    &mut lines,
+                                    max_width,
+                                    colors,
+                                    &mut emitted_anything,
+                                );
                                 emitted_anything = true;
                                 let reasoning_style = Style::default()
                                     .fg(colors.text_weak)
@@ -2600,6 +2686,15 @@ impl Chat {
                                     continue;
                                 }
 
+                                flush_pending_tool_groups(
+                                    self,
+                                    &mut pending_exploration,
+                                    &mut pending_tasks,
+                                    &mut lines,
+                                    max_width,
+                                    colors,
+                                    &mut emitted_anything,
+                                );
                                 emitted_anything = true;
                                 lines.extend(render_markdown(visible_text, max_width, colors));
                                 lines.push(Line::from(""));
@@ -2611,6 +2706,43 @@ impl Chat {
                                     continue;
                                 };
 
+                                let parsed = parse_tool_message(&content);
+                                if let Some(item) = parsed.as_ref().and_then(exploration_tool_item)
+                                {
+                                    flush_pending_tasks(
+                                        self,
+                                        &mut pending_tasks,
+                                        &mut lines,
+                                        max_width,
+                                        colors,
+                                        &mut emitted_anything,
+                                    );
+                                    pending_exploration.push(item);
+                                    continue;
+                                }
+
+                                if let Some(item) = parsed.as_ref().and_then(task_tool_item) {
+                                    flush_pending_exploration(
+                                        self,
+                                        &mut pending_exploration,
+                                        &mut lines,
+                                        max_width,
+                                        colors,
+                                        &mut emitted_anything,
+                                    );
+                                    pending_tasks.push(item);
+                                    continue;
+                                }
+
+                                flush_pending_tool_groups(
+                                    self,
+                                    &mut pending_exploration,
+                                    &mut pending_tasks,
+                                    &mut lines,
+                                    max_width,
+                                    colors,
+                                    &mut emitted_anything,
+                                );
                                 emitted_anything = true;
                                 let tool_message = Message::tool(content);
                                 let tool_lines =
@@ -2623,6 +2755,15 @@ impl Chat {
                             _ => {}
                         }
                     }
+                    flush_pending_tool_groups(
+                        self,
+                        &mut pending_exploration,
+                        &mut pending_tasks,
+                        &mut lines,
+                        max_width,
+                        colors,
+                        &mut emitted_anything,
+                    );
 
                     if !emitted_anything {
                         if is_streaming || (message.is_complete && message.was_interrupted) {
@@ -4466,6 +4607,56 @@ mod tests {
                 "    Read README.md",
                 "    Search opencode|codex in references",
                 ""
+            ]
+        );
+    }
+
+    #[test]
+    fn test_structured_assistant_context_tools_render_as_one_explored_group() {
+        let chat = Chat::new();
+        let mut msg = Message::incomplete("");
+        msg.add_tool_call_part(
+            "call_1",
+            "grep",
+            serde_json::json!({ "pattern": "Explored", "path": "src" }),
+        );
+        msg.add_tool_call_part("call_2", "list", serde_json::json!({ "path": "." }));
+        msg.add_tool_call_part(
+            "call_3",
+            "read",
+            serde_json::json!({ "file_path": "/repo/justfile" }),
+        );
+        msg.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_1",
+            "name": "grep",
+            "status": "ok",
+            "output_preview": "src/ui/components/chat.rs: Explored",
+        }));
+        msg.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_2",
+            "name": "list",
+            "status": "ok",
+            "output_preview": "src/\njustfile",
+        }));
+        msg.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_3",
+            "name": "read",
+            "status": "ok",
+            "output_preview": "default:\n    just --list",
+        }));
+        let colors = test_colors();
+
+        let lines = chat.format_message(&msg, 100, 0, 1, None, None, "model", &colors, false);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "⬢ Explored",
+                "  └ Search Explored in src",
+                "    List .",
+                "    Read justfile",
+                "",
             ]
         );
     }

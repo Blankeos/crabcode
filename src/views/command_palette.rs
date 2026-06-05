@@ -266,6 +266,12 @@ fn core_palette_items(
             "Add or update provider credentials",
         ),
         (
+            "remote",
+            "Start Remote Host",
+            "Application",
+            "Close the TUI and run crabcode serve",
+        ),
+        (
             "refreshmodels",
             "Refresh Model Cache",
             "Model",
