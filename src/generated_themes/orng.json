@@ -38,7 +38,9 @@
     "lightOrange": "#EC5B2B",
     "lightBlue": "#0062d1",
     "lightCyan": "#318795",
-    "lightYellow": "#b0851f"
+    "lightYellow": "#b0851f",
+    "darkStep11Weak": "#808080",
+    "lightStep11Weak": "#8a8a8a"
   },
   "theme": {
     "primary": {
@@ -76,6 +78,10 @@
     "textMuted": {
       "dark": "darkStep11",
       "light": "lightStep11"
+    },
+    "textWeak": {
+      "dark": "darkStep11Weak",
+      "light": "lightStep11Weak"
     },
     "selectedListItemText": {
       "dark": "#0a0a0a",
@@ -142,8 +148,8 @@
       "light": "lightStep2"
     },
     "diffLineNumber": {
-      "dark": "darkStep3",
-      "light": "lightStep3"
+      "dark": "diffContext",
+      "light": "#595755"
     },
     "diffAddedLineNumberBg": {
       "dark": "#162535",

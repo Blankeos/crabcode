@@ -14,7 +14,8 @@
     "nightOwlMuted": "#5f7e97",
     "nightOwlGray": "#637777",
     "nightOwlLightGray": "#89a4bb",
-    "nightOwlPanel": "#0b253a"
+    "nightOwlPanel": "#0b253a",
+    "nightOwlMutedWeak": "#5f7e97"
   },
   "theme": {
     "primary": {
@@ -52,6 +53,10 @@
     "textMuted": {
       "dark": "nightOwlMuted",
       "light": "nightOwlMuted"
+    },
+    "textWeak": {
+      "dark": "nightOwlMutedWeak",
+      "light": "nightOwlMutedWeak"
     },
     "background": {
       "dark": "nightOwlBg",
@@ -114,8 +119,8 @@
       "light": "nightOwlPanel"
     },
     "diffLineNumber": {
-      "dark": "nightOwlMuted",
-      "light": "nightOwlMuted"
+      "dark": "#7791a6",
+      "light": "#7791a6"
     },
     "diffAddedLineNumberBg": {
       "dark": "#0a2e1a",

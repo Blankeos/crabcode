@@ -12,7 +12,9 @@
     "pink": "#ff79c6",
     "purple": "#bd93f9",
     "red": "#ff5555",
-    "yellow": "#f1fa8c"
+    "yellow": "#f1fa8c",
+    "commentWeak": "#6272a4",
+    "6272a4Weak": "#6272a4"
   },
   "theme": {
     "primary": {
@@ -50,6 +52,10 @@
     "textMuted": {
       "dark": "comment",
       "light": "#6272a4"
+    },
+    "textWeak": {
+      "dark": "commentWeak",
+      "light": "6272a4Weak"
     },
     "background": {
       "dark": "#282a36",
@@ -112,8 +118,8 @@
       "light": "#e8e8e2"
     },
     "diffLineNumber": {
-      "dark": "currentLine",
-      "light": "#c8c8c2"
+      "dark": "#989aa4",
+      "light": "#686865"
     },
     "diffAddedLineNumberBg": {
       "dark": "#1a3a1a",

@@ -16,7 +16,9 @@
     "blueDim": "#7cb8bb",
     "magenta": "#dc8cc3",
     "cyan": "#93e0e3",
-    "orange": "#dfaf8f"
+    "orange": "#dfaf8f",
+    "fgMutedWeak": "#9f9f9f",
+    "6f6f6fWeak": "#6f6f6f"
   },
   "theme": {
     "primary": {
@@ -54,6 +56,10 @@
     "textMuted": {
       "dark": "fgMuted",
       "light": "#6f6f6f"
+    },
+    "textWeak": {
+      "dark": "fgMutedWeak",
+      "light": "6f6f6fWeak"
     },
     "background": {
       "dark": "bg",
@@ -116,8 +122,8 @@
       "light": "#f5f5e5"
     },
     "diffLineNumber": {
-      "dark": "#6f6f6f",
-      "light": "#b0b0a0"
+      "dark": "#d2d2d2",
+      "light": "textMuted"
     },
     "diffAddedLineNumberBg": {
       "dark": "#4f5f4f",

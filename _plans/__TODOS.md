@@ -60,7 +60,7 @@
 
 - [x] A single AI response, is considered 1 message. So combine all its parts into a single message record. Not that every message part becomes a separate message in the timeline dialog.
 
-- [ ] Message model refactor: persist one logical assistant response as one assistant message with ordered parts (`reasoning`, `text`, `tool_call`, `tool_result`) instead of protocol-shaped `assistant/tool/assistant` rows. Keep provider replay as a flattening step, and make interrupted/error turns durable while streaming.
+- [x] Message model refactor: persist one logical assistant response as one assistant message with ordered parts (`reasoning`, `text`, `tool_call`, `tool_result`) instead of protocol-shaped `assistant/tool/assistant` rows. Keep provider replay as a flattening step, and make interrupted/error turns durable while streaming.
 
 - [x] Allow me to paste images i.e. [Image #1] [Image #2] [Image #3]. When I click on them, the image would be opened with my Finder (OS-specific)
 
@@ -227,3 +227,5 @@ I want - [x] To do this But I dont want to do this
 - [x] /fork command like codex.
 
 - [x] TUI: When very last item in /models. If the very last item is a "Thinking" model, then I can't really see the "currently selected/focused" item (the last item), because the thinking left and right key covers it.
+
+- [ ] Improve the look of the "Permission required" dialog. Make it look more fitting for vertically aligned. Right now it's like on a flex row so the options are right to left. I like the look of "Question tool" dialog though. Any way we can get an inspired look out of that and use that for the "Permission required" dialog?

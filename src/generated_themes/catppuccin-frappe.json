@@ -26,7 +26,8 @@
     "frappeSurface0": "#414559",
     "frappeBase": "#303446",
     "frappeMantle": "#292c3c",
-    "frappeCrust": "#232634"
+    "frappeCrust": "#232634",
+    "frappeOverlay2Weak": "#949cb8"
   },
   "theme": {
     "primary": {
@@ -62,8 +63,12 @@
       "light": "frappeText"
     },
     "textMuted": {
-      "dark": "frappeSubtext1",
-      "light": "frappeSubtext1"
+      "dark": "frappeOverlay2",
+      "light": "frappeOverlay2"
+    },
+    "textWeak": {
+      "dark": "frappeOverlay2Weak",
+      "light": "frappeOverlay2Weak"
     },
     "background": {
       "dark": "frappeBase",
@@ -125,10 +130,7 @@
       "dark": "frappeMantle",
       "light": "frappeMantle"
     },
-    "diffLineNumber": {
-      "dark": "frappeSurface1",
-      "light": "frappeSurface1"
-    },
+    "diffLineNumber": "textMuted",
     "diffAddedLineNumberBg": {
       "dark": "#223025",
       "light": "#223025"

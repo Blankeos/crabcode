@@ -294,6 +294,8 @@ impl Input {
             .set_selection_style(Style::default().bg(colors.accent).fg(colors.text));
         self.textarea
             .set_cursor_style(input_cursor_style(agent_color));
+        self.textarea
+            .set_placeholder_style(Style::default().fg(colors.text_weak));
         self.textarea.set_style(
             Style::default()
                 .fg(colors.text)

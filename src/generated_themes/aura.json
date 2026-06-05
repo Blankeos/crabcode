@@ -12,7 +12,8 @@
     "red": "#ff6767",
     "orange": "#ffca85",
     "cyan": "#61ffca",
-    "green": "#9dff65"
+    "green": "#9dff65",
+    "darkFgMutedWeak": "#6d6d6d"
   },
   "theme": {
     "primary": "purple",
@@ -24,6 +25,10 @@
     "info": "purple",
     "text": "darkFg",
     "textMuted": "darkFgMuted",
+    "textWeak": {
+      "dark": "darkFgMutedWeak",
+      "light": "darkFgMutedWeak"
+    },
     "background": "darkBg",
     "backgroundPanel": "darkBgPanel",
     "backgroundElement": "darkBgPanel",
@@ -39,7 +44,7 @@
     "diffAddedBg": "#354933",
     "diffRemovedBg": "#3f191a",
     "diffContextBg": "darkBgPanel",
-    "diffLineNumber": "darkBorder",
+    "diffLineNumber": "#898989",
     "diffAddedLineNumberBg": "#162620",
     "diffRemovedLineNumberBg": "#26161a",
     "markdownText": "darkFg",

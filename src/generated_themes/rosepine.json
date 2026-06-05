@@ -27,7 +27,9 @@
     "dawnOverlay": "#f2e9e1",
     "dawnMuted": "#9893a5",
     "dawnSubtle": "#797593",
-    "dawnText": "#575279"
+    "dawnText": "#575279",
+    "mutedWeak": "#6e6a86",
+    "dawnMutedWeak": "#9893a5"
   },
   "theme": {
     "primary": {
@@ -65,6 +67,10 @@
     "textMuted": {
       "dark": "muted",
       "light": "dawnMuted"
+    },
+    "textWeak": {
+      "dark": "mutedWeak",
+      "light": "dawnMutedWeak"
     },
     "background": {
       "dark": "base",
@@ -127,8 +133,8 @@
       "light": "dawnSurface"
     },
     "diffLineNumber": {
-      "dark": "muted",
-      "light": "dawnMuted"
+      "dark": "#9491a6",
+      "light": "#6c6875"
     },
     "diffAddedLineNumberBg": {
       "dark": "#1f2d3a",

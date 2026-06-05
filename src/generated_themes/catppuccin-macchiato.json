@@ -26,7 +26,8 @@
     "macSurface0": "#363a4f",
     "macBase": "#24273a",
     "macMantle": "#1e2030",
-    "macCrust": "#181926"
+    "macCrust": "#181926",
+    "macOverlay2Weak": "#939ab7"
   },
   "theme": {
     "primary": {
@@ -62,8 +63,12 @@
       "light": "macText"
     },
     "textMuted": {
-      "dark": "macSubtext1",
-      "light": "macSubtext1"
+      "dark": "macOverlay2",
+      "light": "macOverlay2"
+    },
+    "textWeak": {
+      "dark": "macOverlay2Weak",
+      "light": "macOverlay2Weak"
     },
     "background": {
       "dark": "macBase",
@@ -125,10 +130,7 @@
       "dark": "macMantle",
       "light": "macMantle"
     },
-    "diffLineNumber": {
-      "dark": "macSurface1",
-      "light": "macSurface1"
-    },
+    "diffLineNumber": "textMuted",
     "diffAddedLineNumberBg": {
       "dark": "#223025",
       "light": "#223025"

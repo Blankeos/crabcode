@@ -30,7 +30,8 @@
     "purple400": "#8B7EC8",
     "purple600": "#5E409D",
     "magenta400": "#CE5D97",
-    "magenta600": "#A02F6F"
+    "magenta600": "#A02F6F",
+    "base600Weak": "#6F6E69"
   },
   "theme": {
     "primary": {
@@ -68,6 +69,10 @@
     "textMuted": {
       "dark": "base600",
       "light": "base600"
+    },
+    "textWeak": {
+      "dark": "base600Weak",
+      "light": "base600Weak"
     },
     "background": {
       "dark": "black",
@@ -130,8 +135,8 @@
       "light": "base50"
     },
     "diffLineNumber": {
-      "dark": "base600",
-      "light": "base600"
+      "dark": "#888883",
+      "light": "#5a5955"
     },
     "diffAddedLineNumberBg": {
       "dark": "#152515",

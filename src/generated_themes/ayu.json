@@ -23,7 +23,8 @@
     "darkRemoved": "#F26D78",
     "darkAccent": "#E6B450",
     "darkError": "#D95757",
-    "darkIndentActive": "#6C7380"
+    "darkIndentActive": "#6C7380",
+    "darkFgMutedWeak": "#565B66"
   },
   "theme": {
     "primary": "darkEntity",
@@ -35,6 +36,10 @@
     "info": "darkTag",
     "text": "darkFg",
     "textMuted": "darkFgMuted",
+    "textWeak": {
+      "dark": "darkFgMutedWeak",
+      "light": "darkFgMutedWeak"
+    },
     "background": "darkBg",
     "backgroundPanel": "darkPanel",
     "backgroundElement": "darkBgAlt",
@@ -50,7 +55,7 @@
     "diffAddedBg": "#20303b",
     "diffRemovedBg": "#37222c",
     "diffContextBg": "darkPanel",
-    "diffLineNumber": "darkGutter",
+    "diffLineNumber": "diffContext",
     "diffAddedLineNumberBg": "#1b2b34",
     "diffRemovedLineNumberBg": "#2d1f26",
     "markdownText": "darkFg",

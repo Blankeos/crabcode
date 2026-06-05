@@ -6,22 +6,17 @@
     "purple-600": "#5266eb",
     "purple-400": "#8da4f5",
     "purple-300": "#a7b6f8",
-
     "red-700": "#b0175f",
     "red-600": "#d03275",
     "red-400": "#fc92b4",
-
     "green-700": "#036e43",
     "green-600": "#188554",
     "green-400": "#77c599",
-
     "orange-700": "#a44200",
     "orange-600": "#c45000",
     "orange-400": "#fc9b6f",
-
     "blue-600": "#007f95",
     "blue-400": "#77becf",
-
     "neutral-1000": "#10101a",
     "neutral-950": "#171721",
     "neutral-900": "#1e1e2a",
@@ -36,16 +31,16 @@
     "neutral-050": "#fbfcfd",
     "neutral-000": "#ffffff",
     "neutral-150": "#ededf3",
-
     "border-light": "#7073931a",
     "border-light-subtle": "#7073930f",
     "border-dark": "#b4b7c81f",
     "border-dark-subtle": "#b4b7c814",
-
     "diff-added-light": "#1885541a",
     "diff-removed-light": "#d032751a",
     "diff-added-dark": "#77c59933",
-    "diff-removed-dark": "#fc92b433"
+    "diff-removed-dark": "#fc92b433",
+    "neutral400Weak": "#9d9da8",
+    "neutral500Weak": "#70707d"
   },
   "theme": {
     "primary": {
@@ -83,6 +78,10 @@
     "textMuted": {
       "light": "neutral-500",
       "dark": "neutral-400"
+    },
+    "textWeak": {
+      "dark": "neutral400Weak",
+      "light": "neutral500Weak"
     },
     "background": {
       "light": "neutral-000",

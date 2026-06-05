@@ -542,7 +542,7 @@ impl Theme {
                 };
                 let background_element = resolve_or("backgroundElement", dialog_background);
                 let text = resolve_or("text", primary);
-                let text_weak = resolve_or("textMuted", text);
+                let text_weak = resolve_or("textWeak", resolve_or("textMuted", text));
                 let border = resolve_or("border", text_weak);
                 let border_focus = resolve_or("borderActive", border);
                 let border_weak_focus = resolve_or("borderSubtle", border);

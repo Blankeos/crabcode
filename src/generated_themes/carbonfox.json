@@ -41,7 +41,9 @@
     "diffGreen": "#50fa7b",
     "diffRed": "#ff6b6b",
     "diffGreenBg": "#0f2418",
-    "diffRedBg": "#2a1216"
+    "diffRedBg": "#2a1216",
+    "fg3Weak": "#7d848f",
+    "lfg3Weak": "#6f6f6f"
   },
   "theme": {
     "primary": {
@@ -79,6 +81,10 @@
     "textMuted": {
       "dark": "fg3",
       "light": "lfg3"
+    },
+    "textWeak": {
+      "dark": "fg3Weak",
+      "light": "lfg3Weak"
     },
     "background": {
       "dark": "bg1",
@@ -141,8 +147,8 @@
       "light": "lbg1"
     },
     "diffLineNumber": {
-      "dark": "fg3",
-      "light": "lfg3"
+      "dark": "#808792",
+      "light": "textMuted"
     },
     "diffAddedLineNumberBg": {
       "dark": "diffGreenBg",

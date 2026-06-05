@@ -26,7 +26,9 @@
     "lightPurple": "#8250df",
     "lightPink": "#bf3989",
     "lightYellow": "#9a6700",
-    "lightCyan": "#1b7c83"
+    "lightCyan": "#1b7c83",
+    "darkFgMutedWeak": "#8b949e",
+    "lightFgMutedWeak": "#57606a"
   },
   "theme": {
     "primary": {
@@ -64,6 +66,10 @@
     "textMuted": {
       "dark": "darkFgMuted",
       "light": "lightFgMuted"
+    },
+    "textWeak": {
+      "dark": "darkFgMutedWeak",
+      "light": "lightFgMutedWeak"
     },
     "background": {
       "dark": "darkBg",
@@ -126,8 +132,8 @@
       "light": "lightBgAlt"
     },
     "diffLineNumber": {
-      "dark": "#484f58",
-      "light": "#afb8c1"
+      "dark": "#95999e",
+      "light": "textMuted"
     },
     "diffAddedLineNumberBg": {
       "dark": "#033a16",
