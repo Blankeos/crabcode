@@ -894,6 +894,20 @@ impl Dialog {
         false
     }
 
+    pub fn select_first_item_in_group(&mut self, group: &str) -> bool {
+        let flat_items = self.get_flat_items();
+        if let Some(pos) = flat_items
+            .iter()
+            .position(|item| item.group.as_str() == group)
+        {
+            self.selected_index = pos;
+            self.focused_group_header = None;
+            self.adjust_scroll();
+            return true;
+        }
+        false
+    }
+
     pub fn select_index_clamped(&mut self, index: usize) -> bool {
         let item_count = self.get_flat_items().len();
         if item_count == 0 {

@@ -5254,6 +5254,12 @@ impl App {
         }
 
         let current_workspace_id = self.session_manager.current_workspace_id();
+        if self
+            .sessions_dialog_state
+            .select_first_item_in_workspace(current_workspace_id)
+        {
+            return;
+        }
         let _ = self
             .sessions_dialog_state
             .focus_workspace(current_workspace_id);
@@ -9478,8 +9484,10 @@ mod tests {
         assert_eq!(app.sessions_dialog_state.filter, SessionsDialogFilter::All);
         assert_eq!(
             app.sessions_dialog_state.dialog.get_focused_group_header(),
-            Some(app.session_manager.current_workspace_name())
+            None
         );
+        let selected = app.sessions_dialog_state.dialog.get_selected().unwrap();
+        assert_eq!(selected.group, app.session_manager.current_workspace_name());
         assert!(app
             .sessions_dialog_state
             .dialog
