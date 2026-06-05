@@ -9,6 +9,12 @@ fn main() {
     let dist_dir = manifest_dir.join("remote-client/dist/client");
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("remote_assets.rs");
 
+    if !dist_dir.join("index.html").is_file() {
+        panic!(
+            "remote client assets are missing; run `just remote-client-build` before building crabcode"
+        );
+    }
+
     let mut files = Vec::new();
     collect_files(&dist_dir, &dist_dir, &mut files);
     files.sort_by(|a, b| a.0.cmp(&b.0));
