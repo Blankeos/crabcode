@@ -76,6 +76,13 @@
       ],
       "type": "string"
     },
+    "MacosNotificationBackend": {
+      "enum": [
+        "crabcode",
+        "osascript"
+      ],
+      "type": "string"
+    },
     "NotificationEventConfigFile": {
       "additionalProperties": false,
       "properties": {
@@ -166,6 +173,14 @@
         "terminal_condition": {
           "$ref": "#/$defs/TerminalNotificationCondition",
           "default": "unfocused"
+        },
+        "macosBackend": {
+          "$ref": "#/$defs/MacosNotificationBackend",
+          "default": "crabcode"
+        },
+        "macos_backend": {
+          "$ref": "#/$defs/MacosNotificationBackend",
+          "default": "crabcode"
         }
       },
       "type": "object"

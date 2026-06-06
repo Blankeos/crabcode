@@ -100,6 +100,35 @@ fn restore_terminal_modes(
     Ok(())
 }
 
+fn send_test_notification() -> Result<()> {
+    let loaded_config = crate::config::ConfigLoader::load()?;
+    let event = crate::sound::SoundEvent::Complete;
+
+    let (sounds, warnings) =
+        crate::sound::resolve_effective_sounds(&loaded_config.merged_config.notifications);
+    for warning in warnings {
+        eprintln!("{warning}");
+    }
+
+    if let Some(path) = sounds.path_for_event(event) {
+        eprintln!("playing configured sound: {}", path.display());
+        crate::sound::play_file(path);
+    } else {
+        eprintln!("no sound configured for complete notifications");
+    }
+
+    crate::notify::notify_event_with_options(
+        event,
+        Some("local app icon test"),
+        crate::notify::NotificationOptions {
+            #[cfg(target_os = "macos")]
+            macos_backend: loaded_config.merged_config.notifications.macos_backend,
+        },
+    );
+
+    Ok(())
+}
+
 pub fn push_startup_diag(msg: String) {
     if crate::logging::enabled() {
         let _ = crate::logging::log(&msg);
@@ -492,6 +521,9 @@ struct Args {
     #[arg(long = "emit-logs", hide = true)]
     emit_logs: bool,
 
+    #[arg(long = "test-notification", hide = true)]
+    test_notification: bool,
+
     /// The prompt to run (positional, used in print mode)
     prompt: Vec<String>,
 }
@@ -569,6 +601,11 @@ fn launch_remote_serve(request: app::RemoteLaunchRequest) -> Result<()> {
 async fn main() -> Result<()> {
     let args = Args::parse();
     crate::logging::set_enabled(args.emit_logs);
+
+    if args.test_notification {
+        send_test_notification()?;
+        return Ok(());
+    }
 
     match &args.command {
         Some(Command::Serve { bind, pair_code }) => {

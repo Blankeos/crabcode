@@ -22,6 +22,7 @@ include = [
     "/README.md",
     "/LICENSE",
     "/crabcode-logo.txt",
+    "/favicon.png",
     "/mascot.txt",
     "/sounds/complete.mp3",
     "/sounds/error.mp3",

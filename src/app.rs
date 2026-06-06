@@ -630,7 +630,14 @@ impl App {
         }
 
         if self.notifications.desktop_for_event(event) {
-            crate::notify::notify_event(event, detail);
+            crate::notify::notify_event_with_options(
+                event,
+                detail,
+                crate::notify::NotificationOptions {
+                    #[cfg(target_os = "macos")]
+                    macos_backend: self.notifications.macos_backend,
+                },
+            );
         }
     }
 

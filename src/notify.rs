@@ -3,6 +3,21 @@ use std::process::{Command, Stdio};
 
 const MAX_TERMINAL_TITLE_CHARS: usize = 240;
 
+#[cfg(target_os = "macos")]
+const MACOS_NOTIFIER_CACHE_VERSION: &str = "macos-notifier-v3";
+#[cfg(target_os = "macos")]
+const MACOS_NOTIFIER_APP_NAME: &str = "Crabcode Notifier.app";
+#[cfg(target_os = "macos")]
+const MACOS_NOTIFIER_BUNDLE_ID: &str = "tl.carlo.crabcode.notifier";
+#[cfg(target_os = "macos")]
+const MACOS_NOTIFIER_EXECUTABLE: &str = "CrabcodeNotifier";
+#[cfg(target_os = "macos")]
+const MACOS_NOTIFIER_ICON_FILE: &str = "CrabcodeNotifier";
+#[cfg(target_os = "macos")]
+const MACOS_NOTIFIER_MARKER: &str = ".crabcode-notifier-ready";
+#[cfg(target_os = "macos")]
+const MACOS_NOTIFIER_ICON_PNG: &[u8] = include_bytes!("../favicon.png");
+
 pub fn is_supported() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -25,14 +40,60 @@ pub fn is_supported() -> bool {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn notify_test_event() -> io::Result<()> {
+    let (title, subtitle, body) = notification_content(
+        crate::sound::SoundEvent::Complete,
+        Some("local app icon test"),
+    );
+    let macos_title = with_crab_title(&title);
+    try_notify_macos_app(&macos_title, &subtitle, &body)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn notify_test_event() -> io::Result<()> {
+    notify_event(
+        crate::sound::SoundEvent::Complete,
+        Some("local app icon test"),
+    );
+    Ok(())
+}
+
 pub fn notify_event(event: crate::sound::SoundEvent, detail: Option<&str>) {
+    notify_event_with_options(event, detail, NotificationOptions::default());
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NotificationOptions {
+    #[cfg(target_os = "macos")]
+    pub macos_backend: crate::config::MacosNotificationBackend,
+}
+
+impl Default for NotificationOptions {
+    fn default() -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            macos_backend: crate::config::MacosNotificationBackend::CrabcodeNotifier,
+        }
+    }
+}
+
+pub fn notify_event_with_options(
+    event: crate::sound::SoundEvent,
+    detail: Option<&str>,
+    options: NotificationOptions,
+) {
     let (title, subtitle, body) = notification_content(event, detail);
 
     #[cfg(target_os = "macos")]
     {
-        let osascript_title = with_crab_title(&title);
-        let script = build_osascript(&osascript_title, &subtitle, &body);
-        let _ = Command::new("osascript").arg("-e").arg(script).spawn();
+        let macos_title = with_crab_title(&title);
+        if options.macos_backend == crate::config::MacosNotificationBackend::Osascript
+            || try_notify_macos_app(&macos_title, &subtitle, &body).is_err()
+        {
+            let script = build_osascript(&macos_title, &subtitle, &body);
+            let _ = Command::new("osascript").arg("-e").arg(script).spawn();
+        }
         return;
     }
 
@@ -227,6 +288,271 @@ fn build_osascript(title: &str, subtitle: &str, body: &str) -> String {
     }
 
     script
+}
+
+#[cfg(target_os = "macos")]
+fn try_notify_macos_app(title: &str, subtitle: &str, body: &str) -> io::Result<()> {
+    let app = ensure_macos_notifier_app()?;
+    let executable = app
+        .join("Contents")
+        .join("MacOS")
+        .join(MACOS_NOTIFIER_EXECUTABLE);
+    let status = Command::new(executable)
+        .arg(title)
+        .arg(subtitle)
+        .arg(body)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("macOS notifier failed with {status}"),
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_notifier_app() -> io::Result<std::path::PathBuf> {
+    let base = crate::persistence::get_cache_dir().join(MACOS_NOTIFIER_CACHE_VERSION);
+    let app = base.join(MACOS_NOTIFIER_APP_NAME);
+    let marker = base.join(MACOS_NOTIFIER_MARKER);
+    let icon = base.join(format!("{MACOS_NOTIFIER_ICON_FILE}.icns"));
+    let executable = app
+        .join("Contents")
+        .join("MacOS")
+        .join(MACOS_NOTIFIER_EXECUTABLE);
+
+    if marker.exists() && app.join("Contents").join("Info.plist").exists() && executable.exists() {
+        return Ok(app);
+    }
+
+    crate::persistence::ensure_cache_dir()
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+    std::fs::create_dir_all(&base)?;
+    let _ = std::fs::remove_dir_all(&app);
+
+    let source_icon = base.join("favicon.png");
+    let source = base.join("notifier.swift");
+    let iconset = base.join(format!("{MACOS_NOTIFIER_ICON_FILE}.iconset"));
+
+    std::fs::write(&source_icon, MACOS_NOTIFIER_ICON_PNG)?;
+    std::fs::write(&source, macos_notifier_swift_source())?;
+
+    generate_macos_icns(&source_icon, &iconset, &icon)?;
+    compile_macos_notifier_app(&source, &app, &icon)?;
+    std::fs::write(marker, MACOS_NOTIFIER_BUNDLE_ID)?;
+
+    Ok(app)
+}
+
+#[cfg(target_os = "macos")]
+fn generate_macos_icns(
+    source_icon: &std::path::Path,
+    iconset: &std::path::Path,
+    icon: &std::path::Path,
+) -> io::Result<()> {
+    let _ = std::fs::remove_dir_all(iconset);
+    std::fs::create_dir_all(iconset)?;
+
+    for (size, name) in macos_icon_specs() {
+        run_macos_command(
+            Command::new("sips")
+                .arg("-z")
+                .arg(size.to_string())
+                .arg(size.to_string())
+                .arg(source_icon)
+                .arg("--out")
+                .arg(iconset.join(name)),
+        )?;
+    }
+
+    run_macos_command(
+        Command::new("iconutil")
+            .arg("-c")
+            .arg("icns")
+            .arg(iconset)
+            .arg("-o")
+            .arg(icon),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn compile_macos_notifier_app(
+    source: &std::path::Path,
+    app: &std::path::Path,
+    icon: &std::path::Path,
+) -> io::Result<()> {
+    let contents = app.join("Contents");
+    let macos = contents.join("MacOS");
+    let resources = app.join("Contents").join("Resources");
+    std::fs::create_dir_all(&macos)?;
+    std::fs::create_dir_all(&resources)?;
+
+    run_macos_command(
+        Command::new("swiftc")
+            .arg("-swift-version")
+            .arg("5")
+            .arg(source)
+            .arg("-o")
+            .arg(macos.join(MACOS_NOTIFIER_EXECUTABLE))
+            .arg("-framework")
+            .arg("UserNotifications"),
+    )?;
+
+    std::fs::copy(
+        icon,
+        resources.join(format!("{MACOS_NOTIFIER_ICON_FILE}.icns")),
+    )?;
+
+    std::fs::write(contents.join("Info.plist"), macos_notifier_info_plist())?;
+
+    let _ = run_macos_command(
+        Command::new("codesign")
+            .arg("-f")
+            .arg("-s")
+            .arg("-")
+            .arg(app),
+    );
+    let _ = run_macos_command(
+        Command::new(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+        )
+        .arg("-f")
+        .arg(app),
+    );
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_command(command: &mut Command) -> io::Result<()> {
+    let program = command.get_program().to_string_lossy().into_owned();
+    let status = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("{program} failed with {status}"),
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_icon_specs() -> [(u32, &'static str); 10] {
+    [
+        (16, "icon_16x16.png"),
+        (32, "icon_16x16@2x.png"),
+        (32, "icon_32x32.png"),
+        (64, "icon_32x32@2x.png"),
+        (128, "icon_128x128.png"),
+        (256, "icon_128x128@2x.png"),
+        (256, "icon_256x256.png"),
+        (512, "icon_256x256@2x.png"),
+        (512, "icon_512x512.png"),
+        (1024, "icon_512x512@2x.png"),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn macos_notifier_swift_source() -> &'static str {
+    r#"import Foundation
+import UserNotifications
+
+final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        if #available(macOS 11.0, *) {
+            completionHandler([.banner, .list, .sound])
+        } else {
+            completionHandler([.alert, .sound])
+        }
+    }
+}
+
+let args = CommandLine.arguments
+let title = args.count > 1 ? args[1] : "🦀 crabcode"
+let subtitle = args.count > 2 ? args[2] : ""
+let body = args.count > 3 ? args[3] : "Your assistant response is ready."
+
+let center = UNUserNotificationCenter.current()
+let delegate = NotificationDelegate()
+center.delegate = delegate
+let group = DispatchGroup()
+var granted = false
+var addFailed = false
+
+group.enter()
+center.requestAuthorization(options: [.alert, .sound]) { didGrant, _ in
+    granted = didGrant
+    group.leave()
+}
+group.wait()
+
+if !granted {
+    exit(1)
+}
+
+let content = UNMutableNotificationContent()
+content.title = title
+content.subtitle = subtitle
+content.body = body
+content.sound = .default
+
+let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.2, repeats: false)
+let request = UNNotificationRequest(
+    identifier: "crabcode-\(UUID().uuidString)",
+    content: content,
+    trigger: trigger
+)
+
+group.enter()
+center.add(request) { error in
+    addFailed = error != nil
+    group.leave()
+}
+group.wait()
+
+if addFailed {
+    exit(1)
+}
+
+RunLoop.current.run(until: Date().addingTimeInterval(2.0))
+"#
+}
+
+#[cfg(target_os = "macos")]
+fn macos_notifier_info_plist() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>{MACOS_NOTIFIER_EXECUTABLE}</string>
+  <key>CFBundleIdentifier</key><string>{MACOS_NOTIFIER_BUNDLE_ID}</string>
+  <key>CFBundleName</key><string>Crabcode Notifier</string>
+  <key>CFBundleDisplayName</key><string>Crabcode</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleIconFile</key><string>{MACOS_NOTIFIER_ICON_FILE}</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+"#
+    )
 }
 
 #[cfg(target_os = "macos")]

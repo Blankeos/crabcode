@@ -143,6 +143,18 @@ pub enum TerminalNotificationCondition {
     Always,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacosNotificationBackend {
+    CrabcodeNotifier,
+    Osascript,
+}
+
+impl Default for MacosNotificationBackend {
+    fn default() -> Self {
+        Self::CrabcodeNotifier
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationEventConfig {
     pub terminal: TerminalNotificationMode,
@@ -158,6 +170,7 @@ pub struct NotificationsConfig {
     pub permission: NotificationEventConfig,
     pub question: NotificationEventConfig,
     pub terminal_condition: TerminalNotificationCondition,
+    pub macos_backend: MacosNotificationBackend,
 }
 
 impl NotificationsConfig {
@@ -206,6 +219,7 @@ impl Default for NotificationsConfig {
                 desktop: false,
             },
             terminal_condition: TerminalNotificationCondition::Unfocused,
+            macos_backend: MacosNotificationBackend::CrabcodeNotifier,
         }
     }
 }
@@ -766,7 +780,6 @@ fn opencode_allowed_keys() -> BTreeSet<&'static str> {
 fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     let mut out = opencode_allowed_keys();
     out.insert("theme");
-    out.insert("sounds");
     out.insert("notifications");
     out.insert("images");
     out
@@ -1025,7 +1038,6 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     out.provider_timeouts = parse_provider_timeouts(obj.get("provider"), diagnostics);
 
     let mut notifications = NotificationsConfig::default();
-    apply_legacy_sounds(obj.get("sounds"), &mut notifications, diagnostics);
     apply_notifications(obj.get("notifications"), &mut notifications, diagnostics);
     out.notifications = notifications;
     out.images = parse_images(obj.get("images"), diagnostics);
@@ -1434,108 +1446,6 @@ fn parse_image_open_with(
     }
 }
 
-fn apply_legacy_sounds(
-    value: Option<&Value>,
-    notifications: &mut NotificationsConfig,
-    diagnostics: &mut ConfigDiagnostics,
-) {
-    let Some(value) = value else {
-        return;
-    };
-
-    if value.is_null() {
-        return;
-    }
-
-    let Value::Object(map) = value else {
-        diagnostics
-            .warnings
-            .push("sounds is deprecated and must be an object when used".to_string());
-        return;
-    };
-
-    diagnostics.warnings.push(
-        "sounds is deprecated; move audio settings to notifications.<event>.soundEnabled and notifications.<event>.soundFile"
-            .to_string(),
-    );
-
-    if map.contains_key("notify") {
-        diagnostics.warnings.push(
-            "sounds.notify is no longer supported; use notifications.<event>.desktop instead"
-                .to_string(),
-        );
-    }
-
-    apply_legacy_sound_event(
-        &mut notifications.error,
-        map.get("error"),
-        "sounds.error",
-        "notifications.error",
-        diagnostics,
-    );
-    apply_legacy_sound_event(
-        &mut notifications.complete,
-        map.get("complete"),
-        "sounds.complete",
-        "notifications.complete",
-        diagnostics,
-    );
-    apply_legacy_sound_event(
-        &mut notifications.permission,
-        map.get("permission"),
-        "sounds.permission",
-        "notifications.permission",
-        diagnostics,
-    );
-    apply_legacy_sound_event(
-        &mut notifications.question,
-        map.get("question"),
-        "sounds.question",
-        "notifications.question",
-        diagnostics,
-    );
-}
-
-fn apply_legacy_sound_event(
-    target: &mut NotificationEventConfig,
-    value: Option<&Value>,
-    old_key: &str,
-    new_key: &str,
-    diagnostics: &mut ConfigDiagnostics,
-) {
-    let Some(value) = value else {
-        return;
-    };
-
-    if let Value::Bool(enabled) = value {
-        target.sound_enabled = *enabled;
-        return;
-    }
-
-    let Value::Object(map) = value else {
-        diagnostics
-            .warnings
-            .push(format!("{} must be a boolean or object when used", old_key));
-        return;
-    };
-
-    if let Some(Value::Bool(enabled)) = map.get("enabled") {
-        target.sound_enabled = *enabled;
-    }
-
-    if let Some(Value::Bool(notify)) = map.get("notify") {
-        diagnostics.warnings.push(format!(
-            "{}.notify is deprecated; use {}.desktop instead",
-            old_key, new_key
-        ));
-        target.desktop = *notify;
-    }
-
-    if let Some(Value::String(file)) = map.get("file") {
-        apply_sound_file(target, file, &format!("{}.file", old_key), diagnostics);
-    }
-}
-
 fn apply_notifications(
     value: Option<&Value>,
     notifications: &mut NotificationsConfig,
@@ -1567,6 +1477,11 @@ fn apply_notifications(
             "notifications.terminalCondition",
             diagnostics,
         );
+    }
+
+    if let Some(backend) = map.get("macosBackend").or_else(|| map.get("macos_backend")) {
+        notifications.macos_backend =
+            parse_macos_notification_backend(backend, "notifications.macosBackend", diagnostics);
     }
 
     apply_notification_event(
@@ -1765,6 +1680,34 @@ fn parse_terminal_notification_mode(
     }
 }
 
+fn parse_macos_notification_backend(
+    value: &Value,
+    key: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> MacosNotificationBackend {
+    let Some(value) = value.as_str() else {
+        if !value.is_null() {
+            diagnostics
+                .warnings
+                .push(format!("{} must be \"crabcode\" or \"osascript\"", key));
+        }
+        return MacosNotificationBackend::CrabcodeNotifier;
+    };
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "crabcode" | "crabcode-notifier" | "crabcode_notifier" | "notifier" | "native" => {
+            MacosNotificationBackend::CrabcodeNotifier
+        }
+        "osascript" | "script" => MacosNotificationBackend::Osascript,
+        _ => {
+            diagnostics
+                .warnings
+                .push(format!("{} must be \"crabcode\" or \"osascript\"", key));
+            MacosNotificationBackend::CrabcodeNotifier
+        }
+    }
+}
+
 fn parse_terminal_notification_condition(
     value: &Value,
     key: &str,
@@ -1798,7 +1741,6 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
     let implemented: BTreeSet<&'static str> = [
         "theme",
         "model",
-        "sounds",
         "default_agent",
         "command",
         "agent",
@@ -1835,6 +1777,7 @@ mod tests {
             &json!({
                 "notifications": {
                     "terminalCondition": "always",
+                    "macosBackend": "osascript",
                     "complete": {
                         "terminal": "enabled",
                         "desktop": true,
@@ -1874,6 +1817,51 @@ mod tests {
             config.notifications.terminal_condition,
             TerminalNotificationCondition::Always
         );
+        assert_eq!(
+            config.notifications.macos_backend,
+            MacosNotificationBackend::Osascript
+        );
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_macos_notification_backend() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "notifications": {
+                    "macosBackend": "osascript"
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.notifications.macos_backend,
+            MacosNotificationBackend::Osascript
+        );
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn top_level_sounds_config_is_ignored() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "sounds": {
+                    "complete": {
+                        "enabled": false,
+                        "notify": true,
+                        "file": "/tmp/legacy.wav"
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert!(config.notifications.complete.sound_enabled);
+        assert!(!config.notifications.complete.desktop);
+        assert_eq!(config.notifications.complete.sound_file, None);
         assert!(diagnostics.warnings.is_empty());
     }
 
@@ -1957,36 +1945,6 @@ mod tests {
             config.notifications.complete.terminal,
             TerminalNotificationMode::Disabled
         );
-    }
-
-    #[test]
-    fn legacy_sounds_are_migrated_to_notification_events() {
-        let mut diagnostics = ConfigDiagnostics::default();
-        let config = parse_merged_config(
-            &json!({
-                "sounds": {
-                    "complete": {
-                        "enabled": true,
-                        "notify": true,
-                        "file": "/tmp/complete.wav"
-                    },
-                    "question": false
-                }
-            }),
-            &mut diagnostics,
-        );
-
-        assert!(config.notifications.complete.sound_enabled);
-        assert!(config.notifications.complete.desktop);
-        assert_eq!(
-            config.notifications.complete.sound_file,
-            Some(PathBuf::from("/tmp/complete.wav"))
-        );
-        assert!(!config.notifications.question.sound_enabled);
-        assert!(diagnostics
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("sounds is deprecated")));
     }
 
     #[test]
