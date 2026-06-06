@@ -42,6 +42,7 @@ pub struct DialogItem {
     pub description: String,
     pub tip: Option<String>,
     pub provider_id: String,
+    pub active: bool,
 }
 
 pub struct Registry {
@@ -192,6 +193,7 @@ mod tests {
             description: "Test description".to_string(),
             tip: None,
             provider_id: String::new(),
+            active: false,
         }
     }
 

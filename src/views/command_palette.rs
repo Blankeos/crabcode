@@ -299,6 +299,7 @@ fn core_palette_items(
             description: description.to_string(),
             tip: command_palette_tip(command),
             provider_id: registered.hidden_tokens.join(" "),
+            active: false,
         });
     }
 
@@ -393,6 +394,7 @@ fn custom_command_items(registry: &Registry, is_chat: bool) -> Vec<DialogItem> {
                 },
                 tip: custom.and_then(custom_command_source_tip),
                 provider_id: String::new(),
+                active: false,
             }
         })
         .collect();
@@ -442,6 +444,7 @@ fn app_action_item(
         description: description.to_string(),
         tip: tip.map(str::to_string),
         provider_id,
+        active: false,
     }
 }
 

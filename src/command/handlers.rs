@@ -48,6 +48,7 @@ pub fn handle_sessions<'a>(
                     description: String::new(),
                     tip: None,
                     provider_id: session.title.clone(),
+                    active: false,
                 }
             })
             .collect();
@@ -164,6 +165,7 @@ pub fn handle_connect<'a>(
                         None
                     },
                     provider_id: id.clone(),
+                    active: false,
                 }
             })
             .collect();
@@ -335,9 +337,7 @@ pub fn handle_models<'a>(
             let is_favorite =
                 favorites_set.contains(&(model.provider_id.clone(), model.id.clone()));
 
-            let tip = if is_active {
-                Some("Active".to_string())
-            } else if is_favorite {
+            let tip = if is_favorite {
                 Some("❤︎".to_string())
             } else {
                 None
@@ -352,6 +352,7 @@ pub fn handle_models<'a>(
                 description,
                 tip,
                 provider_id: model.provider_id.clone(),
+                active: is_active,
             });
         };
 

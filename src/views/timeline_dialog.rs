@@ -86,6 +86,7 @@ impl TimelineDialogState {
                 description,
                 tip: Some(tip),
                 provider_id: String::new(),
+                active: false,
             });
             last_timeline_role = Some(timeline_role);
             last_assistant_preview_empty =

@@ -290,6 +290,7 @@ mod tests {
             description: String::new(),
             tip: None,
             provider_id: provider_id.to_string(),
+            active: false,
         }
     }
 

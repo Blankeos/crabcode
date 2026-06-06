@@ -39,6 +39,7 @@ pub struct DialogItem {
     pub description: String,
     pub tip: Option<String>,
     pub provider_id: String,
+    pub active: bool,
 }
 
 impl Clone for DialogItem {
@@ -50,6 +51,7 @@ impl Clone for DialogItem {
             description: self.description.clone(),
             tip: self.tip.clone(),
             provider_id: self.provider_id.clone(),
+            active: self.active,
         }
     }
 }
@@ -412,15 +414,19 @@ impl Dialog {
         if let Some(tip) = &item.tip {
             Self::consider_search_field(pattern, matcher, tip, 0, &mut best_score);
         }
+        if item.active {
+            Self::consider_search_field(pattern, matcher, "Active", 0, &mut best_score);
+        }
 
+        let active_token = if item.active { " Active" } else { "" };
         let combined = match &item.tip {
             Some(tip) => format!(
-                "{} {} {} {} {}",
-                group, item.provider_id, item.name, item.description, tip
+                "{} {} {} {} {}{}",
+                group, item.provider_id, item.name, item.description, tip, active_token
             ),
             None => format!(
-                "{} {} {} {}",
-                group, item.provider_id, item.name, item.description
+                "{} {} {} {}{}",
+                group, item.provider_id, item.name, item.description, active_token
             ),
         };
         Self::consider_search_field(pattern, matcher, &combined, 0, &mut best_score);
@@ -1025,42 +1031,63 @@ impl Dialog {
         }
 
         let indent_width = width.min(2);
-        let indent = " ".repeat(indent_width);
+        let active_indicator = if item.active { "● " } else { "  " };
+        let indicator = Self::truncate_to_width(active_indicator, indent_width);
         let has_description = !item.description.is_empty();
 
         if !has_description {
             let name = Self::truncate_to_width(&item.name, width.saturating_sub(indent_width));
-            let text = format!("{indent}{name}");
-            let text_width = text.width();
-            return (vec![Span::raw(text)], text_width);
+            let text_width = indicator.width() + name.width();
+            let spans = if item.active {
+                vec![
+                    Span::styled(indicator, Style::default().fg(colors.primary)),
+                    Span::styled(name, Style::default().fg(colors.primary)),
+                ]
+            } else {
+                vec![Span::raw(format!("{indicator}{name}"))]
+            };
+            return (spans, text_width);
         }
 
         let separator_width = 2usize;
         let full_name_width = item.name.width();
         if indent_width + full_name_width + separator_width >= width {
             let name = Self::truncate_to_width(&item.name, width.saturating_sub(indent_width));
-            let text = format!("{indent}{name}");
-            let text_width = text.width();
-            return (vec![Span::raw(text)], text_width);
+            let text_width = indicator.width() + name.width();
+            let spans = if item.active {
+                vec![
+                    Span::styled(indicator, Style::default().fg(colors.primary)),
+                    Span::styled(name, Style::default().fg(colors.primary)),
+                ]
+            } else {
+                vec![Span::raw(format!("{indicator}{name}"))]
+            };
+            return (spans, text_width);
         }
 
         let desc_budget = width.saturating_sub(indent_width + full_name_width + separator_width);
         let description = Self::truncate_to_width(&item.description, desc_budget);
-        let prefix = format!("{indent}{}  ", item.name);
-        let text_width = prefix.width() + description.width();
+        let name_prefix = format!("{}  ", item.name);
+        let text_width = indicator.width() + name_prefix.width() + description.width();
 
-        (
-            vec![
-                Span::raw(prefix),
-                Span::styled(
-                    description,
-                    Style::default()
-                        .fg(colors.text_weak)
-                        .add_modifier(Modifier::DIM),
-                ),
-            ],
-            text_width,
-        )
+        let mut spans = Vec::new();
+        if item.active {
+            spans.push(Span::styled(indicator, Style::default().fg(colors.primary)));
+            spans.push(Span::styled(
+                name_prefix,
+                Style::default().fg(colors.primary),
+            ));
+        } else {
+            spans.push(Span::raw(format!("{indicator}{name_prefix}")));
+        }
+        spans.push(Span::styled(
+            description,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+
+        (spans, text_width)
     }
 
     fn item_spans_for_width(
@@ -1816,6 +1843,7 @@ mod tests {
                 description: "Description for Model A".to_string(),
                 tip: None,
                 provider_id: "provider1".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "2".to_string(),
@@ -1824,6 +1852,7 @@ mod tests {
                 description: "Description for Model B".to_string(),
                 tip: None,
                 provider_id: "provider1".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "3".to_string(),
@@ -1832,6 +1861,7 @@ mod tests {
                 description: "Description for Model C".to_string(),
                 tip: None,
                 provider_id: "provider2".to_string(),
+                active: false,
             },
         ]
     }
@@ -1845,6 +1875,7 @@ mod tests {
                 description: "".to_string(),
                 tip: None,
                 provider_id: "p".to_string(),
+                active: false,
             })
             .collect()
     }
@@ -1858,6 +1889,7 @@ mod tests {
                 description: "".to_string(),
                 tip: None,
                 provider_id: "p".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "2".to_string(),
@@ -1866,6 +1898,7 @@ mod tests {
                 description: "".to_string(),
                 tip: None,
                 provider_id: "p".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "3".to_string(),
@@ -1874,6 +1907,7 @@ mod tests {
                 description: "".to_string(),
                 tip: None,
                 provider_id: "p".to_string(),
+                active: false,
             },
         ]
     }
@@ -1887,6 +1921,7 @@ mod tests {
                 description: "NanoGPT | reasoning".to_string(),
                 tip: None,
                 provider_id: "nanogpt".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "openai-gpt-5".to_string(),
@@ -1895,6 +1930,7 @@ mod tests {
                 description: "OpenAI | reasoning, tools".to_string(),
                 tip: None,
                 provider_id: "openai".to_string(),
+                active: false,
             },
         ]
     }
@@ -2078,6 +2114,47 @@ mod tests {
         assert_eq!(flat_items[0].name, "GPT-5");
         assert_eq!(flat_items[1].provider_id, "nanogpt");
         assert_eq!(flat_items[1].name, "OpenAI o1");
+    }
+
+    #[test]
+    fn test_dialog_active_items_are_searchable_without_replacing_tip() {
+        let active_favorite = DialogItem {
+            id: "gpt-5".to_string(),
+            name: "GPT-5".to_string(),
+            group: "OpenAI".to_string(),
+            description: "OpenAI | reasoning".to_string(),
+            tip: Some("❤︎".to_string()),
+            provider_id: "openai".to_string(),
+            active: true,
+        };
+        let mut dialog = Dialog::with_items(
+            "Models",
+            vec![
+                active_favorite.clone(),
+                DialogItem {
+                    id: "claude".to_string(),
+                    name: "Claude".to_string(),
+                    group: "Anthropic".to_string(),
+                    description: "Anthropic".to_string(),
+                    tip: None,
+                    provider_id: "anthropic".to_string(),
+                    active: false,
+                },
+            ],
+        );
+
+        dialog.set_search_query("active");
+
+        let flat_items = dialog.get_flat_items();
+        assert_eq!(flat_items.len(), 1);
+        assert_eq!(flat_items[0].id, "gpt-5");
+        assert_eq!(flat_items[0].tip.as_deref(), Some("❤︎"));
+
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let rendered = Dialog::item_spans_for_width(&active_favorite, 32, colors);
+        let rendered_text: String = rendered.iter().map(|span| span.content.as_ref()).collect();
+        assert!(rendered_text.starts_with("● GPT-5"));
+        assert!(rendered_text.ends_with("❤︎ "));
     }
 
     #[test]

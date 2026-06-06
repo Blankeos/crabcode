@@ -148,6 +148,7 @@ mod tests {
             description: String::new(),
             tip: None,
             provider_id: String::new(),
+            active: false,
         }
     }
 

@@ -4390,6 +4390,7 @@ impl App {
                                         description: item.description,
                                         tip: item.tip,
                                         provider_id: item.provider_id.clone(),
+                                        active: item.active,
                                     })
                                     .collect();
                             self.connect_dialog_state =
@@ -4410,6 +4411,7 @@ impl App {
                                         description: item.description,
                                         tip: item.tip,
                                         provider_id: item.provider_id.clone(),
+                                        active: item.active,
                                     })
                                     .collect();
                             self.show_models_dialog(title, dialog_items);
@@ -4593,6 +4595,7 @@ impl App {
                             description: item.description,
                             tip: item.tip,
                             provider_id: item.provider_id.clone(),
+                            active: item.active,
                         })
                         .collect();
                     self.connect_dialog_state =
@@ -4612,6 +4615,7 @@ impl App {
                             description: item.description,
                             tip: item.tip,
                             provider_id: item.provider_id.clone(),
+                            active: item.active,
                         })
                         .collect();
                     self.show_models_dialog(title, dialog_items);
@@ -4704,6 +4708,7 @@ impl App {
                         session.updated_at,
                     )),
                     provider_id: session.title.clone(),
+                    active: false,
                 }
             })
             .collect();
@@ -4782,6 +4787,7 @@ impl App {
                 description: "Copy message to clipboard".to_string(),
                 tip: None,
                 provider_id: "copy".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "fork".to_string(),
@@ -4790,6 +4796,7 @@ impl App {
                 description: "Create new session (Will include this message)".to_string(),
                 tip: None,
                 provider_id: "fork".to_string(),
+                active: false,
             },
         ];
 
@@ -4801,6 +4808,7 @@ impl App {
                 description: "Remove messages from here onward".to_string(),
                 tip: None,
                 provider_id: "undo".to_string(),
+                active: false,
             });
         }
 
@@ -5147,9 +5155,7 @@ impl App {
             let is_favorite =
                 favorites_set.contains(&(model.provider_id.clone(), model.id.clone()));
 
-            let tip = if is_active {
-                Some("Active".to_string())
-            } else if is_favorite {
+            let tip = if is_favorite {
                 Some("❤︎".to_string())
             } else {
                 None
@@ -5164,6 +5170,7 @@ impl App {
                 description,
                 tip,
                 provider_id: model.provider_id.clone(),
+                active: is_active,
             });
         };
 
@@ -5261,11 +5268,7 @@ impl App {
     ) {
         for item in &mut items {
             let is_active = item.id == self.model && item.provider_id == self.provider_name;
-            if is_active {
-                item.tip = Some("Active".to_string());
-            } else if item.tip.as_deref() == Some("Active") {
-                item.tip = None;
-            }
+            item.active = is_active;
         }
 
         self.models_dialog_state = init_models_dialog(title, items);
@@ -5326,12 +5329,9 @@ impl App {
                     name: t.id.clone(),
                     group: String::new(),
                     description: String::new(),
-                    tip: if is_active {
-                        Some("Active".to_string())
-                    } else {
-                        None
-                    },
+                    tip: None,
                     provider_id: String::new(),
+                    active: is_active,
                 }
             })
             .collect();
@@ -5371,6 +5371,7 @@ impl App {
                         Some("No description".to_string())
                     },
                     provider_id: String::new(),
+                    active: false,
                 });
             }
         }
@@ -5393,6 +5394,7 @@ impl App {
                 description: "OAuth via browser callback".to_string(),
                 tip: None,
                 provider_id: "openai".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "openai-oauth-headless".to_string(),
@@ -5401,6 +5403,7 @@ impl App {
                 description: "Device code login flow".to_string(),
                 tip: None,
                 provider_id: "openai".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "openai-api-key".to_string(),
@@ -5409,6 +5412,7 @@ impl App {
                 description: "Use OpenAI API key".to_string(),
                 tip: None,
                 provider_id: "openai".to_string(),
+                active: false,
             },
         ];
 
