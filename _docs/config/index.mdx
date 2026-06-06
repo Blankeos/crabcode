@@ -24,10 +24,12 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
 
 ## File layout
 
-| Platform | Directory | Root file | Rules | Commands | Agents | Skills | MCP / config |
+| Platform | Directory | Root file 🟰 | Rules | Commands 🔀 | Agents | Skills 🔀 | MCP / config 🔀 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenCode | `.opencode/` | `AGENTS.md` | none | `.opencode/commands/` | `.opencode/agents/` | `.opencode/skills/` | `.opencode/opencode.jsonc` |
 | crabcode | `.crabcode/` | `AGENTS.md` | none | `.crabcode/commands/` | `.crabcode/agents/` | `.crabcode/skills/` | `.crabcode/crabcode.jsonc` |
+
+🟰 Same standard across both directories (e.g. `AGENTS.md` at project root). 🔀 Merges contributions from both directories. Same-name entries: crabcode wins.
 
 ## Example
 

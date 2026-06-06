@@ -240,4 +240,4 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
 - [x] Syntax highlighting for apply_patch and edit tool calls on the remote-client browser UI.
 
-- [ ] IN the "Overview" of ocnfiguration docs, mention which ones "merge" int he "File Layout", very useful info. Like a legend on the table with an emoji, then say "* Merges across both"
+- [x] IN the "Overview" of ocnfiguration docs, mention which ones "merge" int he "File Layout", very useful info. Like a legend on the table with an emoji, then say "\* Merges across both"
