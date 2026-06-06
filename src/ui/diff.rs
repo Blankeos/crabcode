@@ -491,6 +491,66 @@ pub fn format_edit_diff_for_path_with_start(
     )
 }
 
+pub fn render_unified_diff_for_path_with_indent(
+    diff_lines: &[DiffLine],
+    max_width: usize,
+    colors: &ThemeColors,
+    indent: &str,
+    path: &str,
+) -> Vec<Line<'static>> {
+    let Some(start_line) = diff_lines.iter().filter_map(|line| line.line_number).min() else {
+        return render_unified_diff_with_indent(diff_lines, max_width, colors, indent);
+    };
+    let end_line = diff_lines
+        .iter()
+        .filter_map(|line| line.line_number)
+        .max()
+        .unwrap_or(start_line);
+    let line_count = end_line.saturating_sub(start_line) + 1;
+    let mut old_lines = vec![String::new(); line_count];
+    let mut new_lines = vec![String::new(); line_count];
+
+    for diff_line in diff_lines {
+        let Some(line_number) = diff_line.line_number else {
+            continue;
+        };
+        let Some(index) = line_number.checked_sub(start_line) else {
+            continue;
+        };
+        let Some(old_slot) = old_lines.get_mut(index) else {
+            continue;
+        };
+        match diff_line.line_type {
+            DiffLineType::Remove => *old_slot = diff_line.text.clone(),
+            DiffLineType::Add => {
+                if let Some(new_slot) = new_lines.get_mut(index) {
+                    *new_slot = diff_line.text.clone();
+                }
+            }
+            DiffLineType::Context => {
+                *old_slot = diff_line.text.clone();
+                if let Some(new_slot) = new_lines.get_mut(index) {
+                    *new_slot = diff_line.text.clone();
+                }
+            }
+        }
+    }
+
+    let old_text = old_lines.join("\n");
+    let new_text = new_lines.join("\n");
+    let old_syntax_lines = crate::ui::syntax::highlight_code_for_path(&old_text, path, colors);
+    let new_syntax_lines = crate::ui::syntax::highlight_code_for_path(&new_text, path, colors);
+    render_unified_diff_with_indent_and_syntax(
+        diff_lines,
+        max_width,
+        colors,
+        indent,
+        old_syntax_lines.as_deref(),
+        new_syntax_lines.as_deref(),
+        start_line,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

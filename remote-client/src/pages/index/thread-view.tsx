@@ -33,7 +33,7 @@ import {
 } from "../../icons"
 import { cx } from "../../lib/cx"
 import type { RemoteMessage, RemoteStatus } from "../../remote-api"
-import type { DiffLine, ImagePreviewTarget, ThreadItem, ToolActivityStep, ToolIconKind, ToolMessage, ToolStepDetail, ToolVisualState } from "./page-types"
+import type { DiffLine, DiffSection, ImagePreviewTarget, ThreadItem, ToolActivityStep, ToolIconKind, ToolMessage, ToolStepDetail, ToolVisualState } from "./page-types"
 import { handleImagePreviewKeyDown, messageImageAttachmentData, promptTextPartClass, promptTextParts, promptTextPartStyle } from "./prompt-utils"
 import { actionDescriptor, assistantMetrics, buildActivitySteps, messageModelLabel, trimPreview } from "./thread-model"
 import { agentAccentClass, displayAgentMode, fallbackCopyText } from "./shared-utils"
@@ -208,6 +208,7 @@ function ToolActionMessage(props: { tool: Accessor<ToolMessage> }) {
               details={descriptor().details}
               preview={descriptor().preview}
               diffLines={descriptor().diffLines}
+              diffSections={descriptor().diffSections}
             />
           </CollapsiblePanel>
         </section>
@@ -220,6 +221,7 @@ function ToolDetails(props: {
   details: ToolStepDetail[]
   preview?: string
   diffLines?: DiffLine[]
+  diffSections?: DiffSection[]
   compact?: boolean
 }) {
   return (
@@ -256,19 +258,20 @@ function ToolDetails(props: {
         </div>
       </Show>
       <Show when={props.diffLines && props.diffLines.length > 0}>
-        <div class="grid max-w-full gap-0.5 overflow-x-auto rounded-[7px] border border-[var(--line)] bg-black/20 p-3 font-mono text-[0.73rem] leading-normal text-[#bebbb4]" aria-label="Diff preview">
-          <For each={props.diffLines}>
-            {(line) => (
-              <div
-                class={cx(
-                  "grid min-w-max grid-cols-[1rem_minmax(0,1fr)] gap-2",
-                  line.kind === "add" && "text-[#8fd8aa]",
-                  line.kind === "remove" && "text-[#e09299]"
-                )}
-              >
-                <span class="select-none text-[var(--faint)]">{line.kind === "add" ? "+" : line.kind === "remove" ? "-" : " "}</span>
-                <code class="[font:inherit] text-inherit">{line.text}</code>
-              </div>
+        <DiffPreview lines={props.diffLines || []} />
+      </Show>
+      <Show when={props.diffSections && props.diffSections.length > 0}>
+        <div class="grid max-w-full gap-3 overflow-x-auto rounded-[7px] border border-[var(--line)] bg-black/20 p-3 font-mono text-[0.73rem] leading-normal text-[#bebbb4]" aria-label="Diff preview">
+          <For each={props.diffSections}>
+            {(section) => (
+              <section class="min-w-max">
+                <div class="mb-1.5 flex min-w-max items-center gap-2 text-[0.7rem] font-semibold text-[#d0a94f]">
+                  <span class="h-px w-6 bg-[#d0a94f]/45" />
+                  <span>{section.path}</span>
+                  <span class="h-px flex-1 bg-[#d0a94f]/25" />
+                </div>
+                <DiffRows lines={section.lines} language={section.language} />
+              </section>
             )}
           </For>
         </div>
@@ -282,6 +285,90 @@ function ToolDetails(props: {
       </Show>
     </div>
   )
+}
+
+function DiffPreview(props: { lines: DiffLine[]; language?: string }) {
+  return (
+    <div class="grid max-w-full gap-0.5 overflow-x-auto rounded-[7px] border border-[var(--line)] bg-black/20 p-3 font-mono text-[0.73rem] leading-normal text-[#bebbb4]" aria-label="Diff preview">
+      <DiffRows lines={props.lines} language={props.language} />
+    </div>
+  )
+}
+
+function DiffRows(props: { lines: DiffLine[]; language?: string }) {
+  return (
+    <For each={props.lines}>
+      {(line) => {
+        const language = line.language || props.language
+        return (
+          <div
+            class={cx(
+              "grid min-w-max grid-cols-[2.4rem_1rem_minmax(0,1fr)] gap-2",
+              line.kind === "add" && "bg-[#0c2613] text-[#8fd8aa]",
+              line.kind === "remove" && "bg-[#2b1012] text-[#e09299]",
+              line.kind === "context" && "text-[#8d8981]"
+            )}
+          >
+            <span class="select-none text-right text-[var(--faint)]">{line.lineNumber ?? ""}</span>
+            <span class="select-none text-[var(--faint)]">{line.kind === "add" ? "+" : line.kind === "remove" ? "-" : " "}</span>
+            <code class="[font:inherit] text-inherit">
+              <SyntaxText text={line.text} language={language} />
+            </code>
+          </div>
+        )
+      }}
+    </For>
+  )
+}
+
+function SyntaxText(props: { text: string; language?: string }) {
+  const tokens = () => syntaxTokens(props.text, props.language)
+  return (
+    <>
+      <For each={tokens()}>
+        {(token) => <span class={syntaxTokenClass(token.kind)}>{token.text}</span>}
+      </For>
+    </>
+  )
+}
+
+type SyntaxToken = { kind: "plain" | "keyword" | "string" | "comment" | "number" | "type"; text: string }
+
+function syntaxTokens(text: string, language?: string): SyntaxToken[] {
+  if (!language) return [{ kind: "plain", text }]
+  const keywordPattern = language === "rust"
+    ? /\b(?:async|await|break|const|continue|crate|else|enum|false|fn|for|if|impl|let|loop|match|mod|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|use|where|while)\b/g
+    : /\b(?:as|async|await|break|case|catch|class|const|continue|default|else|export|extends|false|finally|for|from|function|if|import|in|interface|let|new|null|return|satisfies|switch|throw|true|try|type|typeof|undefined|var|while)\b/g
+  const regex = new RegExp(`(//.*$|/\\*[\\s\\S]*?\\*/|"(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|\`(?:\\\\.|[^\`\\\\])*\`|\\b\\d+(?:\\.\\d+)?\\b|${keywordPattern.source}|\\b[A-Z][A-Za-z0-9_]*\\b)`, "g")
+  const tokens: SyntaxToken[] = []
+  let lastIndex = 0
+  for (const match of text.matchAll(regex)) {
+    const index = match.index ?? 0
+    if (index > lastIndex) tokens.push({ kind: "plain", text: text.slice(lastIndex, index) })
+    const value = match[0]
+    const kind: SyntaxToken["kind"] = value.startsWith("//") || value.startsWith("/*")
+      ? "comment"
+      : value.startsWith("\"") || value.startsWith("'") || value.startsWith("`")
+        ? "string"
+        : /^\d/.test(value)
+          ? "number"
+          : /^[A-Z]/.test(value)
+            ? "type"
+            : "keyword"
+    tokens.push({ kind, text: value })
+    lastIndex = index + value.length
+  }
+  if (lastIndex < text.length) tokens.push({ kind: "plain", text: text.slice(lastIndex) })
+  return tokens
+}
+
+function syntaxTokenClass(kind: SyntaxToken["kind"]) {
+  if (kind === "keyword") return "text-[#8fb7ff]"
+  if (kind === "string") return "text-[#d8bf7f]"
+  if (kind === "comment") return "text-[#7f8a77]"
+  if (kind === "number") return "text-[#c7a7e8]"
+  if (kind === "type") return "text-[#8fd3d8]"
+  return undefined
 }
 
 function ToolIcon(props: { kind: ToolIconKind; class?: string }) {

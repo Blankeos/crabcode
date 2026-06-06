@@ -4022,11 +4022,12 @@ impl Chat {
                             Span::styled("─".repeat(rule_width), header_style),
                         ]));
                     }
-                    out.extend(crate::ui::diff::render_unified_diff_with_indent(
+                    out.extend(crate::ui::diff::render_unified_diff_for_path_with_indent(
                         &file.diff_lines,
                         max_width,
                         colors,
                         "    ",
+                        &file.path,
                     ));
                 }
             } else if let Some(ref preview_text) = output_preview {

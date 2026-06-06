@@ -1,5 +1,5 @@
 import type { RemoteMessage, RemoteMessagePart, RemoteStatus } from "../../remote-api"
-import type { ActionDescriptor, DiffLine, JsonObject, JsonValue, ParsedToolMessage, ThreadItem, ToolActivityStep, ToolMessage, ToolStepDetail, ToolVisualState } from "./page-types"
+import type { ActionDescriptor, DiffLine, DiffSection, JsonObject, JsonValue, ParsedToolMessage, ThreadItem, ToolActivityStep, ToolMessage, ToolStepDetail, ToolVisualState } from "./page-types"
 import { basename, cuid, formatSeconds } from "./shared-utils"
 
 const THINKING_TOOL_NAMES = new Set([
@@ -449,7 +449,7 @@ export function actionDescriptor(tool: ToolMessage): ActionDescriptor {
           status: state,
         },
       ],
-      diffLines: compactDiffLines(diffLineOps(oldText, newText)),
+      diffLines: withDiffLanguage(compactDiffLines(diffLineOps(oldText, newText)), filePath),
       preview: errorPreview,
     }
   }
@@ -472,26 +472,30 @@ export function actionDescriptor(tool: ToolMessage): ActionDescriptor {
           status: state,
         },
       ],
-      diffLines: compactDiffLines(diffLineOps("", newText)),
+      diffLines: withDiffLanguage(compactDiffLines(diffLineOps("", newText)), filePath),
       preview: errorPreview,
     }
   }
 
   if (tool.parsed.name === "apply_patch") {
     const patch = argString(args, ["patch"]) || ""
-    const paths = patchPaths(patch, tool.cwd)
+    const patchPreview = patchPreviewFromText(patch, tool.cwd)
+    const paths = patchPreview.paths.length > 0 ? patchPreview.paths : patchPaths(patch, tool.cwd)
     const fileCount = numberValue(metadata?.file_count) ?? paths.length
+    const description = paths.length > 0 ? paths.slice(0, 3).join(", ") : fileCount > 0 ? formatCount(fileCount, "file") : tool.parsed.title || "Workspace patch"
     return {
       label: state === "active" ? "Applying patch" : state === "error" ? "Patch failed" : "Applied patch",
-      description: fileCount > 0 ? formatCount(fileCount, "file") : tool.parsed.title || "Workspace patch",
+      description: paths.length > 3 ? `${description} +${paths.length - 3} more` : description,
       state,
       icon: state === "error" ? "warning" : "pencil",
+      stats: { added: patchPreview.added, removed: patchPreview.removed },
       details:
         paths.length > 0
           ? paths.slice(0, 8).map((path) => ({ label: path, status: state }))
           : [{ label: tool.parsed.title || "Patch", detail: firstPreviewLine(tool.parsed.outputPreview), status: state }],
-      diffLines: [],
-      preview: state === "error" ? tool.parsed.outputPreview : firstPreviewLine(tool.parsed.outputPreview),
+      diffLines: patchPreview.sections.length === 1 ? patchPreview.sections[0].lines : [],
+      diffSections: patchPreview.sections.length > 1 ? patchPreview.sections : undefined,
+      preview: state === "error" ? tool.parsed.outputPreview : patchPreview.sections.length > 0 ? undefined : firstPreviewLine(tool.parsed.outputPreview),
     }
   }
 
@@ -749,6 +753,159 @@ export function compactDiffLines(lines: DiffLine[], maxLines = 12) {
   const start = Math.max(0, changed[0] - 2)
   const end = Math.min(lines.length, changed[changed.length - 1] + 3)
   return lines.slice(start, end).slice(0, maxLines)
+}
+
+export function withDiffLanguage(lines: DiffLine[], path: string) {
+  const language = languageForPath(path)
+  return lines.map((line) => ({ ...line, language }))
+}
+
+type PatchMode =
+  | { kind: "none" }
+  | { kind: "add"; newLine: number }
+  | { kind: "hunk"; oldLine?: number; newLine?: number }
+
+type PatchPreview = {
+  paths: string[]
+  sections: DiffSection[]
+  added: number
+  removed: number
+}
+
+const PATCH_DIFF_MAX_LINES = 80
+
+export function patchPreviewFromText(patch: string, cwd: string): PatchPreview {
+  const paths = patchPaths(patch, cwd)
+  const sections: DiffSection[] = []
+  const lines = patchLinesWithoutFences(patch)
+  let mode: PatchMode = { kind: "none" }
+  let current: DiffSection | undefined
+  let added = 0
+  let removed = 0
+  let totalLines = 0
+
+  const sectionForPath = (rawPath: string) => {
+    const path = displayPath(normalizeDiffPath(rawPath), cwd, false)
+    let section = sections.find((item) => item.path === path)
+    if (!section) {
+      section = { path, language: languageForPath(path), lines: [] }
+      sections.push(section)
+    }
+    current = section
+    return section
+  }
+
+  const pushLine = (kind: DiffLine["kind"], text: string, lineNumber?: number) => {
+    const section = current || sectionForPath(paths[0] || "Patch")
+    if (kind === "add") added += 1
+    if (kind === "remove") removed += 1
+    if (totalLines >= PATCH_DIFF_MAX_LINES) return
+    section.lines.push({ kind, text, lineNumber, language: section.language })
+    totalLines += 1
+  }
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const trimmed = line.trim()
+    const next = lines[index + 1]
+
+    if (!trimmed || trimmed === "\\ No newline at end of file") continue
+
+    const addFile = trimmed.match(/^\*\*\* Add File: (.+)$/)?.[1]
+    if (addFile) {
+      sectionForPath(addFile)
+      mode = { kind: "add", newLine: 1 }
+      continue
+    }
+
+    const codexPath = trimmed.match(/^\*\*\* (?:Update|Delete) File: (.+)$/)?.[1] || trimmed.match(/^\*\*\* Move to: (.+)$/)?.[1]
+    if (codexPath) {
+      sectionForPath(codexPath)
+      mode = { kind: "none" }
+      continue
+    }
+
+    if (trimmed === "*** Begin Patch" || trimmed === "*** End Patch") continue
+
+    if (line.startsWith("--- ") && next?.startsWith("+++ ")) {
+      const plusPath = normalizeDiffPath(next.slice(4))
+      const minusPath = normalizeDiffPath(line.slice(4))
+      sectionForPath(plusPath === "/dev/null" ? minusPath : plusPath)
+      mode = { kind: "none" }
+      continue
+    }
+    if (line.startsWith("+++ ") || line.startsWith("diff --git ") || line.startsWith("index ") || line.startsWith("new file mode ") || line.startsWith("deleted file mode ")) {
+      mode = { kind: "none" }
+      continue
+    }
+
+    if (line.startsWith("@@")) {
+      const { oldLine, newLine } = parsePatchHunkStart(line)
+      mode = { kind: "hunk", oldLine, newLine }
+      continue
+    }
+
+    if (mode.kind === "add") {
+      if (line.startsWith("+")) pushLine("add", line.slice(1), mode.newLine++)
+      continue
+    }
+
+    if (mode.kind === "hunk") {
+      const prefix = line[0]
+      const text = line.slice(1)
+      if (prefix === " ") {
+        pushLine("context", text, mode.newLine)
+        if (mode.oldLine !== undefined) mode.oldLine += 1
+        if (mode.newLine !== undefined) mode.newLine += 1
+      } else if (prefix === "-") {
+        pushLine("remove", text, mode.oldLine)
+        if (mode.oldLine !== undefined) mode.oldLine += 1
+      } else if (prefix === "+") {
+        pushLine("add", text, mode.newLine)
+        if (mode.newLine !== undefined) mode.newLine += 1
+      }
+    }
+  }
+
+  return {
+    paths: paths.length > 0 ? paths : sections.map((section) => section.path),
+    sections: sections.filter((section) => section.lines.length > 0),
+    added,
+    removed,
+  }
+}
+
+function patchLinesWithoutFences(patch: string) {
+  const lines = patch.trim().split("\n")
+  if (lines[0]?.trimStart().startsWith("```")) lines.shift()
+  if (lines[lines.length - 1]?.trimStart().startsWith("```")) lines.pop()
+  return lines
+}
+
+function normalizeDiffPath(raw: string) {
+  const path = raw.trim().split(/\s+/)[0]?.replace(/^"|"$/g, "") || ""
+  return path.replace(/^[ab]\//, "")
+}
+
+function parsePatchHunkStart(line: string) {
+  const oldLine = line.match(/ -(\d+)/)?.[1]
+  const newLine = line.match(/ \+(\d+)/)?.[1]
+  return {
+    oldLine: oldLine ? Math.max(1, Number(oldLine)) : undefined,
+    newLine: newLine ? Math.max(1, Number(newLine)) : undefined,
+  }
+}
+
+export function languageForPath(path: string) {
+  const ext = path.split(".").pop()?.toLowerCase()
+  if (!ext) return undefined
+  if (["ts", "tsx", "js", "jsx", "mjs", "cjs"].includes(ext)) return "typescript"
+  if (ext === "rs") return "rust"
+  if (["json", "jsonc"].includes(ext)) return "json"
+  if (["md", "mdx"].includes(ext)) return "markdown"
+  if (["css", "scss", "sass"].includes(ext)) return "css"
+  if (["html", "xml"].includes(ext)) return "html"
+  return ext
 }
 
 export function lcsLength(left: string[], right: string[]) {

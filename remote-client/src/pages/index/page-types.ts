@@ -101,6 +101,14 @@ export type ToolActivityStep = {
 export type DiffLine = {
   kind: "add" | "remove" | "context"
   text: string
+  lineNumber?: number
+  language?: string
+}
+
+export type DiffSection = {
+  path: string
+  language?: string
+  lines: DiffLine[]
 }
 
 export type ActionDescriptor = {
@@ -111,6 +119,7 @@ export type ActionDescriptor = {
   stats?: { added: number; removed: number }
   details: ToolStepDetail[]
   diffLines: DiffLine[]
+  diffSections?: DiffSection[]
   preview?: string
 }
 
