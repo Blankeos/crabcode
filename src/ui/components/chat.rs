@@ -101,6 +101,7 @@ pub struct ChatHyperlinkHover {
 // Minimum elapsed time before showing tokens/s (250ms)
 const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
 const TOOL_RESULT_MAX_SCREEN_LINES: usize = 8;
+const PATCH_DIFF_PREVIEW_MAX_LINES: usize = 40;
 const TOOL_MARKER_ACTIVE: &str = "⬡";
 const TOOL_MARKER_DONE: &str = "⬢";
 
@@ -146,6 +147,414 @@ struct PlanStep {
 struct PlanUpdateDisplay {
     explanation: Option<String>,
     plan: Vec<PlanStep>,
+}
+
+#[derive(Default)]
+struct PatchPreview {
+    paths: Vec<String>,
+    added: usize,
+    removed: usize,
+    files: Vec<PatchFilePreview>,
+    truncated: bool,
+}
+
+#[derive(Default)]
+struct PatchFilePreview {
+    path: String,
+    diff_lines: Vec<crate::ui::diff::DiffLine>,
+}
+
+enum PatchPreviewMode {
+    None,
+    AddFile {
+        new_line: usize,
+    },
+    Hunk {
+        old_line: Option<usize>,
+        new_line: Option<usize>,
+        pending: Vec<(char, String)>,
+    },
+}
+
+fn patch_preview_from_text(patch: &str) -> PatchPreview {
+    let mut preview = PatchPreview {
+        paths: crate::tools::patch::extract_patch_paths(patch)
+            .into_iter()
+            .map(|path| display_path(&path, false))
+            .collect(),
+        ..PatchPreview::default()
+    };
+    let lines = patch_lines_without_fences(patch);
+    let mut mode = PatchPreviewMode::None;
+    let mut current_file = None::<usize>;
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        let next = lines.get(index + 1).copied();
+
+        if trimmed == r"\ No newline at end of file" || trimmed.starts_with("```") {
+            index += 1;
+            continue;
+        }
+
+        if trimmed.starts_with("*** Add File: ") {
+            flush_patch_hunk(&mut preview, current_file, &mut mode);
+            let path = trimmed
+                .strip_prefix("*** Add File: ")
+                .expect("prefix already checked");
+            current_file = Some(push_patch_file_preview(&mut preview, path));
+            mode = PatchPreviewMode::AddFile { new_line: 1 };
+            index += 1;
+            continue;
+        }
+
+        if let Some(path) = trimmed
+            .strip_prefix("*** Update File: ")
+            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+            .or_else(|| trimmed.strip_prefix("*** Move to: "))
+        {
+            flush_patch_hunk(&mut preview, current_file, &mut mode);
+            current_file = Some(push_patch_file_preview(&mut preview, path));
+            mode = PatchPreviewMode::None;
+            index += 1;
+            continue;
+        }
+
+        if trimmed == "*** Begin Patch" || trimmed == "*** End Patch" {
+            flush_patch_hunk(&mut preview, current_file, &mut mode);
+            index += 1;
+            continue;
+        }
+
+        if line.starts_with("diff --git ")
+            || line.starts_with("index ")
+            || line.starts_with("new file mode ")
+            || line.starts_with("deleted file mode ")
+        {
+            flush_patch_hunk(&mut preview, current_file, &mut mode);
+            mode = PatchPreviewMode::None;
+            index += 1;
+            continue;
+        }
+
+        if line.starts_with("--- ") && next.is_some_and(|next| next.starts_with("+++ ")) {
+            flush_patch_hunk(&mut preview, current_file, &mut mode);
+            current_file = next
+                .and_then(unified_diff_path_from_plus_header)
+                .map(|path| {
+                    if path == "/dev/null" {
+                        let old_path = line
+                            .strip_prefix("--- ")
+                            .map(normalize_diff_preview_path)
+                            .unwrap_or_default();
+                        push_patch_file_preview(&mut preview, &old_path)
+                    } else {
+                        push_patch_file_preview(&mut preview, &path)
+                    }
+                });
+            mode = PatchPreviewMode::None;
+            index += 1;
+            continue;
+        }
+        if line.starts_with("+++ ") {
+            flush_patch_hunk(&mut preview, current_file, &mut mode);
+            mode = PatchPreviewMode::None;
+            index += 1;
+            continue;
+        }
+
+        if line.starts_with("@@") {
+            flush_patch_hunk(&mut preview, current_file, &mut mode);
+            let (old_line, new_line) = parse_patch_hunk_start(line);
+            mode = PatchPreviewMode::Hunk {
+                old_line,
+                new_line,
+                pending: Vec::new(),
+            };
+            index += 1;
+            continue;
+        }
+
+        match &mut mode {
+            PatchPreviewMode::AddFile { new_line } => {
+                if let Some(text) = line.strip_prefix('+') {
+                    let line_number = Some(*new_line);
+                    *new_line += 1;
+                    push_patch_diff_line(
+                        &mut preview,
+                        current_file,
+                        crate::ui::diff::DiffLineType::Add,
+                        line_number,
+                        text,
+                    );
+                }
+            }
+            PatchPreviewMode::Hunk { pending, .. } => {
+                let Some((prefix, text)) = split_patch_line(line) else {
+                    flush_patch_hunk(&mut preview, current_file, &mut mode);
+                    index += 1;
+                    continue;
+                };
+                pending.push((prefix, text.to_string()));
+            }
+            PatchPreviewMode::None => {}
+        }
+
+        index += 1;
+    }
+
+    flush_patch_hunk(&mut preview, current_file, &mut mode);
+
+    if preview.truncated {
+        let file_index = current_file.unwrap_or_else(|| ensure_patch_file_preview(&mut preview));
+        if let Some(file) = preview.files.get_mut(file_index) {
+            file.diff_lines.push(crate::ui::diff::DiffLine {
+                line_type: crate::ui::diff::DiffLineType::Context,
+                line_number: None,
+                text: "⋯".to_string(),
+            });
+        }
+    }
+
+    preview
+}
+
+fn push_patch_file_preview(preview: &mut PatchPreview, path: &str) -> usize {
+    let path = display_path(&normalize_diff_preview_path(path), false);
+    if let Some(index) = preview.files.iter().position(|file| file.path == path) {
+        return index;
+    }
+    preview.files.push(PatchFilePreview {
+        path,
+        diff_lines: Vec::new(),
+    });
+    preview.files.len() - 1
+}
+
+fn ensure_patch_file_preview(preview: &mut PatchPreview) -> usize {
+    if preview.files.is_empty() {
+        let path = preview
+            .paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Patch".to_string());
+        preview.files.push(PatchFilePreview {
+            path,
+            diff_lines: Vec::new(),
+        });
+    }
+    preview.files.len() - 1
+}
+
+fn unified_diff_path_from_plus_header(line: &str) -> Option<String> {
+    line.strip_prefix("+++ ").map(normalize_diff_preview_path)
+}
+
+fn flush_patch_hunk(
+    preview: &mut PatchPreview,
+    file_index: Option<usize>,
+    mode: &mut PatchPreviewMode,
+) {
+    let PatchPreviewMode::Hunk {
+        old_line,
+        new_line,
+        pending,
+    } = mode
+    else {
+        return;
+    };
+
+    if pending.is_empty() {
+        return;
+    }
+
+    let (mut old_cursor, mut new_cursor) = (*old_line, *new_line);
+    if (old_cursor.is_none() || new_cursor.is_none()) && file_index.is_some() {
+        if let Some(inferred) = infer_patch_hunk_start(preview, file_index, pending) {
+            old_cursor.get_or_insert(inferred);
+            new_cursor.get_or_insert(inferred);
+        }
+    }
+
+    let pending_lines = std::mem::take(pending);
+    for (prefix, text) in pending_lines {
+        match prefix {
+            ' ' => {
+                let line_number = new_cursor;
+                increment_optional_line(&mut old_cursor);
+                increment_optional_line(&mut new_cursor);
+                push_patch_diff_line(
+                    preview,
+                    file_index,
+                    crate::ui::diff::DiffLineType::Context,
+                    line_number,
+                    &text,
+                );
+            }
+            '-' => {
+                let line_number = old_cursor;
+                increment_optional_line(&mut old_cursor);
+                push_patch_diff_line(
+                    preview,
+                    file_index,
+                    crate::ui::diff::DiffLineType::Remove,
+                    line_number,
+                    &text,
+                );
+            }
+            '+' => {
+                let line_number = new_cursor;
+                increment_optional_line(&mut new_cursor);
+                push_patch_diff_line(
+                    preview,
+                    file_index,
+                    crate::ui::diff::DiffLineType::Add,
+                    line_number,
+                    &text,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn infer_patch_hunk_start(
+    preview: &PatchPreview,
+    file_index: Option<usize>,
+    pending: &[(char, String)],
+) -> Option<usize> {
+    let path = file_index
+        .and_then(|index| preview.files.get(index))
+        .map(|file| file.path.as_str())
+        .or_else(|| preview.paths.first().map(String::as_str))?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let old_text = patch_hunk_side_text(pending, '+');
+    let new_text = patch_hunk_side_text(pending, '-');
+    if old_text.is_empty() && new_text.is_empty() {
+        return Some(1);
+    }
+
+    let byte_offset = find_hunk_text_offset(&content, &old_text)
+        .or_else(|| find_hunk_text_offset(&content, &new_text))?;
+    Some(content[..byte_offset].lines().count() + 1)
+}
+
+fn patch_hunk_side_text(pending: &[(char, String)], excluded_prefix: char) -> String {
+    pending
+        .iter()
+        .filter(|(prefix, _)| *prefix != excluded_prefix)
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn find_hunk_text_offset(content: &str, text: &str) -> Option<usize> {
+    if text.is_empty() {
+        return Some(0);
+    }
+    content.find(text).or_else(|| {
+        let with_newline = format!("{}\n", text);
+        content.find(&with_newline)
+    })
+}
+
+fn normalize_diff_preview_path(raw: &str) -> String {
+    let path = raw
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches('"');
+    path.strip_prefix("a/")
+        .or_else(|| path.strip_prefix("b/"))
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn patch_lines_without_fences(patch: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = patch.trim().lines().collect();
+    if lines
+        .first()
+        .is_some_and(|line| line.trim_start().starts_with("```"))
+    {
+        lines.remove(0);
+        if lines
+            .last()
+            .is_some_and(|line| line.trim_start().starts_with("```"))
+        {
+            lines.pop();
+        }
+    }
+    lines
+}
+
+fn parse_patch_hunk_start(line: &str) -> (Option<usize>, Option<usize>) {
+    let mut old_line = None;
+    let mut new_line = None;
+    for part in line.split_whitespace() {
+        if old_line.is_none() && part.starts_with('-') {
+            old_line = parse_patch_range_start(part);
+        } else if new_line.is_none() && part.starts_with('+') {
+            new_line = parse_patch_range_start(part);
+        }
+    }
+    (old_line, new_line)
+}
+
+fn parse_patch_range_start(part: &str) -> Option<usize> {
+    part.get(1..)?
+        .split(',')
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|line| line.max(1))
+}
+
+fn split_patch_line(line: &str) -> Option<(char, &str)> {
+    let prefix = line.chars().next()?;
+    if matches!(prefix, ' ' | '-' | '+') {
+        Some((prefix, &line[prefix.len_utf8()..]))
+    } else {
+        None
+    }
+}
+
+fn increment_optional_line(line: &mut Option<usize>) {
+    if let Some(value) = line.as_mut() {
+        *value += 1;
+    }
+}
+
+fn push_patch_diff_line(
+    preview: &mut PatchPreview,
+    file_index: Option<usize>,
+    line_type: crate::ui::diff::DiffLineType,
+    line_number: Option<usize>,
+    text: &str,
+) {
+    match line_type {
+        crate::ui::diff::DiffLineType::Add => preview.added += 1,
+        crate::ui::diff::DiffLineType::Remove => preview.removed += 1,
+        crate::ui::diff::DiffLineType::Context => {}
+    }
+
+    if patch_preview_line_count(preview) < PATCH_DIFF_PREVIEW_MAX_LINES {
+        let file_index = file_index.unwrap_or_else(|| ensure_patch_file_preview(preview));
+        if let Some(file) = preview.files.get_mut(file_index) {
+            file.diff_lines.push(crate::ui::diff::DiffLine {
+                line_type,
+                line_number,
+                text: text.to_string(),
+            });
+        }
+    } else {
+        preview.truncated = true;
+    }
+}
+
+fn patch_preview_line_count(preview: &PatchPreview) -> usize {
+    preview.files.iter().map(|file| file.diff_lines.len()).sum()
 }
 
 fn now_epoch_ms() -> u64 {
@@ -3516,6 +3925,116 @@ impl Chat {
                     push_preview_lines(&mut out, preview, max_width, result_style);
                 }
             }
+        } else if name == "apply_patch" && status != "error" {
+            let patch = args_obj
+                .and_then(|o| o.get("patch"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let preview = patch_preview_from_text(patch);
+            let active = matches!(status.as_str(), "running" | "pending");
+            let file_count = metadata_usize(metadata.as_ref(), &["file_count"])
+                .unwrap_or_else(|| preview.paths.len());
+            let description = if preview.paths.is_empty() {
+                if file_count == 1 {
+                    "1 file".to_string()
+                } else if file_count > 1 {
+                    format!("{} files", file_count)
+                } else {
+                    "workspace".to_string()
+                }
+            } else if preview.paths.len() == 1 {
+                preview.paths[0].clone()
+            } else {
+                preview
+                    .paths
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let description = if preview.paths.len() > 3 {
+                format!(
+                    "{} +{} more",
+                    description,
+                    preview.paths.len().saturating_sub(3)
+                )
+            } else {
+                description
+            };
+
+            let marker = self.tool_marker(active);
+            let marker_style = Style::default()
+                .fg(if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
+            let title_style = Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD);
+            let target_style = Style::default().fg(colors.text);
+            let add_style = Style::default()
+                .fg(colors.diff_add)
+                .add_modifier(Modifier::BOLD);
+            let remove_style = Style::default()
+                .fg(colors.diff_remove)
+                .add_modifier(Modifier::BOLD);
+            let verb = if active {
+                "Applying patch"
+            } else {
+                "Applied patch"
+            };
+
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled(marker.to_string(), marker_style),
+                    Span::raw(" "),
+                    Span::styled(verb.to_string(), title_style),
+                    Span::raw(" "),
+                    Span::styled(description, target_style),
+                    Span::raw(" ("),
+                    Span::styled(format!("+{}", preview.added), add_style),
+                    Span::raw(" "),
+                    Span::styled(format!("-{}", preview.removed), remove_style),
+                    Span::raw(")"),
+                ]),
+                max_width,
+                Line::from(Span::styled("  ", marker_style)),
+            );
+
+            if preview.files.iter().any(|file| !file.diff_lines.is_empty()) {
+                for (index, file) in preview.files.iter().enumerate() {
+                    if file.diff_lines.is_empty() {
+                        continue;
+                    }
+                    if preview.files.len() > 1 || index > 0 {
+                        let header_style = Style::default()
+                            .fg(colors.warning)
+                            .add_modifier(Modifier::BOLD);
+                        let rule_width = max_width.saturating_sub(file.path.chars().count() + 8);
+                        out.push(Line::from(vec![
+                            Span::styled("    ── ", header_style),
+                            Span::styled(file.path.clone(), header_style),
+                            Span::raw(" "),
+                            Span::styled("─".repeat(rule_width), header_style),
+                        ]));
+                    }
+                    out.extend(crate::ui::diff::render_unified_diff_with_indent(
+                        &file.diff_lines,
+                        max_width,
+                        colors,
+                        "    ",
+                    ));
+                }
+            } else if let Some(ref preview_text) = output_preview {
+                let result_style = Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM);
+                push_preview_lines(&mut out, preview_text, max_width, result_style);
+            }
         } else if matches!(name.as_str(), "edit" | "write") && status != "error" {
             let file_path = args_obj
                 .and_then(|o| o.get("file_path").or_else(|| o.get("filePath")))
@@ -4742,6 +5261,97 @@ mod tests {
             rendered,
             vec!["⬢ Added src/new.rs (+1 -0)", "    1 +fn main() {}"]
         );
+    }
+
+    #[test]
+    fn test_apply_patch_tool_renders_diff_summary() {
+        let chat = Chat::new();
+        let patch = "*** Begin Patch\n*** Update File: src/ui/components/chat.rs\n@@ -7,3 +7,3 @@\n alpha\n-beta\n+bravo\n*** End Patch\n";
+        let content = serde_json::json!({
+            "name": "apply_patch",
+            "status": "ok",
+            "args": { "patch": patch },
+            "metadata": { "file_count": 1 },
+            "output_preview": "Applied patch: updated 1",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 100, &colors, false);
+        let rendered = lines.iter().map(trimmed_line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "⬢ Applied patch src/ui/components/chat.rs (+1 -1)",
+                "    7  alpha",
+                "    8 -beta",
+                "    8 +bravo",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_apply_patch_tool_infers_line_numbers_for_rangeless_hunk() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("hello.txt");
+        std::fs::write(&file_path, "alpha\nbravo\ngamma\n").unwrap();
+        let file_path = file_path.to_string_lossy().to_string();
+        let chat = Chat::new();
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: {}\n@@\n-beta\n+bravo\n*** End Patch\n",
+            file_path
+        );
+        let content = serde_json::json!({
+            "name": "apply_patch",
+            "status": "ok",
+            "args": { "patch": patch },
+            "metadata": { "file_count": 1 },
+            "output_preview": "Applied patch: updated 1",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 120, &colors, false);
+        let rendered = lines.iter().map(trimmed_line_text).collect::<Vec<_>>();
+
+        assert!(rendered[0].contains("hello.txt (+1 -1)"));
+        assert!(rendered.iter().any(|line| line == "    2 -beta"));
+        assert!(rendered.iter().any(|line| line == "    2 +bravo"));
+    }
+
+    #[test]
+    fn test_apply_patch_tool_groups_multifile_diff_with_headers() {
+        let chat = Chat::new();
+        let patch = "*** Begin Patch\n*** Add File: tmp/apply-patch-smoke/a.txt\n+one\n+two\n*** Add File: tmp/apply-patch-smoke/b.txt\n+red\n+blue\n*** End Patch\n";
+        let content = serde_json::json!({
+            "name": "apply_patch",
+            "status": "ok",
+            "args": { "patch": patch },
+            "metadata": { "file_count": 2 },
+            "output_preview": "Applied patch: added 2",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 120, &colors, false);
+        let rendered = lines.iter().map(trimmed_line_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered[0],
+            "⬢ Applied patch tmp/apply-patch-smoke/a.txt, tmp/apply-patch-smoke/b.txt (+4 -0)"
+        );
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("── tmp/apply-patch-smoke/a.txt")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("── tmp/apply-patch-smoke/b.txt")));
+        assert!(rendered.iter().any(|line| line == "    1 +one"));
+        assert!(rendered.iter().any(|line| line == "    1 +red"));
     }
 
     #[test]
