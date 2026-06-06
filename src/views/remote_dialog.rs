@@ -6,9 +6,10 @@ use ratatui::{
     widgets::{Clear, Paragraph, Wrap},
     Frame,
 };
-use tui_textarea::{Input as TuiInput, TextArea};
+use tui_textarea::TextArea;
 
 use crate::theme::ThemeColors;
+use crate::ui::textarea_keys::input_textarea;
 
 pub const DEFAULT_REMOTE_BIND: &str = "0.0.0.0:8421";
 
@@ -299,13 +300,12 @@ pub fn handle_remote_dialog_key_event(
             RemoteDialogAction::Submit(submission)
         }
         _ => {
-            let input = TuiInput::from(event);
             match state.focus {
                 RemoteDialogFocus::Bind => {
-                    state.bind_textarea.input(input);
+                    input_textarea(&mut state.bind_textarea, event);
                 }
                 RemoteDialogFocus::Pin => {
-                    state.pin_textarea.input(input);
+                    input_textarea(&mut state.pin_textarea, event);
                 }
             }
             RemoteDialogAction::Handled

@@ -1,5 +1,5 @@
 use ratatui::crossterm::event::{
-    self, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::{
     layout::Rect,
@@ -1976,6 +1976,13 @@ impl App {
     }
 
     pub fn handle_keys(&mut self, key: KeyEvent) {
+        // Kitty keyboard protocol can report key releases. Without this, the
+        // Enter release that arrives after `/models` or `/sessions` opens a
+        // dialog is interpreted by that fresh dialog as a submit.
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+
         let overlay_before_key = if key.code == KeyCode::Esc {
             self.overlay_focus
         } else {

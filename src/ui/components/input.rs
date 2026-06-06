@@ -4,6 +4,7 @@ use crate::push_toast;
 use crate::theme::{agent_color, contrast_text, ThemeColors};
 use crate::toast::{Toast, ToastLevel};
 use crate::ui::selection::EdgeScrollDirection;
+use crate::ui::textarea_keys::has_command_modifier;
 use crate::utils::image_attachment;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -116,6 +117,38 @@ impl Input {
             pending_pastes: Vec::new(),
             image_open_config: crate::config::ImagesConfig::default(),
             hovered_image_placeholder: None,
+        }
+    }
+
+    fn move_to_line_start(&mut self) {
+        self.preferred_visual_col = None;
+        let (row, _) = self.textarea.cursor();
+        self.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
+    }
+
+    fn move_to_line_end(&mut self) {
+        self.preferred_visual_col = None;
+        let (row, _) = self.textarea.cursor();
+        let col = self
+            .textarea
+            .lines()
+            .get(row)
+            .map(|line| line.chars().count())
+            .unwrap_or(0);
+        self.textarea
+            .move_cursor(CursorMove::Jump(row as u16, col as u16));
+    }
+
+    fn delete_to_line_start(&mut self) {
+        self.preferred_visual_col = None;
+        let (cursor_row, cursor_col) = self.textarea.cursor();
+        if let Some(line) = self.textarea.lines().get(cursor_row) {
+            // Clamp to valid char boundary to avoid panics on multi-byte emoji
+            let safe_col = char_boundary_before(line, cursor_col);
+            let before_cursor = &line[..safe_col];
+            for _ in 0..before_cursor.chars().count() {
+                self.textarea.delete_char();
+            }
         }
     }
 
@@ -473,24 +506,37 @@ impl Input {
                 true
             }
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
+            KeyCode::Char('a') if event.modifiers == KeyModifiers::CONTROL => {
+                self.move_to_line_start();
+                true
+            }
+            KeyCode::Char('e') if event.modifiers == KeyModifiers::CONTROL => {
+                self.move_to_line_end();
+                true
+            }
             KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
-                self.preferred_visual_col = None;
-                let (cursor_row, cursor_col) = self.textarea.cursor();
-                if let Some(line) = self.textarea.lines().get(cursor_row) {
-                    // Clamp to valid char boundary to avoid panics on multi-byte emoji
-                    let safe_col = char_boundary_before(line, cursor_col);
-                    let before_cursor = &line[..safe_col];
-                    for _ in 0..before_cursor.chars().count() {
-                        self.textarea.delete_char();
-                    }
-                }
+                self.delete_to_line_start();
                 self.sync_image_placeholders();
                 self.sync_pending_pastes();
+                true
+            }
+            KeyCode::Left if has_command_modifier(event.modifiers) => {
+                self.move_to_line_start();
+                true
+            }
+            KeyCode::Right if has_command_modifier(event.modifiers) => {
+                self.move_to_line_end();
                 true
             }
             KeyCode::Tab => false,
             KeyCode::Esc => false,
             KeyCode::Backspace if self.remove_placeholder_at_cursor(false) => true,
+            KeyCode::Backspace if has_command_modifier(event.modifiers) => {
+                self.delete_to_line_start();
+                self.sync_image_placeholders();
+                self.sync_pending_pastes();
+                true
+            }
             KeyCode::Delete if self.remove_placeholder_at_cursor(true) => true,
             KeyCode::Backspace if event.modifiers.contains(KeyModifiers::ALT) => {
                 self.preferred_visual_col = None;

@@ -235,3 +235,7 @@ I want - [x] To do this But I dont want to do this
 In fact I also want the same aesthetic for "Active" themes in /themes.
 
 For the /connect dialog it's a little unique. Let's keep it. Before this, I wanted this but nevermind: ~Right now for connect, we use "🟢 Connected". But let's just use a ✔︎ on the left side. And since there's a lot of "Connected" items, no need to change the text color, we just want the ✔︎ as a green thing on the left side. Still searchable via "Connected"~
+
+- [x] On Wezterm, I did `config.enable_kitty_keyboard = true`, now cmd+left or cmd+right doesn't work anymore (for skipping to the first/last character on the current line). Idk if this is a wezterm problem I need to patch or just on the wezterm lua side. Currently still works on the Zed Terminal btw. Where I observed: In chat inputs, any input fields.
+
+- [ ] Syntax highlighting on the remote-client browser UI.

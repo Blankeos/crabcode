@@ -2,6 +2,7 @@ use crate::theme::{contrast_text, ThemeColors};
 use crate::ui::scrollbar::{
     render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
 };
+use crate::ui::textarea_keys::input_textarea;
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
@@ -17,7 +18,7 @@ use ratatui::{
     Frame,
 };
 use std::collections::{HashMap, HashSet};
-use tui_textarea::{Input as TuiInput, TextArea};
+use tui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const SEARCH_AREA_HEIGHT: u16 = 2;
@@ -1172,8 +1173,7 @@ impl Dialog {
             KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => true,
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
             _ => {
-                let input = TuiInput::from(event);
-                self.search_textarea.input(input);
+                input_textarea(&mut self.search_textarea, event);
                 self.search_query = self.search_textarea.lines().join("");
                 self.apply_filter();
                 true

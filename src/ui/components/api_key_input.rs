@@ -6,9 +6,10 @@ use ratatui::{
     widgets::{Clear, Paragraph},
     Frame,
 };
-use tui_textarea::{Input as TuiInput, TextArea};
+use tui_textarea::TextArea;
 
 use crate::theme::ThemeColors;
+use crate::ui::textarea_keys::input_textarea;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputAction {
@@ -86,8 +87,7 @@ impl ApiKeyInput {
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => InputAction::Continue,
             _ => {
                 if event.kind == KeyEventKind::Press {
-                    let input = TuiInput::from(event);
-                    self.text_area.input(input);
+                    input_textarea(&mut self.text_area, event);
                 }
                 InputAction::Continue
             }

@@ -9,7 +9,9 @@ use ratatui::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tui_textarea::{CursorMove, Input as TuiInput, TextArea};
+use tui_textarea::{CursorMove, TextArea};
+
+use crate::ui::textarea_keys::input_textarea;
 
 #[derive(Debug)]
 pub struct SessionRenameDialogState {
@@ -234,7 +236,7 @@ pub fn handle_session_rename_dialog_key_event(
             }
         }
         _ => {
-            dialog_state.input_textarea.input(TuiInput::from(event));
+            input_textarea(&mut dialog_state.input_textarea, event);
             RenameAction::Handled
         }
     }

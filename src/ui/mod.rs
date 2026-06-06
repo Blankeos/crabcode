@@ -6,4 +6,5 @@ pub mod markdown;
 pub mod scrollbar;
 pub mod selection;
 pub mod syntax;
+pub mod textarea_keys;
 pub mod wrapping;
