@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "crabcode"
-version = "0.0.2"
+version = "0.0.1"
 edition = "2021"
 description = "(WIP) Rust AI CLI Coding Agent with a beautiful terminal UI"
 license = "MIT"
