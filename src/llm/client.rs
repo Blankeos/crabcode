@@ -367,6 +367,7 @@ pub async fn stream_llm_with_cancellation(
     agent_max_steps: Option<usize>,
     agent_registry: crate::agent::definition::AgentRegistry,
     tool_permissions: crate::tools::ToolPermissions,
+    websearch_config: crate::config::configuration::WebsearchConfig,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
 ) -> Result<(), DynError> {
@@ -384,11 +385,13 @@ pub async fn stream_llm_with_cancellation(
 
     let aisdk_messages = convert_messages_for_model(&messages, request_config.supports_image_input);
 
-    let tool_registry = crate::tools::initialize_tool_registry_with_dynamic(
+    let tool_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
         Some(sender.clone()),
         tool_permissions.clone(),
         agent_registry,
         cancel_token.clone(),
+        Some(&request_config.provider_name),
+        &websearch_config,
     )
     .await;
 

@@ -241,3 +241,19 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 - [x] Syntax highlighting for apply_patch and edit tool calls on the remote-client browser UI.
 
 - [x] IN the "Overview" of ocnfiguration docs, mention which ones "merge" int he "File Layout", very useful info. Like a legend on the table with an emoji, then say "\* Merges across both"
+
+- [x] Working websearch APIs
+  - [x] exa-mcp - what opencode uses (default on). limits not visible. free, frictionless. no need for user to setup.
+  - [x] tavily - I think has the best usage 1000q/m + free tier
+  - [x] exa - has free + best quality, good 1000q/m + free tier, expensive after.
+  - [x] ollama-cloud - okay quality + free tier, comes w/ model sub, so good plus.
+  - [x] serpapi - free tier, low usage 250q/m.
+  - [x] perplexity - ⚠️ not tested, assumed. baseline good quality, $2 less than exa
+  - [x] brave - ⚠️ not tested, assumed
+  - imo, codex had the best, but idk how to replicate that, they have their own internal.
+
+- [ ] I run two instances of crabcode (in the terminal), I change the model, it affects all instances. Idk how they all cross communicate but that's both cool and weird. I do want to isolate the model use per instance tho. esp if 1 is running something different, I wouldnt want to change it.
+
+- [ ] In the desktop notif, we say Response complete, can we also mention the name of the workspace.
+
+- [ ] Generate images with a codex exec call. No oauth spoofing needed. Just needs codex to be there.

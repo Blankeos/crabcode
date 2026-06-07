@@ -285,6 +285,7 @@ async fn run_print_mode(
     let (sender, mut receiver) = mpsc::unbounded_channel();
 
     let agent_registry = loaded_config.merged_config.agent_registry.clone();
+    let websearch_config = loaded_config.merged_config.websearch.clone();
     let mut agent_policies = crate::tools::AgentToolPolicies::default();
     for (mode, tools) in agent_registry.tool_policy_map() {
         agent_policies = agent_policies.with_custom_tools(mode, tools);
@@ -301,11 +302,13 @@ async fn run_print_mode(
         .and_then(|agent| agent.max_steps);
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
-    let prompt_registry = crate::tools::initialize_tool_registry_with_dynamic(
+    let prompt_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
         Some(sender.clone()),
         tool_permissions.clone(),
         agent_registry.clone(),
         cancel_token.clone(),
+        Some(&provider_name),
+        &websearch_config,
     )
     .await;
     let prompt_registry = crate::tools::scope_tool_registry_for_agent(
@@ -344,6 +347,7 @@ async fn run_print_mode(
             agent_max_steps,
             agent_registry,
             tool_permissions,
+            websearch_config,
             messages,
             sender,
         )

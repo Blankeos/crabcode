@@ -325,6 +325,7 @@ pub struct App {
     pub sounds: crate::sound::ResolvedSoundsConfig,
     pub notifications: crate::config::NotificationsConfig,
     pub images: crate::config::ImagesConfig,
+    pub websearch: crate::config::configuration::WebsearchConfig,
     terminal_focused: bool,
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
@@ -588,6 +589,7 @@ impl App {
             sounds: resolved_sounds,
             notifications: loaded_config.merged_config.notifications,
             images: loaded_config.merged_config.images,
+            websearch: loaded_config.merged_config.websearch,
             terminal_focused: true,
             tool_permissions,
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
@@ -6719,6 +6721,7 @@ impl App {
             .copied();
         let tool_permissions = self.tool_permissions.clone();
         let agent_registry = self.agent_registry.clone();
+        let websearch_config = self.websearch.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -6733,11 +6736,13 @@ impl App {
         if !has_system {
             let prompt_registry = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    let registry = crate::tools::initialize_tool_registry_with_dynamic(
+                    let registry = crate::tools::initialize_tool_registry_with_dynamic_config(
                         Some(sender.clone()),
                         tool_permissions.clone(),
                         agent_registry.clone(),
                         cancel_token.clone(),
+                        Some(&provider_name),
+                        &websearch_config,
                     )
                     .await;
                     crate::tools::scope_tool_registry_for_agent(
@@ -6776,6 +6781,7 @@ impl App {
                 agent_max_steps,
                 agent_registry,
                 tool_permissions,
+                websearch_config,
                 messages,
                 sender_clone.clone(),
             );
@@ -8081,6 +8087,7 @@ mod tests {
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
             images: crate::config::ImagesConfig::default(),
+            websearch: crate::config::configuration::WebsearchConfig::default(),
             terminal_focused: true,
             tool_permissions: crate::tools::ToolPermissions::new(".".to_string()),
             skills_dirs: Vec::new(),

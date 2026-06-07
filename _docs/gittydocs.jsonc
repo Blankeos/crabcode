@@ -29,6 +29,7 @@
         { "label": "OpenCode Compatibility", "path": "/config/opencode-compatibility" },
         { "label": "Notifications", "path": "/config/notifications" },
         { "label": "Images", "path": "/config/images" },
+        { "label": "Websearch", "path": "/config/websearch" },
         { "label": "Theme", "path": "/config/theme" },
       ],
     },

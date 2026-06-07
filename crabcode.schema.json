@@ -184,6 +184,52 @@
         }
       },
       "type": "object"
+    },
+    "WebsearchProvider": {
+      "enum": [
+        "exa-hosted-mcp",
+        "exa",
+        "tavily",
+        "perplexity",
+        "brave",
+        "ollama-cloud",
+        "serpapi",
+        "keiro"
+      ],
+      "type": "string"
+    },
+    "WebsearchConfigFile": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "provider": {
+          "$ref": "#/$defs/WebsearchProvider",
+          "default": "exa-hosted-mcp"
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "apiKey": {
+          "description": "Optional API key value. Use placeholders like {env:EXA_API_KEY} or {file:~/.keys/exa}. Required for keyed providers; optional for exa-hosted-mcp.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "const": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
     }
   },
   "$id": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json",
@@ -240,6 +286,19 @@
       ]
     },
     "tools": true,
+    "websearch": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/WebsearchConfigFile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "watcher": true
   },
   "title": "CrabcodeConfigFile",

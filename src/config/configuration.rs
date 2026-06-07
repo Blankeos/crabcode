@@ -252,6 +252,52 @@ impl Default for ImagesConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebsearchProvider {
+    ExaHostedMcp,
+    Exa,
+    Tavily,
+    Perplexity,
+    Brave,
+    OllamaCloud,
+    SerpApi,
+    Keiro,
+}
+
+impl WebsearchProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExaHostedMcp => "exa-hosted-mcp",
+            Self::Exa => "exa",
+            Self::Tavily => "tavily",
+            Self::Perplexity => "perplexity",
+            Self::Brave => "brave",
+            Self::OllamaCloud => "ollama-cloud",
+            Self::SerpApi => "serpapi",
+            Self::Keiro => "keiro",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebsearchConfig {
+    pub enabled: Option<bool>,
+    pub provider: WebsearchProvider,
+    pub endpoint: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl Default for WebsearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            provider: WebsearchProvider::ExaHostedMcp,
+            endpoint: None,
+            api_key: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderTimeout {
     Millis(u64),
     Disabled,
@@ -271,6 +317,7 @@ pub struct MergedConfig {
     pub provider_timeouts: HashMap<String, ProviderTimeout>,
     pub notifications: NotificationsConfig,
     pub images: ImagesConfig,
+    pub websearch: WebsearchConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -782,6 +829,7 @@ fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     out.insert("theme");
     out.insert("notifications");
     out.insert("images");
+    out.insert("websearch");
     out
 }
 
@@ -1041,8 +1089,106 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     apply_notifications(obj.get("notifications"), &mut notifications, diagnostics);
     out.notifications = notifications;
     out.images = parse_images(obj.get("images"), diagnostics);
+    out.websearch = parse_websearch(obj.get("websearch"), diagnostics);
 
     out
+}
+
+fn parse_websearch(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> WebsearchConfig {
+    let mut websearch = WebsearchConfig::default();
+    let Some(value) = value else {
+        return websearch;
+    };
+
+    match value {
+        Value::Bool(enabled) => {
+            websearch.enabled = Some(*enabled);
+            return websearch;
+        }
+        Value::Object(map) => {
+            if let Some(enabled) = map.get("enabled") {
+                if let Some(v) = enabled.as_bool() {
+                    websearch.enabled = Some(v);
+                } else {
+                    diagnostics
+                        .warnings
+                        .push("websearch.enabled must be a boolean".to_string());
+                }
+            }
+
+            if let Some(provider) = map.get("provider") {
+                if let Some(raw) = provider.as_str() {
+                    match parse_websearch_provider(raw) {
+                        Some(provider) => websearch.provider = provider,
+                        _ => diagnostics.warnings.push(format!(
+                            "websearch.provider must be one of: exa-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro; got {}",
+                            raw
+                        )),
+                    }
+                } else {
+                    diagnostics
+                        .warnings
+                        .push("websearch.provider must be a string".to_string());
+                }
+            }
+
+            if let Some(endpoint) = map.get("endpoint") {
+                if let Some(raw) = endpoint.as_str() {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        websearch.endpoint = None;
+                    } else if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+                        websearch.endpoint = Some(trimmed.to_string());
+                    } else {
+                        diagnostics
+                            .warnings
+                            .push("websearch.endpoint must be an http(s) URL".to_string());
+                    }
+                } else {
+                    diagnostics
+                        .warnings
+                        .push("websearch.endpoint must be a string".to_string());
+                }
+            }
+
+            if let Some(api_key) = map.get("apiKey") {
+                if let Some(raw) = api_key.as_str() {
+                    let trimmed = raw.trim();
+                    websearch.api_key = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                } else if api_key.is_null() || api_key.as_bool() == Some(false) {
+                    websearch.api_key = None;
+                } else {
+                    diagnostics
+                        .warnings
+                        .push("websearch.apiKey must be a string, false, or null".to_string());
+                }
+            }
+        }
+        _ => diagnostics
+            .warnings
+            .push("websearch must be a boolean or object".to_string()),
+    }
+
+    websearch
+}
+
+fn parse_websearch_provider(raw: &str) -> Option<WebsearchProvider> {
+    let normalized = raw.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "exa-hosted-mcp" => Some(WebsearchProvider::ExaHostedMcp),
+        "exa" => Some(WebsearchProvider::Exa),
+        "tavily" => Some(WebsearchProvider::Tavily),
+        "perplexity" => Some(WebsearchProvider::Perplexity),
+        "brave" => Some(WebsearchProvider::Brave),
+        "ollama-cloud" => Some(WebsearchProvider::OllamaCloud),
+        "serpapi" => Some(WebsearchProvider::SerpApi),
+        "keiro" => Some(WebsearchProvider::Keiro),
+        _ => None,
+    }
 }
 
 impl MergedConfig {
@@ -1747,6 +1893,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "provider",
         "notifications",
         "images",
+        "websearch",
     ]
     .into_iter()
     .collect();
@@ -1822,6 +1969,100 @@ mod tests {
             MacosNotificationBackend::Osascript
         );
         assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_websearch_config() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "websearch": {
+                    "enabled": true,
+                    "provider": "exa",
+                    "endpoint": "https://mcp.exa.ai/mcp",
+                    "apiKey": "secret"
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.websearch.enabled, Some(true));
+        assert_eq!(config.websearch.provider, WebsearchProvider::Exa);
+        assert_eq!(config.websearch.provider.as_str(), "exa");
+        assert_eq!(
+            config.websearch.endpoint.as_deref(),
+            Some("https://mcp.exa.ai/mcp")
+        );
+        assert_eq!(config.websearch.api_key.as_deref(), Some("secret"));
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_websearch_boolean_shorthand() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(&json!({ "websearch": false }), &mut diagnostics);
+
+        assert_eq!(config.websearch.enabled, Some(false));
+        assert_eq!(config.websearch.provider, WebsearchProvider::ExaHostedMcp);
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_keiro_websearch_config() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "websearch": {
+                    "provider": "keiro",
+                    "apiKey": "secret"
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.websearch.provider, WebsearchProvider::Keiro);
+        assert_eq!(config.websearch.api_key.as_deref(), Some("secret"));
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_only_canonical_websearch_providers() {
+        assert_eq!(
+            parse_websearch_provider("exa-hosted-mcp"),
+            Some(WebsearchProvider::ExaHostedMcp)
+        );
+        assert_eq!(
+            parse_websearch_provider("exa"),
+            Some(WebsearchProvider::Exa)
+        );
+        assert_eq!(
+            parse_websearch_provider("tavily"),
+            Some(WebsearchProvider::Tavily)
+        );
+        assert_eq!(
+            parse_websearch_provider("perplexity"),
+            Some(WebsearchProvider::Perplexity)
+        );
+        assert_eq!(
+            parse_websearch_provider("brave"),
+            Some(WebsearchProvider::Brave)
+        );
+        assert_eq!(
+            parse_websearch_provider("ollama-cloud"),
+            Some(WebsearchProvider::OllamaCloud)
+        );
+        assert_eq!(
+            parse_websearch_provider("serpapi"),
+            Some(WebsearchProvider::SerpApi)
+        );
+        assert_eq!(
+            parse_websearch_provider("keiro"),
+            Some(WebsearchProvider::Keiro)
+        );
+        assert_eq!(parse_websearch_provider("ollama"), None);
+        assert_eq!(parse_websearch_provider("keiro-labs"), None);
+        assert_eq!(parse_websearch_provider("keirolabs"), None);
+        assert_eq!(parse_websearch_provider("brave-search"), None);
     }
 
     #[test]

@@ -1,12 +1,23 @@
 use crate::tools::{
     fs::{GlobTool, GrepTool, ListTool, ReadTool, ViewImageTool, WriteFilesTool, WriteTool},
     ApplyPatchTool, BashTool, EditTool, QuestionTool, SkillTool, TaskTool, ToolPermissions,
-    ToolRegistry, UpdatePlanTool, WebfetchTool,
+    ToolRegistry, UpdatePlanTool, WebfetchTool, WebsearchTool,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub async fn initialize_tool_registry() -> ToolRegistry {
+    initialize_tool_registry_with_config(
+        None,
+        &crate::config::configuration::WebsearchConfig::default(),
+    )
+    .await
+}
+
+pub async fn initialize_tool_registry_with_config(
+    provider_name: Option<&str>,
+    websearch_config: &crate::config::configuration::WebsearchConfig,
+) -> ToolRegistry {
     let registry = ToolRegistry::new();
 
     registry.register(Arc::new(GlobTool::new())).await;
@@ -21,6 +32,11 @@ pub async fn initialize_tool_registry() -> ToolRegistry {
     registry.register(Arc::new(EditTool::new())).await;
     registry.register(Arc::new(SkillTool::new())).await;
     registry.register(Arc::new(WebfetchTool::new())).await;
+    if WebsearchTool::is_enabled_for_provider(provider_name.unwrap_or_default(), websearch_config) {
+        registry
+            .register(Arc::new(WebsearchTool::new(websearch_config.clone())))
+            .await;
+    }
     registry.register(Arc::new(UpdatePlanTool::new())).await;
 
     registry
@@ -55,6 +71,19 @@ pub async fn initialize_tool_registry_with_dynamic(
     cancel_token: CancellationToken,
 ) -> ToolRegistry {
     let registry = initialize_tool_registry().await;
+    register_dynamic_tools(&registry, sender, permissions, agent_registry, cancel_token).await;
+    registry
+}
+
+pub async fn initialize_tool_registry_with_dynamic_config(
+    sender: Option<crate::llm::ChunkSender>,
+    permissions: ToolPermissions,
+    agent_registry: crate::agent::definition::AgentRegistry,
+    cancel_token: CancellationToken,
+    provider_name: Option<&str>,
+    websearch_config: &crate::config::configuration::WebsearchConfig,
+) -> ToolRegistry {
+    let registry = initialize_tool_registry_with_config(provider_name, websearch_config).await;
     register_dynamic_tools(&registry, sender, permissions, agent_registry, cancel_token).await;
     registry
 }

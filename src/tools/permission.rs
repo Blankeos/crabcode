@@ -707,6 +707,11 @@ fn permission_patterns_for_tool(
                 push_nonempty(&mut patterns, &url);
             }
         }
+        "websearch" => {
+            if let Some(query) = get_string(params, "query") {
+                push_nonempty(&mut patterns, &query);
+            }
+        }
         "question" | "update_plan" => patterns.push("*".to_string()),
         "write_files" => {
             if let Some(files) = params.get("files").and_then(Value::as_array) {
