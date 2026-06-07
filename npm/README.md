@@ -53,27 +53,19 @@ curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | 
 
 ## Usage
 
-### Commands
+It works (almost) exactly like OpenCode. Just opens faster, with some intuitive changes I like, here are most of them:
 
-| Command     | Description                      |
-| ----------- | -------------------------------- |
-| `/sessions` | List all sessions                |
-| `/new`      | Create a new session             |
-| `/connect`  | Open the provider connect dialog |
-| `/models`   | List available models            |
-| `/exit`     | Quit crabcode                    |
-
-### Key Bindings
-
-| Key              | Action                                 |
-| ---------------- | -------------------------------------- |
-| `Ctrl+X`         | Open the shortcuts dialog              |
-| `TAB`            | Switch between PLAN and BUILD agents   |
-| `Enter`          | Submit message or execute command      |
-| `Ctrl+C` (once)  | Clear input                            |
-| `Ctrl+C` (twice) | Quit                                   |
-| `Esc`            | Close popup suggestions                |
-| `↑/↓`            | Navigate in input or suggestions popup |
+- Opens instantly!
+- Sounds out-of-the-box + clean Desktop notifications!
+- Multiworkspace by default, can run like 3+ sessions in the same instance, just works like a webapp.
+- Ollama Local CLI connections works out-of-the-box.
+- My own remote implementation. Probably worse.
+- My own UX preferences:
+  - Can click on `[Image #1]` tags to open them.
+  - Themes has no background, all tranluscent (don't really care right now).
+  - Lots of toolcall-shapes inspired by the actual Codex harness.
+  - When switching models, you can press `⇆` to change thinking efforts.
+  - Copy on select is disabled by default. Copy is two-step in crabcode. Gets annoying in OpenCode, especially w/ clipboard history.
 
 ### Agent Types
 
@@ -99,6 +91,8 @@ I tried crabcode specifically for these providers:
 - [x] **openai** (both API key and OAuth, thank you OpenAI for supporting harnesses!)
 - [x] **opencode-zen** and **opencode-go**
 - [x] **nano-gpt**
+- [x] **commandcode** (Pro)
+- [x] **ollama-cli**
 - [x] **zai**
 - [x] **ollama-cloud**
 - [x] **xiaomi-token-plan-sgp**
