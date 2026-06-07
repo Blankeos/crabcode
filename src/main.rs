@@ -121,6 +121,13 @@ fn send_test_notification() -> Result<()> {
         event,
         Some("local app icon test"),
         crate::notify::NotificationOptions {
+            workspace_name: loaded_config
+                .cwd
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string),
+
             #[cfg(target_os = "macos")]
             macos_backend: loaded_config.merged_config.notifications.macos_backend,
         },

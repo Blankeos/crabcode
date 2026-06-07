@@ -40,11 +40,27 @@ pub fn is_supported() -> bool {
     }
 }
 
+fn notification_title(workspace_name: Option<&str>) -> String {
+    let Some(workspace_name) = workspace_name
+        .map(sanitize_notification_title_part)
+        .filter(|name| !name.is_empty())
+    else {
+        return "crabcode".to_string();
+    };
+
+    format!("crabcode | {workspace_name}")
+}
+
+fn sanitize_notification_title_part(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(target_os = "macos")]
 pub fn notify_test_event() -> io::Result<()> {
     let (title, subtitle, body) = notification_content(
         crate::sound::SoundEvent::Complete,
         Some("local app icon test"),
+        None,
     );
     let macos_title = with_crab_title(&title);
     try_notify_macos_app(&macos_title, &subtitle, &body)
@@ -63,8 +79,10 @@ pub fn notify_event(event: crate::sound::SoundEvent, detail: Option<&str>) {
     notify_event_with_options(event, detail, NotificationOptions::default());
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct NotificationOptions {
+    pub workspace_name: Option<String>,
+
     #[cfg(target_os = "macos")]
     pub macos_backend: crate::config::MacosNotificationBackend,
 }
@@ -72,6 +90,8 @@ pub struct NotificationOptions {
 impl Default for NotificationOptions {
     fn default() -> Self {
         Self {
+            workspace_name: None,
+
             #[cfg(target_os = "macos")]
             macos_backend: crate::config::MacosNotificationBackend::CrabcodeNotifier,
         }
@@ -83,7 +103,8 @@ pub fn notify_event_with_options(
     detail: Option<&str>,
     options: NotificationOptions,
 ) {
-    let (title, subtitle, body) = notification_content(event, detail);
+    let (title, subtitle, body) =
+        notification_content(event, detail, options.workspace_name.as_deref());
 
     #[cfg(target_os = "macos")]
     {
@@ -233,6 +254,7 @@ fn env_eq(key: &str, expected: &str) -> bool {
 fn notification_content(
     event: crate::sound::SoundEvent,
     detail: Option<&str>,
+    workspace_name: Option<&str>,
 ) -> (String, String, String) {
     match event {
         crate::sound::SoundEvent::Complete => {
@@ -243,7 +265,7 @@ fn notification_content(
                 _ => "Response complete".to_string(),
             };
             (
-                "crabcode".to_string(),
+                notification_title(workspace_name),
                 subtitle,
                 "Your assistant response is ready.".to_string(),
             )
@@ -607,6 +629,7 @@ fn escape_xml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::notification_content;
     use super::sanitize_terminal_title;
     use super::MAX_TERMINAL_TITLE_CHARS;
 
@@ -623,5 +646,18 @@ mod tests {
         let sanitized = sanitize_terminal_title(&title);
 
         assert_eq!(sanitized.len(), MAX_TERMINAL_TITLE_CHARS);
+    }
+
+    #[test]
+    fn complete_notification_title_includes_workspace_name() {
+        let (title, subtitle, body) = notification_content(
+            crate::sound::SoundEvent::Complete,
+            Some("1.2s | 42t/s"),
+            Some("  crabcode\nworkspace  "),
+        );
+
+        assert_eq!(title, "crabcode | crabcode workspace");
+        assert_eq!(subtitle, "Response complete - 1.2s | 42t/s");
+        assert_eq!(body, "Your assistant response is ready.");
     }
 }

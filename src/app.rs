@@ -237,6 +237,37 @@ const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TERMINAL_TITLE_SPINNER_INTERVAL_MS: u128 = 100;
 
+type ReasoningEffortOverrides =
+    std::collections::HashMap<(String, String), crate::model::reasoning::ReasoningEffort>;
+
+fn reasoning_effort_overrides_from_prefs(
+    prefs: &crate::persistence::prefs::ModelPreferences,
+) -> ReasoningEffortOverrides {
+    let mut overrides = ReasoningEffortOverrides::new();
+    let Some(map) = prefs.variant.as_object() else {
+        return overrides;
+    };
+
+    for (key, value) in map {
+        let Some((provider_id, model_id)) = key.split_once('/') else {
+            continue;
+        };
+        let Some(effort) = value.as_str().and_then(|value| {
+            value
+                .parse::<crate::model::reasoning::ReasoningEffort>()
+                .ok()
+        }) else {
+            continue;
+        };
+        if effort == crate::model::reasoning::ReasoningEffort::None {
+            continue;
+        }
+        overrides.insert((provider_id.to_string(), model_id.to_string()), effort);
+    }
+
+    overrides
+}
+
 #[derive(Debug)]
 struct ClientSessionState {
     chat: Chat,
@@ -313,6 +344,9 @@ pub struct App {
     pub provider_timeouts: std::collections::HashMap<String, crate::config::ProviderTimeout>,
     pub model: String,
     pub provider_name: String,
+    // Reasoning/thinking effort is loaded from persisted preferences once, then kept process-local.
+    // Changes are persisted for future starts but are not re-read into other running terminals.
+    reasoning_efforts: ReasoningEffortOverrides,
     pub cwd: String,
     pub base_focus: BaseFocus,
     pub overlay_focus: OverlayFocus,
@@ -492,6 +526,12 @@ impl App {
                 ("big-pickle".to_string(), "opencode".to_string())
             };
 
+        let reasoning_efforts = prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_model_preferences().ok())
+            .map(|prefs| reasoning_effort_overrides_from_prefs(&prefs))
+            .unwrap_or_default();
+
         let configured_theme_id = loaded_config.merged_config.theme.as_deref();
         let persisted_theme_id = if configured_theme_id.is_none() {
             prefs_dao
@@ -577,6 +617,7 @@ impl App {
             provider_timeouts,
             model: active_model,
             provider_name: active_provider_name,
+            reasoning_efforts,
             cwd: cwd.clone(),
             base_focus: BaseFocus::Home,
             overlay_focus: OverlayFocus::None,
@@ -636,6 +677,8 @@ impl App {
                 event,
                 detail,
                 crate::notify::NotificationOptions {
+                    workspace_name: Some(self.terminal_title_project_name()),
+
                     #[cfg(target_os = "macos")]
                     macos_backend: self.notifications.macos_backend,
                 },
@@ -1462,15 +1505,38 @@ impl App {
             .and_then(|discovery| discovery.get_model_reasoning_capability(provider_id, model_id))
     }
 
-    fn saved_reasoning_effort_for_model(
+    fn reasoning_effort_override_for_model(
         &self,
         provider_id: &str,
         model_id: &str,
     ) -> Option<crate::model::reasoning::ReasoningEffort> {
-        self.prefs_dao
-            .as_ref()
-            .and_then(|dao| dao.get_model_reasoning_effort(provider_id, model_id).ok())
-            .flatten()
+        self.reasoning_efforts
+            .get(&(provider_id.to_string(), model_id.to_string()))
+            .copied()
+    }
+
+    fn set_reasoning_effort_override_for_model(
+        &mut self,
+        provider_id: String,
+        model_id: String,
+        effort: Option<crate::model::reasoning::ReasoningEffort>,
+    ) -> anyhow::Result<()> {
+        if let Some(ref dao) = self.prefs_dao {
+            if let Some(effort) = effort {
+                dao.set_model_reasoning_effort(provider_id.clone(), model_id.clone(), effort)?;
+            } else {
+                dao.clear_model_reasoning_effort(&provider_id, &model_id)?;
+            }
+        }
+
+        let key = (provider_id, model_id);
+        if let Some(effort) = effort {
+            self.reasoning_efforts.insert(key, effort);
+        } else {
+            self.reasoning_efforts.remove(&key);
+        }
+
+        Ok(())
     }
 
     fn resolved_reasoning_effort_for_model(
@@ -1479,19 +1545,10 @@ impl App {
         model_id: &str,
     ) -> Option<crate::model::reasoning::ReasoningEffort> {
         let capability = self.reasoning_capability_for_model(provider_id, model_id)?;
-        let saved = self.saved_reasoning_effort_for_model(provider_id, model_id)?;
-        let resolved = capability.resolve(Some(saved))?;
+        let requested = self.reasoning_effort_override_for_model(provider_id, model_id)?;
+        let resolved = capability.resolve(Some(requested))?;
         if resolved == crate::model::reasoning::ReasoningEffort::None {
             return None;
-        }
-        if saved != resolved {
-            if let Some(ref dao) = self.prefs_dao {
-                let _ = dao.set_model_reasoning_effort(
-                    provider_id.to_string(),
-                    model_id.to_string(),
-                    resolved,
-                );
-            }
         }
         Some(resolved)
     }
@@ -1536,24 +1593,13 @@ impl App {
         let Some(capability) = self.reasoning_capability_for_model(&provider_id, &model_id) else {
             return false;
         };
-        let saved = self.saved_reasoning_effort_for_model(&provider_id, &model_id);
-        let Some(next) = capability.cycle_override(saved, direction) else {
+        let current = self.reasoning_effort_override_for_model(&provider_id, &model_id);
+        let Some(next) = capability.cycle_override(current, direction) else {
             return false;
         };
 
-        if let Some(ref dao) = self.prefs_dao {
-            let result = if let Some(next) = next {
-                dao.set_model_reasoning_effort(provider_id, model_id, next)
-            } else {
-                dao.clear_model_reasoning_effort(&provider_id, &model_id)
-            };
-
-            if result.is_err() {
-                return false;
-            }
-        }
-
-        true
+        self.set_reasoning_effort_override_for_model(provider_id, model_id, next)
+            .is_ok()
     }
 
     fn cycle_active_reasoning_effort(&mut self) -> bool {
@@ -2838,9 +2884,11 @@ impl App {
         let effort = effort.unwrap_or_default();
         let effort = effort.trim();
         if effort.is_empty() || effort.eq_ignore_ascii_case("off") {
-            if let Some(ref dao) = self.prefs_dao {
-                dao.clear_model_reasoning_effort(&self.provider_name, &self.model)?;
-            }
+            self.set_reasoning_effort_override_for_model(
+                self.provider_name.clone(),
+                self.model.clone(),
+                None,
+            )?;
             return Ok(true);
         }
 
@@ -2853,9 +2901,11 @@ impl App {
             return Ok(false);
         }
 
-        if let Some(ref dao) = self.prefs_dao {
-            dao.set_model_reasoning_effort(self.provider_name.clone(), self.model.clone(), parsed)?;
-        }
+        self.set_reasoning_effort_override_for_model(
+            self.provider_name.clone(),
+            self.model.clone(),
+            Some(parsed),
+        )?;
 
         Ok(true)
     }
@@ -8075,6 +8125,7 @@ mod tests {
             provider_timeouts: std::collections::HashMap::new(),
             model: "test-model".to_string(),
             provider_name: "test-provider".to_string(),
+            reasoning_efforts: ReasoningEffortOverrides::new(),
             cwd: ".".to_string(),
             base_focus: BaseFocus::Home,
             overlay_focus: OverlayFocus::None,
@@ -8116,6 +8167,46 @@ mod tests {
             .as_ref()
             .map(|dialog| dialog.items.iter().map(|item| item.name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn reasoning_effort_overrides_are_instance_local() {
+        let mut first = test_app();
+        let second = test_app();
+
+        first
+            .set_reasoning_effort_override_for_model(
+                "openai".to_string(),
+                "gpt-5".to_string(),
+                Some(crate::model::reasoning::ReasoningEffort::High),
+            )
+            .unwrap();
+
+        assert_eq!(
+            first.reasoning_effort_override_for_model("openai", "gpt-5"),
+            Some(crate::model::reasoning::ReasoningEffort::High)
+        );
+        assert_eq!(
+            second.reasoning_effort_override_for_model("openai", "gpt-5"),
+            None
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_overrides_load_from_persisted_preferences() {
+        let mut prefs = crate::persistence::prefs::ModelPreferences::default();
+        prefs.set_reasoning_effort(
+            "openai".to_string(),
+            "gpt-5".to_string(),
+            crate::model::reasoning::ReasoningEffort::High,
+        );
+
+        let overrides = reasoning_effort_overrides_from_prefs(&prefs);
+
+        assert_eq!(
+            overrides.get(&("openai".to_string(), "gpt-5".to_string())),
+            Some(&crate::model::reasoning::ReasoningEffort::High)
+        );
     }
 
     #[test]
