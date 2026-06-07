@@ -1,0 +1,42 @@
+---
+title: crabcode
+description: A fast, terminal-first coding agent built in Rust.
+---
+
+# Build faster in your terminal
+
+![Crabcode banner](/static/crabcode_banner.jpg)
+
+**crabcode** is a Rust-first coding agent that lives in your terminal.
+
+This project was literally just "what if I built opencode, in rust?". Same UX, no context switching, no heavy IDE—just fast startup, keyboard-driven workflows, and the AI models you already use.
+
+```bash
+npm install -g crabcode  # npm
+bun install -g crabcode  # or bun
+cargo binstall crabcode  # or cargo-binstall (prebuilt binary, faster)
+cargo install crabcode   # or cargo (build from source)
+curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | sh # or linux/macos (via curl)
+```
+
+---
+
+## What is crabcode?
+
+|                | OpenCode                     | crabcode                     |
+| -------------- | ---------------------------- | ---------------------------- |
+| **Platforms**  | Terminal, Desktop, Web       | Terminal only                |
+| **Built with** | TypeScript/Zig/Tauri         | Rust                         |
+| **Focus**      | Multi-platform, feature-rich | Terminal-native, lightweight |
+
+crabcode is a focused, terminal-only coding agent—just the TUI, built in Rust for speed and memory-efficiency. OpenCode gives you options across multiple platforms; crabcode picks one and does it well.
+
+**Coming from OpenCode?** Your existing config at `~/.config/opencode/opencode.jsonc` is automatically picked up.
+
+---
+
+## Where to next
+
+- [Quickstart](/quickstart) – Get up and running in 5 minutes
+- [Configuration](/config) – OpenCode-compatible config, notifications, and themes
+- [GitHub](https://github.com/blankeos/crabcode) – Source code and issues

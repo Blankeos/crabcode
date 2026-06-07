@@ -1,0 +1,11 @@
+- name: Install Bun
+  uses: oven-sh/setup-bun@v2
+- name: Build remote client
+  shell: bash
+  run: |
+    cd remote-client
+    bun install --frozen-lockfile
+    bun run build
+- name: Verify remote client assets
+  shell: bash
+  run: test -s remote-client/dist/client/index.html

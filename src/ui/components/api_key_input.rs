@@ -1,12 +1,15 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     prelude::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
     Frame,
 };
-use tui_textarea::{Input as TuiInput, TextArea};
+use tui_textarea::TextArea;
+
+use crate::theme::ThemeColors;
+use crate::ui::textarea_keys::input_textarea;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputAction {
@@ -84,15 +87,14 @@ impl ApiKeyInput {
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => InputAction::Continue,
             _ => {
                 if event.kind == KeyEventKind::Press {
-                    let input = TuiInput::from(event);
-                    self.text_area.input(input);
+                    input_textarea(&mut self.text_area, event);
                 }
                 InputAction::Continue
             }
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, colors: &ThemeColors) {
         if !self.visible {
             return;
         }
@@ -121,7 +123,7 @@ impl ApiKeyInput {
         };
 
         frame.render_widget(
-            Paragraph::new("").style(Style::default().bg(Color::Rgb(20, 20, 30))),
+            Paragraph::new("").style(Style::default().bg(colors.dialog_background)),
             dialog_area,
         );
 
@@ -134,31 +136,50 @@ impl ApiKeyInput {
             ])
             .split(content_area);
 
-        let title_line = Line::from(vec![
-            Span::styled(
-                "API key",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" ".repeat(40)),
-            Span::styled(
-                "esc",
-                Style::default()
-                    .fg(Color::Rgb(255, 140, 0))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
+        let esc_text = "esc";
+        let esc_area_width = (esc_text.len() as u16).saturating_add(1);
+        let header_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(esc_area_width),
+            ])
+            .split(chunks[0]);
 
-        frame.render_widget(Paragraph::new(title_line), chunks[0]);
+        let title_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            "API key",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(ratatui::layout::Alignment::Left);
+        frame.render_widget(title_paragraph, header_chunks[0]);
+
+        let esc_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            esc_text,
+            Style::default()
+                .fg(colors.primary)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(ratatui::layout::Alignment::Right);
+        frame.render_widget(esc_paragraph, header_chunks[1]);
+
         frame.render_widget(&self.text_area, chunks[1]);
 
-        let footer_line = Line::from(vec![Span::styled(
-            "enter submit",
-            Style::default()
-                .fg(Color::Rgb(150, 120, 100))
-                .add_modifier(Modifier::DIM),
-        )]);
+        let footer_line = Line::from(vec![
+            Span::styled(
+                "enter",
+                Style::default()
+                    .fg(colors.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " submit",
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]);
 
         frame.render_widget(Paragraph::new(footer_line), chunks[2]);
     }

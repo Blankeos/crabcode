@@ -1,0 +1,66 @@
+{
+  // Optional: enables editor completion/validation.
+  "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json",
+
+  // Theme ID (not a path). Crabcode resolves theme IDs from built-ins and theme folders.
+  // Example built-ins live under `src/generated_themes/*.json`.
+  "theme": "default",
+
+  // Default model (used only when you don't have an active model persisted yet).
+  "model": "openai/gpt-5.2",
+
+  // Notifications are optional and grouped by event.
+  // - `terminal` controls editor alert signals such as Zed tab dots.
+  // - `desktop` toggles native desktop notifications per event.
+  // - `soundEnabled` toggles each event's audio.
+  // - `soundFile` must be an absolute path (no `~`, no relative).
+  // - If `soundEnabled` is true and `soundFile` is omitted:
+  //   - `complete` and `error` use bundled defaults
+  //   - `permission` and `question` stay silent
+  "notifications": {
+    "terminalCondition": "unfocused",
+    "error": {
+      "terminal": "disabled",
+      "soundEnabled": true,
+      "desktop": false,
+      // Optional override:
+      // "soundFile": "/absolute/path/to/error.mp3"
+    },
+    "complete": {
+      "terminal": "auto",
+      "soundEnabled": true,
+      "desktop": false,
+      // Optional override:
+      // "soundFile": "/absolute/path/to/complete.mp3"
+    },
+    "permission": {
+      "terminal": "auto",
+      "soundEnabled": false,
+      "desktop": false,
+      // "soundFile": "/absolute/path/to/permission.wav"
+    },
+    "question": {
+      "terminal": "auto",
+      "soundEnabled": false,
+      "desktop": false,
+      // "soundFile": "/absolute/path/to/question.wav"
+    }
+  },
+
+  // --- Accepted (merged) but not implemented yet (phase 1) ---
+  // These keys are preserved for forward compatibility.
+  //
+  // "agent": { ... },
+  // "instructions": [ ... ],
+  // "tools": { "bash": true, "read": true },
+  // "mcp": { ... },
+  // "provider": { ... },
+  // "command": { ... },
+  // "permission": { ... },
+  // "compaction": { ... },
+  // "watcher": { ... },
+  // "default_agent": "...",
+  // "formatter": { ... },
+  // "disabled_providers": [ ... ],
+  // "enabled_providers": [ ... ]
+}

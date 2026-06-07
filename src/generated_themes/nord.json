@@ -1,131 +1,229 @@
 {
-  "$schema": "https://opencode.ai/desktop-theme.json",
-  "name": "Nord",
-  "id": "nord",
-  "light": {
-    "seeds": {
-      "neutral": "#eceff4",
-      "primary": "#5e81ac",
-      "success": "#8fbcbb",
-      "warning": "#d08770",
-      "error": "#bf616a",
-      "info": "#81a1c1",
-      "interactive": "#5e81ac",
-      "diffAdd": "#a3be8c",
-      "diffDelete": "#bf616a"
-    },
-    "overrides": {
-      "background-base": "#eceff4",
-      "background-weak": "#e4e8f0",
-      "background-strong": "#f1f3f8",
-      "background-stronger": "#f6f8fc",
-      "border-weak-base": "#d5dbe7",
-      "border-weak-hover": "#c9d0de",
-      "border-weak-active": "#bec5d4",
-      "border-weak-selected": "#b2bacc",
-      "border-weak-disabled": "#f0f3fa",
-      "border-weak-focus": "#b9bfd0",
-      "border-base": "#afb7cb",
-      "border-hover": "#a3abc1",
-      "border-active": "#979fb7",
-      "border-selected": "#8b94ad",
-      "border-disabled": "#e5e9f2",
-      "border-focus": "#9ca4ba",
-      "border-strong-base": "#757f97",
-      "border-strong-hover": "#69718a",
-      "border-strong-active": "#5d647d",
-      "border-strong-selected": "#525970",
-      "border-strong-disabled": "#c9cedc",
-      "border-strong-focus": "#636c84",
-      "surface-diff-add-base": "#e4f0e4",
-      "surface-diff-delete-base": "#f4e1e4",
-      "surface-diff-hidden-base": "#dfe6f2",
-      "text-base": "#2e3440",
-      "text-weak": "#4c566a",
-      "text-strong": "#1f2530",
-      "syntax-string": "#a3be8c",
-      "syntax-primitive": "#bf616a",
-      "syntax-property": "#5e81ac",
-      "syntax-type": "#d08770",
-      "syntax-constant": "#81a1c1",
-      "syntax-info": "#81a1c1",
-      "markdown-heading": "#5e81ac",
-      "markdown-text": "#2e3440",
-      "markdown-link": "#5e81ac",
-      "markdown-link-text": "#81a1c1",
-      "markdown-code": "#a3be8c",
-      "markdown-block-quote": "#d08770",
-      "markdown-emph": "#d08770",
-      "markdown-strong": "#bf616a",
-      "markdown-horizontal-rule": "#cbd3e1",
-      "markdown-list-item": "#5e81ac",
-      "markdown-list-enumeration": "#81a1c1",
-      "markdown-image": "#5e81ac",
-      "markdown-image-text": "#81a1c1",
-      "markdown-code-block": "#5e81ac"
-    }
+  "$schema": "https://opencode.ai/theme.json",
+  "defs": {
+    "nord0": "#2E3440",
+    "nord1": "#3B4252",
+    "nord2": "#434C5E",
+    "nord3": "#4C566A",
+    "nord4": "#D8DEE9",
+    "nord5": "#E5E9F0",
+    "nord6": "#ECEFF4",
+    "nord7": "#8FBCBB",
+    "nord8": "#88C0D0",
+    "nord9": "#81A1C1",
+    "nord10": "#5E81AC",
+    "nord11": "#BF616A",
+    "nord12": "#D08770",
+    "nord13": "#EBCB8B",
+    "nord14": "#A3BE8C",
+    "nord15": "#B48EAD",
+    "8B95A7Weak": "#8B95A7",
+    "nord1Weak": "#5a6170"
   },
-  "dark": {
-    "seeds": {
-      "neutral": "#2e3440",
-      "primary": "#88c0d0",
-      "success": "#a3be8c",
-      "warning": "#d08770",
-      "error": "#bf616a",
-      "info": "#81a1c1",
-      "interactive": "#88c0d0",
-      "diffAdd": "#81a1c1",
-      "diffDelete": "#bf616a"
+  "theme": {
+    "primary": {
+      "dark": "nord8",
+      "light": "nord10"
     },
-    "overrides": {
-      "background-base": "#1f2430",
-      "background-weak": "#222938",
-      "background-strong": "#1c202a",
-      "background-stronger": "#181c24",
-      "border-weak-base": "#343a47",
-      "border-weak-hover": "#383f50",
-      "border-weak-active": "#3d4458",
-      "border-weak-selected": "#434a62",
-      "border-weak-disabled": "#151923",
-      "border-weak-focus": "#3f4359",
-      "border-base": "#4a5163",
-      "border-hover": "#515870",
-      "border-active": "#585f7c",
-      "border-selected": "#606889",
-      "border-disabled": "#1b202a",
-      "border-focus": "#545b78",
-      "border-strong-base": "#6a7492",
-      "border-strong-hover": "#747e9f",
-      "border-strong-active": "#7e88ac",
-      "border-strong-selected": "#8993b9",
-      "border-strong-disabled": "#232836",
-      "border-strong-focus": "#76819f",
-      "surface-diff-add-base": "#1f2e33",
-      "surface-diff-delete-base": "#2e212a",
-      "surface-diff-hidden-base": "#222b3a",
-      "text-base": "#e5e9f0",
-      "text-weak": "#a4adbf",
-      "text-strong": "#f8fafc",
-      "syntax-string": "#a3be8c",
-      "syntax-primitive": "#d57780",
-      "syntax-property": "#88c0d0",
-      "syntax-type": "#eac196",
-      "syntax-constant": "#81a1c1",
-      "syntax-info": "#81a1c1",
-      "markdown-heading": "#88c0d0",
-      "markdown-text": "#e5e9f0",
-      "markdown-link": "#88c0d0",
-      "markdown-link-text": "#81a1c1",
-      "markdown-code": "#a3be8c",
-      "markdown-block-quote": "#d08770",
-      "markdown-emph": "#d08770",
-      "markdown-strong": "#bf616a",
-      "markdown-horizontal-rule": "#2f384a",
-      "markdown-list-item": "#88c0d0",
-      "markdown-list-enumeration": "#81a1c1",
-      "markdown-image": "#88c0d0",
-      "markdown-image-text": "#81a1c1",
-      "markdown-code-block": "#cbd3e1"
+    "secondary": {
+      "dark": "nord9",
+      "light": "nord9"
+    },
+    "accent": {
+      "dark": "nord7",
+      "light": "nord7"
+    },
+    "error": {
+      "dark": "nord11",
+      "light": "nord11"
+    },
+    "warning": {
+      "dark": "nord12",
+      "light": "nord12"
+    },
+    "success": {
+      "dark": "nord14",
+      "light": "nord14"
+    },
+    "info": {
+      "dark": "nord8",
+      "light": "nord10"
+    },
+    "text": {
+      "dark": "nord6",
+      "light": "nord0"
+    },
+    "textMuted": {
+      "dark": "#8B95A7",
+      "light": "nord1"
+    },
+    "textWeak": {
+      "dark": "8B95A7Weak",
+      "light": "nord1Weak"
+    },
+    "background": {
+      "dark": "nord0",
+      "light": "nord6"
+    },
+    "backgroundPanel": {
+      "dark": "nord1",
+      "light": "nord5"
+    },
+    "backgroundElement": {
+      "dark": "nord2",
+      "light": "nord4"
+    },
+    "border": {
+      "dark": "nord2",
+      "light": "nord3"
+    },
+    "borderActive": {
+      "dark": "nord3",
+      "light": "nord2"
+    },
+    "borderSubtle": {
+      "dark": "nord2",
+      "light": "nord3"
+    },
+    "diffAdded": {
+      "dark": "nord14",
+      "light": "nord14"
+    },
+    "diffRemoved": {
+      "dark": "nord11",
+      "light": "nord11"
+    },
+    "diffContext": {
+      "dark": "#8B95A7",
+      "light": "nord3"
+    },
+    "diffHunkHeader": {
+      "dark": "#8B95A7",
+      "light": "nord3"
+    },
+    "diffHighlightAdded": {
+      "dark": "nord14",
+      "light": "nord14"
+    },
+    "diffHighlightRemoved": {
+      "dark": "nord11",
+      "light": "nord11"
+    },
+    "diffAddedBg": {
+      "dark": "#3B4252",
+      "light": "#E5E9F0"
+    },
+    "diffRemovedBg": {
+      "dark": "#3B4252",
+      "light": "#E5E9F0"
+    },
+    "diffContextBg": {
+      "dark": "nord1",
+      "light": "nord5"
+    },
+    "diffLineNumber": {
+      "dark": "#a9aeb6",
+      "light": "textMuted"
+    },
+    "diffAddedLineNumberBg": {
+      "dark": "#3B4252",
+      "light": "#E5E9F0"
+    },
+    "diffRemovedLineNumberBg": {
+      "dark": "#3B4252",
+      "light": "#E5E9F0"
+    },
+    "markdownText": {
+      "dark": "nord4",
+      "light": "nord0"
+    },
+    "markdownHeading": {
+      "dark": "nord8",
+      "light": "nord10"
+    },
+    "markdownLink": {
+      "dark": "nord9",
+      "light": "nord9"
+    },
+    "markdownLinkText": {
+      "dark": "nord7",
+      "light": "nord7"
+    },
+    "markdownCode": {
+      "dark": "nord14",
+      "light": "nord14"
+    },
+    "markdownBlockQuote": {
+      "dark": "#8B95A7",
+      "light": "nord3"
+    },
+    "markdownEmph": {
+      "dark": "nord12",
+      "light": "nord12"
+    },
+    "markdownStrong": {
+      "dark": "nord13",
+      "light": "nord13"
+    },
+    "markdownHorizontalRule": {
+      "dark": "#8B95A7",
+      "light": "nord3"
+    },
+    "markdownListItem": {
+      "dark": "nord8",
+      "light": "nord10"
+    },
+    "markdownListEnumeration": {
+      "dark": "nord7",
+      "light": "nord7"
+    },
+    "markdownImage": {
+      "dark": "nord9",
+      "light": "nord9"
+    },
+    "markdownImageText": {
+      "dark": "nord7",
+      "light": "nord7"
+    },
+    "markdownCodeBlock": {
+      "dark": "nord4",
+      "light": "nord0"
+    },
+    "syntaxComment": {
+      "dark": "#8B95A7",
+      "light": "nord3"
+    },
+    "syntaxKeyword": {
+      "dark": "nord9",
+      "light": "nord9"
+    },
+    "syntaxFunction": {
+      "dark": "nord8",
+      "light": "nord8"
+    },
+    "syntaxVariable": {
+      "dark": "nord7",
+      "light": "nord7"
+    },
+    "syntaxString": {
+      "dark": "nord14",
+      "light": "nord14"
+    },
+    "syntaxNumber": {
+      "dark": "nord15",
+      "light": "nord15"
+    },
+    "syntaxType": {
+      "dark": "nord7",
+      "light": "nord7"
+    },
+    "syntaxOperator": {
+      "dark": "nord9",
+      "light": "nord9"
+    },
+    "syntaxPunctuation": {
+      "dark": "nord4",
+      "light": "nord0"
     }
   }
 }

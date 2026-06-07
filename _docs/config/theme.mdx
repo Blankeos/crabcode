@@ -1,0 +1,17 @@
+---
+title: Theme
+description: Theme config in crabcode.
+---
+
+# Theme
+
+Theme support is mostly OpenCode-compatible: you can use `theme` IDs and OpenCode-style theme files.
+
+The one difference is intentional: `theme` is **not** cross-merged from OpenCode files like `.opencode/opencode.jsonc` (or equivalent local/global variants). Crabcode only reads theme settings from its own crabcode config files.
+
+Reasons:
+1. `theme` is a terminal rendering concern in crabcode, while OpenCode theme settings may include desktop-only assumptions.
+2. Keeping only crabcode-owned theme config makes precedence predictable for users.
+3. It avoids accidental overrides when existing OpenCode configs are shared across tools.
+
+For theme file format and naming, use the [OpenCode theme docs](https://opencode.ai/docs/themes/).

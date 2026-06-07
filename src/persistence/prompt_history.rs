@@ -131,7 +131,7 @@ impl PromptHistoryCache {
         self.prompts.len()
     }
 
-    pub fn navigate_up(&mut self, current_text: &str) -> Option<String> {
+    pub fn navigate_up(&mut self, _current_text: &str) -> Option<String> {
         if self.prompts.is_empty() {
             return None;
         }
@@ -152,7 +152,7 @@ impl PromptHistoryCache {
         }
     }
 
-    pub fn navigate_down(&mut self, current_text: &str) -> Option<String> {
+    pub fn navigate_down(&mut self, _current_text: &str) -> Option<String> {
         match self.current_index {
             None => None,
             Some(0) => {

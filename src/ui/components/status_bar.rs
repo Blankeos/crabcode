@@ -1,9 +1,6 @@
-use ratatui::{
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    Frame,
-};
+use ratatui::{layout::Rect, style::Modifier, style::Style, text::Line, text::Span, Frame};
+
+use crate::theme::ThemeColors;
 
 pub struct StatusBar {
     pub version: String,
@@ -30,7 +27,7 @@ impl StatusBar {
         }
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    pub fn render(&self, f: &mut Frame, area: Rect, colors: &ThemeColors) {
         let cwd_with_tilde = if let Some(home) = std::env::var_os("HOME") {
             let home_str = home.to_string_lossy();
             if self.cwd.starts_with(&*home_str) {
@@ -46,20 +43,27 @@ impl StatusBar {
         } else {
             cwd_with_tilde
         };
-        let mut left_spans = vec![Span::raw(cwd_display)];
+        let mut left_spans = vec![Span::styled(
+            cwd_display,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        )];
 
         if let Some(ref branch) = self.branch {
-            left_spans.push(Span::raw(" ("));
             left_spans.push(Span::styled(
-                branch,
-                Style::default().fg(Color::Rgb(255, 140, 0)),
+                format!(":{}", branch),
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
             ));
-            left_spans.push(Span::raw(")"));
         }
 
         let right_spans = vec![Span::styled(
             &self.version,
-            Style::default().add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
         )];
 
         let line = Line::from(left_spans);

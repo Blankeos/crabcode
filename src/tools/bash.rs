@@ -1,6 +1,6 @@
 use crate::tools::{
-    get_bool_param, get_integer_param, get_string_param, validate_required, Tool, ToolContext,
-    ToolError, ToolHandler, ToolResult, ParameterSchema, ParameterType,
+    get_integer_param, get_string_param, validate_required, ParameterSchema, ParameterType, Tool,
+    ToolContext, ToolError, ToolHandler, ToolResult,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -18,26 +18,6 @@ pub struct BashTool;
 impl BashTool {
     pub fn new() -> Self {
         Self
-    }
-
-    fn is_dangerous(command: &str) -> Option<String> {
-        let dangerous_patterns = [
-            "rm -rf /",
-            "rm -rf /*",
-            ":(){ :|: & };:",
-            "> /dev/sda",
-            "mkfs",
-            "dd if=/dev/zero",
-            "chmod -R 777 /",
-        ];
-
-        for pattern in &dangerous_patterns {
-            if command.contains(pattern) {
-                return Some(format!("Command contains dangerous pattern: {}", pattern));
-            }
-        }
-
-        None
     }
 }
 
@@ -85,18 +65,20 @@ impl ToolHandler for BashTool {
             .ok_or_else(|| ToolError::Validation("command is required".to_string()))?;
 
         let timeout_seconds = get_integer_param(&params, "timeout")
-            .map(|v| if v <= 0 { DEFAULT_TIMEOUT_SECONDS } else { v as u64 })
+            .map(|v| {
+                if v <= 0 {
+                    DEFAULT_TIMEOUT_SECONDS
+                } else {
+                    v as u64
+                }
+            })
             .unwrap_or(DEFAULT_TIMEOUT_SECONDS);
 
-        let workdir = get_string_param(&params, "path")
-            .or_else(|| get_string_param(&params, "workdir"));
+        let workdir =
+            get_string_param(&params, "path").or_else(|| get_string_param(&params, "workdir"));
 
-        let description = get_string_param(&params, "description")
-            .unwrap_or_else(|| command_str.clone());
-
-        if let Some(reason) = Self::is_dangerous(&command_str) {
-            return Err(ToolError::Permission(reason));
-        }
+        let description =
+            get_string_param(&params, "description").unwrap_or_else(|| command_str.clone());
 
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(&command_str);
@@ -194,20 +176,23 @@ impl ToolHandler for BashTool {
             output_parts.join("\n")
         };
 
-        let truncated = stdout_lines.len() >= MAX_OUTPUT_SIZE || stderr_lines.len() >= MAX_OUTPUT_SIZE;
+        let truncated =
+            stdout_lines.len() >= MAX_OUTPUT_SIZE || stderr_lines.len() >= MAX_OUTPUT_SIZE;
         let final_output = if truncated {
-            format!("{}\n\n[Output truncated to {} bytes]", output, MAX_OUTPUT_SIZE)
+            format!(
+                "{}\n\n[Output truncated to {} bytes]",
+                output, MAX_OUTPUT_SIZE
+            )
         } else {
             output
         };
 
         let exit_code = exit_status.code().unwrap_or(-1);
 
-        Ok(ToolResult::new(
-            format!("Bash: {}", description),
-            final_output
+        Ok(
+            ToolResult::new(format!("Bash: {}", description), final_output)
+                .with_metadata("exit_code", serde_json::json!(exit_code))
+                .with_metadata("command", serde_json::json!(command_str)),
         )
-        .with_metadata("exit_code", serde_json::json!(exit_code))
-        .with_metadata("command", serde_json::json!(command_str)))
     }
 }

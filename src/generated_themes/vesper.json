@@ -1,131 +1,218 @@
 {
-  "$schema": "https://opencode.ai/desktop-theme.json",
-  "name": "Vesper",
-  "id": "vesper",
-  "light": {
-    "seeds": {
-      "neutral": "#F0F0F0",
-      "primary": "#FFC799",
-      "success": "#99FFE4",
-      "warning": "#FFC799",
-      "error": "#FF8080",
-      "info": "#FFC799",
-      "interactive": "#FFC799",
-      "diffAdd": "#99FFE4",
-      "diffDelete": "#FF8080"
-    },
-    "overrides": {
-      "background-base": "#FFF",
-      "background-weak": "#F8F8F8",
-      "background-strong": "#F0F0F0",
-      "background-stronger": "#E8E8E8",
-      "border-weak-base": "#E8E8E8",
-      "border-weak-hover": "#E0E0E0",
-      "border-weak-active": "#D8D8D8",
-      "border-weak-selected": "#D0D0D0",
-      "border-weak-disabled": "#F0F0F0",
-      "border-weak-focus": "#D8D8D8",
-      "border-base": "#D0D0D0",
-      "border-hover": "#C8C8C8",
-      "border-active": "#C0C0C0",
-      "border-selected": "#B8B8B8",
-      "border-disabled": "#E8E8E8",
-      "border-focus": "#C0C0C0",
-      "border-strong-base": "#A0A0A0",
-      "border-strong-hover": "#989898",
-      "border-strong-active": "#909090",
-      "border-strong-selected": "#888888",
-      "border-strong-disabled": "#D0D0D0",
-      "border-strong-focus": "#909090",
-      "surface-diff-add-base": "#e8f5e8",
-      "surface-diff-delete-base": "#f5e8e8",
-      "surface-diff-hidden-base": "#F0F0F0",
-      "text-base": "#101010",
-      "text-weak": "#A0A0A0",
-      "text-strong": "#000000",
-      "syntax-string": "#99FFE4",
-      "syntax-primitive": "#FF8080",
-      "syntax-property": "#FFC799",
-      "syntax-type": "#FFC799",
-      "syntax-constant": "#A0A0A0",
-      "syntax-info": "#A0A0A0",
-      "markdown-heading": "#FFC799",
-      "markdown-text": "#101010",
-      "markdown-link": "#FFC799",
-      "markdown-link-text": "#A0A0A0",
-      "markdown-code": "#A0A0A0",
-      "markdown-block-quote": "#101010",
-      "markdown-emph": "#101010",
-      "markdown-strong": "#101010",
-      "markdown-horizontal-rule": "#65737E",
-      "markdown-list-item": "#101010",
-      "markdown-list-enumeration": "#101010",
-      "markdown-image": "#FFC799",
-      "markdown-image-text": "#A0A0A0",
-      "markdown-code-block": "#FFC799"
-    }
+  "$schema": "https://opencode.ai/theme.json",
+  "defs": {
+    "vesperBg": "#101010",
+    "vesperFg": "#FFF",
+    "vesperComment": "#8b8b8b",
+    "vesperKeyword": "#A0A0A0",
+    "vesperFunction": "#FFC799",
+    "vesperString": "#99FFE4",
+    "vesperNumber": "#FFC799",
+    "vesperError": "#FF8080",
+    "vesperWarning": "#FFC799",
+    "vesperSuccess": "#99FFE4",
+    "vesperMuted": "#A0A0A0"
   },
-  "dark": {
-    "seeds": {
-      "neutral": "#101010",
-      "primary": "#FFC799",
-      "success": "#99FFE4",
-      "warning": "#FFC799",
-      "error": "#FF8080",
-      "info": "#FFC799",
-      "interactive": "#FFC799",
-      "diffAdd": "#99FFE4",
-      "diffDelete": "#FF8080"
+  "theme": {
+    "primary": {
+      "dark": "#FFC799",
+      "light": "#FFC799"
     },
-    "overrides": {
-      "background-base": "#101010",
-      "background-weak": "#141414",
-      "background-strong": "#0C0C0C",
-      "background-stronger": "#080808",
-      "border-weak-base": "#1C1C1C",
-      "border-weak-hover": "#202020",
-      "border-weak-active": "#242424",
-      "border-weak-selected": "#282828",
-      "border-weak-disabled": "#141414",
-      "border-weak-focus": "#242424",
-      "border-base": "#282828",
-      "border-hover": "#303030",
-      "border-active": "#383838",
-      "border-selected": "#404040",
-      "border-disabled": "#181818",
-      "border-focus": "#383838",
-      "border-strong-base": "#505050",
-      "border-strong-hover": "#585858",
-      "border-strong-active": "#606060",
-      "border-strong-selected": "#686868",
-      "border-strong-disabled": "#202020",
-      "border-strong-focus": "#606060",
-      "surface-diff-add-base": "#0d2818",
-      "surface-diff-delete-base": "#281a1a",
-      "surface-diff-hidden-base": "#141414",
-      "text-base": "#FFF",
-      "text-weak": "#A0A0A0",
-      "text-strong": "#FFFFFF",
-      "syntax-string": "#99FFE4",
-      "syntax-primitive": "#FF8080",
-      "syntax-property": "#FFC799",
-      "syntax-type": "#FFC799",
-      "syntax-constant": "#A0A0A0",
-      "syntax-info": "#8b8b8b",
-      "markdown-heading": "#FFC799",
-      "markdown-text": "#FFF",
-      "markdown-link": "#FFC799",
-      "markdown-link-text": "#A0A0A0",
-      "markdown-code": "#A0A0A0",
-      "markdown-block-quote": "#FFF",
-      "markdown-emph": "#FFF",
-      "markdown-strong": "#FFF",
-      "markdown-horizontal-rule": "#65737E",
-      "markdown-list-item": "#FFF",
-      "markdown-list-enumeration": "#FFF",
-      "markdown-image": "#FFC799",
-      "markdown-image-text": "#A0A0A0",
-      "markdown-code-block": "#FFF"
+    "secondary": {
+      "dark": "#99FFE4",
+      "light": "#99FFE4"
+    },
+    "accent": {
+      "dark": "#FFC799",
+      "light": "#FFC799"
+    },
+    "error": {
+      "dark": "vesperError",
+      "light": "vesperError"
+    },
+    "warning": {
+      "dark": "vesperWarning",
+      "light": "vesperWarning"
+    },
+    "success": {
+      "dark": "vesperSuccess",
+      "light": "vesperSuccess"
+    },
+    "info": {
+      "dark": "#FFC799",
+      "light": "#FFC799"
+    },
+    "text": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
+    },
+    "textMuted": {
+      "dark": "vesperMuted",
+      "light": "vesperMuted"
+    },
+    "background": {
+      "dark": "vesperBg",
+      "light": "#FFF"
+    },
+    "backgroundPanel": {
+      "dark": "vesperBg",
+      "light": "#F0F0F0"
+    },
+    "backgroundElement": {
+      "dark": "vesperBg",
+      "light": "#E0E0E0"
+    },
+    "border": {
+      "dark": "#282828",
+      "light": "#D0D0D0"
+    },
+    "borderActive": {
+      "dark": "#FFC799",
+      "light": "#FFC799"
+    },
+    "borderSubtle": {
+      "dark": "#1C1C1C",
+      "light": "#E8E8E8"
+    },
+    "diffAdded": {
+      "dark": "vesperSuccess",
+      "light": "vesperSuccess"
+    },
+    "diffRemoved": {
+      "dark": "vesperError",
+      "light": "vesperError"
+    },
+    "diffContext": {
+      "dark": "vesperMuted",
+      "light": "vesperMuted"
+    },
+    "diffHunkHeader": {
+      "dark": "vesperMuted",
+      "light": "vesperMuted"
+    },
+    "diffHighlightAdded": {
+      "dark": "vesperSuccess",
+      "light": "vesperSuccess"
+    },
+    "diffHighlightRemoved": {
+      "dark": "vesperError",
+      "light": "vesperError"
+    },
+    "diffAddedBg": {
+      "dark": "#0d2818",
+      "light": "#e8f5e8"
+    },
+    "diffRemovedBg": {
+      "dark": "#281a1a",
+      "light": "#f5e8e8"
+    },
+    "diffContextBg": {
+      "dark": "vesperBg",
+      "light": "#F8F8F8"
+    },
+    "diffLineNumber": {
+      "dark": "textMuted",
+      "light": "#6a6a6a"
+    },
+    "diffAddedLineNumberBg": {
+      "dark": "#0d2818",
+      "light": "#e8f5e8"
+    },
+    "diffRemovedLineNumberBg": {
+      "dark": "#281a1a",
+      "light": "#f5e8e8"
+    },
+    "markdownText": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
+    },
+    "markdownHeading": {
+      "dark": "#FFC799",
+      "light": "#FFC799"
+    },
+    "markdownLink": {
+      "dark": "#FFC799",
+      "light": "#FFC799"
+    },
+    "markdownLinkText": {
+      "dark": "vesperMuted",
+      "light": "vesperMuted"
+    },
+    "markdownCode": {
+      "dark": "vesperMuted",
+      "light": "vesperMuted"
+    },
+    "markdownBlockQuote": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
+    },
+    "markdownEmph": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
+    },
+    "markdownStrong": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
+    },
+    "markdownHorizontalRule": {
+      "dark": "#65737E",
+      "light": "#65737E"
+    },
+    "markdownListItem": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
+    },
+    "markdownListEnumeration": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
+    },
+    "markdownImage": {
+      "dark": "#FFC799",
+      "light": "#FFC799"
+    },
+    "markdownImageText": {
+      "dark": "vesperMuted",
+      "light": "vesperMuted"
+    },
+    "markdownCodeBlock": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
+    },
+    "syntaxComment": {
+      "dark": "vesperComment",
+      "light": "vesperComment"
+    },
+    "syntaxKeyword": {
+      "dark": "vesperKeyword",
+      "light": "vesperKeyword"
+    },
+    "syntaxFunction": {
+      "dark": "vesperFunction",
+      "light": "vesperFunction"
+    },
+    "syntaxVariable": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
+    },
+    "syntaxString": {
+      "dark": "vesperString",
+      "light": "vesperString"
+    },
+    "syntaxNumber": {
+      "dark": "vesperNumber",
+      "light": "vesperNumber"
+    },
+    "syntaxType": {
+      "dark": "vesperFunction",
+      "light": "vesperFunction"
+    },
+    "syntaxOperator": {
+      "dark": "vesperKeyword",
+      "light": "vesperKeyword"
+    },
+    "syntaxPunctuation": {
+      "dark": "vesperFg",
+      "light": "vesperBg"
     }
   }
 }

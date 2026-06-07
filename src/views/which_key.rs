@@ -1,9 +1,9 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
     Frame,
 };
 use std::time::{Duration, Instant};
@@ -15,7 +15,13 @@ const TIMEOUT_SECONDS: u64 = 5;
 #[derive(Debug, Clone, PartialEq)]
 pub enum WhichKeyAction {
     ShowModels,
+    ShowThemes,
     ShowSessions,
+    ShowTimeline,
+    GoChild,
+    GoParent,
+    PreviousChild,
+    NextChild,
     NewSession,
     Quit,
     ScrollUp,
@@ -48,6 +54,11 @@ impl WhichKeyState {
                 action: WhichKeyAction::ShowModels,
             },
             KeyBinding {
+                key: "t".to_string(),
+                description: "Open Themes dialog".to_string(),
+                action: WhichKeyAction::ShowThemes,
+            },
+            KeyBinding {
                 key: "l".to_string(),
                 description: "Open Sessions dialog".to_string(),
                 action: WhichKeyAction::ShowSessions,
@@ -65,6 +76,31 @@ impl WhichKeyState {
         ];
 
         let chat_bindings = vec![
+            KeyBinding {
+                key: "↓".to_string(),
+                description: "Go to first subagent session".to_string(),
+                action: WhichKeyAction::GoChild,
+            },
+            KeyBinding {
+                key: "↑".to_string(),
+                description: "Go to parent session".to_string(),
+                action: WhichKeyAction::GoParent,
+            },
+            KeyBinding {
+                key: "←".to_string(),
+                description: "Previous subagent session".to_string(),
+                action: WhichKeyAction::PreviousChild,
+            },
+            KeyBinding {
+                key: "→".to_string(),
+                description: "Next subagent session".to_string(),
+                action: WhichKeyAction::NextChild,
+            },
+            KeyBinding {
+                key: "g".to_string(),
+                description: "Open Messages Timeline dialog".to_string(),
+                action: WhichKeyAction::ShowTimeline,
+            },
             KeyBinding {
                 key: "k".to_string(),
                 description: "Scroll up".to_string(),
@@ -115,9 +151,33 @@ impl WhichKeyState {
         self.update_last_key_time();
 
         match event.code {
+            KeyCode::Char('g') | KeyCode::Char('G') if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::ShowTimeline
+            }
+            KeyCode::Down if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::GoChild
+            }
+            KeyCode::Up if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::GoParent
+            }
+            KeyCode::Left if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::PreviousChild
+            }
+            KeyCode::Right if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::NextChild
+            }
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 self.hide();
                 WhichKeyAction::ShowModels
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                self.hide();
+                WhichKeyAction::ShowThemes
             }
             KeyCode::Char('l') | KeyCode::Char('L') => {
                 self.hide();
@@ -164,16 +224,19 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
     }
 
     let area = f.area();
-    let popup_width = 40u16;
-    // Base height: 2 (borders) + 1 (empty) + 4 (bindings) + 1 (empty) + 1 (ESC) = 9
-    // Add 2 more lines per chat binding when active
-    let base_height = 9u16;
     let chat_bindings_count = if state.is_chat_active {
-        state.chat_bindings.len() as u16
+        state.chat_bindings.len()
     } else {
         0
     };
-    let popup_height = base_height + chat_bindings_count * 1;
+    let bindings_count = state.bindings.len() + chat_bindings_count;
+
+    // Scale like the Dialog component (which is 70×25) — broad enough to visually
+    // anchor the popup and cover behind-the-modal content (logo, scrollbar artefacts).
+    const POPUP_WIDTH: u16 = 58;
+
+    let popup_width = area.width.min(POPUP_WIDTH);
+    let popup_height = area.height.min((bindings_count + 7) as u16);
 
     let popup_area = Rect {
         x: area.x + (area.width.saturating_sub(popup_width)) / 2,
@@ -182,21 +245,66 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
         height: popup_height,
     };
 
+    // Clear and fill background (flat style like other dialogs)
     f.render_widget(Clear, popup_area);
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(colors.dialog_background)),
+        popup_area,
+    );
 
-    let block = Block::default()
-        .title(" Shortcuts ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors.border_focus))
-        .title_style(
+    // Content area with padding (matching Dialog component)
+    const PADDING_X: u16 = 3;
+    const PADDING_Y: u16 = 1;
+    let content_area = Rect {
+        x: popup_area.x + PADDING_X,
+        y: popup_area.y + PADDING_Y,
+        width: popup_area.width.saturating_sub(PADDING_X * 2),
+        height: popup_area.height.saturating_sub(PADDING_Y * 2),
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),                     // top margin
+            Constraint::Length(1),                     // title
+            Constraint::Length(bindings_count as u16), // bindings
+            Constraint::Length(1),                     // spacer
+            Constraint::Length(1),                     // footer
+        ])
+        .split(content_area);
+
+    // Header: title (left) and esc hint (right) — same as Dialog
+    let esc_text = "esc";
+    let esc_width = esc_text.len() as u16;
+    let header_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(esc_width)])
+        .split(chunks[1]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "Shortcuts",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(Alignment::Left),
+        header_chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            esc_text,
             Style::default()
                 .fg(colors.primary)
                 .add_modifier(Modifier::BOLD),
-        );
+        )]))
+        .alignment(Alignment::Right),
+        header_chunks[1],
+    );
 
+    // Bindings
     let mut lines: Vec<Line> = vec![];
-
-    lines.push(Line::from(""));
 
     for binding in &state.bindings {
         let key_span = Span::styled(
@@ -209,7 +317,6 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
         lines.push(Line::from(vec![key_span, Span::raw(" "), desc_span]));
     }
 
-    // Add chat-specific bindings when on chat page
     if state.is_chat_active {
         for binding in &state.chat_bindings {
             let key_span = Span::styled(
@@ -223,21 +330,17 @@ pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColo
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "  ESC ",
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), chunks[2]);
+
+    // Footer — dim hint matching Dialog footer style
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "Press a key to execute, ESC to cancel",
             Style::default()
-                .fg(colors.info)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("cancel", Style::default().fg(colors.text_weak)),
-    ]));
-
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(block)
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: true });
-
-    f.render_widget(paragraph, popup_area);
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        )]))
+        .alignment(Alignment::Left),
+        chunks[4],
+    );
 }

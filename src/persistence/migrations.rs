@@ -8,6 +8,14 @@ pub fn run_migrations(db: &mut Connection) -> Result<()> {
         migrate_to_v1(db)?;
     }
 
+    if current_version < 2 {
+        migrate_to_v2(db)?;
+    }
+
+    if current_version < 3 {
+        migrate_to_v3(db)?;
+    }
+
     Ok(())
 }
 
@@ -28,6 +36,7 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_identifier TEXT NOT NULL,
             name TEXT NOT NULL,
             created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
@@ -36,6 +45,8 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
             total_time_sec REAL NOT NULL DEFAULT 0,
             avg_tokens_per_sec REAL NOT NULL DEFAULT 0
         );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_identifier ON sessions(session_identifier);
 
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
@@ -90,6 +101,80 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
 
     tx.execute(
         "INSERT INTO migrations (version, applied_at) VALUES (1, strftime('%s', 'now'))",
+        params![],
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_v2(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction()?;
+
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS workspaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_path TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            archived_at INTEGER,
+            last_opened_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workspaces_sort ON workspaces(sort_order ASC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_workspaces_path ON workspaces(root_path);
+        "#,
+    )?;
+
+    let _ = tx.execute("ALTER TABLE sessions ADD COLUMN workspace_id INTEGER", []);
+    let _ = tx.execute(
+        "ALTER TABLE sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'idle'",
+        [],
+    );
+    let _ = tx.execute(
+        "ALTER TABLE sessions ADD COLUMN active_generation_id TEXT",
+        [],
+    );
+    let _ = tx.execute("ALTER TABLE sessions ADD COLUMN last_error TEXT", []);
+    let _ = tx.execute("ALTER TABLE sessions ADD COLUMN pinned_at INTEGER", []);
+    let _ = tx.execute("ALTER TABLE sessions ADD COLUMN archived_at INTEGER", []);
+
+    tx.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions(workspace_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+        CREATE INDEX IF NOT EXISTS idx_sessions_pinned ON sessions(pinned_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);
+        "#,
+    )?;
+
+    tx.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at) VALUES (2, strftime('%s', 'now'))",
+        params![],
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_v3(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction()?;
+
+    let _ = tx.execute(
+        "ALTER TABLE sessions ADD COLUMN parent_session_identifier TEXT",
+        [],
+    );
+
+    tx.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_sessions_parent_identifier
+            ON sessions(parent_session_identifier, updated_at DESC);
+        "#,
+    )?;
+
+    tx.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at) VALUES (3, strftime('%s', 'now'))",
         params![],
     )?;
 

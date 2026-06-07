@@ -1,0 +1,38 @@
+{
+  "name": "crabcode",
+  "version": "0.0.1",
+  "description": "(WIP) Rust AI CLI coding agent with a beautiful terminal UI",
+  "main": "bin.js",
+  "bin": {
+    "crabcode": "./bin.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Blankeos/crabcode.git"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "tui",
+    "terminal",
+    "rust"
+  ],
+  "author": "Blankeos",
+  "license": "MIT",
+  "files": [
+    "install.js",
+    "bin.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=12"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ]
+}

@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
+const CACHE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
@@ -56,6 +57,16 @@ pub struct Model {
     pub cost: Option<Cost>,
     #[serde(default)]
     pub limit: Option<Limit>,
+    #[serde(default)]
+    pub provider: Option<ModelProvider>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProvider {
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub api: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +101,8 @@ pub struct Limit {
 struct CacheEntry {
     data: HashMap<String, Provider>,
     timestamp: u64,
+    #[serde(default)]
+    schema_version: u32,
 }
 
 pub struct Discovery {
@@ -159,6 +172,42 @@ impl Discovery {
         Ok(providers)
     }
 
+    async fn fetch_with_internal_providers(
+        &self,
+        cached: Option<&HashMap<String, Provider>>,
+    ) -> Result<HashMap<String, Provider>> {
+        let mut providers = self.fetch_from_api().await?;
+        self.inject_internal_remote_providers(&mut providers, cached)
+            .await;
+        Ok(providers)
+    }
+
+    async fn inject_internal_remote_providers(
+        &self,
+        providers: &mut HashMap<String, Provider>,
+        cached: Option<&HashMap<String, Provider>>,
+    ) {
+        if providers.contains_key(crate::model::commandcode::PROVIDER_ID) {
+            return;
+        }
+
+        if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+            return;
+        }
+
+        match crate::model::commandcode::fetch_provider(&self.client).await {
+            Ok(provider) => crate::model::commandcode::inject_provider(providers, provider),
+            Err(err) => {
+                if let Some(provider) = cached
+                    .and_then(|cached| cached.get(crate::model::commandcode::PROVIDER_ID).cloned())
+                {
+                    crate::model::commandcode::inject_provider(providers, provider);
+                }
+                crate::emit_log!("Skipped CommandCode model discovery: {}", err);
+            }
+        }
+    }
+
     fn load_from_cache(&self) -> Result<Option<HashMap<String, Provider>>> {
         let cache_path = self.get_cache_path();
 
@@ -170,6 +219,10 @@ impl Discovery {
 
         let entry: CacheEntry =
             serde_json::from_str(&cached_json).context("Failed to parse cache file")?;
+
+        if entry.schema_version < CACHE_SCHEMA_VERSION {
+            return Ok(None);
+        }
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -194,6 +247,7 @@ impl Discovery {
         let entry = CacheEntry {
             data: data.clone(),
             timestamp: now,
+            schema_version: CACHE_SCHEMA_VERSION,
         };
 
         let serialized =
@@ -205,43 +259,95 @@ impl Discovery {
     }
 
     pub async fn fetch_providers(&self) -> Result<HashMap<String, Provider>> {
-        if let Some(cached) = self.load_from_cache()? {
-            return Ok(cached);
-        }
+        let mut providers = if let Some(cached) = self.load_from_cache()? {
+            let mut providers = cached;
+            if !providers.contains_key(crate::model::commandcode::PROVIDER_ID) {
+                self.inject_internal_remote_providers(&mut providers, None)
+                    .await;
+                if providers.contains_key(crate::model::commandcode::PROVIDER_ID) {
+                    let _ = self.save_to_cache(&providers);
+                }
+            }
+            providers
+        } else if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+            // In test mode, avoid hard network dependency so unit tests are reliable.
+            match self.fetch_from_api().await {
+                Ok(providers) => {
+                    let mut providers = providers;
+                    self.inject_internal_remote_providers(&mut providers, None)
+                        .await;
+                    let _ = self.save_to_cache(&providers);
+                    providers
+                }
+                Err(_) => {
+                    let mut providers: HashMap<String, Provider> = HashMap::new();
+                    for (id, name) in [
+                        ("opencode", "OpenCode"),
+                        ("anthropic", "Anthropic"),
+                        ("openai", "OpenAI"),
+                        ("google", "Google"),
+                    ] {
+                        providers.insert(
+                            id.to_string(),
+                            Provider {
+                                id: id.to_string(),
+                                name: name.to_string(),
+                                api: String::new(),
+                                doc: String::new(),
+                                env: Vec::new(),
+                                npm: String::new(),
+                                models: HashMap::new(),
+                            },
+                        );
+                    }
+                    providers
+                }
+            }
+        } else {
+            let providers = self.fetch_with_internal_providers(None).await?;
+            self.save_to_cache(&providers)?;
+            providers
+        };
 
-        let providers = self.fetch_from_api().await?;
-
-        self.save_to_cache(&providers)?;
+        crate::model::ollama::inject_provider(&mut providers);
 
         Ok(providers)
     }
 
     pub async fn refresh_cache(&self) -> Result<HashMap<String, Provider>> {
-        let providers = self.fetch_from_api().await?;
+        let cached = self.load_from_cache().ok().flatten();
+        let mut providers = self.fetch_with_internal_providers(cached.as_ref()).await?;
         self.save_to_cache(&providers)?;
+        crate::model::ollama::inject_provider(&mut providers);
         Ok(providers)
     }
 
     pub async fn fetch_models(&self) -> Result<Vec<crate::model::types::Model>> {
-        let providers = self.fetch_providers().await?;
-
-        let mut models = Vec::new();
+        let mut models = crate::model::ollama::models_from_runtime_cache();
+        let providers = match self.fetch_providers().await {
+            Ok(providers) => providers,
+            Err(_err) if !models.is_empty() => return Ok(models),
+            Err(err) => return Err(err),
+        };
 
         for (provider_id, provider) in providers {
+            if crate::model::ollama::is_ollama_provider(&provider_id) {
+                continue;
+            }
+
             for (model_id, model) in provider.models {
                 let mut capabilities = Vec::new();
 
                 if model.attachment {
                     capabilities.push("attachment".to_string());
                 }
-                if model.reasoning {
-                    capabilities.push("reasoning".to_string());
-                }
-                if model.tool_call {
-                    capabilities.push("tool_call".to_string());
-                }
+
                 if model.structured_output {
                     capabilities.push("structured_output".to_string());
+                }
+
+                if model.reasoning {
+                    capabilities.push("reasoning".to_string());
                 }
 
                 let is_text_model = model.modalities.as_ref().map_or(true, |m| {
@@ -253,15 +359,72 @@ impl Discovery {
                     models.push(crate::model::types::Model {
                         id: model_id.clone(),
                         name: model.name.clone(),
+                        family: model.family.clone(),
                         provider_id: provider_id.clone(),
                         provider_name: provider.name.clone(),
                         capabilities,
+                        reasoning: model.reasoning,
                     });
                 }
             }
         }
 
         Ok(models)
+    }
+
+    pub fn get_model_pricing(&self, provider_id: &str, model_id: &str) -> Option<Cost> {
+        let cache_path = self.get_cache_path();
+        if !cache_path.exists() {
+            return None;
+        }
+        let cached_json = std::fs::read_to_string(cache_path).ok()?;
+        let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
+        let provider = entry.data.get(provider_id)?;
+        let model = provider.models.get(model_id)?;
+        model.cost.clone()
+    }
+
+    pub fn get_model_limit(&self, provider_id: &str, model_id: &str) -> Option<u32> {
+        let cache_path = self.get_cache_path();
+        if !cache_path.exists() {
+            return None;
+        }
+        let cached_json = std::fs::read_to_string(cache_path).ok()?;
+        let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
+        let provider = entry.data.get(provider_id)?;
+        let model = provider.models.get(model_id)?;
+        model.limit.as_ref().map(|l| l.context)
+    }
+
+    pub fn get_model_reasoning_capability(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<crate::model::reasoning::ReasoningCapability> {
+        let cache_path = self.get_cache_path();
+        if !cache_path.exists() {
+            return None;
+        }
+        let cached_json = std::fs::read_to_string(cache_path).ok()?;
+        let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
+        let provider = entry.data.get(provider_id)?;
+        let model = provider.models.get(model_id)?;
+        let provider_npm = model
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.npm.as_deref())
+            .filter(|npm| !npm.trim().is_empty())
+            .unwrap_or(provider.npm.as_str());
+        Some(crate::model::reasoning::capability_for_model(
+            provider_id,
+            provider_npm,
+            model_id,
+            &model.id,
+            &model.name,
+            &model.family,
+            &model.release_date,
+            model.reasoning,
+        ))
     }
 
     pub async fn list_models(&self, provider_filter: Option<&str>) -> Result<String> {
@@ -335,6 +498,19 @@ impl Default for Discovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unique_test_cache_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        PathBuf::from(format!(
+            "/tmp/crabcode_test_cache/{}_{}_{}.json",
+            name,
+            std::process::id(),
+            nanos
+        ))
+    }
 
     #[tokio::test]
     async fn test_discovery_creation() {
@@ -425,6 +601,7 @@ mod tests {
         let entry = CacheEntry {
             data: providers.clone(),
             timestamp: 123456,
+            schema_version: CACHE_SCHEMA_VERSION,
         };
 
         let serialized = serde_json::to_string(&entry).unwrap();
@@ -432,13 +609,35 @@ mod tests {
 
         assert_eq!(deserialized.data.len(), 1);
         assert_eq!(deserialized.timestamp, 123456);
+        assert_eq!(deserialized.schema_version, CACHE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_model_provider_override_deserialization() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id": "qwen3.7-max",
+            "name": "Qwen3.7 Max",
+            "release_date": "2026-05-21",
+            "last_updated": "2026-05-21",
+            "provider": {
+                "npm": "@ai-sdk/anthropic"
+            }
+        }))
+        .unwrap();
+
+        let provider = model.provider.expect("provider override");
+        assert_eq!(provider.npm.as_deref(), Some("@ai-sdk/anthropic"));
+        assert_eq!(provider.api, None);
     }
 
     #[tokio::test]
     async fn test_cache_persistence() {
-        let discovery = Discovery::new().unwrap();
-
-        let cache_path = discovery.get_cache_path().clone();
+        let mut discovery = Discovery::new().unwrap();
+        let cache_path = unique_test_cache_path("models_dev_cache_persistence");
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        discovery.cache_path = cache_path.clone();
 
         let test_data = {
             let mut providers = HashMap::new();

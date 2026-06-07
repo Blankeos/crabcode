@@ -1,7 +1,11 @@
-use crate::theme::ThemeColors;
+use crate::theme::{contrast_text, ThemeColors};
+use crate::ui::scrollbar::{
+    render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
+};
+use crate::ui::textarea_keys::input_textarea;
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
-    Config, Matcher,
+    Config, Matcher, Utf32Str,
 };
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -10,12 +14,23 @@ use ratatui::{
     prelude::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Clear, Paragraph, ScrollbarState},
     Frame,
 };
-use std::collections::HashMap;
-use tui_textarea::{Input as TuiInput, TextArea};
-use unicode_width::UnicodeWidthStr;
+use std::collections::{HashMap, HashSet};
+use tui_textarea::TextArea;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+const SEARCH_AREA_HEIGHT: u16 = 2;
+const PROVIDER_EXACT_MATCH_BOOST: u32 = 1_000_000;
+const PROVIDER_PREFIX_MATCH_BOOST: u32 = 900_000;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DialogPosition {
+    Left,
+    Center,
+    Right,
+}
 
 #[derive(Debug)]
 pub struct DialogItem {
@@ -25,6 +40,7 @@ pub struct DialogItem {
     pub description: String,
     pub tip: Option<String>,
     pub provider_id: String,
+    pub active: bool,
 }
 
 impl Clone for DialogItem {
@@ -36,6 +52,7 @@ impl Clone for DialogItem {
             description: self.description.clone(),
             tip: self.tip.clone(),
             provider_id: self.provider_id.clone(),
+            active: self.active,
         }
     }
 }
@@ -62,12 +79,24 @@ pub struct Dialog {
     pub search_textarea: TextArea<'static>,
     pub scrollbar_state: ScrollbarState,
     pub is_dragging_scrollbar: bool,
+    scrollbar_drag_offset: Option<u16>,
     pub visible_row_count: usize,
     pub actions: Vec<DialogAction>,
+    bottom_gap_height: u16,
+    pub position: DialogPosition,
+    pub pending_delete_id: Option<String>,
+    collapsible_groups: bool,
+    collapsed_groups: HashSet<String>,
+    focusable_group_headers: bool,
+    focused_group_header: Option<String>,
     matcher: Matcher,
 }
 
 impl Dialog {
+    fn group_has_header(group: &str) -> bool {
+        !group.is_empty()
+    }
+
     pub fn new(title: impl Into<String>) -> Self {
         let title = title.into();
         let mut search_textarea = TextArea::default();
@@ -87,10 +116,39 @@ impl Dialog {
             search_textarea,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
+            scrollbar_drag_offset: None,
             visible_row_count: 0,
             actions: Vec::new(),
+            bottom_gap_height: 1,
+            position: DialogPosition::Center,
+            pending_delete_id: None,
+            collapsible_groups: false,
+            collapsed_groups: HashSet::new(),
+            focusable_group_headers: false,
+            focused_group_header: None,
             matcher: Matcher::new(Config::DEFAULT),
         }
+    }
+
+    pub fn with_position(mut self, position: DialogPosition) -> Self {
+        self.position = position;
+        self
+    }
+
+    pub fn with_collapsible_groups(mut self, enabled: bool) -> Self {
+        self.collapsible_groups = enabled;
+        if !enabled {
+            self.collapsed_groups.clear();
+        }
+        self
+    }
+
+    pub fn with_focusable_group_headers(mut self, enabled: bool) -> Self {
+        self.focusable_group_headers = enabled;
+        if !enabled {
+            self.focused_group_header = None;
+        }
+        self
     }
 
     pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
@@ -102,6 +160,10 @@ impl Dialog {
     pub fn with_actions(mut self, actions: Vec<DialogAction>) -> Self {
         self.actions = actions;
         self
+    }
+
+    pub fn set_bottom_gap_height(&mut self, height: u16) {
+        self.bottom_gap_height = height.max(1);
     }
 
     pub fn set_items(&mut self, items: Vec<DialogItem>) {
@@ -150,6 +212,10 @@ impl Dialog {
         });
 
         self.groups = special.into_iter().chain(regular.into_iter()).collect();
+
+        let valid_groups: HashSet<String> = self.groups.iter().cloned().collect();
+        self.collapsed_groups
+            .retain(|group| valid_groups.contains(group));
     }
 
     pub fn show(&mut self) {
@@ -162,6 +228,8 @@ impl Dialog {
         self.search_query.clear();
         self.search_textarea = TextArea::default();
         self.search_textarea.set_placeholder_text("Search");
+        self.is_dragging_scrollbar = false;
+        self.scrollbar_drag_offset = None;
     }
 
     pub fn toggle(&mut self) {
@@ -174,21 +242,90 @@ impl Dialog {
 
     pub fn set_search_query(&mut self, query: impl Into<String>) {
         self.search_query = query.into();
+        self.search_textarea = TextArea::default();
+        self.search_textarea.set_placeholder_text("Search");
+        if !self.search_query.is_empty() {
+            self.search_textarea.insert_str(&self.search_query);
+        }
         self.apply_filter();
-        self.selected_index = 0;
-        self.scroll_offset = 0;
-        self.update_scrollbar();
     }
 
     pub fn clear_search(&mut self) {
         self.search_query.clear();
+        self.search_textarea = TextArea::default();
+        self.search_textarea.set_placeholder_text("Search");
         self.apply_filter();
-        self.selected_index = 0;
-        self.scroll_offset = 0;
+    }
+
+    pub fn is_group_collapsed(&self, group: &str) -> bool {
+        self.collapsible_groups && self.collapsed_groups.contains(group)
+    }
+
+    pub fn toggle_group_collapsed(&mut self, group: &str) {
+        if !self.collapsible_groups {
+            return;
+        }
+
+        if self.collapsed_groups.contains(group) {
+            self.collapsed_groups.remove(group);
+        } else {
+            self.collapsed_groups.insert(group.to_string());
+        }
+
+        self.reconcile_selection_after_filter(None);
         self.update_scrollbar();
     }
 
+    pub fn focus_group_header(&mut self, group: &str) -> bool {
+        if !self.focusable_group_headers || !Self::group_has_header(group) {
+            return false;
+        }
+
+        if !self
+            .filtered_items
+            .iter()
+            .any(|(candidate, items)| candidate == group && !items.is_empty())
+        {
+            return false;
+        }
+
+        self.focused_group_header = Some(group.to_string());
+        self.adjust_scroll();
+        true
+    }
+
+    pub fn get_focused_group_header(&self) -> Option<&str> {
+        self.focused_group_header.as_deref()
+    }
+
+    pub fn collapsed_groups(&self) -> HashSet<String> {
+        self.collapsed_groups.clone()
+    }
+
+    pub fn set_collapsed_groups(&mut self, groups: HashSet<String>) {
+        self.collapsed_groups = if self.collapsible_groups {
+            groups
+        } else {
+            HashSet::new()
+        };
+
+        let valid_groups: HashSet<String> = self.groups.iter().cloned().collect();
+        self.collapsed_groups
+            .retain(|group| valid_groups.contains(group));
+        self.reconcile_selection_after_filter(None);
+        self.update_scrollbar();
+    }
+
+    pub fn preserve_scrollbar_drag_state_from(&mut self, previous: &Self) {
+        self.is_dragging_scrollbar = previous.is_dragging_scrollbar;
+        self.scrollbar_drag_offset = previous.scrollbar_drag_offset;
+    }
+
     fn apply_filter(&mut self) {
+        let preferred_selected = self
+            .get_selected()
+            .map(|item| (item.id.clone(), item.provider_id.clone()));
+
         if self.search_query.is_empty() {
             self.filtered_items = self
                 .groups
@@ -206,43 +343,195 @@ impl Dialog {
                 CaseMatching::Ignore,
                 Normalization::Smart,
             );
-            let mut filtered: Vec<(String, Vec<DialogItem>)> = Vec::new();
+            let groups = self.groups.clone();
+            let mut filtered: Vec<(String, Vec<DialogItem>, u32, usize)> = Vec::new();
 
-            for group in &self.groups {
-                let items = self.grouped_items.get(group).unwrap();
-
-                let combined_strings: Vec<String> = items
+            for (group_index, group) in groups.iter().enumerate() {
+                let items = self.grouped_items.get(group).cloned().unwrap_or_default();
+                let mut scored_items: Vec<(DialogItem, u32, usize)> = items
                     .iter()
-                    .map(|item| format!("{} {}", group, item.name))
+                    .enumerate()
+                    .filter_map(|(item_index, item)| {
+                        Self::search_item_score(
+                            &pattern,
+                            &mut self.matcher,
+                            &self.search_query,
+                            group,
+                            item,
+                        )
+                        .map(|score| (item.clone(), score, item_index))
+                    })
                     .collect();
 
-                let matched: Vec<(&str, u32)> = pattern.match_list(
-                    combined_strings.iter().map(|s| s.as_str()),
-                    &mut self.matcher,
-                );
+                if !scored_items.is_empty() {
+                    scored_items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
 
-                if !matched.is_empty() {
-                    let mut scored_items: Vec<(DialogItem, u32)> = matched
-                        .into_iter()
-                        .filter_map(|(combined_str, score)| {
-                            items
-                                .iter()
-                                .find(|item| format!("{} {}", group, item.name) == *combined_str)
-                                .map(|item| (item.clone(), score))
-                        })
-                        .collect();
-
-                    scored_items.sort_by(|a, b| b.1.cmp(&a.1));
-
+                    let group_score = scored_items
+                        .first()
+                        .map(|(_, score, _)| *score)
+                        .unwrap_or(0);
                     let sorted_items: Vec<DialogItem> =
-                        scored_items.into_iter().map(|(item, _)| item).collect();
+                        scored_items.into_iter().map(|(item, _, _)| item).collect();
 
-                    filtered.push((group.clone(), sorted_items));
+                    filtered.push((group.clone(), sorted_items, group_score, group_index));
                 }
             }
-            self.filtered_items = filtered;
+
+            filtered.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.3.cmp(&b.3)));
+            self.filtered_items = filtered
+                .into_iter()
+                .map(|(group, items, _, _)| (group, items))
+                .collect();
         }
-        self.update_scrollbar();
+
+        self.reconcile_selection_after_filter(preferred_selected);
+    }
+
+    fn search_item_score(
+        pattern: &Pattern,
+        matcher: &mut Matcher,
+        query: &str,
+        group: &str,
+        item: &DialogItem,
+    ) -> Option<u32> {
+        let mut best_score = None;
+
+        Self::consider_search_field(
+            pattern,
+            matcher,
+            group,
+            Self::provider_match_boost(query, group),
+            &mut best_score,
+        );
+        Self::consider_search_field(
+            pattern,
+            matcher,
+            &item.provider_id,
+            Self::provider_match_boost(query, &item.provider_id),
+            &mut best_score,
+        );
+        Self::consider_search_field(pattern, matcher, &item.name, 0, &mut best_score);
+        Self::consider_search_field(pattern, matcher, &item.description, 0, &mut best_score);
+        if let Some(tip) = &item.tip {
+            Self::consider_search_field(pattern, matcher, tip, 0, &mut best_score);
+        }
+        if item.active {
+            Self::consider_search_field(pattern, matcher, "Active", 0, &mut best_score);
+        }
+
+        let active_token = if item.active { " Active" } else { "" };
+        let combined = match &item.tip {
+            Some(tip) => format!(
+                "{} {} {} {} {}{}",
+                group, item.provider_id, item.name, item.description, tip, active_token
+            ),
+            None => format!(
+                "{} {} {} {}{}",
+                group, item.provider_id, item.name, item.description, active_token
+            ),
+        };
+        Self::consider_search_field(pattern, matcher, &combined, 0, &mut best_score);
+
+        best_score
+    }
+
+    fn consider_search_field(
+        pattern: &Pattern,
+        matcher: &mut Matcher,
+        text: &str,
+        boost: u32,
+        best_score: &mut Option<u32>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+
+        let mut buf = Vec::new();
+        if let Some(score) = pattern.score(Utf32Str::new(text, &mut buf), matcher) {
+            let boosted_score = score.saturating_add(boost);
+            *best_score = Some(
+                best_score
+                    .map(|current| current.max(boosted_score))
+                    .unwrap_or(boosted_score),
+            );
+        }
+    }
+
+    fn provider_match_boost(query: &str, text: &str) -> u32 {
+        let query = Self::normalize_search_text(query);
+        if query.is_empty() {
+            return 0;
+        }
+
+        let normalized_text = Self::normalize_search_text(text);
+        if normalized_text == query {
+            PROVIDER_EXACT_MATCH_BOOST
+        } else if normalized_text.starts_with(&query)
+            || Self::normalized_token_starts_with(text, &query)
+        {
+            PROVIDER_PREFIX_MATCH_BOOST
+        } else {
+            0
+        }
+    }
+
+    fn normalize_search_text(text: &str) -> String {
+        text.chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    fn normalized_token_starts_with(text: &str, query: &str) -> bool {
+        text.split(|ch: char| !ch.is_alphanumeric())
+            .map(Self::normalize_search_text)
+            .any(|token| !token.is_empty() && token.starts_with(query))
+    }
+
+    fn reconcile_selection_after_filter(&mut self, preferred_selected: Option<(String, String)>) {
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
+            if let Some(group) = self.focused_group_header.clone() {
+                if self.focus_group_header(&group) {
+                    return;
+                }
+            }
+            self.focused_group_header = None;
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.update_scrollbar();
+            return;
+        }
+
+        if let Some(group) = self.focused_group_header.clone() {
+            if self.focus_group_header(&group) {
+                return;
+            }
+            self.focused_group_header = None;
+        }
+
+        if let Some((id, provider_id)) = preferred_selected {
+            let selected_pos = {
+                let flat_items = self.get_flat_items();
+                flat_items
+                    .iter()
+                    .position(|item| item.id == id && item.provider_id == provider_id)
+                    .or_else(|| flat_items.iter().position(|item| item.id == id))
+            };
+
+            if let Some(pos) = selected_pos {
+                self.selected_index = pos;
+                self.focused_group_header = None;
+                self.adjust_scroll();
+                return;
+            }
+        }
+
+        if self.selected_index >= flat_len {
+            self.selected_index = 0;
+        }
+
+        self.adjust_scroll();
     }
 
     fn update_scrollbar(&mut self) {
@@ -262,19 +551,83 @@ impl Dialog {
     }
 
     pub fn next(&mut self) {
-        let flat_items = self.get_flat_items();
-        if !flat_items.is_empty() && self.selected_index < flat_items.len() - 1 {
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
+            return;
+        }
+
+        self.focused_group_header = None;
+
+        if self.selected_index >= flat_len {
+            self.selected_index = 0;
+            self.adjust_scroll();
+            return;
+        }
+
+        if self.selected_index < flat_len - 1 {
             self.selected_index += 1;
             self.adjust_scroll();
         }
     }
 
     pub fn previous(&mut self) {
-        let flat_items = self.get_flat_items();
-        if !flat_items.is_empty() && self.selected_index > 0 {
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
+            return;
+        }
+
+        self.focused_group_header = None;
+
+        if self.selected_index >= flat_len {
+            self.selected_index = flat_len.saturating_sub(1);
+            self.adjust_scroll();
+            return;
+        }
+
+        if self.selected_index > 0 {
             self.selected_index -= 1;
             self.adjust_scroll();
         }
+    }
+
+    pub fn next_wrapping(&mut self) {
+        if self.focusable_group_headers {
+            self.move_focus_wrapping(1);
+            return;
+        }
+
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
+            return;
+        }
+
+        self.focused_group_header = None;
+        self.selected_index = if self.selected_index >= flat_len.saturating_sub(1) {
+            0
+        } else {
+            self.selected_index + 1
+        };
+        self.adjust_scroll();
+    }
+
+    pub fn previous_wrapping(&mut self) {
+        if self.focusable_group_headers {
+            self.move_focus_wrapping(-1);
+            return;
+        }
+
+        let flat_len = self.get_flat_items().len();
+        if flat_len == 0 {
+            return;
+        }
+
+        self.focused_group_header = None;
+        self.selected_index = if self.selected_index == 0 || self.selected_index >= flat_len {
+            flat_len.saturating_sub(1)
+        } else {
+            self.selected_index - 1
+        };
+        self.adjust_scroll();
     }
 
     pub fn scroll_down(&mut self) {
@@ -285,17 +638,129 @@ impl Dialog {
         let visible_rows = self.get_visible_row_count().max(1);
         let max_offset = total_lines.saturating_sub(visible_rows);
         self.scroll_offset = (self.scroll_offset + 1).min(max_offset);
+        self.sync_focus_after_scroll(1);
         self.update_scrollbar();
     }
 
     pub fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.sync_focus_after_scroll(-1);
         self.update_scrollbar();
+    }
+
+    fn sync_focus_after_scroll(&mut self, direction: isize) {
+        let visible_rows = self.get_visible_row_count().max(1);
+        let start_line = self.scroll_offset;
+        let end_line = start_line.saturating_add(visible_rows);
+
+        let mut fallback_group: Option<String> = None;
+        let mut fallback_item: Option<usize> = None;
+
+        let line_range: Box<dyn Iterator<Item = usize>> = if direction >= 0 {
+            Box::new(start_line..end_line)
+        } else {
+            Box::new((start_line..end_line).rev())
+        };
+
+        for line in line_range {
+            if fallback_group.is_none() {
+                fallback_group = self.get_group_from_line(line);
+            }
+            if fallback_item.is_none() {
+                fallback_item = self.get_item_index_from_line(line);
+            }
+            if fallback_group.is_some() || fallback_item.is_some() {
+                break;
+            }
+        }
+
+        if let Some(item_index) = fallback_item {
+            self.selected_index = item_index;
+            self.focused_group_header = None;
+        } else if let Some(group) = fallback_group {
+            if self.focusable_group_headers {
+                self.focused_group_header = Some(group);
+            }
+        }
+    }
+
+    fn move_focus_wrapping(&mut self, delta: isize) {
+        let rows = self.focus_rows();
+        if rows.is_empty() {
+            return;
+        }
+
+        let current = self
+            .current_focus_row_index(&rows)
+            .unwrap_or(if delta >= 0 { 0 } else { rows.len() - 1 });
+        let next = if delta >= 0 {
+            (current + 1) % rows.len()
+        } else if current == 0 {
+            rows.len() - 1
+        } else {
+            current - 1
+        };
+
+        self.apply_focus_row(&rows[next]);
+        self.adjust_scroll();
+    }
+
+    fn focus_rows(&self) -> Vec<DialogFocusRow> {
+        let mut rows = Vec::new();
+        let mut item_index = 0;
+
+        for (group, items) in &self.filtered_items {
+            if items.is_empty() {
+                continue;
+            }
+
+            if self.focusable_group_headers && Self::group_has_header(group) {
+                rows.push(DialogFocusRow::Group(group.clone()));
+            }
+
+            if self.is_group_collapsed(group) {
+                continue;
+            }
+
+            for _ in items {
+                rows.push(DialogFocusRow::Item(item_index));
+                item_index += 1;
+            }
+        }
+
+        rows
+    }
+
+    fn current_focus_row_index(&self, rows: &[DialogFocusRow]) -> Option<usize> {
+        if let Some(group) = &self.focused_group_header {
+            return rows.iter().position(
+                |row| matches!(row, DialogFocusRow::Group(candidate) if candidate == group),
+            );
+        }
+
+        rows.iter().position(
+            |row| matches!(row, DialogFocusRow::Item(index) if *index == self.selected_index),
+        )
+    }
+
+    fn apply_focus_row(&mut self, row: &DialogFocusRow) {
+        match row {
+            DialogFocusRow::Group(group) => {
+                self.focused_group_header = Some(group.clone());
+            }
+            DialogFocusRow::Item(index) => {
+                self.focused_group_header = None;
+                self.selected_index = *index;
+            }
+        }
     }
 
     fn get_flat_items(&self) -> Vec<&DialogItem> {
         let mut items = Vec::new();
-        for (_, group_items) in &self.filtered_items {
+        for (group, group_items) in &self.filtered_items {
+            if self.is_group_collapsed(group) {
+                continue;
+            }
             for item in group_items {
                 items.push(item);
             }
@@ -304,27 +769,38 @@ impl Dialog {
     }
 
     fn get_content_line_count(&self) -> usize {
-        let flat_items = self.get_flat_items();
-        if flat_items.is_empty() {
+        if self.filtered_items.is_empty() {
             return 1;
         }
         let mut count = 0;
-        for (_, items) in &self.filtered_items {
-            count += items.len() + 1;
+        for (group, items) in &self.filtered_items {
+            let header = if Self::group_has_header(group) { 1 } else { 0 };
+            let visible_items = if self.is_group_collapsed(group) {
+                0
+            } else {
+                items.len()
+            };
+            count += visible_items + header;
         }
-        count
+        count.max(1)
     }
 
     fn get_line_index_of_item(&self, item_index: usize) -> usize {
         let mut line_index = 0;
         let mut current_item_index = 0;
 
-        for (_, items) in &self.filtered_items {
+        for (group, items) in &self.filtered_items {
             if items.is_empty() {
                 continue;
             }
 
-            line_index += 1;
+            if Self::group_has_header(group) {
+                line_index += 1;
+            }
+
+            if self.is_group_collapsed(group) {
+                continue;
+            }
 
             for _item in items {
                 if current_item_index == item_index {
@@ -337,9 +813,36 @@ impl Dialog {
         line_index
     }
 
-    fn adjust_scroll(&mut self) {
+    fn get_line_index_of_group_header(&self, target_group: &str) -> usize {
+        let mut line_index = 0;
+
+        for (group, items) in &self.filtered_items {
+            if items.is_empty() {
+                continue;
+            }
+
+            if Self::group_has_header(group) {
+                if group == target_group {
+                    return line_index;
+                }
+                line_index += 1;
+            }
+
+            if !self.is_group_collapsed(group) {
+                line_index += items.len();
+            }
+        }
+
+        line_index
+    }
+
+    pub fn adjust_scroll(&mut self) {
         let visible_rows = self.get_visible_row_count().max(1);
-        let selected_line = self.get_line_index_of_item(self.selected_index);
+        let selected_line = self
+            .focused_group_header
+            .as_deref()
+            .map(|group| self.get_line_index_of_group_header(group))
+            .unwrap_or_else(|| self.get_line_index_of_item(self.selected_index));
 
         if selected_line < self.scroll_offset {
             self.scroll_offset = selected_line;
@@ -351,31 +854,297 @@ impl Dialog {
             self.scroll_offset = selected_line.saturating_sub(visible_rows.saturating_sub(1));
         }
 
-        if self.selected_index == 0 {
+        if self.focused_group_header.is_none() && self.selected_index == 0 {
             self.scroll_offset = 0;
         }
 
         self.update_scrollbar();
     }
 
+    fn content_padding(&self) -> (u16, u16) {
+        match self.position {
+            DialogPosition::Center => (3, 2),
+            DialogPosition::Left | DialogPosition::Right => (1, 1),
+        }
+    }
+
+    fn padded_content_area(&self) -> Rect {
+        let (padding_x, padding_y) = self.content_padding();
+        Rect {
+            x: self.dialog_area.x + padding_x,
+            y: self.dialog_area.y + padding_y,
+            width: self.dialog_area.width.saturating_sub(padding_x * 2),
+            height: self.dialog_area.height.saturating_sub(padding_y * 2),
+        }
+    }
+
     fn get_visible_row_count(&self) -> usize {
         if self.visible_row_count > 0 {
             self.visible_row_count
         } else {
-            const DIALOG_WIDTH: u16 = 70;
-            const DIALOG_HEIGHT: u16 = 25;
-            const PADDING: u16 = 3;
+            const DIALOG_HEIGHT_CENTER: u16 = 25;
 
-            let total_fixed_height = 1 + 1 + 3 + 1 + 1;
-            let padding_total = PADDING * 2;
-            let list_area_height = DIALOG_HEIGHT.saturating_sub(total_fixed_height + padding_total);
-            list_area_height as usize
+            let footer_height = self.footer_height();
+            let total_fixed_height =
+                1 + 1 + SEARCH_AREA_HEIGHT + self.bottom_gap_height + footer_height;
+            let (_, padding_y) = self.content_padding();
+            let padding_total = padding_y * 2;
+
+            match self.position {
+                DialogPosition::Center => {
+                    let list_area_height =
+                        DIALOG_HEIGHT_CENTER.saturating_sub(total_fixed_height + padding_total);
+                    list_area_height as usize
+                }
+                DialogPosition::Left | DialogPosition::Right => {
+                    // Side panels use full height, minus fixed chrome + padding
+                    let list_area_height = 40u16.saturating_sub(total_fixed_height + padding_total);
+                    list_area_height as usize
+                }
+            }
         }
     }
 
     pub fn get_selected(&self) -> Option<&DialogItem> {
+        if self.focused_group_header.is_some() {
+            return None;
+        }
+
         let flat_items = self.get_flat_items();
         flat_items.get(self.selected_index).copied()
+    }
+
+    pub fn select_item_by_key(&mut self, id: &str, provider_id: &str) -> bool {
+        let flat_items = self.get_flat_items();
+        if let Some(pos) = flat_items
+            .iter()
+            .position(|item| item.id == id && item.provider_id == provider_id)
+        {
+            self.selected_index = pos;
+            self.focused_group_header = None;
+            self.adjust_scroll();
+            return true;
+        }
+        false
+    }
+
+    pub fn select_item_by_id(&mut self, id: &str) -> bool {
+        let flat_items = self.get_flat_items();
+        if let Some(pos) = flat_items.iter().position(|item| item.id == id) {
+            self.selected_index = pos;
+            self.focused_group_header = None;
+            self.adjust_scroll();
+            return true;
+        }
+        false
+    }
+
+    pub fn select_first_item_in_group(&mut self, group: &str) -> bool {
+        let flat_items = self.get_flat_items();
+        if let Some(pos) = flat_items
+            .iter()
+            .position(|item| item.group.as_str() == group)
+        {
+            self.selected_index = pos;
+            self.focused_group_header = None;
+            self.adjust_scroll();
+            return true;
+        }
+        false
+    }
+
+    pub fn select_index_clamped(&mut self, index: usize) -> bool {
+        let item_count = self.get_flat_items().len();
+        if item_count == 0 {
+            self.focused_group_header = None;
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.update_scrollbar();
+            return false;
+        }
+
+        self.focused_group_header = None;
+        self.selected_index = index.min(item_count.saturating_sub(1));
+        self.adjust_scroll();
+        true
+    }
+
+    pub(crate) fn footer_height(&self) -> u16 {
+        if self.actions.len() > 4 {
+            3
+        } else if self.actions.len() > 2 {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn layout_constraints(&self) -> [ratatui::layout::Constraint; 6] {
+        [
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Length(SEARCH_AREA_HEIGHT),
+            ratatui::layout::Constraint::Min(0),
+            ratatui::layout::Constraint::Length(self.bottom_gap_height),
+            ratatui::layout::Constraint::Length(self.footer_height()),
+        ]
+    }
+
+    fn truncate_to_width(text: &str, max_width: usize) -> String {
+        if max_width == 0 {
+            return String::new();
+        }
+
+        if text.width() <= max_width {
+            return text.to_string();
+        }
+
+        const ELLIPSIS: &str = "...";
+        let ellipsis_width = ELLIPSIS.width();
+        if max_width <= ellipsis_width {
+            return ".".repeat(max_width);
+        }
+
+        let content_width = max_width - ellipsis_width;
+        let mut result = String::new();
+        let mut width = 0usize;
+
+        for ch in text.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width + ch_width > content_width {
+                break;
+            }
+            result.push(ch);
+            width += ch_width;
+        }
+
+        result.push_str(ELLIPSIS);
+        result
+    }
+
+    fn left_item_spans_for_width(
+        item: &DialogItem,
+        width: usize,
+        colors: ThemeColors,
+    ) -> (Vec<Span<'static>>, usize) {
+        if width == 0 {
+            return (Vec::new(), 0);
+        }
+
+        let indent_width = width.min(2);
+        let active_indicator = if item.active { "● " } else { "  " };
+        let indicator = Self::truncate_to_width(active_indicator, indent_width);
+        let has_description = !item.description.is_empty();
+
+        if !has_description {
+            let name = Self::truncate_to_width(&item.name, width.saturating_sub(indent_width));
+            let text_width = indicator.width() + name.width();
+            let spans = if item.active {
+                vec![
+                    Span::styled(indicator, Style::default().fg(colors.primary)),
+                    Span::styled(name, Style::default().fg(colors.primary)),
+                ]
+            } else {
+                vec![Span::raw(format!("{indicator}{name}"))]
+            };
+            return (spans, text_width);
+        }
+
+        let separator_width = 2usize;
+        let full_name_width = item.name.width();
+        if indent_width + full_name_width + separator_width >= width {
+            let name = Self::truncate_to_width(&item.name, width.saturating_sub(indent_width));
+            let text_width = indicator.width() + name.width();
+            let spans = if item.active {
+                vec![
+                    Span::styled(indicator, Style::default().fg(colors.primary)),
+                    Span::styled(name, Style::default().fg(colors.primary)),
+                ]
+            } else {
+                vec![Span::raw(format!("{indicator}{name}"))]
+            };
+            return (spans, text_width);
+        }
+
+        let desc_budget = width.saturating_sub(indent_width + full_name_width + separator_width);
+        let description = Self::truncate_to_width(&item.description, desc_budget);
+        let name_prefix = format!("{}  ", item.name);
+        let text_width = indicator.width() + name_prefix.width() + description.width();
+
+        let mut spans = Vec::new();
+        if item.active {
+            spans.push(Span::styled(indicator, Style::default().fg(colors.primary)));
+            spans.push(Span::styled(
+                name_prefix,
+                Style::default().fg(colors.primary),
+            ));
+        } else {
+            spans.push(Span::raw(format!("{indicator}{name_prefix}")));
+        }
+        spans.push(Span::styled(
+            description,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+
+        (spans, text_width)
+    }
+
+    fn item_spans_for_width(
+        item: &DialogItem,
+        width: usize,
+        colors: ThemeColors,
+    ) -> Vec<Span<'static>> {
+        if width == 0 {
+            return Vec::new();
+        }
+
+        let has_description = !item.description.is_empty();
+        let tip = item
+            .tip
+            .as_ref()
+            .map(|tip| Self::truncate_to_width(tip, width));
+        let tip_width = tip.as_ref().map(|tip| tip.width()).unwrap_or(0);
+        let right_padding = tip
+            .as_deref()
+            .filter(|tip| *tip == "❤︎" && width > tip_width)
+            .map(|_| 1usize)
+            .unwrap_or(0);
+        let minimum_gap = if tip_width > 0 && width > tip_width {
+            1
+        } else {
+            0
+        };
+        let left_budget = width.saturating_sub(tip_width + minimum_gap + right_padding);
+        let (mut spans, left_width) = Self::left_item_spans_for_width(item, left_budget, colors);
+
+        if let Some(tip) = tip {
+            let padding_len = width.saturating_sub(left_width + tip_width + right_padding);
+            spans.push(Span::raw(" ".repeat(padding_len)));
+
+            let tip_style = if tip.starts_with("❤︎") {
+                Style::default()
+                    .fg(Color::Rgb(255, 105, 180))
+                    .add_modifier(Modifier::BOLD)
+            } else if has_description {
+                Style::default()
+                    .fg(colors.text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM)
+            };
+            spans.push(Span::styled(tip, tip_style));
+            if right_padding > 0 {
+                spans.push(Span::raw(" ".repeat(right_padding)));
+            }
+        } else {
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(left_width))));
+        }
+
+        spans
     }
 
     pub fn is_visible(&self) -> bool {
@@ -404,8 +1173,7 @@ impl Dialog {
             KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => true,
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
             _ => {
-                let input = TuiInput::from(event);
-                self.search_textarea.input(input);
+                input_textarea(&mut self.search_textarea, event);
                 self.search_query = self.search_textarea.lines().join("");
                 self.apply_filter();
                 true
@@ -421,38 +1189,65 @@ impl Dialog {
         use ratatui::layout::Position;
         let point = Position::new(event.column, event.row);
 
-        const PADDING: u16 = 3;
-        let content_area = Rect {
-            x: self.dialog_area.x + PADDING,
-            y: self.dialog_area.y + PADDING,
-            width: self.dialog_area.width.saturating_sub(PADDING * 2),
-            height: self.dialog_area.height.saturating_sub(PADDING * 2),
-        };
-
-        if !content_area.contains(point) {
-            self.is_dragging_scrollbar = false;
-            return false;
-        }
+        let content_area = self.padded_content_area();
 
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(3),
-                ratatui::layout::Constraint::Min(0),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-            ])
+            .constraints(self.layout_constraints())
             .split(content_area);
 
         let list_area = chunks[3];
+        if list_area.height > 0 && self.visible_row_count != list_area.height as usize {
+            self.visible_row_count = list_area.height as usize;
+            self.update_scrollbar();
+        }
         let scrollbar_area = Rect {
-            x: list_area.x + list_area.width - 1,
+            x: list_area.x + list_area.width.saturating_sub(1),
             y: list_area.y,
             width: 1,
             height: list_area.height,
         };
+
+        if self.is_dragging_scrollbar {
+            match event.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.scroll_to_position(event.row, scrollbar_area);
+                    return true;
+                }
+                MouseEventKind::Up(_) => {
+                    self.is_dragging_scrollbar = false;
+                    self.scrollbar_drag_offset = None;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            && !self.dialog_area.contains(point)
+        {
+            self.hide();
+            return true;
+        }
+
+        if matches!(
+            event.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        ) && self.dialog_area.contains(point)
+        {
+            match event.kind {
+                MouseEventKind::ScrollDown => self.scroll_down(),
+                MouseEventKind::ScrollUp => self.scroll_up(),
+                _ => {}
+            }
+            return true;
+        }
+
+        if !content_area.contains(point) {
+            self.is_dragging_scrollbar = false;
+            self.scrollbar_drag_offset = None;
+            return false;
+        }
 
         let is_on_scrollbar = scrollbar_area.contains(point);
 
@@ -467,12 +1262,23 @@ impl Dialog {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if is_on_scrollbar {
-                    self.is_dragging_scrollbar = true;
-                    self.scroll_to_position(event.row, scrollbar_area);
-                    true
+                    let total_lines = self.get_content_line_count();
+                    let visible_rows = scrollbar_area.height as usize;
+                    let metrics = ScrollMetrics::new(total_lines, visible_rows, self.scroll_offset);
+                    if let Some(grab_offset) =
+                        scrollbar_grab_offset(metrics, scrollbar_area, event.row)
+                    {
+                        self.is_dragging_scrollbar = true;
+                        self.scrollbar_drag_offset = Some(grab_offset);
+                        self.scroll_to_position(event.row, scrollbar_area);
+                        true
+                    } else {
+                        false
+                    }
                 } else {
-                    if let Some(item_index) = self.get_item_index_from_y(event.row, list_area) {
+                    if let Some(item_index) = self.item_index_at_position(event.column, event.row) {
                         self.selected_index = item_index;
+                        self.focused_group_header = None;
                         return true;
                     }
                     false
@@ -488,9 +1294,11 @@ impl Dialog {
             }
             MouseEventKind::Moved => {
                 if !is_on_scrollbar {
-                    if let Some(item_index) = self.get_item_index_from_y(event.row, list_area) {
-                        if item_index != self.selected_index {
+                    if let Some(item_index) = self.item_index_at_position(event.column, event.row) {
+                        if item_index != self.selected_index || self.focused_group_header.is_some()
+                        {
                             self.selected_index = item_index;
+                            self.focused_group_header = None;
                         }
                     }
                 }
@@ -499,6 +1307,7 @@ impl Dialog {
             MouseEventKind::Up(_) => {
                 if self.is_dragging_scrollbar {
                     self.is_dragging_scrollbar = false;
+                    self.scrollbar_drag_offset = None;
                     true
                 } else {
                     false
@@ -508,31 +1317,156 @@ impl Dialog {
         }
     }
 
+    pub fn contains_position(&self, column: u16, row: u16) -> bool {
+        if !self.visible {
+            return false;
+        }
+        use ratatui::layout::Position;
+        self.dialog_area.contains(Position::new(column, row))
+    }
+
+    pub fn item_index_at_position(&self, column: u16, row: u16) -> Option<usize> {
+        if !self.visible {
+            return None;
+        }
+
+        use ratatui::layout::Position;
+        let point = Position::new(column, row);
+
+        if !self.dialog_area.contains(point) {
+            return None;
+        }
+
+        let content_area = self.padded_content_area();
+
+        if !content_area.contains(point) {
+            return None;
+        }
+
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints(self.layout_constraints())
+            .split(content_area);
+
+        let list_area = chunks[3];
+        let list_content_area = Rect {
+            x: list_area.x,
+            y: list_area.y,
+            width: list_area.width.saturating_sub(2),
+            height: list_area.height,
+        };
+
+        if !list_content_area.contains(point) {
+            return None;
+        }
+
+        self.get_item_index_from_y(row, list_area)
+    }
+
+    pub fn group_at_position(&self, column: u16, row: u16) -> Option<String> {
+        if !self.visible || !self.collapsible_groups {
+            return None;
+        }
+
+        use ratatui::layout::Position;
+        let point = Position::new(column, row);
+
+        if !self.dialog_area.contains(point) {
+            return None;
+        }
+
+        let content_area = self.padded_content_area();
+
+        if !content_area.contains(point) {
+            return None;
+        }
+
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints(self.layout_constraints())
+            .split(content_area);
+
+        let list_area = chunks[3];
+        let list_content_area = Rect {
+            x: list_area.x,
+            y: list_area.y,
+            width: list_area.width.saturating_sub(2),
+            height: list_area.height,
+        };
+
+        if !list_content_area.contains(point) {
+            return None;
+        }
+
+        let relative_y = row.saturating_sub(list_area.y) as usize;
+        let content_line = self.scroll_offset + relative_y;
+        self.get_group_from_line(content_line)
+    }
+
     fn get_item_index_from_y(&self, row: u16, list_area: Rect) -> Option<usize> {
         let relative_y = row.saturating_sub(list_area.y) as usize;
         let content_line = self.scroll_offset + relative_y;
         self.get_item_index_from_line(content_line)
     }
 
-    fn get_item_index_from_line(&self, line: usize) -> Option<usize> {
+    fn get_group_from_line(&self, line: usize) -> Option<String> {
         let mut current_line = 0;
-        let mut item_index = 0;
 
-        for (_, items) in &self.filtered_items {
+        for (group, items) in &self.filtered_items {
             if items.is_empty() {
                 continue;
             }
 
-            let group_header_line = current_line;
-            let items_start_line = group_header_line + 1;
-            let items_end_line = items_start_line + items.len();
+            if Self::group_has_header(group) {
+                if line == current_line {
+                    return Some(group.clone());
+                }
+                current_line += 1;
+            }
+
+            let visible_items = if self.is_group_collapsed(group) {
+                0
+            } else {
+                items.len()
+            };
+
+            if line < current_line + visible_items {
+                return None;
+            }
+
+            current_line += visible_items;
+        }
+
+        None
+    }
+
+    fn get_item_index_from_line(&self, line: usize) -> Option<usize> {
+        let mut current_line = 0;
+        let mut item_index = 0;
+
+        for (group, items) in &self.filtered_items {
+            if items.is_empty() {
+                continue;
+            }
+
+            let items_start_line = if Self::group_has_header(group) {
+                current_line + 1
+            } else {
+                current_line
+            };
+            let visible_items = if self.is_group_collapsed(group) {
+                0
+            } else {
+                items.len()
+            };
+            let items_end_line = items_start_line + visible_items;
 
             if line >= items_start_line && line < items_end_line {
                 return Some(item_index + (line - items_start_line));
             }
 
             current_line = items_end_line;
-            item_index += items.len();
+            item_index += visible_items;
         }
 
         None
@@ -545,14 +1479,14 @@ impl Dialog {
         }
 
         let visible_rows = scrollbar_area.height as usize;
-        let relative_y = row.saturating_sub(scrollbar_area.y) as usize;
         let max_offset = total_lines.saturating_sub(visible_rows);
-
-        let new_offset = if max_offset > 0 {
-            (relative_y * max_offset) / visible_rows
-        } else {
-            0
-        };
+        let metrics = ScrollMetrics::new(total_lines, visible_rows, self.scroll_offset);
+        let grab_offset = self
+            .scrollbar_drag_offset
+            .or_else(|| scrollbar_grab_offset(metrics, scrollbar_area, row))
+            .unwrap_or(0);
+        let new_offset =
+            scrollbar_offset_from_row_with_grab(metrics, scrollbar_area, row, grab_offset);
         self.scroll_offset = new_offset.min(max_offset);
 
         let flat_items = self.get_flat_items();
@@ -560,6 +1494,7 @@ impl Dialog {
             let item_at_offset = self.get_item_index_from_line(self.scroll_offset);
             if let Some(idx) = item_at_offset {
                 self.selected_index = idx;
+                self.focused_group_header = None;
             }
         }
 
@@ -571,78 +1506,97 @@ impl Dialog {
             return;
         }
 
-        const DIALOG_WIDTH: u16 = 70;
-        const DIALOG_HEIGHT: u16 = 25;
+        const DIALOG_WIDTH_CENTER: u16 = 70;
+        const DIALOG_HEIGHT_CENTER: u16 = 25;
+        const DIALOG_WIDTH_SIDE: u16 = 45;
 
-        let dialog_width = area.width.min(DIALOG_WIDTH);
-        let dialog_height = area.height.min(DIALOG_HEIGHT);
+        match self.position {
+            DialogPosition::Center => {
+                let dialog_width = area.width.min(DIALOG_WIDTH_CENTER);
+                let dialog_height = area.height.min(DIALOG_HEIGHT_CENTER);
 
-        self.dialog_area = Rect {
-            x: (area.width - dialog_width) / 2,
-            y: (area.height - dialog_height) / 2,
-            width: dialog_width,
-            height: dialog_height,
-        };
+                self.dialog_area = Rect {
+                    x: (area.width - dialog_width) / 2,
+                    y: (area.height - dialog_height) / 2,
+                    width: dialog_width,
+                    height: dialog_height,
+                };
+            }
+            DialogPosition::Right => {
+                let dialog_width = area.width.min(DIALOG_WIDTH_SIDE);
+
+                self.dialog_area = Rect {
+                    x: area.width.saturating_sub(dialog_width),
+                    y: area.y,
+                    width: dialog_width,
+                    height: area.height,
+                };
+            }
+            DialogPosition::Left => {
+                let dialog_width = area.width.min(DIALOG_WIDTH_SIDE);
+
+                self.dialog_area = Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: dialog_width,
+                    height: area.height,
+                };
+            }
+        }
 
         frame.render_widget(Clear, self.dialog_area);
 
-        const PADDING: u16 = 3;
-        self.content_area = Rect {
-            x: self.dialog_area.x + PADDING,
-            y: self.dialog_area.y + PADDING,
-            width: self.dialog_area.width.saturating_sub(PADDING * 2),
-            height: self.dialog_area.height.saturating_sub(PADDING * 2),
-        };
+        self.content_area = self.padded_content_area();
 
         frame.render_widget(
             ratatui::widgets::Paragraph::new("")
-                .style(ratatui::style::Style::default().bg(Color::Rgb(20, 20, 30))),
+                .style(ratatui::style::Style::default().bg(colors.dialog_background)),
             self.dialog_area,
         );
 
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(3),
-                ratatui::layout::Constraint::Min(0),
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Length(1),
-            ])
+            .constraints(self.layout_constraints())
             .split(self.content_area);
 
-        let title_line = Line::from(vec![
-            Span::styled(
-                &self.title,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                "esc",
-                Style::default()
-                    .fg(colors.primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
+        let esc_text = "esc";
+        let esc_area_width = (esc_text.width() as u16).saturating_add(1);
+        let header_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(esc_area_width),
+            ])
+            .split(chunks[0]);
 
-        let title_paragraph =
-            Paragraph::new(title_line).alignment(ratatui::layout::Alignment::Left);
-        frame.render_widget(title_paragraph, chunks[0]);
+        let title_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            &self.title,
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(ratatui::layout::Alignment::Left);
+        frame.render_widget(title_paragraph, header_chunks[0]);
+
+        let esc_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            esc_text,
+            Style::default()
+                .fg(colors.primary)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(ratatui::layout::Alignment::Right);
+        frame.render_widget(esc_paragraph, header_chunks[1]);
 
         frame.render_widget(&self.search_textarea, chunks[2]);
 
         let mut content_lines = Vec::new();
-        let flat_items = self.get_flat_items();
         let list_area_width = chunks[3].width.saturating_sub(2); // Subtract scrollbar width
         let filtered_items = self.filtered_items.clone();
 
-        if flat_items.is_empty() {
+        if self.filtered_items.is_empty() {
             content_lines.push(Line::from(vec![Span::styled(
                 "No results found",
-                Style::default().fg(Color::Gray),
+                Style::default().fg(colors.text_weak),
             )]));
         } else {
             let mut item_index = 0;
@@ -651,87 +1605,81 @@ impl Dialog {
                 if items.is_empty() {
                     continue;
                 }
-                content_lines.push(Line::from(vec![Span::styled(
-                    group.clone(),
-                    Style::default()
-                        .fg(colors.primary)
-                        .add_modifier(Modifier::BOLD),
-                )]));
 
-                for item in items {
-                    let is_selected = item_index == self.selected_index;
-                    let is_special_group = group == "Favorite" || group == "Recent";
-                    let has_description = is_special_group && !item.description.is_empty();
-
-                    let mut spans: Vec<Span> = if let Some(tip) = &item.tip {
-                        let base_len = if has_description {
-                            item.name.width() + item.description.width() + 4
+                if Self::group_has_header(group) {
+                    let header_spans = if self.collapsible_groups {
+                        let chevron = if self.is_group_collapsed(group) {
+                            "⏷"
                         } else {
-                            item.name.width() + 2
+                            "⏶"
                         };
-                        let tip_width = tip.width();
-                        let padding_len =
-                            (list_area_width as usize).saturating_sub(base_len + tip_width);
-                        let padding_after_tip = (list_area_width as usize)
-                            .saturating_sub(base_len + tip_width + 2 + padding_len);
-
-                        if has_description {
-                            vec![
-                                Span::raw(format!("  {}  ", item.name)),
-                                Span::styled(
-                                    item.description.clone(),
-                                    Style::default()
-                                        .fg(Color::Rgb(150, 150, 150))
-                                        .add_modifier(Modifier::DIM),
-                                ),
-                                Span::raw(" ".repeat(padding_len)),
-                                Span::styled(
-                                    tip,
-                                    Style::default()
-                                        .fg(Color::Rgb(100, 200, 100))
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(" ".repeat(padding_after_tip)),
-                            ]
-                        } else {
-                            vec![
-                                Span::raw(format!("  {}", item.name)),
-                                Span::raw(" ".repeat(padding_len)),
-                                Span::styled(
-                                    tip,
-                                    Style::default()
-                                        .fg(Color::Rgb(150, 120, 100))
-                                        .add_modifier(Modifier::DIM),
-                                ),
-                                Span::raw(" ".repeat(padding_after_tip)),
-                            ]
-                        }
-                    } else if has_description {
-                        let text_len = item.name.width() + item.description.width() + 4;
-                        let padding_len = (list_area_width as usize).saturating_sub(text_len);
+                        let chevron_width = chevron.width();
+                        let group = Self::truncate_to_width(
+                            group,
+                            (list_area_width as usize).saturating_sub(chevron_width),
+                        );
+                        let padding_len = (list_area_width as usize)
+                            .saturating_sub(group.width() + chevron_width);
                         vec![
-                            Span::raw(format!("  {}  ", item.name)),
                             Span::styled(
-                                item.description.clone(),
+                                group,
                                 Style::default()
-                                    .fg(Color::Rgb(150, 150, 150))
-                                    .add_modifier(Modifier::DIM),
+                                    .fg(colors.primary)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                             Span::raw(" ".repeat(padding_len)),
+                            Span::styled(
+                                chevron,
+                                Style::default()
+                                    .fg(colors.primary)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                         ]
                     } else {
-                        let text_len = item.name.width() + 2;
-                        let padding_len = (list_area_width as usize).saturating_sub(text_len);
-                        vec![
-                            Span::raw(format!("  {}", item.name)),
-                            Span::raw(" ".repeat(padding_len)),
-                        ]
+                        vec![Span::styled(
+                            Self::truncate_to_width(group, list_area_width as usize),
+                            Style::default()
+                                .fg(colors.primary)
+                                .add_modifier(Modifier::BOLD),
+                        )]
                     };
 
-                    if is_selected {
+                    let mut header_spans = header_spans;
+                    if self.focused_group_header.as_deref() == Some(group.as_str()) {
+                        let fg = contrast_text(colors.primary);
+                        for span in &mut header_spans {
+                            let mut style = span.style.clone();
+                            style = style.fg(fg).bg(colors.primary);
+                            span.style = style;
+                        }
+                    }
+
+                    content_lines.push(Line::from(header_spans));
+                }
+
+                if self.is_group_collapsed(group) {
+                    continue;
+                }
+
+                for item in items {
+                    let is_selected =
+                        self.focused_group_header.is_none() && item_index == self.selected_index;
+                    let is_pending_delete = self.pending_delete_id.as_ref() == Some(&item.id);
+                    let mut spans =
+                        Self::item_spans_for_width(item, list_area_width as usize, colors);
+
+                    if is_pending_delete {
+                        let fg = contrast_text(colors.error);
                         for span in &mut spans {
                             let mut style = span.style.clone();
-                            style = style.fg(Color::Black).bg(colors.primary);
+                            style = style.fg(fg).bg(colors.error);
+                            span.style = style;
+                        }
+                    } else if is_selected {
+                        let fg = contrast_text(colors.primary);
+                        for span in &mut spans {
+                            let mut style = span.style.clone();
+                            style = style.fg(fg).bg(colors.primary);
                             span.style = style;
                         }
                     }
@@ -742,8 +1690,13 @@ impl Dialog {
             }
         }
 
+        let previous_visible_row_count = self.visible_row_count;
         self.visible_row_count = chunks[3].height as usize;
-        self.update_scrollbar();
+        if previous_visible_row_count != self.visible_row_count {
+            self.adjust_scroll();
+        } else {
+            self.update_scrollbar();
+        }
 
         let list_content_area = Rect {
             x: chunks[3].x,
@@ -756,73 +1709,80 @@ impl Dialog {
             Paragraph::new(content_lines).scroll((self.scroll_offset as u16, 0));
         frame.render_widget(content_paragraph, list_content_area);
 
-        let scrollbar_area = chunks[3];
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"))
-                .track_symbol(Some(" ")),
+        let scrollbar_area = Rect {
+            x: chunks[3].x + chunks[3].width.saturating_sub(1),
+            y: chunks[3].y,
+            width: 1,
+            height: chunks[3].height,
+        };
+        render_scrollbar(
+            frame,
+            ScrollMetrics::new(
+                self.get_content_line_count(),
+                self.visible_row_count,
+                self.scroll_offset,
+            ),
             scrollbar_area,
-            &mut self.scrollbar_state,
+            colors.background_element,
+            colors.text_weak,
         );
 
-        let mut footer_spans = vec![];
-        for (i, action) in self.actions.iter().enumerate() {
-            if i > 0 {
-                footer_spans.push(Span::raw("  "));
+        let footer_paragraph = Paragraph::new(self.footer_lines(chunks[5].width, colors))
+            .alignment(ratatui::layout::Alignment::Left);
+        frame.render_widget(footer_paragraph, chunks[5]);
+    }
+
+    fn footer_lines(&self, width: u16, colors: ThemeColors) -> Vec<Line<'static>> {
+        if self.actions.is_empty() {
+            return vec![Line::from(vec![])];
+        }
+
+        let max_lines = self.footer_height() as usize;
+        let max_width = width.max(1) as usize;
+        let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+        let mut current: Vec<Span<'static>> = Vec::new();
+        let mut current_width = 0usize;
+
+        for action in &self.actions {
+            let action_width = action.label.width() + action.key.width() + 2;
+            let spacer_width = if current.is_empty() { 0 } else { 2 };
+
+            if !current.is_empty()
+                && current_width + spacer_width + action_width > max_width
+                && lines.len() + 1 < max_lines
+            {
+                lines.push(current);
+                current = Vec::new();
+                current_width = 0;
             }
-            footer_spans.push(Span::styled(
-                &action.label,
+
+            if !current.is_empty() {
+                current.push(Span::raw("  "));
+                current_width += 2;
+            }
+
+            current.push(Span::styled(
+                action.label.clone(),
                 Style::default()
                     .fg(colors.primary)
                     .add_modifier(Modifier::BOLD),
             ));
-            footer_spans.push(Span::raw("  "));
-            footer_spans.push(Span::styled(
-                &action.key,
+            current.push(Span::raw("  "));
+            current.push(Span::styled(
+                action.key.clone(),
                 Style::default()
-                    .fg(Color::Rgb(150, 120, 100))
+                    .fg(colors.text_weak)
                     .add_modifier(Modifier::DIM),
             ));
+            current_width += action_width;
         }
 
-        let footer_line = if footer_spans.is_empty() {
-            Line::from(vec![
-                Span::styled(
-                    "Connect provider",
-                    Style::default()
-                        .fg(colors.primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    "ctrl+a",
-                    Style::default()
-                        .fg(Color::Rgb(150, 120, 100))
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    "Favorite",
-                    Style::default()
-                        .fg(colors.primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    "ctrl+f",
-                    Style::default()
-                        .fg(Color::Rgb(150, 120, 100))
-                        .add_modifier(Modifier::DIM),
-                ),
-            ])
-        } else {
-            Line::from(footer_spans)
-        };
+        lines.push(current);
+        while lines.len() < max_lines {
+            lines.push(Vec::new());
+        }
 
-        let footer_paragraph =
-            Paragraph::new(footer_line).alignment(ratatui::layout::Alignment::Left);
-        frame.render_widget(footer_paragraph, chunks[5]);
+        lines.into_iter().map(Line::from).collect()
     }
 }
 
@@ -849,11 +1809,25 @@ impl Clone for Dialog {
             search_textarea: self.search_textarea.clone(),
             scrollbar_state: self.scrollbar_state,
             is_dragging_scrollbar: self.is_dragging_scrollbar,
+            scrollbar_drag_offset: self.scrollbar_drag_offset,
             visible_row_count: self.visible_row_count,
             actions: self.actions.clone(),
+            bottom_gap_height: self.bottom_gap_height,
+            position: self.position,
+            pending_delete_id: self.pending_delete_id.clone(),
+            collapsible_groups: self.collapsible_groups,
+            collapsed_groups: self.collapsed_groups.clone(),
+            focusable_group_headers: self.focusable_group_headers,
+            focused_group_header: self.focused_group_header.clone(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DialogFocusRow {
+    Group(String),
+    Item(usize),
 }
 
 #[cfg(test)]
@@ -869,6 +1843,7 @@ mod tests {
                 description: "Description for Model A".to_string(),
                 tip: None,
                 provider_id: "provider1".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "2".to_string(),
@@ -877,6 +1852,7 @@ mod tests {
                 description: "Description for Model B".to_string(),
                 tip: None,
                 provider_id: "provider1".to_string(),
+                active: false,
             },
             DialogItem {
                 id: "3".to_string(),
@@ -885,6 +1861,76 @@ mod tests {
                 description: "Description for Model C".to_string(),
                 tip: None,
                 provider_id: "provider2".to_string(),
+                active: false,
+            },
+        ]
+    }
+
+    fn create_many_test_items(count: usize) -> Vec<DialogItem> {
+        (0..count)
+            .map(|idx| DialogItem {
+                id: idx.to_string(),
+                name: format!("Model {}", idx),
+                group: "Group".to_string(),
+                description: "".to_string(),
+                tip: None,
+                provider_id: "p".to_string(),
+                active: false,
+            })
+            .collect()
+    }
+
+    fn create_fuzzy_test_items() -> Vec<DialogItem> {
+        vec![
+            DialogItem {
+                id: "1".to_string(),
+                name: "gitlab".to_string(),
+                group: "Other".to_string(),
+                description: "".to_string(),
+                tip: None,
+                provider_id: "p".to_string(),
+                active: false,
+            },
+            DialogItem {
+                id: "2".to_string(),
+                name: "github".to_string(),
+                group: "Other".to_string(),
+                description: "".to_string(),
+                tip: None,
+                provider_id: "p".to_string(),
+                active: false,
+            },
+            DialogItem {
+                id: "3".to_string(),
+                name: "gruvbox".to_string(),
+                group: "Other".to_string(),
+                description: "".to_string(),
+                tip: None,
+                provider_id: "p".to_string(),
+                active: false,
+            },
+        ]
+    }
+
+    fn create_provider_weight_test_items() -> Vec<DialogItem> {
+        vec![
+            DialogItem {
+                id: "nanogpt-openai-o1".to_string(),
+                name: "OpenAI o1".to_string(),
+                group: "NanoGPT".to_string(),
+                description: "NanoGPT | reasoning".to_string(),
+                tip: None,
+                provider_id: "nanogpt".to_string(),
+                active: false,
+            },
+            DialogItem {
+                id: "openai-gpt-5".to_string(),
+                name: "GPT-5".to_string(),
+                group: "OpenAI".to_string(),
+                description: "OpenAI | reasoning, tools".to_string(),
+                tip: None,
+                provider_id: "openai".to_string(),
+                active: false,
             },
         ]
     }
@@ -935,6 +1981,100 @@ mod tests {
     }
 
     #[test]
+    fn test_dialog_click_outside_closes_modal() {
+        let mut dialog = Dialog::new("Test");
+        dialog.show();
+        dialog.dialog_area = Rect {
+            x: 10,
+            y: 10,
+            width: 30,
+            height: 10,
+        };
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(handled);
+        assert!(!dialog.is_visible());
+    }
+
+    #[test]
+    fn test_dialog_click_inside_keeps_modal_open() {
+        let mut dialog = Dialog::new("Test");
+        dialog.show();
+        dialog.dialog_area = Rect {
+            x: 10,
+            y: 10,
+            width: 30,
+            height: 10,
+        };
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(!handled);
+        assert!(dialog.is_visible());
+    }
+
+    #[test]
+    fn test_dialog_scrollbar_drag_continues_outside_content_area() {
+        let mut dialog = Dialog::with_items("Models", create_many_test_items(40));
+        dialog.show();
+        dialog.dialog_area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 20,
+        };
+        dialog.visible_row_count = 8;
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 36,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(handled);
+        assert!(dialog.is_dragging_scrollbar);
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 80,
+            row: 100,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(handled);
+        assert!(dialog.is_dragging_scrollbar);
+        assert_eq!(
+            dialog.scroll_offset,
+            dialog
+                .get_content_line_count()
+                .saturating_sub(dialog.get_visible_row_count())
+        );
+
+        let handled = dialog.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 80,
+            row: 14,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(handled);
+        assert!(!dialog.is_dragging_scrollbar);
+        assert_eq!(dialog.scrollbar_drag_offset, None);
+    }
+
+    #[test]
     fn test_dialog_toggle() {
         let mut dialog = Dialog::new("Test");
         assert!(!dialog.is_visible());
@@ -960,6 +2100,61 @@ mod tests {
         dialog.set_search_query("model a");
         assert_eq!(dialog.filtered_items.len(), 1);
         assert_eq!(dialog.filtered_items[0].1[0].name, "Model A");
+    }
+
+    #[test]
+    fn test_dialog_search_prioritizes_provider_match_over_model_match() {
+        let mut dialog = Dialog::with_items("Models", create_provider_weight_test_items());
+
+        dialog.set_search_query("openai");
+
+        let flat_items = dialog.get_flat_items();
+        assert_eq!(flat_items.len(), 2);
+        assert_eq!(flat_items[0].provider_id, "openai");
+        assert_eq!(flat_items[0].name, "GPT-5");
+        assert_eq!(flat_items[1].provider_id, "nanogpt");
+        assert_eq!(flat_items[1].name, "OpenAI o1");
+    }
+
+    #[test]
+    fn test_dialog_active_items_are_searchable_without_replacing_tip() {
+        let active_favorite = DialogItem {
+            id: "gpt-5".to_string(),
+            name: "GPT-5".to_string(),
+            group: "OpenAI".to_string(),
+            description: "OpenAI | reasoning".to_string(),
+            tip: Some("❤︎".to_string()),
+            provider_id: "openai".to_string(),
+            active: true,
+        };
+        let mut dialog = Dialog::with_items(
+            "Models",
+            vec![
+                active_favorite.clone(),
+                DialogItem {
+                    id: "claude".to_string(),
+                    name: "Claude".to_string(),
+                    group: "Anthropic".to_string(),
+                    description: "Anthropic".to_string(),
+                    tip: None,
+                    provider_id: "anthropic".to_string(),
+                    active: false,
+                },
+            ],
+        );
+
+        dialog.set_search_query("active");
+
+        let flat_items = dialog.get_flat_items();
+        assert_eq!(flat_items.len(), 1);
+        assert_eq!(flat_items[0].id, "gpt-5");
+        assert_eq!(flat_items[0].tip.as_deref(), Some("❤︎"));
+
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let rendered = Dialog::item_spans_for_width(&active_favorite, 32, colors);
+        let rendered_text: String = rendered.iter().map(|span| span.content.as_ref()).collect();
+        assert!(rendered_text.starts_with("● GPT-5"));
+        assert!(rendered_text.ends_with("❤︎ "));
     }
 
     #[test]
@@ -989,6 +2184,29 @@ mod tests {
     }
 
     #[test]
+    fn test_dialog_next_from_invalid_selection_focuses_first() {
+        let mut dialog = Dialog::with_items("Providers", create_fuzzy_test_items());
+        dialog.set_search_query("gu");
+        assert!(!dialog.get_flat_items().is_empty());
+
+        dialog.selected_index = 999;
+        dialog.next();
+        assert_eq!(dialog.selected_index, 0);
+        assert!(dialog.get_selected().is_some());
+    }
+
+    #[test]
+    fn test_dialog_search_preserves_selected_item_if_still_present() {
+        let mut dialog = Dialog::with_items("Providers", create_fuzzy_test_items());
+
+        dialog.selected_index = 1;
+        assert_eq!(dialog.get_selected().unwrap().name, "github");
+
+        dialog.set_search_query("gu");
+        assert_eq!(dialog.get_selected().unwrap().name, "github");
+    }
+
+    #[test]
     fn test_dialog_previous() {
         let mut dialog = Dialog::with_items("Models", create_test_items());
         assert_eq!(dialog.selected_index, 0);
@@ -1013,6 +2231,16 @@ mod tests {
         let selected = dialog.get_selected();
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().name, "Model A");
+    }
+
+    #[test]
+    fn test_dialog_select_index_clamped_uses_last_available_item() {
+        let mut dialog = Dialog::with_items("Models", create_test_items());
+
+        assert!(dialog.select_index_clamped(99));
+
+        assert_eq!(dialog.selected_index, 2);
+        assert_eq!(dialog.get_selected().unwrap().name, "Model C");
     }
 
     #[test]

@@ -109,6 +109,7 @@ impl ProviderDAO {
                 if let Some(auth_config) = configured_auth.get(&provider.id) {
                     let auth_type = match auth_config {
                         super::auth::AuthConfig::Api { .. } => "api",
+                        super::auth::AuthConfig::Local => "local",
                         super::auth::AuthConfig::OAuth { .. } => "oauth",
                     };
 

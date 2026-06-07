@@ -1,0 +1,15 @@
+# DevRefs makes cloning/updating references for agents seamless and fast.
+# Edit this file directly, or use `devrefs add <id> <description>` to add entries.
+references:
+  - id: ogulcancelik/herdr
+    description: "Ratatui app with good scroll"
+    remote: https://github.com/ogulcancelik/herdr.git
+    branch: master
+  - id: anomalyco/opencode
+    description: "Main reference and preferred agent harness by the author, we wanted to rewrite it in rust w/ crabcode"
+    remote: https://github.com/anomalyco/opencode.git
+    branch: dev
+  - id: openai/codex
+    description: "a ratatui agent harness that we can use as reference, especially since it's by openai"
+    remote: https://github.com/openai/codex.git
+    branch: main

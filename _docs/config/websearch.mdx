@@ -1,0 +1,50 @@
+---
+title: Websearch
+description: Configure the built-in websearch tool and search provider.
+---
+
+# Web Search
+
+crabcode exposes a built-in `websearch` tool by default. Agents use `websearch` for discovery and `webfetch` when they already know the URL. The default provider is Exa's hosted MCP service, which does not require an API key.
+
+```jsonc title="crabcode.jsonc"
+{
+  "websearch": {
+    "enabled": true,
+    "provider": "exa-hosted-mcp"
+  },
+  "permission": {
+    "websearch": "allow"
+  }
+}
+```
+
+Use `websearch: false` to disable the tool.
+
+## Providers
+
+| Provider | API key config |
+| --- | --- |
+| `exa-hosted-mcp` | Optional `apiKey`; works without one |
+| `exa` | `apiKey: "{env:EXA_API_KEY}"` |
+| `tavily` | `apiKey: "{env:TAVILY_API_KEY}"` |
+| `perplexity` | `apiKey: "{env:PERPLEXITY_API_KEY}"` |
+| `brave` | `apiKey: "{env:BRAVE_SEARCH_API_KEY}"` |
+| `ollama-cloud` | `apiKey: "{env:OLLAMA_API_KEY}"` |
+| `serpapi` | `apiKey: "{env:SERPAPI_API_KEY}"` |
+| `keiro` | `apiKey: "{env:KEIRO_API_KEY}"` |
+
+Only the provider names above are accepted.
+
+## Keyed provider example
+
+```jsonc title="crabcode.jsonc"
+{
+  "websearch": {
+    "provider": "keiro",
+    "apiKey": "{env:KEIRO_API_KEY}"
+  }
+}
+```
+
+`endpoint` can override the default provider URL for testing or proxying.

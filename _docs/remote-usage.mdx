@@ -1,0 +1,260 @@
+---
+title: Remote Usage
+description: Use crabcode from another phone, laptop, browser, or SSH session.
+---
+
+# Use crabcode away from your keyboard
+
+crabcode can run on one machine while you control it from another. The machine with the project checkout, credentials, tools, and session history is the host. Your phone, tablet, or second laptop is a client.
+
+That shape covers two common cases:
+
+| Use case | What you want |
+| --- | --- |
+| Local network | Keep prompting from your phone while you are in the kitchen, on the couch, or away from your desk. |
+| External network | Keep prompting while you are out for lunch, travelling, or using a different laptop. |
+
+The main idea is:
+
+```bash
+# Host machine
+crabcode serve
+
+# Browser client
+# Open the URL printed by the host.
+
+# Terminal client
+crabcode attach <url-or-alias>
+
+# One-shot remote prompt
+crabcode -p --attach <url-or-alias> "continue the refactor"
+```
+
+For any URL that another device can reach, use pairing:
+
+```bash
+crabcode serve --paircode random
+```
+
+The host prints a short pair code. Enter it once from a browser or `crabcode attach`; the client stores a trusted token in its crabcode state directory so future attaches can use the remembered host alias.
+
+## How remote usage works
+
+`crabcode serve` starts a small HTTP host for the current workspace. The host owns the important things:
+
+| Host-owned state | Why it stays on the host |
+| --- | --- |
+| Workspace files | Tools run against the project checkout on the host machine. |
+| Provider credentials | API keys and OAuth tokens stay in the host's `auth.json`. |
+| Session history | Conversations are stored in the host's crabcode state database. |
+| Active agent run | Browser and terminal clients can disconnect without moving the project or credentials. |
+
+Clients are thin control surfaces:
+
+| Client | Use it for |
+| --- | --- |
+| Phone or laptop browser | Prompting, reading the transcript, switching sessions, changing model or agent mode, approving permissions, answering agent questions, and cancelling a run. |
+| `crabcode attach <url>` | Full terminal-style control from another laptop or terminal-capable device. |
+| `crabcode -p --attach <url> "..."` | Scripts, launchers, shortcuts, and quick follow-up prompts. |
+| SSH | The classic remote terminal path when you do not want to run `crabcode serve`. |
+
+crabcode does not expose a general remote shell or proxy arbitrary development ports. It exposes crabcode sessions. If your app also runs a dev server on the host, expose that separately through your LAN, Tailscale, SSH forwarding, or another preview tunnel.
+
+## Same machine
+
+The default bind address is local-only:
+
+```bash
+crabcode serve --paircode random
+```
+
+Open the printed browser URL on the same machine, usually:
+
+```text
+http://127.0.0.1:8421
+```
+
+You can also attach from another terminal on the same machine:
+
+```bash
+crabcode attach http://127.0.0.1:8421
+```
+
+## Local network
+
+To reach crabcode from a phone or another laptop on the same Wi-Fi or Ethernet network, bind the host to a reachable address.
+
+On the machine with the project:
+
+```bash
+cd ~/code/my-project
+crabcode serve --bind 0.0.0.0:8421 --paircode random
+```
+
+The host will print a phone URL when it can detect one. If it prints only `127.0.0.1`, replace that address with the host machine's LAN IP, for example:
+
+```text
+http://192.168.1.42:8421
+```
+
+From a phone or laptop browser:
+
+1. Open the LAN URL.
+2. Enter the pair code printed by `crabcode serve`.
+3. Prompt, monitor, cancel, or switch sessions from the browser.
+
+From another laptop terminal:
+
+```bash
+crabcode attach http://192.168.1.42:8421
+```
+
+After pairing, `crabcode attach` remembers the host. List remembered hosts with:
+
+```bash
+crabcode hosts
+```
+
+Then attach by alias:
+
+```bash
+crabcode attach my-project
+```
+
+`--bind 0.0.0.0:8421` listens on every network interface. Use it only on networks you trust, keep the pair code enabled, and stop the host with `Ctrl+C` when you are done.
+
+## External network with Tailscale
+
+Tailscale works well with crabcode because it gives your devices private network reachability. crabcode does not need a Tailscale integration; it only needs to bind to an address your tailnet devices can reach.
+
+Recommended shape:
+
+1. Install Tailscale on the host machine and the client device.
+2. Sign both devices into the same tailnet.
+3. Start crabcode on the host, listening on all interfaces.
+4. Copy the host's Tailscale IP or MagicDNS name.
+5. Open `http://<tailscale-ip-or-name>:8421` from your phone.
+
+On the host:
+
+```bash
+cd ~/code/my-project
+crabcode serve --bind 0.0.0.0:8421 --paircode random
+```
+
+From a phone browser:
+
+```text
+http://<tailnet-ip>:8421
+```
+
+If you use MagicDNS, the URL can be a machine name instead:
+
+```text
+http://devbox:8421
+```
+
+From another laptop:
+
+```bash
+crabcode attach http://devbox:8421
+```
+
+For a one-shot prompt:
+
+```bash
+crabcode -p --attach http://devbox:8421 "summarize the current state and keep going"
+```
+
+This is the "off grid for lunch" workflow: the project stays on your laptop, Mac mini, homelab box, or VPS, while your phone reaches it over Tailscale. Your provider credentials stay on the host.
+
+For a tighter bind that listens only on the host's Tailscale interface, use the host's Tailscale IPv4 address:
+
+```bash
+TAILNET_IP=$(tailscale ip -4)
+crabcode serve --bind "$TAILNET_IP:8421" --paircode random
+```
+
+Binding to `0.0.0.0` is usually the most convenient setup and still lets you connect through Tailscale, but it also listens on LAN interfaces. Keep the pair code enabled and stop the host with `Ctrl+C` when you are done.
+
+## Choosing a server
+
+The server is simply the device that owns the checkout and runs `crabcode serve`.
+
+| Server | Good for | Notes |
+| --- | --- | --- |
+| Your laptop | Continuing a local coding run from your phone. | The laptop must stay awake and online. |
+| Mac mini or desktop | Always-on home or office workstation. | Best when paired with Tailscale or another private network. |
+| VPS | Remote development from anywhere. | Install Tailscale on the VPS too; use key-based SSH and firewall public ports. |
+
+A VPS can join your tailnet like any other device. In that setup, Tailscale is the private network.
+
+Do not expose a write-capable crabcode host directly to the public internet. Put it behind Tailscale, another private network, SSH forwarding, or a hardened access layer.
+
+## Remote app previews
+
+If crabcode starts or edits an app that runs on `localhost:3000`, remember that `localhost` means different things on different devices.
+
+On the host machine:
+
+```text
+http://localhost:3000
+```
+
+On your phone, that same URL points at the phone, not the host. Use one of these instead:
+
+| Preview path | Example |
+| --- | --- |
+| LAN URL | `http://192.168.1.42:3000` |
+| Tailscale URL | `http://devbox:3000` |
+| SSH local forwarding | Forward remote `3000` to local `3000` in your SSH client. |
+| Tunnel tool | Use the tunnel your project already supports. |
+
+crabcode remote access controls crabcode. It does not automatically expose every dev server running on the host.
+
+## Classic SSH remote usage
+
+You do not need `crabcode serve` for the classic terminal workflow. This is how you would use many terminal coding agents remotely: SSH into the machine that has the project, start a persistent terminal session, and run crabcode there.
+
+From another laptop:
+
+```bash
+ssh devbox
+cd ~/code/my-project
+tmux new -A -s crabcode
+crabcode
+```
+
+If the SSH connection drops, reconnect and run the same `tmux` command:
+
+```bash
+ssh devbox
+cd ~/code/my-project
+tmux new -A -s crabcode
+```
+
+From an iPhone with Termius:
+
+1. Add the host in Termius. Use a Tailscale IP, Tailscale hostname, or normal SSH hostname.
+2. Connect over SSH.
+3. Run `cd ~/code/my-project`.
+4. Run `tmux new -A -s crabcode`.
+5. Run `crabcode`.
+6. Reconnect later and run `tmux new -A -s crabcode` again to return to the same terminal session.
+
+This path has more friction on a phone because you are using a terminal UI through a mobile keyboard. It is still useful when you want the safest possible setup, when the browser client is not enough for a particular workflow, or when you already live in SSH.
+
+## Current limits
+
+Remote usage is personal-device oriented. It is not a shared team workspace or public hosted service.
+
+Browser access is best for prompts, transcript review, session switching, model or agent changes, permission approvals, agent questions, and cancellation. For full TUI behavior from another laptop, use `crabcode attach <url>`. For the most conservative remote setup, use SSH with `tmux` and run normal `crabcode`.
+
+Keep these defaults in mind:
+
+| Default | Meaning |
+| --- | --- |
+| `crabcode serve` binds `127.0.0.1:8421` | Same-machine only. Use `--bind` for phone or laptop access. |
+| Pairing is enabled only when you pass `--paircode` | Use `--paircode random` for any non-local bind. |
+| Trusted clients are local to each client device | `crabcode hosts` shows aliases remembered by that device. |
+| The host process must stay alive | Stop it with `Ctrl+C` when you no longer want remote access. |

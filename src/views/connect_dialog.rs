@@ -1,5 +1,5 @@
 use crate::theme::ThemeColors;
-use crate::ui::components::dialog::{Dialog, DialogItem};
+use crate::ui::components::dialog::{Dialog, DialogAction as FooterAction, DialogItem};
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{layout::Rect, Frame};
 
@@ -18,15 +18,24 @@ impl ConnectDialogState {
     }
 
     pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
+        let title = title.into();
+        let mut dialog = Dialog::with_items(title.clone(), items);
+        if title == "Connect a provider" {
+            dialog = dialog.with_actions(vec![FooterAction {
+                label: "Disconnect".to_string(),
+                key: "ctrl+d".to_string(),
+            }]);
+        }
+
         Self {
-            dialog: Dialog::with_items(title, items),
+            dialog,
             pending_selection: None,
         }
     }
 }
 
 pub fn init_connect_dialog() -> ConnectDialogState {
-    ConnectDialogState::new(Dialog::with_items("Connect a provider", vec![]))
+    ConnectDialogState::with_items("Connect a provider", vec![])
 }
 
 pub fn render_connect_dialog(

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/blankeos/gittydocs/main/gittydocs.schema.json",
+  "theme": {
+    "preset": "ember",
+  },
+  "site": {
+    "name": "crabcode",
+    "favicon": "/static/favicon.png",
+    "repo": {
+      "owner": "blankeos",
+      "name": "crabcode",
+      "ref": "main",
+      "docsPath": "_docs",
+    },
+  },
+  "nav": [
+    {
+      "label": "Docs",
+      "items": [
+        { "label": "Overview", "path": "/" },
+        { "label": "Quickstart", "path": "/quickstart" },
+        { "label": "Remote Usage", "path": "/remote-usage" },
+      ],
+    },
+    {
+      "label": "Configuration",
+      "items": [
+        { "label": "Overview", "path": "/config" },
+        { "label": "OpenCode Compatibility", "path": "/config/opencode-compatibility" },
+        { "label": "Notifications", "path": "/config/notifications" },
+        { "label": "Images", "path": "/config/images" },
+        { "label": "Websearch", "path": "/config/websearch" },
+        { "label": "Theme", "path": "/config/theme" },
+      ],
+    },
+  ],
+}

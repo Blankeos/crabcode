@@ -1,0 +1,106 @@
+---
+title: Quickstart
+description: Get up and running with crabcode in 5 minutes.
+---
+
+# Get from zero to coding
+
+Five minutes from now you'll be pair programming with AI in your terminal.
+
+---
+
+## Install
+
+```bash
+npm install -g crabcode  # npm
+bun install -g crabcode  # or bun
+cargo binstall crabcode  # or cargo-binstall (prebuilt binary, faster)
+cargo install crabcode   # or cargo (build from source)
+curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | sh # or linux/macos (via curl)
+```
+
+---
+
+## First run
+
+Launch crabcode:
+
+```bash
+crabcode
+```
+
+Run `/connect` to add your first provider (OpenAI, Anthropic, etc.). That's it—you're ready.
+
+🎉 That's it! If you know how to use OpenCode, you're pretty much good to go!
+
+---
+
+## Your first session
+
+crabcode works best when you type naturally, like you're pair programming:
+
+- **Ask questions:** "Explain the main function in src/lib.rs"
+- **Request changes:** "Add error handling to this module"
+- **Plan first:** `/plan` when you're not sure how to approach something
+- **Build directly:** `/build` when you know what you want done
+
+Custom slash commands can live in `.opencode/commands/` or `.crabcode/commands/`. crabcode reads the [OpenCode command format](https://opencode.ai/docs/commands/).
+
+---
+
+## Configure crabcode
+
+crabcode uses JSONC (JSON with comments). Create a `crabcode.jsonc` in your project:
+
+```jsonc
+{
+  "theme": "default",
+  "model": "openai/gpt-5.2",
+  "notifications": {
+    "complete": {
+      "terminal": "auto",
+      "soundEnabled": true,
+      "desktop": true,
+    },
+    "error": {
+      "soundEnabled": true,
+    },
+  },
+}
+```
+
+### How config merging works
+
+crabcode reads up to four files (highest priority wins):
+
+1. OpenCode global (`~/.config/opencode/opencode.jsonc`)
+2. crabcode global (`~/.config/crabcode/crabcode.jsonc`)
+3. OpenCode local (`.opencode/opencode.jsonc` in your project)
+4. crabcode local (`crabcode.jsonc` in your project)
+
+Set your defaults globally, override per-project when needed. See the [full configuration reference](/config).
+
+---
+
+## Common commands
+
+Once you're in crabcode:
+
+| Command             | What it does                             |
+| ------------------- | ---------------------------------------- |
+| `/sessions`         | Browse and resume previous conversations |
+| `/new`              | Start fresh                              |
+| `/connect`          | Add or switch providers                  |
+| `/models`           | See available models and their costs     |
+| `/exit` or `Ctrl+C` | Quit                                     |
+
+---
+
+## Where your data lives
+
+| What                     | Default                                               | With `XDG_STATE_HOME`                                  |
+| ------------------------ | ----------------------------------------------------- | ------------------------------------------------------ |
+| Credentials              | `~/.local/state/crabcode/auth.json`                   | `$XDG_STATE_HOME/crabcode/auth.json`                   |
+| Preferences and Sessions | `~/.local/state/crabcode/data.db`                     | `$XDG_STATE_HOME/crabcode/data.db`                     |
+| Model cache              | `~/.local/state/crabcode/cache/models_dev_cache.json` | `$XDG_STATE_HOME/crabcode/cache/models_dev_cache.json` |
+| Bundled notification sounds | `~/.local/state/crabcode/sounds`                   | `$XDG_STATE_HOME/crabcode/sounds`                      |

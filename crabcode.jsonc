@@ -1,0 +1,25 @@
+{
+  "$schema": "crabcode.schema.json",
+  // Crabcode theme id (see src/generated_themes/carbonfox.json)
+  // "theme": "vercel",
+  "notifications": {
+    "complete": {
+      "terminal": "auto",
+      "soundEnabled": true,
+      "desktop": true,
+      "soundFile": "/Users/carlo/Desktop/Projects/crabcode/sounds/complete.wav",
+    },
+    "question": {
+      "soundEnabled": true,
+      "soundFile": "/Users/carlo/Desktop/Projects/crabcode/sounds/question.mp3",
+    },
+    "permission": {
+      "soundEnabled": true,
+      "soundFile": "/Users/carlo/Desktop/Projects/crabcode/sounds/question.mp3",
+    },
+    "error": {
+      "soundEnabled": true,
+      "soundFile": "/Users/carlo/Desktop/Projects/crabcode/sounds/error.mp3",
+    },
+  },
+}

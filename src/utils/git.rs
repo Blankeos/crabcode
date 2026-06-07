@@ -1,9 +1,12 @@
-use std::path::Path;
 use std::process::Command;
 
 pub fn get_current_branch() -> Option<String> {
+    get_branch_for_path(".")
+}
+
+pub fn get_branch_for_path(path: &str) -> Option<String> {
     let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()?;
 

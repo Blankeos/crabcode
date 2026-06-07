@@ -14,7 +14,7 @@ pub enum ProviderType {
 impl ProviderType {
     pub fn from_model_id(model_id: &str) -> Self {
         let lower = model_id.to_lowercase();
-        
+
         if lower.contains("gpt-5") {
             ProviderType::Codex
         } else if lower.contains("gpt-") || lower.contains("o1") || lower.contains("o3") {
@@ -34,7 +34,9 @@ pub struct SystemPromptComposer {
     working_directory: String,
     is_git_repo: bool,
     platform: String,
+    print_mode: bool,
     tool_registry: Option<ToolRegistry>,
+    agent_registry: Option<crate::agent::definition::AgentRegistry>,
 }
 
 impl SystemPromptComposer {
@@ -49,7 +51,9 @@ impl SystemPromptComposer {
             working_directory: working_directory.into(),
             is_git_repo,
             platform: platform.into(),
+            print_mode: false,
             tool_registry: None,
+            agent_registry: None,
         }
     }
 
@@ -58,14 +62,29 @@ impl SystemPromptComposer {
         self
     }
 
-    pub async fn compose(&self,
-    ) -> String {
+    pub fn with_agent_registry(
+        mut self,
+        registry: crate::agent::definition::AgentRegistry,
+    ) -> Self {
+        self.agent_registry = Some(registry);
+        self
+    }
+
+    pub fn with_print_mode(mut self, print_mode: bool) -> Self {
+        self.print_mode = print_mode;
+        self
+    }
+
+    pub async fn compose(&self) -> String {
         let mut parts = Vec::new();
 
         parts.push(self.get_header());
         parts.push(self.get_core_prompt());
+        if self.print_mode {
+            parts.push(self.get_print_mode_context());
+        }
         parts.push(self.get_environment_context());
-        
+
         if let Some(ref registry) = self.tool_registry {
             parts.push(self.get_tools_context(registry).await);
         }
@@ -186,38 +205,62 @@ Your output will be displayed on a command line interface. Your responses should
     }
 
     fn get_codex_prompt(&self) -> String {
-        r#"You are an expert software engineer with a concise, direct, friendly personality.
+        r#"You are Codex, based on GPT-5. You are running as a coding agent in Crabcode on the user's computer.
 
-Core Directives:
-- Keep responses concise, direct, friendly
-- Send brief preambles before tool calls (8-12 words)
-- Break tasks into meaningful, logically ordered steps
-- Don't repeat full plan after todowrite
-- Fix root cause, not surface patches
-- Keep changes minimal and focused
-- Validate work via tests/build
-- Only terminate when problem completely solved
+Personality:
+- Be concise, direct, and friendly.
+- Communicate efficiently and keep the user informed about ongoing actions.
+- Prioritize actionable guidance, assumptions, prerequisites, and next steps.
+- Avoid unnecessary detail unless the user asks for it.
 
-Output Philosophy:
-- Group related actions in single preamble
-- Build on prior context for momentum
-- Keep tone light, friendly, curious
-- Exception: Skip preambles for trivial single-file reads
-- Minimal markdown formatting
+Autonomy and Persistence:
+- Persist until the task is fully handled end-to-end within the current turn whenever feasible.
+- Do not stop at analysis, partial fixes, or incomplete wiring.
+- Carry work through implementation, verification, and a clear explanation of outcomes unless the user explicitly pauses or redirects you.
+- Unless the user explicitly asks for a plan, asks a question about the code, or is brainstorming, assume they want you to make code changes or run tools to solve the problem.
+- If code changes are expected, do not stop at a proposed solution in chat; implement the change.
+- If you hit a blocker, try to resolve it with available tools before yielding.
+- Only terminate when you are sure the problem is solved or you have a concrete blocker to report.
+
+Progress Updates and Final Answers:
+- Send brief preambles before grouped tool calls.
+- Treat preambles and progress updates as interim commentary before tool calls.
+- Never send a preamble or progress update as the final answer.
+- If work remains, continue with tools instead of sending a final answer.
+- Use final answers only when the requested work is complete, verified when practical, and ready to hand back.
+- Keep final answers concise and focused on what changed, validation run, and any real blocker.
+- For routine code changes, prefer one or two compact sentences plus validation; do not list every edited file unless that detail is needed.
+- Once the final answer is complete, stop instead of continuing with extra explanation.
 
 Planning:
-- Use plan tool for non-trivial, multi-phase work
-- Plans should break task into logical dependencies
-- Don't pad with obvious steps
-- Update plans mid-task if needed with explanation
-- Mark steps completed before moving forward
+- Use update_plan for non-trivial, multi-phase work
+- Plans should break the task into meaningful, logically ordered steps that are easy to verify.
+- Do not pad simple work with filler steps or obvious actions.
+- Do not repeat the full plan after update_plan; the UI already displays it.
+- Before starting the next planned step, mark the previous step completed.
+- Maintain exactly one in_progress item at a time.
+- Do not jump an item from pending directly to completed; set it to in_progress first.
+- Update the plan if scope changes, steps split/merge/reorder, or you discover new work.
+- Do not let the plan go stale while coding.
+- Finish with all plan items completed or explicitly canceled/deferred before ending the turn.
+- After update_plan succeeds, proceed with the next concrete tool call; do not call update_plan again unless the plan content or statuses changed.
 
-File Handling:
-- Never re-read files after successful edit
-- Use git log/blame for history context
-- Never add copyright/license headers
-- Don't use one-letter variables
-- Use file_path format for citations
+Task Execution:
+- Fix the problem at the root cause rather than applying surface-level patches when possible.
+- Keep changes minimal and focused on the user's request.
+- Respect the existing codebase style and local patterns.
+- Do not fix unrelated bugs or broken tests; mention them if relevant.
+- Do not git commit or create branches unless explicitly requested.
+- Never add copyright or license headers unless requested.
+- Prefer rg/ripgrep for search and targeted file reads for named files.
+- Avoid repeating identical reads, searches, or validation commands.
+- Do not re-read files solely to confirm a successful edit.
+
+Validation:
+- If tests/builds/formatters exist, use focused validation for the changed area first.
+- Add or update tests when the codebase has adjacent test patterns and the behavioral risk warrants it.
+- Do not add a test framework or formatter to a codebase that does not already use one.
+- If validation fails for unrelated reasons, do not fix unrelated issues; report the residual risk.
 
 Your output will be displayed on a command line interface. Your responses should be short and concise (typically < 4 lines, excluding tool calls)."#.to_string()
     }
@@ -225,7 +268,7 @@ Your output will be displayed on a command line interface. Your responses should
     fn get_environment_context(&self) -> String {
         let git_status = if self.is_git_repo { "yes" } else { "no" };
         let date = chrono::Local::now().format("%a %b %d %Y").to_string();
-        
+
         format!(
             r#"<env>
   Working directory: {}
@@ -237,17 +280,26 @@ Your output will be displayed on a command line interface. Your responses should
         )
     }
 
-    async fn get_tools_context(&self,
-        registry: &ToolRegistry,
-    ) -> String {
+    fn get_print_mode_context(&self) -> String {
+        r#"Non-Interactive Print Mode:
+- Keep planning internal; do not call update_plan.
+- Do not ask the user questions or wait for interactive input.
+- Prefer direct read/apply_patch/edit/bash tool use.
+- For existing-file edits, prefer apply_patch or edit over rewriting whole files; use write_files mainly for new files or true full rewrites.
+- After tests pass, do not run optional one-off formatters or package-manager commands unless the project has an explicit formatter script or the user asked for it.
+- After requested validation passes, send a compact final answer and stop."#
+            .to_string()
+    }
+
+    async fn get_tools_context(&self, registry: &ToolRegistry) -> String {
         let schemas = registry.list_schemas().await;
-        
+
         if schemas.is_empty() {
             return String::new();
         }
 
-        let tools_json = serde_json::to_string_pretty(&schemas)
-            .unwrap_or_else(|_| "[]".to_string());
+        let tools_json =
+            serde_json::to_string_pretty(&schemas).unwrap_or_else(|_| "[]".to_string());
 
         format!(
             r#"You have access to the following tools (JSON schema):
@@ -264,7 +316,69 @@ Tool use:
     }
 
     async fn get_custom_instructions(&self) -> String {
-        rules::get_custom_instructions(&self.working_directory).await
+        let mut instructions = rules::get_custom_instructions(&self.working_directory).await;
+
+        // Add available skills listing
+        if let Some(store) = crate::skill::get_skill_store() {
+            let skills = store.all();
+            if !skills.is_empty() {
+                let skills_xml = skills
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>file://{}</location>\n  </skill>",
+                            s.name,
+                            s.description.as_deref().unwrap_or(""),
+                            s.location.display()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let skills_block = format!(
+                    "\n\nSkills provide specialized instructions and workflows for specific tasks.\n\
+                     Use the skill tool to load a skill when a task matches its description.\n\
+                     <available_skills>\n{}\n</available_skills>",
+                    skills_xml
+                );
+
+                if !instructions.is_empty() {
+                    instructions.push_str("\n\n");
+                }
+                instructions.push_str(&skills_block);
+            }
+        }
+
+        // Add available subagents listing
+        let registry = self
+            .agent_registry
+            .clone()
+            .unwrap_or_else(crate::agent::definition::AgentRegistry::default);
+        let subagents = registry.visible_subagents();
+        if !subagents.is_empty() {
+            let subagents_xml = subagents
+                .iter()
+                .map(|s| {
+                    format!(
+                        "  <subagent>\n    <name>{}</name>\n    <description>{}</description>\n  </subagent>",
+                        s.name, s.description
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let subagents_block = format!(
+                "\n\n<available_subagents>\n{}\n</available_subagents>",
+                subagents_xml
+            );
+
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(&subagents_block);
+        }
+
+        instructions
     }
 }
 
@@ -276,8 +390,48 @@ mod tests {
     fn test_provider_type_detection() {
         assert_eq!(ProviderType::from_model_id("gpt-4"), ProviderType::OpenAI);
         assert_eq!(ProviderType::from_model_id("gpt-5"), ProviderType::Codex);
-        assert_eq!(ProviderType::from_model_id("claude-3"), ProviderType::Anthropic);
-        assert_eq!(ProviderType::from_model_id("gemini-pro"), ProviderType::Gemini);
-        assert_eq!(ProviderType::from_model_id("unknown"), ProviderType::Generic);
+        assert_eq!(
+            ProviderType::from_model_id("claude-3"),
+            ProviderType::Anthropic
+        );
+        assert_eq!(
+            ProviderType::from_model_id("gemini-pro"),
+            ProviderType::Gemini
+        );
+        assert_eq!(
+            ProviderType::from_model_id("unknown"),
+            ProviderType::Generic
+        );
+    }
+
+    #[test]
+    fn codex_prompt_separates_progress_from_final_answers() {
+        let composer = SystemPromptComposer::new("gpt-5", ".", true, "test");
+        let prompt = composer.get_codex_prompt();
+
+        assert!(prompt.contains("preambles and progress updates as interim commentary"));
+        assert!(prompt.contains("Use final answers only when the requested work is complete"));
+        assert!(prompt.contains("continue with tools instead of sending a final answer"));
+        assert!(prompt.contains("Persist until the task is fully handled end-to-end"));
+        assert!(prompt.contains("Do not stop at analysis, partial fixes, or incomplete wiring"));
+        assert!(prompt.contains("Do not let the plan go stale while coding"));
+        assert!(
+            prompt.contains("Finish with all plan items completed or explicitly canceled/deferred")
+        );
+        assert!(prompt.contains("do not call update_plan again unless the plan content"));
+        assert!(prompt.contains("do not stop at a proposed solution in chat"));
+    }
+
+    #[test]
+    fn print_mode_context_disables_interactive_planning() {
+        let composer = SystemPromptComposer::new("gpt-5", ".", true, "test").with_print_mode(true);
+        let context = composer.get_print_mode_context();
+
+        assert!(context.contains("do not call update_plan"));
+        assert!(context.contains("Do not ask the user questions"));
+        assert!(context.contains("apply_patch"));
+        assert!(context.contains("write_files"));
+        assert!(context.contains("one-off formatters"));
+        assert!(context.contains("stop"));
     }
 }

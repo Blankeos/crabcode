@@ -1,4 +1,4 @@
-use ratatui::crossterm::event::KeyEvent;
+use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{layout::Rect, Frame};
 
 use crate::autocomplete::Suggestion;
@@ -34,6 +34,14 @@ pub fn handle_suggestions_popup_key_event(
     event: KeyEvent,
 ) -> PopupAction {
     popup_state.popup.handle_key_event(event)
+}
+
+pub fn handle_suggestions_popup_mouse_event(
+    popup_state: &mut SuggestionsPopupState,
+    event: MouseEvent,
+    area: Rect,
+) -> PopupAction {
+    popup_state.popup.handle_mouse_event(event, area)
 }
 
 pub fn set_suggestions(popup_state: &mut SuggestionsPopupState, suggestions: Vec<Suggestion>) {

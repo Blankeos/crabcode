@@ -1,0 +1,153 @@
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400..750&family=JetBrains+Mono:wght@400..700&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Geist", "Geist Sans", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Geist Mono", ui-monospace, monospace;
+  --easings-emphasized-in: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --easings-emphasized-out: cubic-bezier(0.3, 0, 0.8, 0.15);
+  --animate-fadeIn: fadeIn 160ms ease-out forwards;
+  --animate-fadeOut: fadeOut 160ms ease-in forwards;
+  --animate-flyUpAndScale: flyUpAndScale 240ms var(--easings-emphasized-in) forwards;
+  --animate-flyUpAndScaleExit: flyUpAndScaleExit 160ms var(--easings-emphasized-out) forwards;
+  --animate-scaleIn: scaleIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  --animate-toolPulse: toolPulse 1.15s ease-in-out infinite;
+
+  @keyframes ai-shimmer {
+    from { background-position: 100% center; }
+    to { background-position: 0% center; }
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes fadeOut {
+    from { opacity: 1; }
+    to { opacity: 0; }
+  }
+
+  @keyframes flyUpAndScale {
+    from { opacity: 0; transform: translate(0, 100px) scale(0.97); }
+    to { opacity: 1; transform: translate(0, 0) scale(1); }
+  }
+
+  @keyframes flyUpAndScaleExit {
+    from { opacity: 1; transform: translate(0, 0) scale(1); }
+    to { opacity: 0; transform: translate(0, 50px) scale(0.97); }
+  }
+
+  @keyframes scaleIn {
+    from { opacity: 0; transform: scale(0.85); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  @keyframes toolPulse {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 1; }
+  }
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --bg: #151515;
+    --panel: #1a1a1a;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-strong: rgba(255, 255, 255, 0.13);
+    --text: #eeeeec;
+    --muted: #9b9a96;
+    --faint: #66645f;
+    --blue: #6c8ed8;
+    --green: #5ca886;
+    --red: #c86c74;
+    --brand-primary: var(--blue);
+    --brand-dim: #4a639f;
+    --composer: #1d1d1d;
+    --shadow: rgba(0, 0, 0, 0.28);
+  }
+
+  * { box-sizing: border-box; }
+  html, body, #root, #page-view { height: 100%; min-height: 0; }
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    letter-spacing: 0;
+    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, textarea { font: inherit; }
+  button { border: 0; color: inherit; background: transparent; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  svg { display: block; }
+}
+
+@layer components {
+  [cmdk-group-heading] {
+    padding: 0.65rem 0.55rem 0.3rem;
+    color: var(--faint);
+    font-size: 0.66rem;
+    font-weight: 720;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+
+  .remote-markdown { color: inherit; line-height: 1.65; }
+  .streamdown > * + * { margin-top: 0.85em; }
+  .streamdown p { margin: 0 0 0.25em; }
+  .streamdown h1, .streamdown h2, .streamdown h3, .streamdown h4 {
+    margin: 1.4em 0 0;
+    color: var(--text);
+    font-weight: 650;
+    line-height: 1.3;
+  }
+  .streamdown h1 { font-size: 1.35em; }
+  .streamdown h2 { font-size: 1.18em; }
+  .streamdown h3 { font-size: 1.05em; }
+  .streamdown ul, .streamdown ol { padding-left: 1.35em; }
+  .streamdown ul { list-style: disc; }
+  .streamdown ol { list-style: decimal; }
+  .streamdown li + li { margin-top: 0.25em; }
+  .streamdown li > p { display: inline; }
+  .streamdown a { color: #9db1ef; text-decoration: underline; text-underline-offset: 2px; }
+  .streamdown :not(pre) > code {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: #242424;
+    color: #e4e1da;
+    padding: 0.1em 0.35em;
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+  }
+  .streamdown pre {
+    max-width: 100%;
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #111;
+    padding: 0.8rem 0.9rem;
+  }
+  .streamdown pre code { border: 0; background: transparent; padding: 0; }
+  .streamdown blockquote { border-left: 3px solid var(--line-strong); padding-left: 0.9em; color: var(--muted); }
+  .streamdown hr { margin: 1.5em 0; border: 0; border-top: 1px solid var(--line); }
+  .streamdown table {
+    display: table;
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 0.9em;
+  }
+  .streamdown th, .streamdown td {
+    border-bottom: 1px solid var(--line);
+    padding: 0.6em 0.9em;
+    text-align: left;
+    vertical-align: top;
+  }
+  .streamdown thead { background: #242424; }
+  .streamdown tbody tr:last-child td { border-bottom: 0; }
+}

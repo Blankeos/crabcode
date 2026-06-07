@@ -4,12 +4,14 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Wrap},
+    widgets::{Clear, Paragraph},
     Frame,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tui_textarea::{Input as TuiInput, TextArea};
+use tui_textarea::{CursorMove, TextArea};
+
+use crate::ui::textarea_keys::input_textarea;
 
 #[derive(Debug)]
 pub struct SessionRenameDialogState {
@@ -52,6 +54,7 @@ impl SessionRenameDialogState {
         self.input_textarea.set_placeholder_text("Session title");
         self.input_textarea
             .set_cursor_line_style(Style::default().fg(self.colors.primary));
+        self.input_textarea.move_cursor(CursorMove::End);
         self.visible = true;
         self.is_input_focused.store(true, Ordering::SeqCst);
     }
@@ -84,7 +87,12 @@ impl Default for SessionRenameDialogState {
     fn default() -> Self {
         Self::new(ThemeColors {
             primary: Color::Rgb(255, 140, 0),
+            secondary: Color::Rgb(255, 140, 0),
+            accent: Color::Rgb(255, 140, 0),
+            interactive: Color::Rgb(255, 140, 0),
             background: Color::Reset,
+            dialog_background: Color::Reset,
+            background_element: Color::Reset,
             text: Color::Reset,
             text_weak: Color::Reset,
             text_strong: Color::Reset,
@@ -96,6 +104,25 @@ impl Default for SessionRenameDialogState {
             warning: Color::Rgb(255, 255, 0),
             error: Color::Rgb(255, 0, 0),
             info: Color::Rgb(0, 255, 255),
+            markdown_text: Color::Reset,
+            markdown_heading: Color::Rgb(255, 140, 0),
+            markdown_link: Color::Rgb(0, 255, 255),
+            markdown_link_text: Color::Rgb(0, 255, 255),
+            markdown_code: Color::Rgb(0, 255, 0),
+            markdown_block_quote: Color::Rgb(255, 255, 0),
+            markdown_emph: Color::Rgb(255, 255, 0),
+            markdown_strong: Color::Rgb(255, 140, 0),
+            markdown_horizontal_rule: Color::Reset,
+            markdown_list_item: Color::Rgb(255, 140, 0),
+            markdown_list_enumeration: Color::Rgb(0, 255, 255),
+            markdown_image: Color::Rgb(255, 140, 0),
+            markdown_image_text: Color::Rgb(0, 255, 255),
+            markdown_code_block: Color::Reset,
+            diff_add: Color::Rgb(0, 255, 0),
+            diff_add_bg: Color::Rgb(0, 60, 0),
+            diff_remove: Color::Rgb(255, 0, 0),
+            diff_remove_bg: Color::Rgb(60, 0, 0),
+            diff_gutter: Color::Rgb(140, 140, 140),
         })
     }
 }
@@ -139,7 +166,7 @@ pub fn render_session_rename_dialog(
 
     f.render_widget(
         ratatui::widgets::Paragraph::new("")
-            .style(ratatui::style::Style::default().bg(Color::Rgb(20, 20, 30))),
+            .style(ratatui::style::Style::default().bg(colors.dialog_background)),
         dialog_state.dialog_area,
     );
 
@@ -158,7 +185,7 @@ pub fn render_session_rename_dialog(
         Span::styled(
             "Rename session",
             Style::default()
-                .fg(Color::White)
+                .fg(colors.text)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
         Span::raw(" "),
@@ -178,7 +205,7 @@ pub fn render_session_rename_dialog(
     let footer_line = Line::from(vec![Span::styled(
         "enter submit",
         Style::default()
-            .fg(Color::Rgb(150, 120, 100))
+            .fg(colors.text_weak)
             .add_modifier(ratatui::style::Modifier::DIM),
     )]);
 
@@ -209,7 +236,7 @@ pub fn handle_session_rename_dialog_key_event(
             }
         }
         _ => {
-            dialog_state.input_textarea.input(TuiInput::from(event));
+            input_textarea(&mut dialog_state.input_textarea, event);
             RenameAction::Handled
         }
     }
