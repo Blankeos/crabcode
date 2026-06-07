@@ -56,6 +56,10 @@ fi
 echo "🦋 Updating Cargo.lock..."
 cargo generate-lockfile
 
+# Regenerate CHANGELOG.md from conventional commits (requires git-cliff)
+echo "🦋 Regenerating CHANGELOG.md..."
+git cliff --tag "v${NEW}" -o CHANGELOG.md
+
 # Commit
 echo "🦋 Committing version bump ${NEW}..."
 git add .

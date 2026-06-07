@@ -1,0 +1,61 @@
+# git-cliff ~ configuration
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first | split(pat="\\n") | first }}\
+    {% if commit.remote.username %} by @{{ commit.remote.username }}\
+    {%- elif commit.author.name %} by {{ commit.author.name }}\
+    {% endif %}\
+    {% if commit.remote.pr_number %} in [#{{ commit.remote.pr_number }}](https://github.com/Blankeos/crabcode/pull/{{ commit.remote.pr_number }})\
+    {% endif %}\
+{% endfor %}
+{% endfor %}\
+{%- if github.contributors | filter(attribute="is_first_time", value=true) | length > 0 %}
+
+### New Contributors
+{% for contributor in github.contributors | filter(attribute="is_first_time", value=true) %}
+- @{{ contributor.username }} made their first contribution{% if contributor.pr_number %} in [#{{ contributor.pr_number }}](https://github.com/Blankeos/crabcode/pull/{{ contributor.pr_number }}){% endif %}
+{%- endfor %}
+{%- endif %}\n
+"""
+trim = true
+footer = ""
+
+[remote.github]
+owner = "Blankeos"
+repo = "crabcode"
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", group = "Tests" },
+  { message = "^chore", group = "Chores" },
+  { message = "^release", skip = true },
+  { message = "^Merge", skip = true },
+]
+filter_commits = false
+tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+topo_order = false
+sort_commits = "newest"
