@@ -526,17 +526,19 @@ dependencies = [
 name = "crabcode"
 version = "0.0.2"
 dependencies = [
- "aisdk",
  "anyhow",
  "arboard",
  "async-trait",
  "base64",
+ "bytes",
  "chrono",
  "clap",
  "copypasta",
  "cuid2",
+ "derive_builder",
  "diff",
  "dirs",
+ "eventsource-stream",
  "futures",
  "glob",
  "ignore",
@@ -566,6 +568,7 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "tokio-test",
+ "tokio-tungstenite",
  "tokio-util",
  "tui-markdown",
  "tui-textarea",

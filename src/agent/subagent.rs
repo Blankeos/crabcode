@@ -40,7 +40,7 @@ pub async fn run_subagent(
     permissions: crate::tools::ToolPermissions,
     max_steps: Option<usize>,
 ) -> Result<SubAgentRunResult, String> {
-    use aisdk::core::{
+    use crate::aisdk::core::{
         chunk::ChunkType, response::StreamTextResponse, stop::StopReason, Message as AisdkMessage,
     };
     use futures::StreamExt;
@@ -246,13 +246,13 @@ pub async fn run_subagent(
 
 async fn start_subagent_stream(
     session: &crate::agent::config::LlmSessionConfig,
-    messages: Vec<aisdk::core::Message>,
-    tools: Vec<aisdk::core::Tool>,
+    messages: Vec<crate::aisdk::core::Message>,
+    tools: Vec<crate::aisdk::core::Tool>,
     max_steps: Option<usize>,
     headers: std::collections::HashMap<String, String>,
-) -> Result<aisdk::core::response::StreamTextResponse, String> {
-    use aisdk::core::response::stream_with_tools;
-    use aisdk::{Anthropic, OpenAI, OpenAICompatible};
+) -> Result<crate::aisdk::core::response::StreamTextResponse, String> {
+    use crate::aisdk::core::response::stream_with_tools;
+    use crate::aisdk::{Anthropic, OpenAI, OpenAICompatible};
 
     match session.provider_kind {
         ProviderKind::OpenAICompatible => {

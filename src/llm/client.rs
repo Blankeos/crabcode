@@ -1,11 +1,11 @@
-use aisdk::core::{
+use crate::aisdk::core::{
     chunk::{ChunkType, MessagePhase},
     response::{stream_with_tools, LanguageModelStream, StreamTextResponse},
     stop::StopReason,
     Message as AisdkMessage, Tool,
 };
-use aisdk::message::ImageContent;
-use aisdk::{Anthropic, OpenAI, OpenAICompatible};
+use crate::aisdk::message::ImageContent;
+use crate::aisdk::{Anthropic, OpenAI, OpenAICompatible};
 use futures::StreamExt;
 use std::{collections::HashMap, time::Instant};
 use tokio_util::sync::CancellationToken;

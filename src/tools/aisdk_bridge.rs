@@ -1,6 +1,6 @@
+use crate::aisdk::core::tools::{ToolExecute, ToolOutput};
+use crate::aisdk::core::Tool;
 use crate::tools::{ToolContext, ToolRegistry};
-use aisdk::core::tools::{ToolExecute, ToolOutput};
-use aisdk::core::Tool;
 use schemars::Schema;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -202,7 +202,7 @@ pub async fn convert_to_aisdk_tools(
                 let model_images = tool_result
                     .images
                     .iter()
-                    .map(|image| aisdk::message::ImageContent {
+                    .map(|image| crate::aisdk::message::ImageContent {
                         data_url: image.data_url.clone(),
                         media_type: image.media_type.clone(),
                     })

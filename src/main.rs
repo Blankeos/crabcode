@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod agent;
+mod aisdk;
 mod app;
 mod auth;
 mod autocomplete;
@@ -23,6 +24,30 @@ mod tools;
 mod ui;
 mod utils;
 mod views;
+
+mod chunk {
+    pub use crate::aisdk::chunk::*;
+}
+
+mod error {
+    pub use crate::aisdk::error::*;
+}
+
+mod message {
+    pub use crate::aisdk::message::*;
+}
+
+mod provider {
+    pub use crate::aisdk::provider::*;
+}
+
+mod stop {
+    pub use crate::aisdk::stop::*;
+}
+
+mod tool {
+    pub use crate::aisdk::tool::*;
+}
 
 use crate::toast::{Toast, ToastManager};
 use anyhow::{Context, Result};
