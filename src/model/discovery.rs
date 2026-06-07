@@ -172,6 +172,42 @@ impl Discovery {
         Ok(providers)
     }
 
+    async fn fetch_with_internal_providers(
+        &self,
+        cached: Option<&HashMap<String, Provider>>,
+    ) -> Result<HashMap<String, Provider>> {
+        let mut providers = self.fetch_from_api().await?;
+        self.inject_internal_remote_providers(&mut providers, cached)
+            .await;
+        Ok(providers)
+    }
+
+    async fn inject_internal_remote_providers(
+        &self,
+        providers: &mut HashMap<String, Provider>,
+        cached: Option<&HashMap<String, Provider>>,
+    ) {
+        if providers.contains_key(crate::model::commandcode::PROVIDER_ID) {
+            return;
+        }
+
+        if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
+            return;
+        }
+
+        match crate::model::commandcode::fetch_provider(&self.client).await {
+            Ok(provider) => crate::model::commandcode::inject_provider(providers, provider),
+            Err(err) => {
+                if let Some(provider) = cached
+                    .and_then(|cached| cached.get(crate::model::commandcode::PROVIDER_ID).cloned())
+                {
+                    crate::model::commandcode::inject_provider(providers, provider);
+                }
+                crate::emit_log!("Skipped CommandCode model discovery: {}", err);
+            }
+        }
+    }
+
     fn load_from_cache(&self) -> Result<Option<HashMap<String, Provider>>> {
         let cache_path = self.get_cache_path();
 
@@ -224,11 +260,22 @@ impl Discovery {
 
     pub async fn fetch_providers(&self) -> Result<HashMap<String, Provider>> {
         let mut providers = if let Some(cached) = self.load_from_cache()? {
-            cached
+            let mut providers = cached;
+            if !providers.contains_key(crate::model::commandcode::PROVIDER_ID) {
+                self.inject_internal_remote_providers(&mut providers, None)
+                    .await;
+                if providers.contains_key(crate::model::commandcode::PROVIDER_ID) {
+                    let _ = self.save_to_cache(&providers);
+                }
+            }
+            providers
         } else if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
             // In test mode, avoid hard network dependency so unit tests are reliable.
             match self.fetch_from_api().await {
                 Ok(providers) => {
+                    let mut providers = providers;
+                    self.inject_internal_remote_providers(&mut providers, None)
+                        .await;
                     let _ = self.save_to_cache(&providers);
                     providers
                 }
@@ -257,7 +304,7 @@ impl Discovery {
                 }
             }
         } else {
-            let providers = self.fetch_from_api().await?;
+            let providers = self.fetch_with_internal_providers(None).await?;
             self.save_to_cache(&providers)?;
             providers
         };
@@ -268,7 +315,8 @@ impl Discovery {
     }
 
     pub async fn refresh_cache(&self) -> Result<HashMap<String, Provider>> {
-        let mut providers = self.fetch_from_api().await?;
+        let cached = self.load_from_cache().ok().flatten();
+        let mut providers = self.fetch_with_internal_providers(cached.as_ref()).await?;
         self.save_to_cache(&providers)?;
         crate::model::ollama::inject_provider(&mut providers);
         Ok(providers)

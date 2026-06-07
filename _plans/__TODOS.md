@@ -256,4 +256,8 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
 - [x] In the desktop notifications, we say Response complete, can we also mention the name of the workspace.
 
-- [ ] Generate images with a codex exec call. No oauth spoofing needed. Just needs codex to be there.
+- [x] ~Generate images with a codex exec call. No oauth spoofing needed. Just needs codex to be there.~ (For now, no... lol)
+
+- [ ] Scroll is not intuitive for interruptions. I'm using Logitech MX Master 3s, if I scroll the mouse SUPER down like at super speed. The scroll seems to just get stuck even if I scroll the other direction or just stop.
+
+- [x] Add commandcode.ai since opencode is not planning to.
