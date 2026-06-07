@@ -137,7 +137,7 @@ pub fn notify_event_with_options(
 
     #[cfg(target_os = "windows")]
     {
-        let script = build_windows_toast_script(title, subtitle, body);
+        let script = build_windows_toast_script(&title, &subtitle, &body);
         if command_available("pwsh") {
             let _ = Command::new("pwsh")
                 .arg("-NoProfile")
