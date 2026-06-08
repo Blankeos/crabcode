@@ -271,8 +271,8 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
     But there's a similar 'Action dialog' that needs this UX: 'Message Actions'. It doesn't need to be searchable.
     And I also think it should have shortcuts for autoselecting them like if I press a certain character.
 
-- [ ] Tables bug:
-  - [ ] I see a...
+- [x] Tables bug:
+  - [x] I see a...
 
   ```
    ## Fastest runtime per PDF
@@ -282,6 +282,8 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
      ├──────┼─────────────────────────────┼──────────────────────
   ```
 
-  - Not bug but improvement: I want table wrapping by default. Currently it's truncated by default which is cool too.
+  - [ ] Fixed, but future, maybe offset scrolling whenever I resize... Since I kinda lose progress on where I was currently at, just because the text now wraps.
+
+  - Not bug but improvement: I want table wrapping by default. Currently it's truncated by default, but wrapping might look a lot better too.
 
 - [ ] Switching models mid-stream causes issues. Make sure what the stream uses, uses the same model / thinking effort, and it only changes after the next prompt or interruption. Cuz with openai, it fails when I change the thinking effort midway from when I started (i think, because of websockets).

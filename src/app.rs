@@ -6666,6 +6666,7 @@ impl App {
         );
 
         self.play_sound_event(crate::sound::SoundEvent::Error);
+        self.notify_terminal_event(crate::sound::SoundEvent::Error);
         push_toast(Toast::new(
             format!("LLM error: {}", error),
             ToastLevel::Error,
@@ -7608,6 +7609,8 @@ impl App {
         self.append_user_message_to_current_session(queued.text, queued.image_paths);
 
         if let Err(e) = self.start_llm_streaming(&prompt) {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            self.notify_terminal_event(crate::sound::SoundEvent::Error);
             push_toast(Toast::new(
                 format!("LLM error: {}", e),
                 ToastLevel::Error,
@@ -7678,6 +7681,8 @@ impl App {
             self.base_focus = BaseFocus::Chat;
 
             if let Err(e) = self.start_llm_streaming(&msg) {
+                self.play_sound_event(crate::sound::SoundEvent::Error);
+                self.notify_terminal_event(crate::sound::SoundEvent::Error);
                 push_toast(Toast::new(
                     format!("LLM error: {}", e),
                     ToastLevel::Error,
@@ -7692,6 +7697,8 @@ impl App {
             self.append_user_message_to_current_session(msg.clone(), image_paths);
 
             if let Err(e) = self.start_llm_streaming(&msg) {
+                self.play_sound_event(crate::sound::SoundEvent::Error);
+                self.notify_terminal_event(crate::sound::SoundEvent::Error);
                 push_toast(Toast::new(
                     format!("LLM error: {}", e),
                     ToastLevel::Error,

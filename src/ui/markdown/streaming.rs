@@ -143,8 +143,47 @@ pub fn render_markdown(
     // Pre-process tables: render them as Unicode box-drawing text
     let processed = preprocess_tables(content, max_width);
 
+    render_processed_markdown(&processed, max_width, colors)
+}
+
+fn render_processed_markdown(
+    processed: &str,
+    max_width: usize,
+    colors: &ThemeColors,
+) -> Vec<Line<'static>> {
+    let mut result = Vec::new();
+    let mut markdown_chunk = String::new();
+
+    for line in processed.split_inclusive('\n') {
+        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        if is_preprocessed_table_line(line_without_newline.trim_end()) {
+            result.extend(render_markdown_chunk(&markdown_chunk, max_width, colors));
+            markdown_chunk.clear();
+            result.push(Line::styled(
+                line_without_newline.trim_end().to_string(),
+                Style::default().fg(colors.markdown_text),
+            ));
+        } else {
+            markdown_chunk.push_str(line);
+        }
+    }
+
+    result.extend(render_markdown_chunk(&markdown_chunk, max_width, colors));
+
+    result
+}
+
+fn render_markdown_chunk(
+    markdown: &str,
+    max_width: usize,
+    colors: &ThemeColors,
+) -> Vec<Line<'static>> {
+    if markdown.is_empty() {
+        return Vec::new();
+    }
+
     let options = tui_markdown::Options::new(MarkdownStyleSheet::new(*colors));
-    let text = tui_markdown::from_str_with_options(&processed, &options);
+    let text = tui_markdown::from_str_with_options(markdown, &options);
 
     // Convert to our ratatui version's Line type and wrap to max_width
     let mut themed_lines = Vec::new();
@@ -652,6 +691,46 @@ mod tests {
                 line
             );
         }
+    }
+
+    #[test]
+    fn test_render_markdown_table_after_heading_does_not_join_heading() {
+        let colors = test_colors();
+        let input = "## Fastest runtime per PDF\n\n| Rank | Approach | Runtime notes |\n|---:|---|---|\n| 1 | Native text extraction | Seconds or less per PDF. |\n| 2 | pdfplumber / Camelot / Docling without OCR-heavy mode | Mostly CPU. More expensive than raw text extraction. |";
+        let lines = render_markdown(input, 80, &colors);
+        let line_strings: Vec<String> = lines.iter().map(line_to_string).collect();
+        let output = line_strings.join("\n");
+
+        assert!(
+            line_strings
+                .iter()
+                .any(|line| line.trim() == "## Fastest runtime per PDF"),
+            "heading should render separately:\n{}",
+            output
+        );
+        assert!(
+            line_strings.iter().any(|line| line.starts_with('┌')),
+            "table should render on its own line:\n{}",
+            output
+        );
+        assert!(
+            !output.contains("## ┌") && !output.contains("Fastest runtime per PDF ┌"),
+            "table border should not be appended to the heading:\n{}",
+            output
+        );
+        assert!(
+            !line_strings.iter().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("## ") && is_preprocessed_table_line(trimmed)
+            }),
+            "pre-rendered table lines should not inherit heading markers:\n{}",
+            output
+        );
+        assert!(
+            !output.contains("..."),
+            "wrapped table cells should not be truncated with ellipses:\n{}",
+            output
+        );
     }
 
     #[test]
