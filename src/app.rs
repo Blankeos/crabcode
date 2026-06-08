@@ -7778,17 +7778,17 @@ fn format_selection_prompt_addition(text: &str) -> String {
 }
 
 const SELECTION_ACTION_BAR_WIDTH: u16 = 28;
-const CHAT_SELECTION_ACTION_COPY_COL: usize = 16;
-const CHAT_SELECTION_ACTION_ESC_COL: usize = 23;
+const CHAT_SELECTION_ACTION_ADD_TO_PROMPT_COL: usize = 8;
+const CHAT_SELECTION_ACTION_ESC_COL: usize = 24;
 const INPUT_SELECTION_ACTION_ESC_COL: usize = 8;
 
 fn selection_action_for_column(target: SelectionActionTarget, column: usize) -> SelectionAction {
     match target {
-        SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_COPY_COL => {
-            SelectionAction::AddToPrompt
+        SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_ADD_TO_PROMPT_COL => {
+            SelectionAction::Copy
         }
         SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_ESC_COL => {
-            SelectionAction::Copy
+            SelectionAction::AddToPrompt
         }
         SelectionActionTarget::Chat => SelectionAction::Dismiss,
         SelectionActionTarget::Input if column < INPUT_SELECTION_ACTION_ESC_COL => {
@@ -7892,10 +7892,10 @@ fn render_selection_action_bar(
     let line = if target == SelectionActionTarget::Chat {
         Line::from(vec![
             Span::raw(" "),
-            Span::styled("i", key_style),
-            Span::styled(" add to prompt ", label_style),
             Span::styled("y", key_style),
             Span::styled(" copy ", label_style),
+            Span::styled("i", key_style),
+            Span::styled(" add to prompt ", label_style),
             Span::styled("esc", key_style),
             Span::raw(" "),
         ])
@@ -8383,14 +8383,14 @@ mod tests {
     fn selection_action_bar_column_mapping_matches_rendered_labels() {
         assert_eq!(
             selection_action_for_column(SelectionActionTarget::Chat, 1),
-            SelectionAction::AddToPrompt
-        );
-        assert_eq!(
-            selection_action_for_column(SelectionActionTarget::Chat, 16),
             SelectionAction::Copy
         );
         assert_eq!(
-            selection_action_for_column(SelectionActionTarget::Chat, 23),
+            selection_action_for_column(SelectionActionTarget::Chat, 8),
+            SelectionAction::AddToPrompt
+        );
+        assert_eq!(
+            selection_action_for_column(SelectionActionTarget::Chat, 24),
             SelectionAction::Dismiss
         );
         assert_eq!(
