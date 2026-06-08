@@ -125,12 +125,34 @@ impl CompactionStats {
         self.before_tokens.saturating_sub(self.after_tokens)
     }
 
+    pub fn grew_tokens(self) -> usize {
+        self.after_tokens.saturating_sub(self.before_tokens)
+    }
+
     pub fn reduction_percent(self) -> u32 {
         if self.before_tokens == 0 {
             return 0;
         }
 
         ((self.saved_tokens() as f64 / self.before_tokens as f64) * 100.0).round() as u32
+    }
+
+    pub fn growth_percent(self) -> u32 {
+        if self.before_tokens == 0 {
+            return 0;
+        }
+
+        ((self.grew_tokens() as f64 / self.before_tokens as f64) * 100.0).round() as u32
+    }
+
+    pub fn change_description(self) -> String {
+        if self.after_tokens > self.before_tokens {
+            format!("grew {}%", self.growth_percent())
+        } else if self.after_tokens < self.before_tokens {
+            format!("saved {}%", self.reduction_percent())
+        } else {
+            "no change".to_string()
+        }
     }
 }
 

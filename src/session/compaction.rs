@@ -88,6 +88,24 @@ pub fn select_messages(messages: &[Message], tail_turns: usize) -> Option<Compac
     })
 }
 
+pub fn select_messages_for_compaction(
+    messages: &[Message],
+    preferred_tail_turns: usize,
+) -> Option<CompactionSelection> {
+    for tail_turns in (0..=preferred_tail_turns).rev() {
+        let selection = select_messages(messages, tail_turns)?;
+        if selection
+            .messages_to_summarize
+            .iter()
+            .any(is_meaningful_for_compaction)
+        {
+            return Some(selection);
+        }
+    }
+
+    None
+}
+
 pub fn build_prompt(messages: &[Message]) -> String {
     let mut prompt = String::new();
     prompt.push_str("Summarize the following session transcript.\n\n<session-transcript>\n");
@@ -152,6 +170,14 @@ pub fn message_context_tokens(message: &Message) -> usize {
         return 0;
     }
 
+    let part_tokens = message_parts_context_tokens(message);
+    if part_tokens > 0 {
+        return message
+            .token_count
+            .map(|token_count| token_count.max(part_tokens))
+            .unwrap_or(part_tokens);
+    }
+
     message
         .token_count
         .unwrap_or_else(|| estimate_tokens(&message.content))
@@ -174,6 +200,20 @@ pub fn is_compaction_marker(message: &Message) -> bool {
 
 pub fn is_compaction_display_item(message: &Message) -> bool {
     is_compaction_summary(message) || is_compaction_marker(message)
+}
+
+fn is_meaningful_for_compaction(message: &Message) -> bool {
+    if is_compaction_display_item(message) {
+        return false;
+    }
+
+    !message.content.trim().is_empty()
+        || message.parts.iter().any(|part| {
+            matches!(
+                part.part_type.as_str(),
+                "text" | "tool_call" | "tool_result"
+            )
+        })
 }
 
 pub fn compaction_marker(stats: CompactionStats) -> Message {
@@ -213,11 +253,69 @@ pub fn format_token_count(count: usize) -> String {
 
 pub fn format_compaction_stats(stats: CompactionStats) -> String {
     format!(
-        "{} -> {}, saved {}%",
+        "{} -> {}, {}",
         format_token_count(stats.before_tokens),
         format_token_count(stats.after_tokens),
-        stats.reduction_percent()
+        stats.change_description()
     )
+}
+
+fn message_parts_context_tokens(message: &Message) -> usize {
+    if message.parts.is_empty() {
+        return 0;
+    }
+
+    match message.role {
+        MessageRole::Assistant => assistant_parts_context_tokens(message),
+        MessageRole::Tool => estimate_tokens(&tool_content_for_prompt(&message.content)),
+        _ => estimate_tokens(&message.content),
+    }
+}
+
+fn assistant_parts_context_tokens(message: &Message) -> usize {
+    let tool_call_ids = message
+        .parts
+        .iter()
+        .filter(|part| part.part_type == "tool_call")
+        .filter_map(|part| part.tool_id().map(|id| id.to_string()))
+        .collect::<std::collections::HashSet<_>>();
+
+    message
+        .parts
+        .iter()
+        .map(|part| match part.part_type.as_str() {
+            "text" => part.text_value().map(estimate_tokens).unwrap_or(0),
+            "tool_call" => tool_call_context_tokens(part),
+            "tool_result" => {
+                let mut tokens = tool_result_context_tokens(part);
+                if part
+                    .tool_id()
+                    .map(|id| !tool_call_ids.contains(id))
+                    .unwrap_or(true)
+                {
+                    tokens += tool_call_context_tokens(part);
+                }
+                tokens
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+fn tool_call_context_tokens(part: &crate::session::types::MessagePart) -> usize {
+    let Some(args) = part.data.get("args") else {
+        return 0;
+    };
+
+    estimate_tokens(&serde_json::to_string(args).unwrap_or_else(|_| args.to_string()))
+}
+
+fn tool_result_context_tokens(part: &crate::session::types::MessagePart) -> usize {
+    part.data
+        .get("output_preview")
+        .and_then(|value| value.as_str())
+        .map(estimate_tokens)
+        .unwrap_or(0)
 }
 
 fn message_content_for_prompt(message: &Message) -> String {
@@ -382,6 +480,38 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_selection_reduces_tail_when_prefix_is_only_prior_summary() {
+        let summary = Message::user(format!("{}\nold summary", SUMMARY_PREFIX));
+        let messages = vec![
+            summary,
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("u2"),
+            Message::assistant("a2"),
+        ];
+
+        let selected = select_messages_for_compaction(&messages, 2).expect("selection");
+
+        assert_eq!(selected.messages_to_summarize.len(), 3);
+        assert_eq!(selected.messages_to_summarize[1].content, "u1");
+        assert_eq!(selected.tail_messages.len(), 2);
+        assert_eq!(selected.tail_messages[0].content, "u2");
+    }
+
+    #[test]
+    fn adaptive_selection_ignores_display_only_history() {
+        let summary = Message::user(format!("{}\nold summary", SUMMARY_PREFIX));
+        let marker = compaction_marker(CompactionStats {
+            before_tokens: 100,
+            after_tokens: 10,
+            before_messages: 3,
+            after_messages: 1,
+        });
+
+        assert!(select_messages_for_compaction(&[summary, marker], 2).is_none());
+    }
+
+    #[test]
     fn build_compacted_messages_prefixes_summary() {
         let compacted = build_compacted_messages(
             "summary",
@@ -436,6 +566,40 @@ mod tests {
         assert_eq!(stats.saved_tokens(), 11_640);
         assert_eq!(stats.reduction_percent(), 97);
         assert_eq!(format_compaction_stats(stats), "12.0K -> 360, saved 97%");
+    }
+
+    #[test]
+    fn compaction_stats_formats_growth() {
+        let stats = CompactionStats {
+            before_tokens: 2_472,
+            after_tokens: 3_060,
+            before_messages: 6,
+            after_messages: 5,
+        };
+
+        assert_eq!(stats.grew_tokens(), 588);
+        assert_eq!(stats.growth_percent(), 24);
+        assert_eq!(format_compaction_stats(stats), "2.5K -> 3.1K, grew 24%");
+    }
+
+    #[test]
+    fn assistant_tool_parts_count_as_context_tokens() {
+        let mut message = Message::assistant("small text");
+        message.token_count = Some(1);
+        message.add_tool_call_part(
+            "call_1",
+            "read",
+            serde_json::json!({ "file_path": "src/lib.rs" }),
+        );
+        message.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_1",
+            "name": "read",
+            "status": "ok",
+            "args": { "file_path": "src/lib.rs" },
+            "output_preview": "x".repeat(400),
+        }));
+
+        assert!(message_context_tokens(&message) >= 100);
     }
 
     #[test]

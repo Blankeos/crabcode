@@ -1488,7 +1488,7 @@ impl App {
         }
 
         if let Some(stats) = crate::session::compaction::latest_compaction_stats(messages) {
-            let suffix = format!("last compact {}%", stats.reduction_percent());
+            let suffix = format!("last compact {}", stats.change_description());
             return append_usage_suffix(text, suffix);
         }
 
@@ -4192,7 +4192,7 @@ impl App {
         };
 
         let messages = self.chat_state.chat.messages.clone();
-        let Some(selection) = crate::session::compaction::select_messages(
+        let Some(selection) = crate::session::compaction::select_messages_for_compaction(
             &messages,
             crate::session::compaction::DEFAULT_TAIL_TURNS,
         ) else {
@@ -4242,7 +4242,7 @@ impl App {
                 prompt,
             )
             .await
-            .map(|summary| {
+            .and_then(|summary| {
                 let mut messages = crate::session::compaction::build_compacted_messages(
                     &summary,
                     tail_messages,
@@ -4258,8 +4258,15 @@ impl App {
                     before_messages,
                     after_messages: messages.len(),
                 };
+                if after_tokens >= before_tokens {
+                    return Err(anyhow::anyhow!(
+                        "Compaction did not reduce context: {}",
+                        crate::session::compaction::format_compaction_stats(stats)
+                    )
+                    .into());
+                }
                 crate::session::compaction::append_compaction_marker(&mut messages, stats);
-                (messages, stats)
+                Ok((messages, stats))
             });
 
             let message = match result {
@@ -9558,7 +9565,10 @@ mod tests {
         summary.compaction_stats = Some(stats);
         app.chat_state.chat.add_message(summary);
 
-        assert_eq!(app.session_usage_text(), "360 \u{00b7} last compact 97%");
+        assert_eq!(
+            app.session_usage_text(),
+            "360 \u{00b7} last compact saved 97%"
+        );
     }
 
     #[test]
