@@ -1350,11 +1350,13 @@ fn append_assistant_parts_for_model(
     supports_image_input: bool,
 ) {
     let mut emitted_text = false;
-    let mut seen_tool_calls = std::collections::HashSet::new();
+    let mut pending_tools = AssistantToolReplayGroup::default();
 
     for part in &msg.parts {
         match part.part_type.as_str() {
             "text" => {
+                pending_tools.flush_complete_pairs(aisdk_messages);
+
                 let Some(text) = part.text_value().filter(|text| !text.trim().is_empty()) else {
                     continue;
                 };
@@ -1363,14 +1365,17 @@ fn append_assistant_parts_for_model(
                 aisdk_messages.push(AisdkMessage::assistant(text.to_string()));
             }
             "tool_call" => {
+                if pending_tools.is_complete() {
+                    pending_tools.flush_complete_pairs(aisdk_messages);
+                }
+
                 let Some(obj) = part.data.as_object() else {
                     continue;
                 };
                 if let Some(message) = tool_call_message_from_model_obj(obj) {
                     if let Some(id) = part.tool_id() {
-                        seen_tool_calls.insert(id.to_string());
+                        pending_tools.add_call(id.to_string(), message);
                     }
-                    aisdk_messages.push(message);
                 }
             }
             "tool_result" => {
@@ -1378,26 +1383,84 @@ fn append_assistant_parts_for_model(
                     continue;
                 };
 
-                if let Some(id) = part.tool_id() {
-                    if !seen_tool_calls.contains(id) {
-                        if let Some(call) = tool_call_message_from_model_obj(obj) {
-                            seen_tool_calls.insert(id.to_string());
-                            aisdk_messages.push(call);
-                        }
+                let Some(id) = part.tool_id().map(str::to_string) else {
+                    continue;
+                };
+
+                if !pending_tools.has_call(&id) {
+                    if pending_tools.is_complete() {
+                        pending_tools.flush_complete_pairs(aisdk_messages);
+                    }
+
+                    if let Some(call) = tool_call_message_from_model_obj(obj) {
+                        pending_tools.add_call(id.clone(), call);
                     }
                 }
 
                 if let Some(output) = tool_output_message_from_model_obj(obj, supports_image_input)
                 {
-                    aisdk_messages.push(output);
+                    pending_tools.add_output(id, output);
+                }
+
+                if pending_tools.is_complete() {
+                    pending_tools.flush_complete_pairs(aisdk_messages);
                 }
             }
             _ => {}
         }
     }
 
+    pending_tools.flush_complete_pairs(aisdk_messages);
+
     if !emitted_text && msg.parts.is_empty() && !msg.content.trim().is_empty() {
         aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));
+    }
+}
+
+#[derive(Default)]
+struct AssistantToolReplayGroup {
+    calls: Vec<(String, AisdkMessage)>,
+    outputs: HashMap<String, AisdkMessage>,
+}
+
+impl AssistantToolReplayGroup {
+    fn has_call(&self, id: &str) -> bool {
+        self.calls.iter().any(|(call_id, _)| call_id == id)
+    }
+
+    fn is_complete(&self) -> bool {
+        !self.calls.is_empty()
+            && self
+                .calls
+                .iter()
+                .all(|(call_id, _)| self.outputs.contains_key(call_id))
+    }
+
+    fn add_call(&mut self, id: String, call: AisdkMessage) {
+        if !self.has_call(&id) {
+            self.calls.push((id, call));
+        }
+    }
+
+    fn add_output(&mut self, id: String, output: AisdkMessage) {
+        self.outputs.insert(id, output);
+    }
+
+    fn flush_complete_pairs(&mut self, aisdk_messages: &mut Vec<AisdkMessage>) {
+        let mut calls = Vec::new();
+        let mut outputs = Vec::new();
+
+        for (call_id, call) in &self.calls {
+            if let Some(output) = self.outputs.remove(call_id) {
+                calls.push(call.clone());
+                outputs.push(output);
+            }
+        }
+
+        aisdk_messages.extend(calls);
+        aisdk_messages.extend(outputs);
+        self.calls.clear();
+        self.outputs.clear();
     }
 }
 
@@ -1845,6 +1908,104 @@ mod tests {
             AisdkMessage::Assistant(message) => assert_eq!(message.content, "Done."),
             other => panic!("expected assistant text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn assistant_interleaved_tool_results_replay_as_valid_concurrent_group() {
+        let mut assistant = crate::session::types::Message::incomplete("");
+        assistant.append("I will inspect.");
+        assistant.add_tool_call_part(
+            "call_5",
+            "bash",
+            serde_json::json!({
+                "command": "ls src",
+            }),
+        );
+        assistant.add_tool_call_part(
+            "call_6",
+            "read",
+            serde_json::json!({
+                "file_path": "vite.config.ts",
+            }),
+        );
+        assistant.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_6",
+            "name": "read",
+            "status": "ok",
+            "args": {
+                "file_path": "vite.config.ts",
+            },
+            "output_preview": "vite config"
+        }));
+        assistant.add_tool_call_part(
+            "call_7",
+            "read",
+            serde_json::json!({
+                "file_path": "tsconfig.json",
+            }),
+        );
+        assistant.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_7",
+            "name": "read",
+            "status": "ok",
+            "args": {
+                "file_path": "tsconfig.json",
+            },
+            "output_preview": "tsconfig"
+        }));
+        assistant.add_tool_call_part(
+            "call_8",
+            "read",
+            serde_json::json!({
+                "file_path": "biome.json",
+            }),
+        );
+        assistant.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_8",
+            "name": "read",
+            "status": "ok",
+            "args": {
+                "file_path": "biome.json",
+            },
+            "output_preview": "biome"
+        }));
+        assistant.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_5",
+            "name": "bash",
+            "status": "ok",
+            "args": {
+                "command": "ls src",
+            },
+            "output_preview": "src listing"
+        }));
+        assistant.append("Done.");
+
+        let messages = convert_messages(&[assistant]);
+        let order = messages
+            .iter()
+            .map(|message| match message {
+                AisdkMessage::Assistant(_) => "assistant".to_string(),
+                AisdkMessage::ToolCall(call) => format!("call:{}", call.call_id),
+                AisdkMessage::ToolOutput(output) => format!("output:{}", output.call_id),
+                other => panic!("unexpected message: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            order,
+            vec![
+                "assistant",
+                "call:call_5",
+                "call:call_6",
+                "call:call_7",
+                "call:call_8",
+                "output:call_5",
+                "output:call_6",
+                "output:call_7",
+                "output:call_8",
+                "assistant",
+            ]
+        );
     }
 
     #[test]

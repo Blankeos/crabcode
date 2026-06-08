@@ -286,4 +286,4 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
   - Not bug but improvement: I want table wrapping by default. Currently it's truncated by default, but wrapping might look a lot better too.
 
-- [ ] Switching models mid-stream causes issues. Make sure what the stream uses, uses the same model / thinking effort, and it only changes after the next prompt or interruption. Cuz with openai, it fails when I change the thinking effort midway from when I started (i think, because of websockets).
+- [x] ~Switching models mid-stream causes issues. Make sure what the stream uses, uses the same model / thinking effort, and it only changes after the next prompt or interruption. Cuz with openai, it fails when I change the thinking effort midway from when I started (i think, because of websockets).~ (noticed, it's a non-issue)
