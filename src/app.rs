@@ -18,6 +18,7 @@ use crate::tools::{PermissionResponse, ToolHandler};
 
 use crate::push_toast;
 use crate::toast::{self, Toast, ToastLevel};
+use crate::ui::components::action_dialog::{ActionDialog, ActionDialogEvent, ActionDialogItem};
 use crate::ui::components::chat::{Chat, ChatImageTarget};
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
@@ -143,6 +144,7 @@ pub enum OverlayFocus {
     RemoteDialog,
     SkillsDialog,
     TimelineDialog,
+    CopyActions,
     MessageActions,
     CommandPalette,
     StorageDialog,
@@ -326,8 +328,9 @@ pub struct App {
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
     esc_timeline_primed: bool,
+    pub copy_actions_dialog: Option<ActionDialog>,
     pub message_actions_index: Option<usize>,
-    pub message_actions_dialog: Option<crate::ui::components::dialog::Dialog>,
+    pub message_actions_dialog: Option<ActionDialog>,
     message_actions_return_focus: OverlayFocus,
     selection_action_bar: Option<SelectionActionBarState>,
     pending_chat_message_click: Option<usize>,
@@ -599,6 +602,7 @@ impl App {
             which_key_state,
             timeline_dialog_state,
             esc_timeline_primed: false,
+            copy_actions_dialog: None,
             message_actions_index: None,
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
@@ -2586,21 +2590,43 @@ impl App {
                     crate::views::timeline_dialog::TimelineDialogAction::NotHandled => false,
                 }
             }
+            OverlayFocus::CopyActions => {
+                if let Some(ref mut dialog) = self.copy_actions_dialog {
+                    let event = dialog.handle_key_event(key);
+                    self.handle_copy_actions_event(event)
+                } else {
+                    false
+                }
+            }
             OverlayFocus::MessageActions => {
                 if let Some(ref mut dialog) = self.message_actions_dialog {
-                    if key.code == KeyCode::Esc {
-                        self.close_message_actions();
-                        true
-                    } else if key.code == KeyCode::Enter {
-                        if let Some(selected) = dialog.get_selected() {
-                            let action_clone = selected.provider_id.clone();
-                            self.execute_message_action(&action_clone);
+                    match dialog.handle_key_event(key) {
+                        ActionDialogEvent::Close => {
+                            self.close_message_actions();
                             true
-                        } else {
-                            dialog.handle_key_event(key)
                         }
-                    } else {
-                        dialog.handle_key_event(key)
+                        ActionDialogEvent::Select => {
+                            let action = self
+                                .message_actions_dialog
+                                .as_ref()
+                                .and_then(|dialog| dialog.get_selected())
+                                .map(|selected| selected.id.clone());
+                            if let Some(action) = action {
+                                self.execute_message_action(&action);
+                            }
+                            true
+                        }
+                        ActionDialogEvent::Shortcut(key) => {
+                            let action = self
+                                .message_actions_dialog
+                                .as_ref()
+                                .and_then(|dialog| dialog.item_id_for_shortcut(key));
+                            if let Some(action) = action {
+                                self.execute_message_action(&action);
+                            }
+                            true
+                        }
+                        ActionDialogEvent::None => true,
                     }
                 } else {
                     false
@@ -3453,6 +3479,11 @@ impl App {
                 self.chat_state.chat.clear_highlighted_message();
                 self.overlay_focus = OverlayFocus::None;
             }
+        } else if self.overlay_focus == OverlayFocus::CopyActions {
+            if let Some(ref mut dialog) = self.copy_actions_dialog {
+                let event = dialog.handle_mouse_event(mouse);
+                self.handle_copy_actions_event(event);
+            }
         } else if self.overlay_focus == OverlayFocus::MessageActions {
             if matches!(
                 mouse.kind,
@@ -3484,24 +3515,33 @@ impl App {
                 }
             }
 
-            let maybe_action = if let Some(ref mut dialog) = self.message_actions_dialog {
-                let clicked_item = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                {
-                    dialog.item_index_at_position(mouse.column, mouse.row)
-                } else {
-                    None
-                };
-                let handled = dialog.handle_mouse_event(mouse);
-                if handled && clicked_item.is_some() {
-                    dialog.get_selected().map(|s| s.provider_id.clone())
-                } else {
-                    None
-                }
+            let action_event = if let Some(ref mut dialog) = self.message_actions_dialog {
+                dialog.handle_mouse_event(mouse)
             } else {
-                None
+                ActionDialogEvent::None
             };
-            if let Some(action) = maybe_action {
-                self.execute_message_action(&action);
+            match action_event {
+                ActionDialogEvent::Close => self.close_message_actions(),
+                ActionDialogEvent::Select => {
+                    let action = self
+                        .message_actions_dialog
+                        .as_ref()
+                        .and_then(|dialog| dialog.get_selected())
+                        .map(|selected| selected.id.clone());
+                    if let Some(action) = action {
+                        self.execute_message_action(&action);
+                    }
+                }
+                ActionDialogEvent::Shortcut(key) => {
+                    let action = self
+                        .message_actions_dialog
+                        .as_ref()
+                        .and_then(|dialog| dialog.item_id_for_shortcut(key));
+                    if let Some(action) = action {
+                        self.execute_message_action(&action);
+                    }
+                }
+                ActionDialogEvent::None => {}
             }
             if self
                 .message_actions_dialog
@@ -4123,6 +4163,124 @@ impl App {
         }
     }
 
+    fn open_copy_actions_dialog(&mut self) {
+        let mut dialog = ActionDialog::with_items(
+            "Copy",
+            vec![
+                ActionDialogItem {
+                    id: "transcript".to_string(),
+                    key: 't',
+                    label: "Copy session transcript".to_string(),
+                    description: "Full conversation as Markdown".to_string(),
+                },
+                ActionDialogItem {
+                    id: "id".to_string(),
+                    key: 'i',
+                    label: "Copy session id".to_string(),
+                    description: "Current session identifier".to_string(),
+                },
+                ActionDialogItem {
+                    id: "title".to_string(),
+                    key: 'n',
+                    label: "Copy session title".to_string(),
+                    description: "Current session name".to_string(),
+                },
+            ],
+        );
+        dialog.show();
+        self.copy_actions_dialog = Some(dialog);
+        self.overlay_focus = OverlayFocus::CopyActions;
+    }
+
+    fn execute_copy_action(&mut self, action: &str) {
+        match action {
+            "transcript" => self.copy_session_transcript(),
+            "id" => {
+                let Some(id) = self.session_manager.get_current_session_id().cloned() else {
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
+                    push_toast(Toast::new(
+                        "No active session id to copy",
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                    self.close_copy_actions_dialog();
+                    return;
+                };
+                self.copy_text_with_toast(&id, "Session id copied to clipboard");
+            }
+            "title" => {
+                let Some(title) = self
+                    .session_manager
+                    .get_current_session()
+                    .map(|session| session.title.clone())
+                else {
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
+                    push_toast(Toast::new(
+                        "No active session title to copy",
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                    self.close_copy_actions_dialog();
+                    return;
+                };
+                self.copy_text_with_toast(&title, "Session title copied to clipboard");
+            }
+            _ => {}
+        }
+
+        self.close_copy_actions_dialog();
+    }
+
+    fn copy_text_with_toast(&mut self, text: &str, success_message: &'static str) {
+        match crate::utils::clipboard::copy_text(text) {
+            Ok(_) => push_toast(Toast::new(success_message, ToastLevel::Info, None)),
+            Err(e) => {
+                self.play_sound_event(crate::sound::SoundEvent::Error);
+                push_toast(Toast::new(
+                    format!("Failed to copy: {}", e),
+                    ToastLevel::Error,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+            }
+        }
+    }
+
+    fn handle_copy_actions_event(&mut self, event: ActionDialogEvent) -> bool {
+        match event {
+            ActionDialogEvent::Close => {
+                self.close_copy_actions_dialog();
+                true
+            }
+            ActionDialogEvent::Select => {
+                let action = self
+                    .copy_actions_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.get_selected())
+                    .map(|selected| selected.id.clone());
+                if let Some(action) = action {
+                    self.execute_copy_action(&action);
+                }
+                true
+            }
+            ActionDialogEvent::Shortcut(key) => {
+                let action = self
+                    .copy_actions_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.item_id_for_shortcut(key));
+                if let Some(action) = action {
+                    self.execute_copy_action(&action);
+                }
+                true
+            }
+            ActionDialogEvent::None => true,
+        }
+    }
+
+    fn close_copy_actions_dialog(&mut self) {
+        self.copy_actions_dialog = None;
+        self.overlay_focus = OverlayFocus::None;
+    }
+
     fn reject_chat_only_command_outside_chat(&mut self, command_name: &str) -> bool {
         if self.base_focus == BaseFocus::Chat || !self.command_registry.is_chat_only(command_name) {
             return false;
@@ -4319,7 +4477,7 @@ impl App {
                     return;
                 }
                 if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
-                    self.copy_session_transcript();
+                    self.open_copy_actions_dialog();
                     return;
                 }
                 if parsed.name == "sessions" {
@@ -4532,7 +4690,7 @@ impl App {
             return;
         }
         if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
-            self.copy_session_transcript();
+            self.open_copy_actions_dialog();
             return;
         }
         if parsed.name == "sessions" {
@@ -4846,46 +5004,35 @@ impl App {
     }
 
     fn show_message_actions_from(&mut self, idx: usize, return_focus: OverlayFocus) {
-        use crate::ui::components::dialog::{Dialog, DialogItem};
-
         let can_undo = self.selected_message_can_undo(idx);
         self.message_actions_index = Some(idx);
         self.message_actions_return_focus = return_focus;
 
         let mut items = vec![
-            DialogItem {
+            ActionDialogItem {
                 id: "copy".to_string(),
-                name: "Copy".to_string(),
-                group: String::new(),
+                key: 'c',
+                label: "Copy".to_string(),
                 description: "Copy message to clipboard".to_string(),
-                tip: None,
-                provider_id: "copy".to_string(),
-                active: false,
             },
-            DialogItem {
+            ActionDialogItem {
                 id: "fork".to_string(),
-                name: "Fork at this point".to_string(),
-                group: String::new(),
+                key: 'f',
+                label: "Fork at this point".to_string(),
                 description: "Create new session (Will include this message)".to_string(),
-                tip: None,
-                provider_id: "fork".to_string(),
-                active: false,
             },
         ];
 
         if can_undo {
-            items.push(DialogItem {
+            items.push(ActionDialogItem {
                 id: "undo".to_string(),
-                name: "Undo".to_string(),
-                group: String::new(),
+                key: 'u',
+                label: "Undo".to_string(),
                 description: "Remove messages from here onward".to_string(),
-                tip: None,
-                provider_id: "undo".to_string(),
-                active: false,
             });
         }
 
-        let mut dialog = Dialog::with_items("Message Actions", items);
+        let mut dialog = ActionDialog::with_items("Message Actions", items);
         dialog.show();
         self.message_actions_dialog = Some(dialog);
         self.overlay_focus = OverlayFocus::MessageActions;
@@ -7705,6 +7852,12 @@ impl App {
             );
         }
 
+        if self.overlay_focus == OverlayFocus::CopyActions {
+            if let Some(ref mut dialog) = self.copy_actions_dialog {
+                dialog.render(f, size, colors);
+            }
+        }
+
         if self.overlay_focus == OverlayFocus::MessageActions {
             if let Some(ref mut dialog) = self.message_actions_dialog {
                 dialog.render(f, size, colors);
@@ -8114,6 +8267,7 @@ mod tests {
             which_key_state: crate::views::which_key::init_which_key(),
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
             esc_timeline_primed: false,
+            copy_actions_dialog: None,
             message_actions_index: None,
             message_actions_dialog: None,
             message_actions_return_focus: OverlayFocus::TimelineDialog,
@@ -8172,7 +8326,7 @@ mod tests {
     fn message_action_names(app: &App) -> Vec<String> {
         app.message_actions_dialog
             .as_ref()
-            .map(|dialog| dialog.items.iter().map(|item| item.name.clone()).collect())
+            .map(|dialog| dialog.items.iter().map(|item| item.label.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -8505,6 +8659,43 @@ mod tests {
             scroll_offset_before_click
         );
         assert!(message_action_names(&app).contains(&"Undo".to_string()));
+    }
+
+    #[test]
+    fn copy_command_opens_action_dialog_with_transcript_default() {
+        let mut app = test_app();
+        app.create_new_session(Some("Copy me".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        tokio_test::block_on(app.process_input("/copy"));
+
+        let dialog = app.copy_actions_dialog.as_ref().expect("copy dialog");
+        assert_eq!(app.overlay_focus, OverlayFocus::CopyActions);
+        assert_eq!(dialog.selected_index(), 0);
+        assert_eq!(
+            dialog.get_selected().map(|item| item.id.as_str()),
+            Some("transcript")
+        );
+        assert_eq!(dialog.items[0].key, 't');
+    }
+
+    #[test]
+    fn message_actions_have_shortcuts() {
+        let mut app = test_app();
+        app.create_new_session(Some("Timeline".to_string()));
+        app.session_manager
+            .add_message_to_current_session(&crate::session::types::Message::user("Prompt"))
+            .unwrap();
+
+        app.show_message_actions(0);
+        let dialog = app
+            .message_actions_dialog
+            .as_ref()
+            .expect("message actions");
+
+        assert_eq!(dialog.item_id_for_shortcut('c').as_deref(), Some("copy"));
+        assert_eq!(dialog.item_id_for_shortcut('f').as_deref(), Some("fork"));
+        assert_eq!(dialog.item_id_for_shortcut('u').as_deref(), Some("undo"));
     }
 
     #[test]

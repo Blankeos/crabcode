@@ -1,3 +1,4 @@
+pub mod action_dialog;
 pub mod api_key_input;
 pub mod chat;
 pub mod dialog;

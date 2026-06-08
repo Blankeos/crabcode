@@ -259,5 +259,29 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 - [x] ~Generate images with a codex exec call. No oauth spoofing needed. Just needs codex to be there.~ (For now, no... lol)
 
 - [ ] Scroll is not intuitive for interruptions. I'm using Logitech MX Master 3s, if I scroll the mouse SUPER down like at super speed. The scroll seems to just get stuck even if I scroll the other direction or just stop.
+  - [ ] Also slightly unperformant. I can definitely notice the animations slowing down when I scroll
 
 - [x] Add commandcode.ai since opencode is not planning to.
+
+- [x] /copy should now open a dialog more options to copy.
+  - [x] Copy session transcript to clipboard (first option, so I can just double-enter for the default behavior)
+  - [x] Copy session id
+  - [x] Copy session title
+  - This will essentially be the start of the many 'Action dialogs' that I have that don't need search, idk if I should have a name for them.
+    But there's a similar 'Action dialog' that needs this UX: 'Message Actions'. It doesn't need to be searchable.
+    And I also think it should have shortcuts for autoselecting them like if I press a certain character.
+
+- [ ] Tables bug:
+  - [ ] I see a...
+
+  ```
+   ## Fastest runtime per PDF
+
+   ## ┌──────┬─────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────┐
+     │ Rank │ Approach                    │ Runtime notes                                                                   │
+     ├──────┼─────────────────────────────┼──────────────────────
+  ```
+
+  - Not bug but improvement: I want table wrapping by default. Currently it's truncated by default which is cool too.
+
+- [ ] Switching models mid-stream causes issues. Make sure what the stream uses, uses the same model / thinking effort, and it only changes after the next prompt or interruption. Cuz with openai, it fails when I change the thinking effort midway from when I started (i think, because of websockets).

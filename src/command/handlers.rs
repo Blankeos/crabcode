@@ -760,7 +760,7 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "copy".to_string(),
-        description: "Copy session transcript to clipboard".to_string(),
+        description: "Copy session details to clipboard".to_string(),
         handler: handle_copy,
         hidden_tokens: vec![],
         chat_only: true,
@@ -1150,14 +1150,17 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 15);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
         assert!(names.contains(&"connect".to_string()));
+        assert!(names.contains(&"remote".to_string()));
         assert!(names.contains(&"models".to_string()));
         assert!(names.contains(&"themes".to_string()));
         assert!(names.contains(&"home".to_string()));
+        assert!(names.contains(&"rename".to_string()));
+        assert!(names.contains(&"copy".to_string()));
         assert!(names.contains(&"refreshmodels".to_string()));
         assert!(names.contains(&"timeline".to_string()));
         assert!(names.contains(&"compact".to_string()));
