@@ -30,6 +30,21 @@ impl PromptHistoryDAO {
         Ok(Self { conn })
     }
 
+    #[cfg(test)]
+    fn in_memory_for_test() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute(
+            "CREATE TABLE prompt_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prompt TEXT NOT NULL,
+                timestamp INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        Ok(Self { conn })
+    }
+
     pub fn add_prompt(&self, prompt: &str) -> Result<()> {
         if prompt.trim().is_empty() {
             return Ok(());
@@ -102,6 +117,17 @@ impl PromptHistoryCache {
 
         Ok(Self {
             prompts,
+            current_index: None,
+            dao,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test(prompts: impl IntoIterator<Item = String>) -> Result<Self> {
+        let dao = PromptHistoryDAO::in_memory_for_test()?;
+
+        Ok(Self {
+            prompts: prompts.into_iter().collect(),
             current_index: None,
             dao,
         })

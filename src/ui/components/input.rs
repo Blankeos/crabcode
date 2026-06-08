@@ -67,7 +67,7 @@ pub struct Input {
     selection_drag_active: bool,
     selection_edge_scroll: Option<SelectionEdgeScroll>,
     prompt_history: Option<PromptHistoryCache>,
-    draft_text: Option<String>,
+    draft_state: Option<DraftState>,
     local_images: Vec<LocalImageAttachment>,
     pending_pastes: Vec<PendingPaste>,
     image_open_config: crate::config::ImagesConfig,
@@ -78,6 +78,13 @@ pub struct Input {
 struct PendingPaste {
     placeholder: String,
     content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DraftState {
+    text: String,
+    local_images: Vec<LocalImageAttachment>,
+    pending_pastes: Vec<PendingPaste>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,7 +119,7 @@ impl Input {
             selection_drag_active: false,
             selection_edge_scroll: None,
             prompt_history,
-            draft_text: None,
+            draft_state: None,
             local_images: Vec::new(),
             pending_pastes: Vec::new(),
             image_open_config: crate::config::ImagesConfig::default(),
@@ -441,8 +448,8 @@ impl Input {
                 let current_text = self.get_text();
                 if let Some(ref mut history) = self.prompt_history {
                     if let Some(prompt) = history.navigate_up(&current_text) {
-                        if self.draft_text.is_none() {
-                            self.draft_text = Some(current_text);
+                        if self.draft_state.is_none() {
+                            self.draft_state = Some(self.current_draft_state(current_text));
                         }
                         self.set_text(&prompt);
                         self.textarea.move_cursor(CursorMove::Head);
@@ -465,8 +472,8 @@ impl Input {
                         let is_empty = prompt.is_empty();
                         if is_empty {
                             // Restore draft text when reaching the end of history
-                            if let Some(draft) = self.draft_text.take() {
-                                self.set_text(&draft);
+                            if let Some(draft) = self.draft_state.take() {
+                                self.restore_draft_state(draft);
                             } else {
                                 self.set_text("");
                             }
@@ -929,6 +936,26 @@ impl Input {
         self.viewport_top = 0;
         self.preferred_visual_col = None;
         self.hovered_image_placeholder = None;
+    }
+
+    fn current_draft_state(&self, text: String) -> DraftState {
+        DraftState {
+            text,
+            local_images: self.local_images.clone(),
+            pending_pastes: self.pending_pastes.clone(),
+        }
+    }
+
+    fn restore_draft_state(&mut self, draft: DraftState) {
+        self.reset_textarea();
+        self.textarea.insert_str(&draft.text);
+        self.viewport_top = 0;
+        self.preferred_visual_col = None;
+        self.local_images = draft.local_images;
+        self.pending_pastes = draft.pending_pastes;
+        self.hovered_image_placeholder = None;
+        self.sync_image_placeholders();
+        self.sync_pending_pastes();
     }
 
     fn image_placeholder(number: usize) -> String {
@@ -1702,7 +1729,7 @@ impl Input {
         self.reset_textarea();
         self.viewport_top = 0;
         self.preferred_visual_col = None;
-        self.draft_text = None;
+        self.draft_state = None;
         self.local_images.clear();
         self.pending_pastes.clear();
         self.hovered_image_placeholder = None;
@@ -1718,7 +1745,7 @@ impl Input {
                 let _ = history.add_prompt(&text);
             }
         }
-        self.draft_text = None;
+        self.draft_state = None;
         if let Some(ref mut history) = self.prompt_history {
             history.reset_navigation();
         }
@@ -1843,6 +1870,7 @@ impl Default for Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::PromptHistoryCache;
     use ratatui::crossterm::event::{KeyEventKind, KeyEventState};
     use ratatui::style::Color;
 
@@ -2039,6 +2067,38 @@ mod tests {
 
         assert_eq!(input.get_text(), "see [Image #1] and [Image #2]");
         assert_eq!(input.local_image_paths_for_submission(), paths);
+    }
+
+    #[test]
+    fn test_history_navigation_restores_draft_image_attachment_state() {
+        let mut input = Input::new();
+        input.prompt_history =
+            Some(PromptHistoryCache::new_for_test(["previous prompt".to_string()]).unwrap());
+        let image_path = PathBuf::from("/tmp/example.png");
+        let paste = "a".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+
+        input.insert_str("I pasted ");
+        input.attach_image(image_path.clone());
+        input.insert_str(" ");
+        input.insert_paste(&paste);
+
+        assert!(input.handle_event(key_event(KeyCode::Up)));
+        assert_eq!(input.get_text(), "previous prompt");
+
+        assert!(input.handle_event(key_event(KeyCode::Down)));
+
+        assert_eq!(
+            input.get_text(),
+            format!(
+                "I pasted [Image #1] [Pasted Content {} chars]",
+                LARGE_PASTE_CHAR_THRESHOLD + 1
+            )
+        );
+        assert_eq!(input.local_image_paths_for_submission(), vec![image_path]);
+        assert_eq!(
+            input.submission_text(),
+            format!("I pasted [Image #1] {paste}")
+        );
     }
 
     #[test]
