@@ -3711,7 +3711,6 @@ impl Chat {
             let mut panel_lines: Vec<Line<'_>> = Vec::new();
 
             panel_lines.push(Line::from(vec![Span::styled("", pad_style)]));
-            panel_lines.push(Line::from(vec![Span::styled("# Questions", header_style)]));
 
             if status == "running" {
                 if questions.is_empty() {
@@ -5804,13 +5803,12 @@ codex exec --skip-git-repo-check \
         let lines = chat.format_message(&msg, 80, 0, 1, None, None, "model", &colors, false);
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert_eq!(rendered.len(), 7);
+        assert_eq!(rendered.len(), 6);
         assert_eq!(rendered[0].trim(), "⬢ Questions");
         assert!(rendered[1].trim().is_empty());
-        assert_eq!(rendered[2].trim(), "# Questions");
-        assert!(rendered[4].contains("Provide columns and rows"));
+        assert!(rendered[3].contains("Provide columns and rows"));
+        assert!(rendered[4].trim().is_empty());
         assert!(rendered[5].trim().is_empty());
-        assert!(rendered[6].trim().is_empty());
     }
 
     #[test]

@@ -14,6 +14,11 @@ use std::collections::VecDeque;
 use tokio::sync::oneshot;
 use unicode_width::UnicodeWidthStr;
 
+const QUESTION_DIALOG_FOOTER_GAP_HEIGHT: u16 = 1;
+const QUESTION_HEADER_CANCEL_GAP_WIDTH: u16 = 1;
+const QUESTION_DIALOG_MIN_HEIGHT: u16 = 8 + QUESTION_DIALOG_FOOTER_GAP_HEIGHT;
+const QUESTION_DIALOG_CHROME_HEIGHT: u16 = 4 + QUESTION_DIALOG_FOOTER_GAP_HEIGHT;
+
 #[derive(Clone, Debug)]
 struct QuestionOption {
     label: String,
@@ -946,7 +951,8 @@ pub fn handle_question_dialog_mouse_event(
 fn push_tab_hitbox(
     hitboxes: &mut Vec<QuestionTabHitbox>,
     header_area: Rect,
-    x: &mut u16,
+    virtual_x: u16,
+    scroll_x: u16,
     label: &str,
     index: usize,
 ) {
@@ -955,36 +961,37 @@ fn push_tab_hitbox(
         return;
     }
 
-    let label_start = *x;
+    let label_start = virtual_x;
     let label_end = label_start.saturating_add(label_width);
-    let header_start = header_area.x;
-    let header_end = header_area.x.saturating_add(header_area.width);
+    let viewport_start = scroll_x;
+    let viewport_end = scroll_x.saturating_add(header_area.width);
 
-    if label_end > header_start && label_start < header_end {
-        let visible_start = label_start.max(header_start);
-        let visible_end = label_end.min(header_end);
-        if visible_end > visible_start {
+    if label_end > viewport_start && label_start < viewport_end {
+        let visible_start = label_start.max(viewport_start);
+        let visible_end = label_end.min(viewport_end);
+        let screen_start = header_area
+            .x
+            .saturating_add(visible_start.saturating_sub(scroll_x));
+        let screen_end = header_area
+            .x
+            .saturating_add(visible_end.saturating_sub(scroll_x));
+        if screen_end > screen_start {
             hitboxes.push(QuestionTabHitbox {
                 area: Rect {
-                    x: visible_start,
+                    x: screen_start,
                     y: header_area.y,
-                    width: visible_end - visible_start,
+                    width: screen_end - screen_start,
                     height: 1,
                 },
                 index,
             });
         }
     }
-
-    *x = label_end;
 }
 
-fn question_tab_hitboxes(
-    request: &QuestionDialogRequest,
-    header_area: Rect,
-) -> Vec<QuestionTabHitbox> {
-    let mut hitboxes = Vec::new();
-    let mut x = header_area.x;
+fn tab_virtual_items(request: &QuestionDialogRequest) -> Vec<(usize, String, u16)> {
+    let mut tabs = Vec::with_capacity(request.questions.len() + 1);
+    let mut x = 0u16;
 
     for idx in 0..request.questions.len() {
         if idx > 0 {
@@ -992,7 +999,8 @@ fn question_tab_hitboxes(
         }
 
         let label = stable_tab_label(&format!("Question {}", idx + 1));
-        push_tab_hitbox(&mut hitboxes, header_area, &mut x, &label, idx);
+        tabs.push((idx, label.clone(), x));
+        x = x.saturating_add(UnicodeWidthStr::width(label.as_str()) as u16);
     }
 
     if !request.questions.is_empty() {
@@ -1000,15 +1008,93 @@ fn question_tab_hitboxes(
     }
 
     let confirm_label = stable_tab_label("Confirm");
-    push_tab_hitbox(
-        &mut hitboxes,
-        header_area,
-        &mut x,
-        &confirm_label,
-        request.questions.len(),
-    );
+    tabs.push((request.questions.len(), confirm_label.clone(), x));
+
+    tabs
+}
+
+fn tab_content_width(tabs: &[(usize, String, u16)]) -> u16 {
+    tabs.last()
+        .map(|(_, label, x)| x.saturating_add(UnicodeWidthStr::width(label.as_str()) as u16))
+        .unwrap_or(0)
+}
+
+fn active_tab_scroll(request: &QuestionDialogRequest, viewport_width: u16) -> u16 {
+    if viewport_width == 0 {
+        return 0;
+    }
+
+    let tabs = tab_virtual_items(request);
+    let content_width = tab_content_width(&tabs);
+    if content_width <= viewport_width {
+        return 0;
+    }
+
+    let Some((_, active_label, active_start)) = tabs
+        .iter()
+        .find(|(idx, _, _)| *idx == request.current_index.min(request.questions.len()))
+    else {
+        return 0;
+    };
+
+    let active_width = UnicodeWidthStr::width(active_label.as_str()) as u16;
+    let active_end = active_start.saturating_add(active_width);
+    let max_scroll = content_width.saturating_sub(viewport_width);
+
+    if active_width >= viewport_width {
+        (*active_start).min(max_scroll)
+    } else if active_end > viewport_width {
+        active_end.saturating_sub(viewport_width).min(max_scroll)
+    } else {
+        0
+    }
+}
+
+fn question_tab_hitboxes(
+    request: &QuestionDialogRequest,
+    header_area: Rect,
+    scroll_x: u16,
+) -> Vec<QuestionTabHitbox> {
+    let mut hitboxes = Vec::new();
+    let header_start = header_area.x;
+    let header_end = header_area.x.saturating_add(header_area.width);
+
+    if header_start >= header_end {
+        return hitboxes;
+    }
+
+    for (idx, label, virtual_x) in tab_virtual_items(request) {
+        push_tab_hitbox(&mut hitboxes, header_area, virtual_x, scroll_x, &label, idx);
+    }
 
     hitboxes
+}
+
+fn dialog_body_width(area_width: u16) -> u16 {
+    // The dialog has a left border plus left/right padding before the body.
+    area_width.saturating_sub(3).max(1)
+}
+
+fn wrapped_lines_height(lines: &[Line<'_>], width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+
+    lines
+        .iter()
+        .map(|line| {
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            if text.is_empty() {
+                1
+            } else {
+                text.lines()
+                    .map(|part| textwrap::wrap(part, width).len().max(1) as u16)
+                    .sum()
+            }
+        })
+        .sum()
 }
 
 pub fn render_question_dialog(
@@ -1022,19 +1108,27 @@ pub fn render_question_dialog(
         return;
     };
 
-    let option_count = request
-        .current_question()
-        .map(option_row_count)
-        .unwrap_or(request.questions.len()) as u16;
-    let extra_body_lines = request
-        .current_question()
-        .map(|question| 1 + u16::from(question.multiple))
-        .unwrap_or_else(|| u16::from(request.is_confirm_tab()));
-    let desired_height = 8u16
-        .saturating_add(option_count)
-        .saturating_add(extra_body_lines)
-        .min(18);
-    let panel_height = area.height.min(desired_height.max(8));
+    let body_lines = if request.is_confirm_tab() {
+        confirm_body_lines(request, &colors)
+    } else if let (Some(question), Some(answer)) =
+        (request.current_question(), request.current_answer())
+    {
+        question_body_lines(
+            question,
+            answer,
+            request.current_index,
+            request.editing_custom,
+            &colors,
+        )
+    } else {
+        Vec::new()
+    };
+
+    let desired_body_height = wrapped_lines_height(&body_lines, dialog_body_width(area.width));
+    let desired_height = desired_body_height.saturating_add(QUESTION_DIALOG_CHROME_HEIGHT);
+    let panel_height = area
+        .height
+        .min(desired_height.max(QUESTION_DIALOG_MIN_HEIGHT));
     let dialog_area = Rect {
         x: area.x,
         y: area.y + area.height.saturating_sub(panel_height),
@@ -1066,22 +1160,28 @@ pub fn render_question_dialog(
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(QUESTION_DIALOG_FOOTER_GAP_HEIGHT),
             Constraint::Length(1),
         ])
         .split(content_area);
 
     let cancel_text = "esc cancel";
-    let cancel_width = (cancel_text.len() as u16).min(chunks[0].width);
+    let cancel_width = (UnicodeWidthStr::width(cancel_text) as u16).min(chunks[0].width);
+    let cancel_chunk_width = cancel_width
+        .saturating_add(QUESTION_HEADER_CANCEL_GAP_WIDTH)
+        .min(chunks[0].width);
     let header_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(cancel_width)])
+        .constraints([Constraint::Min(0), Constraint::Length(cancel_chunk_width)])
         .split(chunks[0]);
 
+    let tab_scroll_x = active_tab_scroll(request, header_chunks[0].width);
     f.render_widget(
-        Paragraph::new(question_tabs_line(request, state.queued_count(), &colors)),
+        Paragraph::new(question_tabs_line(request, state.queued_count(), &colors))
+            .scroll((0, tab_scroll_x)),
         header_chunks[0],
     );
-    let tab_hitboxes = question_tab_hitboxes(request, header_chunks[0]);
+    let tab_hitboxes = question_tab_hitboxes(request, header_chunks[0], tab_scroll_x);
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             cancel_text,
@@ -1093,21 +1193,6 @@ pub fn render_question_dialog(
         header_chunks[1],
     );
 
-    let body_lines = if request.is_confirm_tab() {
-        confirm_body_lines(request, &colors)
-    } else if let (Some(question), Some(answer)) =
-        (request.current_question(), request.current_answer())
-    {
-        question_body_lines(
-            question,
-            answer,
-            request.current_index,
-            request.editing_custom,
-            &colors,
-        )
-    } else {
-        Vec::new()
-    };
     f.render_widget(
         Paragraph::new(body_lines)
             .style(Style::default().bg(colors.dialog_background))
@@ -1116,7 +1201,7 @@ pub fn render_question_dialog(
     );
 
     let footer = footer_line(request, &colors);
-    f.render_widget(Paragraph::new(footer).alignment(Alignment::Left), chunks[2]);
+    f.render_widget(Paragraph::new(footer).alignment(Alignment::Left), chunks[3]);
     state.tab_hitboxes = tab_hitboxes;
 }
 
@@ -1668,6 +1753,21 @@ mod tests {
         }
     }
 
+    fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn is_blank_dialog_row(line: &str) -> bool {
+        line.chars()
+            .all(|ch| ch.is_whitespace() || matches!(ch, '┃' | '│' | '▌' | '▐'))
+    }
+
     #[test]
     fn response_returns_selected_option_labels() {
         let (tx, _rx) = oneshot::channel();
@@ -1905,7 +2005,11 @@ mod tests {
         };
         state.tab_hitboxes = {
             let request = state.current.as_ref().unwrap();
-            question_tab_hitboxes(request, header_area)
+            question_tab_hitboxes(
+                request,
+                header_area,
+                active_tab_scroll(request, header_area.width),
+            )
         };
 
         let second = state.tab_hitboxes[1].area;
@@ -1923,6 +2027,148 @@ mod tests {
         );
         assert!(handled);
         assert_eq!(state.current.as_ref().unwrap().current_index, 2);
+    }
+
+    #[test]
+    fn active_tab_scroll_keeps_late_tabs_visible_in_narrow_viewport() {
+        let (tx, _rx) = oneshot::channel();
+        let mut request = QuestionDialogRequest::new(
+            json!([
+                { "question": "Q1", "options": [{ "label": "A" }] },
+                { "question": "Q2", "options": [{ "label": "A" }] },
+                { "question": "Q3", "options": [{ "label": "A" }] },
+                { "question": "Q4", "options": [{ "label": "A" }] },
+                { "question": "Q5", "options": [{ "label": "A" }] },
+                { "question": "Q6", "options": [{ "label": "A" }] },
+                { "question": "Q7", "options": [{ "label": "A" }] },
+                { "question": "Q8", "options": [{ "label": "A" }] }
+            ]),
+            tx,
+        );
+        request.current_index = 7;
+
+        let header_area = Rect {
+            x: 0,
+            y: 0,
+            width: 35,
+            height: 1,
+        };
+        let scroll_x = active_tab_scroll(&request, header_area.width);
+        let hitboxes = question_tab_hitboxes(&request, header_area, scroll_x);
+
+        assert!(scroll_x > 0);
+        assert!(hitboxes.iter().any(|hitbox| hitbox.index == 7));
+        assert!(!hitboxes.iter().any(|hitbox| hitbox.index == 0));
+    }
+
+    #[test]
+    fn render_scrolls_tabs_to_active_question() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([
+                { "question": "Q1", "options": [{ "label": "A" }] },
+                { "question": "Q2", "options": [{ "label": "A" }] },
+                { "question": "Q3", "options": [{ "label": "A" }] },
+                { "question": "Q4", "options": [{ "label": "A" }] },
+                { "question": "Q5", "options": [{ "label": "A" }] },
+                { "question": "Q6", "options": [{ "label": "A" }] },
+                { "question": "Q7", "options": [{ "label": "A" }] },
+                { "question": "Q8", "options": [{ "label": "A" }] }
+            ]),
+            tx,
+        );
+        state.current.as_mut().unwrap().current_index = 7;
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(58, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Question 8"));
+    }
+
+    #[test]
+    fn render_keeps_one_cell_gap_between_tabs_and_cancel_hint() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "Pick",
+                "options": [{ "label": "A" }]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(32, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        let header = lines
+            .iter()
+            .find(|line| line.contains("esc cancel"))
+            .expect("question dialog should render the cancel hint");
+        let cancel_start = header.find("esc cancel").unwrap();
+        let before_cancel = header[..cancel_start].chars().collect::<Vec<_>>();
+
+        assert_eq!(before_cancel.last(), Some(&' '));
+        assert!(before_cancel
+            .iter()
+            .rev()
+            .nth(1)
+            .is_some_and(|ch| !ch.is_whitespace()));
+    }
+
+    #[test]
+    fn render_leaves_one_row_gap_above_help_footer() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "Pick",
+                "options": [{ "label": "A" }]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(48, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        let footer_idx = lines
+            .iter()
+            .position(|line| line.contains("cycle tabs"))
+            .expect("question dialog should render the help footer");
+
+        assert!(footer_idx > 1);
+        assert!(lines[footer_idx - 2].contains("Type your own answer"));
+        assert!(is_blank_dialog_row(&lines[footer_idx - 1]));
     }
 
     #[test]
@@ -2313,6 +2559,58 @@ mod tests {
 
         assert!(request.questions[0].custom);
         assert_eq!(option_row_count(&request.questions[0]), 3);
+    }
+
+    #[test]
+    fn render_expands_for_wrapped_options_so_custom_row_is_visible() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "What should be the first source of truth for scraped PRC data?",
+                "header": "Question",
+                "options": [
+                    {
+                        "label": "D1 / SQLite",
+                        "description": "Flexible future queries, migrations, search indexes, dedupe; my likely recommendation."
+                    },
+                    {
+                        "label": "Static JSON only",
+                        "description": "Simpler deploy: generate files and serve/cache them, no DB."
+                    },
+                    {
+                        "label": "Hybrid: D1 + raw artifacts",
+                        "description": "D1 for metadata/querying, plus cached raw PDFs/parsed JSON in R2/KV/static files."
+                    },
+                    {
+                        "label": "Decide after prototype",
+                        "description": "Build an adapter so storage can be swapped after measuring data shape."
+                    }
+                ]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(95, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Type your own answer"));
     }
 
     #[test]
