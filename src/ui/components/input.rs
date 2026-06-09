@@ -195,8 +195,8 @@ impl Input {
 
         self.preferred_visual_col = Some(edge_scroll.column as usize);
         let moved = match edge_scroll.direction {
-            EdgeScrollDirection::Up => self.move_cursor_visual(-1),
-            EdgeScrollDirection::Down => self.move_cursor_visual(1),
+            EdgeScrollDirection::Up => self.move_cursor_visual(-1, true),
+            EdgeScrollDirection::Down => self.move_cursor_visual(1, true),
         };
         if !moved {
             self.selection_edge_scroll = None;
@@ -208,6 +208,23 @@ impl Input {
         self.selection_drag_active = false;
         self.selection_edge_scroll = None;
         self.preferred_visual_col = None;
+    }
+
+    fn cancel_empty_selection(&mut self) {
+        if matches!(self.textarea.selection_range(), Some((start, end)) if start == end) {
+            self.textarea.cancel_selection();
+        }
+    }
+
+    fn finalize_selection_drag(&mut self) {
+        self.cancel_empty_selection();
+        self.clear_selection_drag_state();
+    }
+
+    fn start_selection_drag_if_needed(&mut self) {
+        if !self.textarea.is_selecting() {
+            self.textarea.start_selection();
+        }
     }
 
     fn clamped_relative_x(area: Rect, column: u16) -> u16 {
@@ -440,7 +457,7 @@ impl Input {
         // Handle Up arrow for prompt history navigation
         // Trigger when cursor is on first line
         if event.code == KeyCode::Up && event.modifiers == KeyModifiers::NONE {
-            if self.move_cursor_visual(-1) {
+            if self.move_cursor_visual(-1, false) {
                 return true;
             }
 
@@ -461,7 +478,7 @@ impl Input {
 
         // Handle Down arrow for prompt history navigation
         if event.code == KeyCode::Down && event.modifiers == KeyModifiers::NONE {
-            if self.move_cursor_visual(1) {
+            if self.move_cursor_visual(1, false) {
                 return true;
             }
 
@@ -583,13 +600,14 @@ impl Input {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) if self.selection_drag_active => {
                     self.preferred_visual_col = None;
+                    self.start_selection_drag_if_needed();
                     self.move_selection_to_mouse_position(textarea_area, mouse);
                     self.update_selection_edge_scroll(textarea_area, mouse);
                     let _ = self.tick_selection_edge_scroll();
                     return true;
                 }
                 MouseEventKind::Up(MouseButton::Left) if self.selection_drag_active => {
-                    self.clear_selection_drag_state();
+                    self.finalize_selection_drag();
                     return false;
                 }
                 MouseEventKind::Moved => {
@@ -609,11 +627,11 @@ impl Input {
                 previous_hover != self.hovered_image_placeholder
             }
             MouseEventKind::ScrollDown => {
-                self.move_cursor_visual(1);
+                self.move_cursor_visual(1, false);
                 true
             }
             MouseEventKind::ScrollUp => {
-                self.move_cursor_visual(-1);
+                self.move_cursor_visual(-1, false);
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -640,10 +658,9 @@ impl Input {
                         }
                         return true;
                     }
-                    // Position cursor and start selection for potential drag
+                    // Position cursor; actual selection starts only if a drag follows.
                     self.textarea
                         .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
-                    self.textarea.start_selection();
                     self.selection_drag_active = true;
                     self.selection_edge_scroll = None;
                 } else {
@@ -652,7 +669,6 @@ impl Input {
                     let last_col = lines[last_row].chars().count();
                     self.textarea
                         .move_cursor(CursorMove::Jump(last_row as u16, last_col as u16));
-                    self.textarea.start_selection();
                     self.selection_drag_active = true;
                     self.selection_edge_scroll = None;
                 }
@@ -663,8 +679,8 @@ impl Input {
                     return false;
                 }
                 self.preferred_visual_col = None;
-                // Since start_selection() was called and is_selecting() is true,
-                // move_cursor extends the selection.
+                self.start_selection_drag_if_needed();
+                // Since selection is active, move_cursor extends it.
                 self.move_selection_to_mouse_position(textarea_area, mouse);
                 self.update_selection_edge_scroll(textarea_area, mouse);
                 let _ = self.tick_selection_edge_scroll();
@@ -672,7 +688,7 @@ impl Input {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 // Selection finalized (cursor was moved during drag)
-                self.clear_selection_drag_state();
+                self.finalize_selection_drag();
                 true
             }
             MouseEventKind::Up(MouseButton::Right) => {
@@ -686,7 +702,7 @@ impl Input {
     }
 
     pub fn has_selection(&self) -> bool {
-        self.textarea.is_selecting()
+        matches!(self.textarea.selection_range(), Some((start, end)) if start != end)
     }
 
     pub fn get_selected_text(&self) -> String {
@@ -1068,7 +1084,7 @@ impl Input {
         ))
     }
 
-    fn move_cursor_visual(&mut self, direction: isize) -> bool {
+    fn move_cursor_visual(&mut self, direction: isize, extend_selection: bool) -> bool {
         let Some(area) = self.textarea_area else {
             return false;
         };
@@ -1103,6 +1119,14 @@ impl Input {
         };
         let target_col =
             Self::display_col_to_char_col(line, target.start_col, target.end_col, preferred_col);
+
+        if extend_selection {
+            if !self.textarea.is_selecting() {
+                self.textarea.start_selection();
+            }
+        } else {
+            self.textarea.cancel_selection();
+        }
 
         self.textarea.move_cursor(CursorMove::Jump(
             target.source_row as u16,
@@ -2352,6 +2376,35 @@ mod tests {
         assert!(input.handle_event(key_event(KeyCode::Up)));
         assert_eq!(input.textarea.cursor(), (0, 0));
         assert_eq!(input.get_text(), "0123456789ABCDEF");
+    }
+
+    #[test]
+    fn test_click_then_up_down_does_not_select_wrapped_text() {
+        let mut input = Input::new();
+        input.insert_str("0123456789ABCDEF");
+        input.textarea_area = Some(Rect::new(0, 0, 15, 6));
+
+        assert!(input.handle_mouse_event(mouse_event_at(
+            MouseEventKind::Down(MouseButton::Left),
+            0,
+            0,
+        )));
+        assert!(input.handle_mouse_event(mouse_event_at(
+            MouseEventKind::Up(MouseButton::Left),
+            0,
+            0,
+        )));
+        assert!(!input.has_selection());
+
+        assert!(input.handle_event(key_event(KeyCode::Down)));
+        assert_eq!(input.textarea.cursor(), (0, 15));
+        assert!(!input.has_selection());
+        assert_eq!(input.get_selected_text(), "");
+
+        assert!(input.handle_event(key_event(KeyCode::Up)));
+        assert_eq!(input.textarea.cursor(), (0, 0));
+        assert!(!input.has_selection());
+        assert_eq!(input.get_selected_text(), "");
     }
 
     #[test]
