@@ -12,8 +12,11 @@ pub struct WaveSpinner {
 }
 
 impl WaveSpinner {
+    pub const WIDTH: u16 = 8;
+
     const DEFAULT_FRAME_DURATION: Duration = Duration::from_millis(50);
     const OPACITIES: [f32; 5] = [1.0, 0.8, 0.6, 0.4, 0.2];
+    const COMPACT_FRAMES: [&'static str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
     pub fn new(base_color: Color) -> Self {
         let frames = Self::generate_frames(base_color);
@@ -50,6 +53,19 @@ impl WaveSpinner {
 
     pub fn spans(&self) -> Vec<Span<'static>> {
         self.frames[self.current_frame].clone()
+    }
+
+    pub fn spans_for_width(&self, width: u16) -> Vec<Span<'static>> {
+        if width == 0 {
+            Vec::new()
+        } else if width < Self::WIDTH {
+            vec![Span::styled(
+                Self::COMPACT_FRAMES[self.current_frame % Self::COMPACT_FRAMES.len()],
+                Style::default().fg(self.base_color),
+            )]
+        } else {
+            self.spans()
+        }
     }
 
     pub fn set_color(&mut self, base_color: Color) {
@@ -245,7 +261,19 @@ mod tests {
     fn test_wave_spinner_spans_length() {
         let spinner = WaveSpinner::new(Color::Rgb(255, 165, 0));
         let spans = spinner.spans();
-        assert_eq!(spans.len(), 8);
+        assert_eq!(spans.len(), WaveSpinner::WIDTH as usize);
+    }
+
+    #[test]
+    fn test_wave_spinner_compacts_when_width_is_narrow() {
+        let spinner = WaveSpinner::new(Color::Rgb(255, 165, 0));
+        assert!(spinner.spans_for_width(0).is_empty());
+        assert_eq!(spinner.spans_for_width(1).len(), 1);
+        assert_eq!(spinner.spans_for_width(WaveSpinner::WIDTH - 1).len(), 1);
+        assert_eq!(
+            spinner.spans_for_width(WaveSpinner::WIDTH).len(),
+            WaveSpinner::WIDTH as usize
+        );
     }
 
     #[test]

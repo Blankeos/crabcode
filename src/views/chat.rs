@@ -171,87 +171,206 @@ pub fn render_chat(
     let help_line = Line::from(help_text);
     let help_width = help_line.width() as u16;
     let available_width = above_status_chunks[5].width;
-    let help_width = help_width.min(available_width);
 
-    let usage_width = if !usage_text.is_empty() {
-        (usage_text.len() as u16 + 2).min(available_width.saturating_sub(help_width))
+    let streaming_desired_width = if is_streaming {
+        let agent_color = crate::theme::agent_color(&agent, colors);
+        chat_state.wave_spinner.set_color(agent_color);
+        streaming_status_desired_width(
+            &chat_state.chat,
+            &chat_state.wave_spinner,
+            colors,
+            is_compacting,
+        )
     } else {
         0
     };
+    let status_widths = chat_status_layout_widths(
+        available_width,
+        is_streaming,
+        streaming_desired_width,
+        usage_text,
+        help_width,
+    );
+
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
+            Constraint::Length(status_widths.streaming),
             Constraint::Min(0),
-            Constraint::Length(usage_width),
-            Constraint::Length(help_width),
+            Constraint::Length(status_widths.usage),
+            Constraint::Length(status_widths.help),
         ])
         .split(above_status_chunks[5]);
 
-    if is_streaming {
-        let agent_color = crate::theme::agent_color(&agent, colors);
-        chat_state.wave_spinner.set_color(agent_color);
-
-        let mut streaming_text = chat_state.wave_spinner.spans();
-
-        if is_compacting {
-            streaming_text.push(Span::raw(" "));
-            streaming_text.push(Span::styled(
-                "compacting context",
-                Style::default().fg(colors.info),
-            ));
-
-            let streaming_paragraph = Paragraph::new(Line::from(streaming_text));
-            f.render_widget(streaming_paragraph, status_chunks[0]);
-        } else {
-            let tps = chat_state.chat.get_streaming_tokens_per_sec();
-
-            if let Some(tps) = tps {
-                streaming_text.push(Span::raw(" "));
-                streaming_text.push(Span::styled(
-                    format!("{:.0}t/s", tps),
-                    Style::default().fg(colors.info),
-                ));
-            }
-
-            if let Some(elapsed) = chat_state.chat.get_streaming_elapsed_seconds() {
-                streaming_text.push(Span::raw(if tps.is_some() { " · " } else { " " }));
-                streaming_text.push(Span::styled(
-                    format!("{:.1}s", elapsed),
-                    Style::default().fg(colors.info),
-                ));
-            }
-
-            streaming_text.push(Span::raw("  "));
-            streaming_text.push(Span::styled(
-                "esc to stop",
-                Style::default()
-                    .fg(colors.text_weak)
-                    .add_modifier(Modifier::DIM),
-            ));
-
-            let streaming_paragraph = Paragraph::new(Line::from(streaming_text));
-            f.render_widget(streaming_paragraph, status_chunks[0]);
-        }
+    if is_streaming && status_widths.streaming > 0 {
+        let streaming_text = streaming_status_spans(
+            &chat_state.chat,
+            &chat_state.wave_spinner,
+            colors,
+            is_compacting,
+            status_widths.streaming,
+        );
+        let streaming_paragraph = Paragraph::new(Line::from(streaming_text));
+        f.render_widget(streaming_paragraph, status_chunks[0]);
     }
 
-    if !usage_text.is_empty() {
+    if !usage_text.is_empty() && status_widths.usage > 0 {
         let usage = Paragraph::new(Line::from(vec![Span::styled(
             usage_text,
             Style::default()
                 .fg(colors.text_weak)
                 .add_modifier(Modifier::DIM),
         )]));
-        f.render_widget(usage, status_chunks[1]);
+        f.render_widget(usage, status_chunks[2]);
     }
 
     let help = Paragraph::new(help_line).alignment(Alignment::Right);
-    f.render_widget(help, status_chunks[2]);
+    f.render_widget(help, status_chunks[3]);
 
     let blank = Block::default();
     f.render_widget(blank, above_status_chunks[6]);
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
     status_bar.render(f, main_chunks[1], colors);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChatStatusLayoutWidths {
+    streaming: u16,
+    usage: u16,
+    help: u16,
+}
+
+fn chat_status_layout_widths(
+    available_width: u16,
+    is_streaming: bool,
+    streaming_desired_width: u16,
+    usage_text: &str,
+    help_width: u16,
+) -> ChatStatusLayoutWidths {
+    let streaming = if is_streaming {
+        streaming_desired_width.min(available_width)
+    } else {
+        0
+    };
+    let remaining = available_width.saturating_sub(streaming);
+    let help = help_width.min(remaining);
+    let usage = if !usage_text.is_empty() {
+        (UnicodeWidthStr::width(usage_text) as u16 + 2).min(remaining.saturating_sub(help))
+    } else {
+        0
+    };
+
+    ChatStatusLayoutWidths {
+        streaming,
+        usage,
+        help,
+    }
+}
+
+fn streaming_status_desired_width(
+    chat: &Chat,
+    wave_spinner: &WaveSpinner,
+    colors: &ThemeColors,
+    is_compacting: bool,
+) -> u16 {
+    spans_width(&streaming_status_spans(
+        chat,
+        wave_spinner,
+        colors,
+        is_compacting,
+        WaveSpinner::WIDTH,
+    ))
+}
+
+fn streaming_status_spans(
+    chat: &Chat,
+    wave_spinner: &WaveSpinner,
+    colors: &ThemeColors,
+    is_compacting: bool,
+    max_width: u16,
+) -> Vec<Span<'static>> {
+    let mut streaming_text = wave_spinner.spans_for_width(max_width);
+    if streaming_text.is_empty() {
+        return streaming_text;
+    }
+
+    if is_compacting {
+        streaming_text.push(Span::raw(" "));
+        streaming_text.push(Span::styled(
+            "compacting context",
+            Style::default().fg(colors.info),
+        ));
+        return streaming_text;
+    }
+
+    let tps = chat.get_streaming_tokens_per_sec();
+    if let Some(tps) = tps {
+        streaming_text.push(Span::raw(" "));
+        streaming_text.push(Span::styled(
+            format!("{:.0}t/s", tps),
+            Style::default().fg(colors.info),
+        ));
+    }
+
+    if let Some(elapsed) = chat.get_streaming_elapsed_seconds() {
+        streaming_text.push(Span::raw(if tps.is_some() { " · " } else { " " }));
+        streaming_text.push(Span::styled(
+            format!("{:.1}s", elapsed),
+            Style::default().fg(colors.info),
+        ));
+    }
+
+    streaming_text.push(Span::raw("  "));
+    streaming_text.push(Span::styled(
+        "esc to stop",
+        Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM),
+    ));
+
+    streaming_text
+}
+
+fn subagent_streaming_status_spans(
+    wave_spinner: &WaveSpinner,
+    colors: &ThemeColors,
+    is_compacting: bool,
+    max_width: u16,
+) -> Vec<Span<'static>> {
+    let mut streaming_text = wave_spinner.spans_for_width(max_width);
+    if streaming_text.is_empty() {
+        return streaming_text;
+    }
+
+    streaming_text.push(Span::raw(" "));
+    if is_compacting {
+        streaming_text.push(Span::styled(
+            "compacting context",
+            Style::default().fg(colors.info),
+        ));
+    } else {
+        streaming_text.push(Span::styled(
+            "esc to stop",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    streaming_text
+}
+
+fn spans_width(spans: &[Span<'static>]) -> u16 {
+    Line::from(spans.to_vec()).width().min(u16::MAX as usize) as u16
+}
+
+fn subagent_nav_width(content_width: u16, is_streaming: bool, nav_desired_width: u16) -> u16 {
+    let streaming_priority_width = if is_streaming {
+        WaveSpinner::WIDTH.min(content_width)
+    } else {
+        0
+    };
+    nav_desired_width.min(content_width.saturating_sub(streaming_priority_width))
 }
 
 pub fn queued_messages_height(messages: &[String]) -> u16 {
@@ -468,51 +587,6 @@ fn render_subagent_footer(
         return;
     }
 
-    let mut left_spans =
-        agent_model_spans_with_color(active_agent, active_model, active_color, colors);
-    left_spans.push(Span::raw("  "));
-    left_spans.push(Span::styled(
-        format!("{} ({} of {})", label, active_index + 1, total),
-        Style::default()
-            .fg(colors.text_weak)
-            .add_modifier(Modifier::DIM),
-    ));
-
-    if running {
-        left_spans.push(Span::raw(" "));
-        left_spans.push(Span::styled("~", Style::default().fg(active_color)));
-    }
-
-    if !usage_text.is_empty() {
-        left_spans.push(Span::raw("  "));
-        left_spans.push(Span::styled(
-            usage_text.to_string(),
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
-        ));
-    }
-
-    if is_streaming {
-        wave_spinner.set_color(active_color);
-        left_spans.push(Span::raw("  "));
-        if is_compacting {
-            left_spans.push(Span::styled(
-                "compacting context",
-                Style::default().fg(colors.info),
-            ));
-        } else {
-            left_spans.extend(wave_spinner.spans());
-            left_spans.push(Span::raw(" "));
-            left_spans.push(Span::styled(
-                "esc to stop",
-                Style::default()
-                    .fg(colors.text_weak)
-                    .add_modifier(Modifier::DIM),
-            ));
-        }
-    }
-
     let nav_line = Line::from(vec![
         Span::styled(
             "Parent ",
@@ -539,14 +613,52 @@ fn render_subagent_footer(
         Span::styled("right", Style::default().fg(colors.text)),
     ]);
 
-    let nav_width = nav_line.width() as u16;
+    let nav_width = subagent_nav_width(content_area.width, is_streaming, nav_line.width() as u16);
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(nav_width.min(content_area.width)),
-        ])
+        .constraints([Constraint::Min(0), Constraint::Length(nav_width)])
         .split(content_area);
+
+    let mut left_spans = Vec::new();
+    if is_streaming {
+        wave_spinner.set_color(active_color);
+        left_spans.extend(subagent_streaming_status_spans(
+            wave_spinner,
+            colors,
+            is_compacting,
+            chunks[0].width,
+        ));
+        left_spans.push(Span::raw("  "));
+    }
+
+    left_spans.extend(agent_model_spans_with_color(
+        active_agent,
+        active_model,
+        active_color,
+        colors,
+    ));
+    left_spans.push(Span::raw("  "));
+    left_spans.push(Span::styled(
+        format!("{} ({} of {})", label, active_index + 1, total),
+        Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM),
+    ));
+
+    if running {
+        left_spans.push(Span::raw(" "));
+        left_spans.push(Span::styled("~", Style::default().fg(active_color)));
+    }
+
+    if !usage_text.is_empty() {
+        left_spans.push(Span::raw("  "));
+        left_spans.push(Span::styled(
+            usage_text.to_string(),
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
 
     f.render_widget(Paragraph::new(Line::from(left_spans)), chunks[0]);
     f.render_widget(
@@ -619,12 +731,45 @@ fn centered_subagent_footer_content(area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::display_agent_name;
+    use super::{
+        chat_status_layout_widths, display_agent_name, subagent_nav_width, ChatStatusLayoutWidths,
+    };
 
     #[test]
     fn display_agent_name_title_cases_agent_words() {
         assert_eq!(display_agent_name("build"), "Build");
         assert_eq!(display_agent_name("vlm-agent"), "Vlm-Agent");
         assert_eq!(display_agent_name("general_reviewer"), "General_Reviewer");
+    }
+
+    #[test]
+    fn status_row_reserves_streaming_before_help_or_usage() {
+        assert_eq!(
+            chat_status_layout_widths(4, true, 18, "100%", 13),
+            ChatStatusLayoutWidths {
+                streaming: 4,
+                usage: 0,
+                help: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn status_row_uses_remaining_width_for_help_and_usage() {
+        assert_eq!(
+            chat_status_layout_widths(40, true, 18, "100%", 13),
+            ChatStatusLayoutWidths {
+                streaming: 18,
+                usage: 6,
+                help: 13,
+            }
+        );
+    }
+
+    #[test]
+    fn subagent_footer_reserves_spinner_width_before_nav() {
+        assert_eq!(subagent_nav_width(4, true, 24), 0);
+        assert_eq!(subagent_nav_width(20, true, 24), 12);
+        assert_eq!(subagent_nav_width(20, false, 24), 20);
     }
 }

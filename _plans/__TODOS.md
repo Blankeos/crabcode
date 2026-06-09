@@ -289,3 +289,7 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 - [x] ~Switching models mid-stream causes issues. Make sure what the stream uses, uses the same model / thinking effort, and it only changes after the next prompt or interruption. Cuz with openai, it fails when I change the thinking effort midway from when I started (i think, because of websockets).~ (noticed, it's a non-issue)
 
 - [x] Bug in chat input. I click a character or anywhere in the input once... Then press up or down (not left or right, no bugs here). It kinda looks like I'm selecting the text where my cursor goes using up and down.
+
+- [ ] Workspaces. Make sure to open the root, when opening crabcode?? maybe
+
+- [x] I wanna see the loading all the time, no matter how shrunken the width of the terminal is.
