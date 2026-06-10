@@ -230,6 +230,10 @@ pub fn capability_for_model(
     let family = family.to_ascii_lowercase();
     let haystack = format!("{provider} {npm} {model} {api} {name} {family}");
 
+    if provider == crate::model::commandcode::PROVIDER_ID {
+        return commandcode_capability(&haystack);
+    }
+
     // models.dev `reasoning: true` means the model can emit thinking/reasoning
     // tokens. OpenCode still requires provider/model-specific variants before
     // exposing selectable effort controls.
@@ -321,6 +325,75 @@ fn widely_supported_capability() -> ReasoningCapability {
         ],
         ReasoningEffort::Medium,
     )
+}
+
+fn commandcode_capability(haystack: &str) -> ReasoningCapability {
+    if haystack.contains("deepseek-v4-pro")
+        || haystack.contains("deepseek v4 pro")
+        || haystack.contains("deepseek-v4-flash")
+        || haystack.contains("deepseek v4 flash")
+    {
+        return ReasoningCapability::effort(
+            vec![ReasoningEffort::High, ReasoningEffort::Max],
+            ReasoningEffort::High,
+        );
+    }
+
+    if haystack.contains("claude-sonnet-4-6")
+        || haystack.contains("claude-sonnet-4.6")
+        || haystack.contains("claude sonnet 4.6")
+        || haystack.contains("claude-fable-5")
+        || haystack.contains("claude fable 5")
+        || haystack.contains("opus-4-6")
+        || haystack.contains("opus-4.6")
+        || haystack.contains("opus 4.6")
+        || haystack.contains("opus-4-7")
+        || haystack.contains("opus-4.7")
+        || haystack.contains("opus 4.7")
+    {
+        return ReasoningCapability::effort(
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+            ],
+            ReasoningEffort::High,
+        );
+    }
+
+    if haystack.contains("gpt-5.4-mini") || haystack.contains("gpt 5.4 mini") {
+        return widely_supported_capability();
+    }
+
+    if haystack.contains("gpt-5.5")
+        || haystack.contains("gpt 5.5")
+        || haystack.contains("gpt-5.4")
+        || haystack.contains("gpt 5.4")
+        || haystack.contains("gpt-5.3-codex")
+        || haystack.contains("gpt 5.3 codex")
+    {
+        return ReasoningCapability::effort(
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+            ],
+            ReasoningEffort::Medium,
+        );
+    }
+
+    if haystack.contains("gemini-3.5-flash")
+        || haystack.contains("gemini 3.5 flash")
+        || haystack.contains("gemini-3.1-flash-lite")
+        || haystack.contains("gemini 3.1 flash lite")
+    {
+        return widely_supported_capability();
+    }
+
+    ReasoningCapability::Unsupported
 }
 
 fn openai_efforts(api_id: &str, release_date: &str) -> Vec<ReasoningEffort> {
@@ -764,6 +837,115 @@ mod tests {
                 ReasoningEffort::Medium,
                 ReasoningEffort::High,
                 ReasoningEffort::Max,
+            ]
+        );
+    }
+
+    #[test]
+    fn commandcode_deepseek_v4_uses_observed_efforts() {
+        let capability = capability_for_model(
+            "commandcode",
+            "@ai-sdk/openai-compatible",
+            "deepseek/deepseek-v4-pro",
+            "deepseek/deepseek-v4-pro",
+            "DeepSeek V4 Pro",
+            "deepseek",
+            "",
+            true,
+        );
+        assert_eq!(
+            capability.values(),
+            &[ReasoningEffort::High, ReasoningEffort::Max]
+        );
+    }
+
+    #[test]
+    fn commandcode_claude_uses_observed_efforts() {
+        let capability = capability_for_model(
+            "commandcode",
+            "@ai-sdk/anthropic",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-6",
+            "Claude Sonnet 4.6",
+            "claude",
+            "",
+            true,
+        );
+        assert_eq!(
+            capability.values(),
+            &[
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+            ]
+        );
+    }
+
+    #[test]
+    fn commandcode_gpt_5_4_mini_uses_observed_efforts() {
+        let capability = capability_for_model(
+            "commandcode",
+            "@ai-sdk/openai-compatible",
+            "openai/gpt-5.4-mini",
+            "openai/gpt-5.4-mini",
+            "GPT-5.4 Mini",
+            "gpt",
+            "",
+            true,
+        );
+        assert_eq!(
+            capability.values(),
+            &[
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ]
+        );
+    }
+
+    #[test]
+    fn commandcode_gpt_5_5_uses_observed_efforts() {
+        let capability = capability_for_model(
+            "commandcode",
+            "@ai-sdk/openai-compatible",
+            "openai/gpt-5.5",
+            "openai/gpt-5.5",
+            "GPT-5.5",
+            "gpt",
+            "",
+            true,
+        );
+        assert_eq!(
+            capability.values(),
+            &[
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+            ]
+        );
+    }
+
+    #[test]
+    fn commandcode_gemini_flash_uses_observed_efforts() {
+        let capability = capability_for_model(
+            "commandcode",
+            "@ai-sdk/openai-compatible",
+            "google/gemini-3.1-flash-lite",
+            "google/gemini-3.1-flash-lite",
+            "Gemini 3.1 Flash Lite",
+            "gemini",
+            "",
+            true,
+        );
+        assert_eq!(
+            capability.values(),
+            &[
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
             ]
         );
     }

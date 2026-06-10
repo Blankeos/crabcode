@@ -87,6 +87,7 @@ fn discovery_model(
 ) -> crate::model::discovery::Model {
     let family = model_family(id);
     let is_anthropic = is_anthropic_model(id);
+    let reasoning = supports_reasoning_effort(id, &name);
 
     crate::model::discovery::Model {
         id: id.to_string(),
@@ -97,10 +98,7 @@ fn discovery_model(
         },
         family,
         attachment: true,
-        // The live models endpoint does not publish capability metadata yet. Keep
-        // this conservative so Crabcode does not send provider-specific
-        // `reasoning_effort` fields to CommandCode models that may reject them.
-        reasoning: false,
+        reasoning,
         tool_call: true,
         structured_output: false,
         temperature: true,
@@ -147,6 +145,44 @@ fn is_anthropic_model(model_id: &str) -> bool {
     model_id.to_ascii_lowercase().contains("claude")
 }
 
+fn supports_reasoning_effort(model_id: &str, model_name: &str) -> bool {
+    let haystack = format!(
+        "{} {}",
+        model_id.to_ascii_lowercase(),
+        model_name.to_ascii_lowercase()
+    );
+
+    [
+        "deepseek-v4-pro",
+        "deepseek v4 pro",
+        "deepseek-v4-flash",
+        "deepseek v4 flash",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4.6",
+        "claude sonnet 4.6",
+        "claude-fable-5",
+        "claude fable 5",
+        "claude-opus-4-6",
+        "claude-opus-4.6",
+        "claude opus 4.6",
+        "claude-opus-4-7",
+        "claude-opus-4.7",
+        "claude opus 4.7",
+        "gpt-5.5",
+        "gpt 5.5",
+        "gpt-5.4",
+        "gpt 5.4",
+        "gpt-5.3-codex",
+        "gpt 5.3 codex",
+        "gemini-3.5-flash",
+        "gemini 3.5 flash",
+        "gemini-3.1-flash-lite",
+        "gemini 3.1 flash lite",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +200,7 @@ mod tests {
         assert_eq!(provider.npm, NPM_PACKAGE);
         let model = provider.models.get("deepseek/deepseek-v4-flash").unwrap();
         assert_eq!(model.name, "DeepSeek V4 Flash");
+        assert!(model.reasoning);
         assert!(model.tool_call);
         assert!(model.attachment);
         assert_eq!(
@@ -185,6 +222,18 @@ mod tests {
         let route = model.provider.as_ref().expect("anthropic route");
         assert_eq!(route.npm.as_deref(), Some(ANTHROPIC_NPM_PACKAGE));
         assert_eq!(route.api.as_deref(), Some(BASE_URL));
+        assert!(model.reasoning);
+    }
+
+    #[test]
+    fn provider_from_models_keeps_unknown_reasoning_conservative() {
+        let provider = provider_from_models(vec![CommandCodeModel {
+            id: "openai/gpt-4o".to_string(),
+            name: "GPT-4o".to_string(),
+            context_length: None,
+        }]);
+
+        let model = provider.models.get("openai/gpt-4o").unwrap();
         assert!(!model.reasoning);
     }
 
