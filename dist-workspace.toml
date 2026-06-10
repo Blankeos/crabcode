@@ -15,5 +15,9 @@ installers = ["homebrew"]
 tap = "blankeos/homebrew-tap"
 # Publish package-manager metadata after release assets are uploaded
 publish-jobs = ["homebrew"]
+# Keep the customized generated GitHub Actions workflow intact.
+# cargo-dist validates generated CI files byte-for-byte by default; this allows
+# intentional workflow edits such as changelog/release and Homebrew publishing customizations.
+allow-dirty = ["ci"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]

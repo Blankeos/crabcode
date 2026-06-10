@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3] - 2026-06-10
+
+### Bug Fixes
+
+- Treat assistant streaming as active before first token by @Blankeos
+- Keep streaming status visible in compact terminal widths by @Blankeos
+- Avoid accidental selection during cursor navigation by @Blankeos
+- Normalize interleaved tool-call/result replay ordering by @Blankeos
+- Improve markdown table wrapping and terminal error notifications by @Blankeos
+- Improve compaction selection, token accounting, and stats messaging by @Blankeos
+- Preserve draft media state when navigating prompt history by @Blankeos
+- Fix chat selection shortcut ordering by @Blankeos
+- Add active-tab scrolling and dynamic height sizing by @Blankeos
+
+### Chores
+
+- Add Homebrew publishing pipeline by @Blankeos
+
+### Features
+
+- Coalesce terminal mouse input and improve chat wheel scrolling by @Blankeos
+- Add chat find bar and improve command-backspace line navigation by @Blankeos
+- Optimize incremental streaming rendering and persistence by @Blankeos
+- Add reasoning capability mappings for supported models by @Blankeos
+- Add reusable action dialog for copy and message actions by @Blankeos
+
 ## [0.0.2] - 2026-06-07
 
 ### Bug Fixes
