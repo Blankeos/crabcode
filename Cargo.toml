@@ -9,6 +9,7 @@ edition = "2021"
 description = "(WIP) Rust AI CLI Coding Agent with a beautiful terminal UI"
 license = "MIT"
 repository = "https://github.com/blankeos/crabcode"
+homepage = "https://github.com/blankeos/crabcode"
 readme = "README.md"
 keywords = ["ai", "cli", "coding", "agent", "tui"]
 categories = ["command-line-utilities", "development-tools", "api-bindings"]

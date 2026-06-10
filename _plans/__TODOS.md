@@ -304,3 +304,5 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
 - [x] Minor UX improvement with chat input. When I press cmd-backspace repeatedly. For example 2x in a row. It doesn't act like opencode right now.
       The more appropriate behavior is I cmd-backspace (erases to the start of the line). press cmd-backspace again (at that point), it goes to the previous line, but doesn't erase the previous line, just puts my cursor at the rightmost of the prev line. I press cmd-backspace again, it goes to the left-most of the line.
+
+- [x] publish to homebrew

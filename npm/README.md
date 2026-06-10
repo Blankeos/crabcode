@@ -28,10 +28,11 @@ A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interac
 ## Installation
 
 ```sh
-npm install -g crabcode  # npm
-bun install -g crabcode  # or bun
-cargo binstall crabcode  # or cargo-binstall (prebuilt binary, faster)
-cargo install crabcode   # or cargo (build from source)
+brew install blankeos/tap/crabcode # Homebrew (macOS/Linux)
+npm install -g crabcode            # npm
+bun install -g crabcode            # or bun
+cargo binstall crabcode            # or cargo-binstall (prebuilt binary, faster)
+cargo install crabcode             # or cargo (build from source)
 curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | sh # or linux/macos (via curl)
 ```
 

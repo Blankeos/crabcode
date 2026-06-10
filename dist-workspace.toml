@@ -10,8 +10,10 @@ ci = "github"
 # Build the embedded browser client before cargo-dist compiles the Rust binary.
 github-build-setup = "../dist-build-setup.yml"
 # The installers to generate for each app
-installers = []
+installers = ["homebrew"]
+# Publish the Homebrew formula to blankeos/homebrew-tap
+tap = "blankeos/homebrew-tap"
+# Publish package-manager metadata after release assets are uploaded
+publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
-# Allow manual edits to generated CI files (e.g. custom install block in release.yml).
-allow-dirty = ["ci"]
