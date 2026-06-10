@@ -1514,7 +1514,7 @@ impl Chat {
     }
 
     pub fn is_streaming(&self) -> bool {
-        self.streaming_first_token_time.is_some() && self.streaming_assistant_idx().is_some()
+        self.streaming_start_time.is_some() && self.streaming_assistant_idx().is_some()
     }
 
     pub fn finalize_streaming_metrics(&mut self) {
@@ -6151,6 +6151,19 @@ codex exec --skip-git-repo-check \
         assert!(!metadata.contains("ttft"));
         assert!(!metadata.contains("t/s"));
         assert!(!metadata.contains("1.0s"));
+    }
+
+    #[test]
+    fn pre_first_token_assistant_is_treated_as_streaming() {
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+
+        assert!(chat.is_streaming());
     }
 
     #[test]

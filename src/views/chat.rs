@@ -18,6 +18,7 @@ pub const SUBAGENT_FOOTER_HEIGHT: u16 = 3;
 const QUEUED_MESSAGES_MAX_VISIBLE: usize = 3;
 const QUEUED_MESSAGES_TOP_PADDING: u16 = 1;
 const QUEUED_MESSAGES_BOTTOM_PADDING: u16 = 1;
+const STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH: u16 = 48;
 
 #[derive(Debug)]
 pub struct ChatState {
@@ -208,7 +209,7 @@ pub fn render_chat(
             &chat_state.wave_spinner,
             colors,
             is_compacting,
-            status_widths.streaming,
+            available_width,
         );
         let streaming_paragraph = Paragraph::new(Line::from(streaming_text));
         f.render_widget(streaming_paragraph, status_chunks[0]);
@@ -279,7 +280,7 @@ fn streaming_status_desired_width(
         wave_spinner,
         colors,
         is_compacting,
-        WaveSpinner::WIDTH,
+        u16::MAX,
     ))
 }
 
@@ -288,9 +289,14 @@ fn streaming_status_spans(
     wave_spinner: &WaveSpinner,
     colors: &ThemeColors,
     is_compacting: bool,
-    max_width: u16,
+    available_width: u16,
 ) -> Vec<Span<'static>> {
-    let mut streaming_text = wave_spinner.spans_for_width(max_width);
+    let spinner_width = if available_width < STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH {
+        1
+    } else {
+        WaveSpinner::WIDTH
+    };
+    let mut streaming_text = wave_spinner.spans_for_width(spinner_width);
     if streaming_text.is_empty() {
         return streaming_text;
     }
@@ -732,8 +738,54 @@ fn centered_subagent_footer_content(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_status_layout_widths, display_agent_name, subagent_nav_width, ChatStatusLayoutWidths,
+        chat_status_layout_widths, display_agent_name, streaming_status_spans, subagent_nav_width,
+        ChatStatusLayoutWidths, STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
     };
+    use crate::theme::ThemeColors;
+    use crate::ui::components::{chat::Chat, wave_spinner::WaveSpinner};
+    use ratatui::style::Color;
+
+    fn test_colors() -> ThemeColors {
+        ThemeColors {
+            primary: Color::Reset,
+            secondary: Color::Reset,
+            accent: Color::Reset,
+            interactive: Color::Reset,
+            background: Color::Reset,
+            dialog_background: Color::Reset,
+            background_element: Color::Reset,
+            text: Color::Reset,
+            text_weak: Color::Reset,
+            text_strong: Color::Reset,
+            border: Color::Reset,
+            border_weak_focus: Color::Reset,
+            border_focus: Color::Reset,
+            border_strong_focus: Color::Reset,
+            success: Color::Reset,
+            warning: Color::Reset,
+            error: Color::Reset,
+            info: Color::Reset,
+            markdown_text: Color::Reset,
+            markdown_heading: Color::Reset,
+            markdown_link: Color::Reset,
+            markdown_link_text: Color::Reset,
+            markdown_code: Color::Reset,
+            markdown_block_quote: Color::Reset,
+            markdown_emph: Color::Reset,
+            markdown_strong: Color::Reset,
+            markdown_horizontal_rule: Color::Reset,
+            markdown_list_item: Color::Reset,
+            markdown_list_enumeration: Color::Reset,
+            markdown_image: Color::Reset,
+            markdown_image_text: Color::Reset,
+            markdown_code_block: Color::Reset,
+            diff_add: Color::Reset,
+            diff_add_bg: Color::Reset,
+            diff_remove: Color::Reset,
+            diff_remove_bg: Color::Reset,
+            diff_gutter: Color::Reset,
+        }
+    }
 
     #[test]
     fn display_agent_name_title_cases_agent_words() {
@@ -764,6 +816,45 @@ mod tests {
                 help: 13,
             }
         );
+    }
+
+    #[test]
+    fn streaming_status_uses_long_spinner_before_first_token_at_normal_width() {
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+        chat.begin_streaming_turn();
+
+        let colors = test_colors();
+        let spinner = WaveSpinner::new(Color::Blue);
+        let spans = streaming_status_spans(
+            &chat,
+            &spinner,
+            &colors,
+            false,
+            STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
+        );
+
+        assert!(spans.len() > WaveSpinner::WIDTH as usize);
+        assert_eq!(spans[0].content.as_ref(), "■");
+    }
+
+    #[test]
+    fn streaming_status_compacts_only_below_terminal_breakpoint() {
+        let chat = Chat::new();
+        let colors = test_colors();
+        let spinner = WaveSpinner::new(Color::Blue);
+        let spans = streaming_status_spans(
+            &chat,
+            &spinner,
+            &colors,
+            false,
+            STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH - 1,
+        );
+
+        assert_eq!(spans[0].content.as_ref(), "⠋");
     }
 
     #[test]

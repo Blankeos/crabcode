@@ -293,3 +293,9 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 - [ ] Workspaces. Make sure to open the root, when opening crabcode?? maybe
 
 - [x] I wanna see the loading all the time, no matter how shrunken the width of the terminal is.
+
+- [ ] Archive a "workspace"
+
+- [ ] OpenCode has a /move command.
+
+- [ ] Add 'search' (like search the chat panel for some messages) cmd palette
