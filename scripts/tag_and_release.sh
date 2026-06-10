@@ -75,8 +75,8 @@ git tag "v${NEW}"
 
 # Create release binaries (with cargo-dist)
 echo "🦋 Pushing..."
-git push --tags
 git push
+git push --tags
 
 # ============================================
 # PUBLISHING: I put it here as documentation, but this is manual for now!
