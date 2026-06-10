@@ -117,6 +117,9 @@ pub struct ChatHyperlinkHover {
 
 // Minimum elapsed time before showing tokens/s (250ms)
 const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
+const MIN_MOUSE_WHEEL_LINES: usize = 1;
+const MAX_MOUSE_WHEEL_LINES: usize = 3;
+const MOUSE_WHEEL_VIEWPORT_FRACTION: usize = 8;
 const TOOL_RESULT_MAX_SCREEN_LINES: usize = 8;
 const PATCH_DIFF_PREVIEW_MAX_LINES: usize = 40;
 const TOOL_MARKER_ACTIVE: &str = "⬡";
@@ -1768,6 +1771,29 @@ impl Chat {
         self.update_scrollbar();
     }
 
+    fn mouse_wheel_lines(&self, notches: usize) -> usize {
+        let per_notch = (self.viewport_height / MOUSE_WHEEL_VIEWPORT_FRACTION)
+            .max(MIN_MOUSE_WHEEL_LINES)
+            .min(MAX_MOUSE_WHEEL_LINES)
+            .max(1);
+        per_notch.saturating_mul(notches.max(1))
+    }
+
+    pub fn handle_mouse_scroll(&mut self, kind: MouseEventKind, notches: usize) -> bool {
+        let amount = self.mouse_wheel_lines(notches);
+        match kind {
+            MouseEventKind::ScrollDown => {
+                self.scroll_down(amount);
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_up(amount);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn scroll_up(&mut self, amount: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         self.user_scrolled_up = true;
@@ -2355,14 +2381,8 @@ impl Chat {
         let is_in_content = rendered_content_area.contains(point);
 
         match event.kind {
-            MouseEventKind::ScrollDown => {
-                self.scroll_down(1);
-                true
-            }
-            MouseEventKind::ScrollUp => {
-                self.scroll_up(1);
-                true
-            }
+            MouseEventKind::ScrollDown => self.handle_mouse_scroll(event.kind, 1),
+            MouseEventKind::ScrollUp => self.handle_mouse_scroll(event.kind, 1),
             MouseEventKind::Down(MouseButton::Left) => {
                 if is_on_scrollbar {
                     let metrics = ScrollMetrics::new(
@@ -6896,6 +6916,44 @@ codex exec --skip-git-repo-check \
 
         chat.scroll_down(3);
         assert_eq!(chat.scroll_offset, 8);
+    }
+
+    #[test]
+    fn mouse_wheel_scroll_uses_viewport_sized_steps() {
+        let mut chat = Chat::new();
+        chat.content_height = 200;
+        chat.viewport_height = 20;
+
+        assert!(chat.handle_mouse_scroll(MouseEventKind::ScrollDown, 1));
+        assert_eq!(chat.scroll_offset, 2);
+
+        assert!(chat.handle_mouse_scroll(MouseEventKind::ScrollDown, 3));
+        assert_eq!(chat.scroll_offset, 8);
+
+        assert!(chat.handle_mouse_scroll(MouseEventKind::ScrollUp, 2));
+        assert_eq!(chat.scroll_offset, 4);
+    }
+
+    #[test]
+    fn mouse_wheel_scroll_has_minimum_step_for_short_viewports() {
+        let mut chat = Chat::new();
+        chat.content_height = 50;
+        chat.viewport_height = 5;
+
+        assert!(chat.handle_mouse_scroll(MouseEventKind::ScrollDown, 1));
+
+        assert_eq!(chat.scroll_offset, MIN_MOUSE_WHEEL_LINES);
+    }
+
+    #[test]
+    fn mouse_wheel_scroll_caps_single_notch_step_for_tall_viewports() {
+        let mut chat = Chat::new();
+        chat.content_height = 200;
+        chat.viewport_height = 80;
+
+        assert!(chat.handle_mouse_scroll(MouseEventKind::ScrollDown, 1));
+
+        assert_eq!(chat.scroll_offset, MAX_MOUSE_WHEEL_LINES);
     }
 
     #[test]

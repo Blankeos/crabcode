@@ -2,7 +2,7 @@ use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::{
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
@@ -2214,6 +2214,24 @@ impl App {
 
     fn current_chat_area(&self) -> Rect {
         self.chat_area_for_size(self.last_frame_size)
+    }
+
+    pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
+        if self.overlay_focus == OverlayFocus::None && self.base_focus == BaseFocus::Chat {
+            let chat_area = self.current_chat_area();
+            if chat_area.contains(Position::new(mouse.column, mouse.row))
+                && self
+                    .chat_state
+                    .chat
+                    .handle_mouse_scroll(mouse.kind, notches)
+            {
+                return;
+            }
+        }
+
+        for _ in 0..notches.max(1) {
+            self.handle_mouse_event(mouse);
+        }
     }
 
     pub fn handle_keys(&mut self, key: KeyEvent) {

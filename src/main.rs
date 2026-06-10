@@ -56,8 +56,8 @@ use clap::{Parser, Subcommand};
 use ratatui::crossterm::{
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, MouseButton,
+        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -87,6 +87,32 @@ fn drain_pending_terminal_events(idle_timeout: Duration) {
             Ok(false) | Err(_) => break,
         }
     }
+}
+
+fn handle_terminal_event(app: &mut App, event: event::Event) {
+    match event {
+        event::Event::Mouse(mouse) => app.handle_mouse_event(mouse),
+        event::Event::Key(key) => {
+            app.handle_keys(key);
+            if app.take_just_closed_overlay() {
+                drain_pending_terminal_events(Duration::from_millis(12));
+            }
+        }
+        event::Event::Paste(text) => {
+            app.handle_paste(text);
+        }
+        event::Event::FocusGained => {
+            app.set_terminal_focused(true);
+        }
+        event::Event::FocusLost => {
+            app.set_terminal_focused(false);
+        }
+        event::Event::Resize(_, _) => {}
+    }
+}
+
+fn mouse_scroll_kind(kind: MouseEventKind) -> bool {
+    matches!(kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp)
 }
 
 fn restore_terminal_modes(
@@ -1021,23 +1047,16 @@ async fn run_event_loop(
 
             match event {
                 event::Event::Mouse(mouse) => {
-                    if matches!(
-                        mouse.kind,
-                        event::MouseEventKind::ScrollDown | event::MouseEventKind::ScrollUp
-                    ) {
-                        const MAX_SCROLL_PER_FRAME: usize = 6;
+                    if mouse_scroll_kind(mouse.kind) {
                         let mut last_scroll = mouse;
                         let mut scroll_count = 1usize;
+                        let mut applied_scroll = false;
 
                         while event::poll(Duration::from_millis(0))? {
                             let next = event::read()?;
                             match next {
                                 event::Event::Mouse(next_mouse) => {
-                                    if matches!(
-                                        next_mouse.kind,
-                                        event::MouseEventKind::ScrollDown
-                                            | event::MouseEventKind::ScrollUp
-                                    ) {
+                                    if mouse_scroll_kind(next_mouse.kind) {
                                         if next_mouse.kind == last_scroll.kind {
                                             scroll_count = scroll_count.saturating_add(1);
                                         } else {
@@ -1045,31 +1064,60 @@ async fn run_event_loop(
                                             scroll_count = 1;
                                         }
                                     } else {
+                                        app.handle_coalesced_mouse_scroll(
+                                            last_scroll,
+                                            scroll_count,
+                                        );
+                                        applied_scroll = true;
                                         app.handle_mouse_event(next_mouse);
+                                        break;
                                     }
                                 }
-                                event::Event::Key(key) => {
-                                    app.handle_keys(key);
-                                    if app.take_just_closed_overlay() {
-                                        drain_pending_terminal_events(Duration::from_millis(12));
-                                    }
+                                next => {
+                                    app.handle_coalesced_mouse_scroll(last_scroll, scroll_count);
+                                    applied_scroll = true;
+                                    handle_terminal_event(app, next);
+                                    break;
                                 }
-                                event::Event::Paste(text) => {
-                                    app.handle_paste(text);
-                                }
-                                event::Event::FocusGained => {
-                                    app.set_terminal_focused(true);
-                                }
-                                event::Event::FocusLost => {
-                                    app.set_terminal_focused(false);
-                                }
-                                event::Event::Resize(_, _) => {}
                             }
                         }
 
-                        let repeat = scroll_count.min(MAX_SCROLL_PER_FRAME);
-                        for _ in 0..repeat {
-                            app.handle_mouse_event(last_scroll);
+                        if !applied_scroll {
+                            app.handle_coalesced_mouse_scroll(last_scroll, scroll_count);
+                        }
+                    } else if matches!(
+                        mouse.kind,
+                        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
+                    ) {
+                        let mut latest_mouse = mouse;
+                        let mut applied_mouse = false;
+
+                        while event::poll(Duration::from_millis(0))? {
+                            let next = event::read()?;
+                            match next {
+                                event::Event::Mouse(next_mouse)
+                                    if next_mouse.kind == mouse.kind
+                                        && next_mouse.modifiers == mouse.modifiers =>
+                                {
+                                    latest_mouse = next_mouse;
+                                }
+                                event::Event::Mouse(next_mouse) => {
+                                    app.handle_mouse_event(latest_mouse);
+                                    applied_mouse = true;
+                                    app.handle_mouse_event(next_mouse);
+                                    break;
+                                }
+                                next => {
+                                    app.handle_mouse_event(latest_mouse);
+                                    applied_mouse = true;
+                                    handle_terminal_event(app, next);
+                                    break;
+                                }
+                            }
+                        }
+
+                        if !applied_mouse {
+                            app.handle_mouse_event(latest_mouse);
                         }
                     } else {
                         app.handle_mouse_event(mouse);
