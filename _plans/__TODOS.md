@@ -284,7 +284,7 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
   - [ ] Fixed, but future, maybe offset scrolling whenever I resize... Since I kinda lose progress on where I was currently at, just because the text now wraps.
 
-  - Not bug but improvement: I want table wrapping by default. Currently it's truncated by default, but wrapping might look a lot better too.
+  - Not bug but improvGement: I want table wrapping by default. Currently it's truncated by default, but wrapping might look a lot better too.
 
 - [x] ~Switching models mid-stream causes issues. Make sure what the stream uses, uses the same model / thinking effort, and it only changes after the next prompt or interruption. Cuz with openai, it fails when I change the thinking effort midway from when I started (i think, because of websockets).~ (noticed, it's a non-issue)
 
@@ -298,6 +298,9 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
 - [ ] OpenCode has a /move command.
 
-- [ ] Add 'search' (like search the chat panel for some messages) cmd palette
+- [x] Add 'search' (like search the chat panel for some messages) cmd palette
 
 - [x] perf: Optimize streaming
+
+- [x] Minor UX improvement with chat input. When I press cmd-backspace repeatedly. For example 2x in a row. It doesn't act like opencode right now.
+      The more appropriate behavior is I cmd-backspace (erases to the start of the line). press cmd-backspace again (at that point), it goes to the previous line, but doesn't erase the previous line, just puts my cursor at the rightmost of the prev line. I press cmd-backspace again, it goes to the left-most of the line.

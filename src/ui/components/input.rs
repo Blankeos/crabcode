@@ -4,7 +4,10 @@ use crate::push_toast;
 use crate::theme::{agent_color, contrast_text, ThemeColors};
 use crate::toast::{Toast, ToastLevel};
 use crate::ui::selection::EdgeScrollDirection;
-use crate::ui::textarea_keys::has_command_modifier;
+use crate::ui::textarea_keys::{
+    command_backspace_to_line_start as textarea_command_backspace_to_line_start,
+    delete_to_line_start as textarea_delete_to_line_start, has_command_modifier,
+};
 use crate::utils::image_attachment;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -133,30 +136,30 @@ impl Input {
         self.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
     }
 
-    fn move_to_line_end(&mut self) {
-        self.preferred_visual_col = None;
-        let (row, _) = self.textarea.cursor();
-        let col = self
-            .textarea
+    fn line_end_col(&self, row: usize) -> usize {
+        self.textarea
             .lines()
             .get(row)
             .map(|line| line.chars().count())
-            .unwrap_or(0);
+            .unwrap_or(0)
+    }
+
+    fn move_to_line_end(&mut self) {
+        self.preferred_visual_col = None;
+        let (row, _) = self.textarea.cursor();
+        let col = self.line_end_col(row);
         self.textarea
             .move_cursor(CursorMove::Jump(row as u16, col as u16));
     }
 
     fn delete_to_line_start(&mut self) {
         self.preferred_visual_col = None;
-        let (cursor_row, cursor_col) = self.textarea.cursor();
-        if let Some(line) = self.textarea.lines().get(cursor_row) {
-            // Clamp to valid char boundary to avoid panics on multi-byte emoji
-            let safe_col = char_boundary_before(line, cursor_col);
-            let before_cursor = &line[..safe_col];
-            for _ in 0..before_cursor.chars().count() {
-                self.textarea.delete_char();
-            }
-        }
+        textarea_delete_to_line_start(&mut self.textarea);
+    }
+
+    fn command_backspace_to_line_start(&mut self) {
+        self.preferred_visual_col = None;
+        textarea_command_backspace_to_line_start(&mut self.textarea);
     }
 
     pub fn with_autocomplete(mut self, autocomplete: AutoComplete) -> Self {
@@ -556,7 +559,7 @@ impl Input {
             KeyCode::Esc => false,
             KeyCode::Backspace if self.remove_placeholder_at_cursor(false) => true,
             KeyCode::Backspace if has_command_modifier(event.modifiers) => {
-                self.delete_to_line_start();
+                self.command_backspace_to_line_start();
                 self.sync_image_placeholders();
                 self.sync_pending_pastes();
                 true
@@ -2228,6 +2231,24 @@ mod tests {
         assert!(handled);
         assert_eq!(input.get_text(), "");
         assert_eq!(input.submission_text(), "");
+    }
+
+    #[test]
+    fn test_command_backspace_at_line_start_moves_to_previous_line_end() {
+        let mut input = Input::new();
+        input.insert_str("first\nsecond");
+
+        assert!(input.handle_event(modified_key_event(KeyCode::Backspace, KeyModifiers::SUPER)));
+        assert_eq!(input.get_text(), "first\n");
+        assert_eq!(input.textarea.cursor(), (1, 0));
+
+        assert!(input.handle_event(modified_key_event(KeyCode::Backspace, KeyModifiers::SUPER)));
+        assert_eq!(input.get_text(), "first\n");
+        assert_eq!(input.textarea.cursor(), (0, 5));
+
+        assert!(input.handle_event(modified_key_event(KeyCode::Backspace, KeyModifiers::SUPER)));
+        assert_eq!(input.get_text(), "\n");
+        assert_eq!(input.textarea.cursor(), (0, 0));
     }
 
     #[test]

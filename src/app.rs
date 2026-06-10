@@ -20,6 +20,7 @@ use crate::push_toast;
 use crate::toast::{self, Toast, ToastLevel};
 use crate::ui::components::action_dialog::{ActionDialog, ActionDialogEvent, ActionDialogItem};
 use crate::ui::components::chat::{Chat, ChatImageTarget};
+use crate::ui::components::find::{FindBar, FindBarAction};
 use crate::ui::components::input::Input;
 use crate::ui::components::popup::Popup;
 use crate::ui::hyperlink::HyperlinkTarget;
@@ -147,6 +148,7 @@ pub enum OverlayFocus {
     CopyActions,
     MessageActions,
     CommandPalette,
+    FindBar,
     StorageDialog,
     WhichKey,
 }
@@ -403,6 +405,7 @@ struct ClientSessionState {
     external_stream: Option<ExternalStreamState>,
     tool_calls: ToolCallViewState,
     queued_messages: std::collections::VecDeque<QueuedUserMessage>,
+    find_bar: FindBar,
     unread_completed: bool,
 }
 
@@ -421,6 +424,7 @@ impl ClientSessionState {
             external_stream: None,
             tool_calls: ToolCallViewState::default(),
             queued_messages: std::collections::VecDeque::new(),
+            find_bar: FindBar::new(),
             unread_completed: false,
         }
     }
@@ -449,6 +453,7 @@ pub struct App {
     pub remote_dialog_state: RemoteDialogState,
     pub skills_dialog_state: crate::views::SkillsDialogState,
     pub command_palette_state: crate::views::command_palette::CommandPaletteState,
+    pub find_bar: FindBar,
     pub storage_dialog_state: StorageDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
@@ -546,6 +551,7 @@ impl App {
         let which_key_state = crate::views::which_key::init_which_key();
         let timeline_dialog_state = crate::views::timeline_dialog::init_timeline_dialog();
         let command_palette_state = init_command_palette();
+        let find_bar = FindBar::new();
         let storage_dialog_state = init_storage_dialog();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
@@ -723,6 +729,7 @@ impl App {
             remote_dialog_state,
             skills_dialog_state,
             command_palette_state,
+            find_bar,
             storage_dialog_state,
             which_key_state,
             timeline_dialog_state,
@@ -1033,6 +1040,7 @@ impl App {
 
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
             state.chat = std::mem::take(&mut self.chat_state.chat);
+            state.find_bar = std::mem::take(&mut self.find_bar);
             state.input_draft = if is_child_session {
                 String::new()
             } else {
@@ -1047,6 +1055,7 @@ impl App {
 
         if let Some(state) = self.session_view_states.get_mut(session_id) {
             self.chat_state.chat = std::mem::take(&mut state.chat);
+            self.find_bar = std::mem::take(&mut state.find_bar);
             self.chat_state.chat.scroll_to_bottom_on_next_render();
             if is_child_session {
                 self.input.clear();
@@ -2215,6 +2224,10 @@ impl App {
             return;
         }
 
+        if self.overlay_focus == OverlayFocus::FindBar && !self.can_open_find_bar() {
+            self.close_find_bar_focus();
+        }
+
         let overlay_before_key = if key.code == KeyCode::Esc {
             self.overlay_focus
         } else {
@@ -2233,6 +2246,19 @@ impl App {
             )
         {
             self.open_command_palette();
+            self.record_overlay_close_after_key(overlay_before_key);
+            return;
+        }
+
+        if key.code == KeyCode::Char('f')
+            && key.modifiers == event::KeyModifiers::CONTROL
+            && matches!(
+                self.overlay_focus,
+                OverlayFocus::None | OverlayFocus::SuggestionsPopup | OverlayFocus::FindBar
+            )
+            && self.can_open_find_bar()
+        {
+            self.open_find_bar();
             self.record_overlay_close_after_key(overlay_before_key);
             return;
         }
@@ -2299,6 +2325,10 @@ impl App {
                     self.update_suggestions();
                     input_handled
                 }
+            }
+            OverlayFocus::FindBar => {
+                self.handle_find_bar_key(key);
+                true
             }
             OverlayFocus::ModelsDialog => {
                 if key.code == KeyCode::Char('a') && key.modifiers == event::KeyModifiers::CONTROL {
@@ -2665,7 +2695,7 @@ impl App {
                                     None,
                                 );
                             }
-                            self.overlay_focus = OverlayFocus::None;
+                            self.restore_focus_after_priority_overlay();
                         }
                         true
                     }
@@ -2691,14 +2721,14 @@ impl App {
                                     None,
                                 );
                             }
-                            self.overlay_focus = OverlayFocus::None;
+                            self.restore_focus_after_priority_overlay();
                         }
                         true
                     }
                     QuestionDialogAction::Cancel => {
                         self.question_dialog_state.clear_with_empty();
                         self.chat_state.chat.resume_streaming_tps_timer();
-                        self.overlay_focus = OverlayFocus::None;
+                        self.restore_focus_after_priority_overlay();
                         self.cancel_streaming();
                         true
                     }
@@ -4091,6 +4121,9 @@ impl App {
                 );
                 self.command_palette_state.dialog.selected_index = 0;
             }
+            (_, OverlayFocus::FindBar) => {
+                self.find_bar.insert_text(&text);
+            }
             (_, OverlayFocus::SessionRenameDialog) => {
                 self.session_rename_dialog_state
                     .input_textarea
@@ -4158,13 +4191,95 @@ impl App {
 
         clear_suggestions(&mut self.suggestions_popup_state);
         let thinking_visible = self.chat_state.chat.thinking_visible();
-        self.command_palette_state.refresh_items(
-            &self.command_registry,
-            self.base_focus == BaseFocus::Chat,
-            thinking_visible,
-        );
+        let is_chat = self.can_open_find_bar();
+        self.command_palette_state
+            .refresh_items(&self.command_registry, is_chat, thinking_visible);
         self.command_palette_state.show();
         self.overlay_focus = OverlayFocus::CommandPalette;
+    }
+
+    fn can_open_find_bar(&self) -> bool {
+        self.base_focus == BaseFocus::Chat
+            && self.session_manager.get_current_session_id().is_some()
+    }
+
+    fn open_find_bar(&mut self) {
+        if !self.can_open_find_bar() {
+            return;
+        }
+        clear_suggestions(&mut self.suggestions_popup_state);
+        self.chat_state.chat.clear_search();
+        self.find_bar.show();
+        self.overlay_focus = OverlayFocus::FindBar;
+    }
+
+    fn close_find_bar_focus(&mut self) {
+        self.find_bar.close();
+        self.find_bar.clear_matches();
+        self.chat_state.chat.clear_search();
+        if self.overlay_focus == OverlayFocus::FindBar {
+            self.overlay_focus = OverlayFocus::None;
+        }
+    }
+
+    fn restore_focus_after_priority_overlay(&mut self) {
+        self.overlay_focus = if self.find_bar.is_active() && self.can_open_find_bar() {
+            OverlayFocus::FindBar
+        } else {
+            OverlayFocus::None
+        };
+    }
+
+    fn current_chat_search_width(&self) -> usize {
+        self.current_chat_area().width.saturating_sub(2).max(1) as usize
+    }
+
+    fn commit_find_query(&mut self) {
+        let query = self.find_bar.committed_query().to_string();
+        if query.trim().is_empty() {
+            self.chat_state.chat.clear_search();
+            self.find_bar.clear_matches();
+            return;
+        }
+
+        let max_width = self.current_chat_search_width();
+        let colors = self.get_current_theme_colors();
+        let count = self
+            .chat_state
+            .chat
+            .set_search_query(&query, max_width, &self.model, &colors);
+        self.find_bar
+            .set_match_status(count, self.chat_state.chat.search_active_match_index());
+    }
+
+    fn cycle_find_match(&mut self, direction: isize) {
+        let count = self.chat_state.chat.search_match_count();
+        if count == 0 && !self.find_bar.committed_query().is_empty() {
+            self.commit_find_query();
+            return;
+        }
+
+        self.chat_state.chat.cycle_search_match(direction);
+        self.find_bar.set_match_status(
+            self.chat_state.chat.search_match_count(),
+            self.chat_state.chat.search_active_match_index(),
+        );
+    }
+
+    fn handle_find_bar_key(&mut self, key: KeyEvent) {
+        let query_before = self.find_bar.query();
+        match self.find_bar.handle_key_event(key) {
+            FindBarAction::CommitSearch => self.commit_find_query(),
+            FindBarAction::Next => self.cycle_find_match(1),
+            FindBarAction::Previous => self.cycle_find_match(-1),
+            FindBarAction::Close => self.close_find_bar_focus(),
+            FindBarAction::None => {
+                if self.find_bar.query() != query_before {
+                    self.find_bar.clear_matches();
+                    self.chat_state.chat.clear_search();
+                }
+            }
+        }
     }
 
     fn open_storage_dialog(&mut self) {
@@ -4249,6 +4364,7 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
                 match action {
                     CommandPaletteAppAction::ToggleAgentMode => self.toggle_agent_mode(),
+                    CommandPaletteAppAction::OpenFind => self.open_find_bar(),
                     CommandPaletteAppAction::SetThinkingVisible(visible) => {
                         self.chat_state.chat.set_thinking_visible(visible);
                     }
@@ -7967,6 +8083,7 @@ impl App {
                     &usage_text,
                     subagent_tabs,
                     &queued_messages,
+                    &mut self.find_bar,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -8459,6 +8576,7 @@ mod tests {
             remote_dialog_state: init_remote_dialog(),
             skills_dialog_state: crate::views::skills_dialog::init_skills_dialog("Skills", vec![]),
             command_palette_state: init_command_palette(),
+            find_bar: FindBar::new(),
             storage_dialog_state: init_storage_dialog(),
             which_key_state: crate::views::which_key::init_which_key(),
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),

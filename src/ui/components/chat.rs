@@ -18,6 +18,13 @@ use ratatui::{
 use serde_json::Value as JsonValue;
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatSearchMatch {
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Chat {
     pub messages: Vec<Message>,
@@ -62,6 +69,13 @@ pub struct Chat {
     pending_click_anchor: Option<(usize, usize)>,
     /// Index of the message highlighted by timeline navigation (None = no highlight)
     pub highlighted_message_index: Option<usize>,
+    /// Match ranges for the active rendered-line chat find query.
+    search_matches: Vec<ChatSearchMatch>,
+    search_active_match: Option<usize>,
+    search_query: String,
+    search_cached_revision: u64,
+    search_cached_width: usize,
+    search_cached_colors_hash: u64,
     /// Monotonic marker for render-affecting message changes.
     render_revision: u64,
     /// Earliest message index dirtied by append-only streaming updates.
@@ -1161,6 +1175,12 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
+            search_matches: Vec::new(),
+            search_active_match: None,
+            search_query: String::new(),
+            search_cached_revision: 0,
+            search_cached_width: 0,
+            search_cached_colors_hash: 0,
             render_revision: 1,
             render_dirty_from: 0,
             cached_lines: Vec::new(),
@@ -1208,6 +1228,12 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
+            search_matches: Vec::new(),
+            search_active_match: None,
+            search_query: String::new(),
+            search_cached_revision: 0,
+            search_cached_width: 0,
+            search_cached_colors_hash: 0,
             render_revision: 1,
             render_dirty_from: 0,
             cached_lines: Vec::new(),
@@ -1393,6 +1419,8 @@ impl Chat {
         self.pending_click_anchor = None;
         self.hovered_image = None;
         self.hovered_hyperlink = None;
+        self.highlighted_message_index = None;
+        self.clear_search();
         self.cached_lines.clear();
         self.cached_positions.clear();
         self.cached_revision = 0;
@@ -1756,6 +1784,62 @@ impl Chat {
         self.scroll_offset = usize::MAX;
         self.user_scrolled_up = false;
         self.update_scrollbar();
+    }
+
+    pub fn set_search_query(
+        &mut self,
+        query: &str,
+        max_width: usize,
+        model: &str,
+        colors: &ThemeColors,
+    ) -> usize {
+        let max_width = max_width.max(1);
+        self.ensure_render_cache(max_width, model, colors);
+        self.search_query.clear();
+        self.search_query.push_str(query);
+        self.rebuild_search_matches(max_width, colors);
+        self.search_active_match = if self.search_matches.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.scroll_to_active_search_match();
+        self.search_matches.len()
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.search_active_match = None;
+        self.search_cached_revision = 0;
+        self.search_cached_width = 0;
+        self.search_cached_colors_hash = 0;
+    }
+
+    pub fn search_match_count(&self) -> usize {
+        self.search_matches.len()
+    }
+
+    pub fn search_active_match_index(&self) -> Option<usize> {
+        self.search_active_match
+    }
+
+    pub fn cycle_search_match(&mut self, direction: isize) -> Option<usize> {
+        let count = self.search_matches.len();
+        if count == 0 {
+            self.search_active_match = None;
+            return None;
+        }
+
+        let current = self.search_active_match.unwrap_or(0);
+        let next = if direction < 0 {
+            (current + count - 1) % count
+        } else {
+            (current + 1) % count
+        };
+        self.search_active_match = Some(next);
+        self.scroll_to_active_search_match();
+        Some(next)
     }
 
     pub fn get_message_line_positions(
@@ -2410,6 +2494,136 @@ impl Chat {
         self.update_scrollbar();
     }
 
+    fn ensure_render_cache(&mut self, max_width: usize, model: &str, colors: &ThemeColors) {
+        self.update_streaming_renderer(max_width.max(1), colors);
+
+        let colors_hash = Self::cache_colors_hash(colors);
+        let cache_valid = self.cached_revision == self.render_revision
+            && self.cached_width == max_width
+            && self.cached_colors_hash == colors_hash;
+
+        if cache_valid {
+            return;
+        }
+
+        let can_rebuild_tail = self.cached_width == max_width
+            && self.cached_colors_hash == colors_hash
+            && self.cached_revision != 0
+            && self.render_dirty_from != 0
+            && self.render_dirty_from != usize::MAX
+            && self.render_dirty_from < self.messages.len()
+            && self.render_dirty_from < self.cached_positions.len();
+
+        if can_rebuild_tail {
+            let dirty_from = self.render_dirty_from;
+            let prefix_line_count = self.cached_positions[dirty_from];
+            let mut message_positions = self.cached_positions[..dirty_from].to_vec();
+            let (tail_lines, tail_positions) = self.build_lines_with_positions_from(
+                dirty_from,
+                prefix_line_count,
+                max_width,
+                model,
+                colors,
+            );
+            let tail_lines = tail_lines
+                .into_iter()
+                .map(line_to_static)
+                .collect::<Vec<_>>();
+            self.cached_lines.truncate(prefix_line_count);
+            self.cached_lines.extend(tail_lines);
+            message_positions.extend(tail_positions);
+            self.message_line_positions = message_positions.clone();
+            self.cached_positions = message_positions;
+        } else {
+            let (message_lines, message_positions) =
+                self.build_all_lines_with_positions(max_width, model, colors);
+            self.cached_lines = message_lines.into_iter().map(line_to_static).collect();
+            self.message_line_positions = message_positions.clone();
+            self.cached_positions = message_positions;
+        }
+
+        self.cached_revision = self.render_revision;
+        self.cached_width = max_width;
+        self.cached_colors_hash = colors_hash;
+        self.render_dirty_from = usize::MAX;
+    }
+
+    fn ensure_search_matches(&mut self, max_width: usize, colors: &ThemeColors) {
+        if self.search_query.is_empty() {
+            return;
+        }
+
+        let colors_hash = Self::cache_colors_hash(colors);
+        if self.search_cached_revision == self.cached_revision
+            && self.search_cached_width == max_width
+            && self.search_cached_colors_hash == colors_hash
+        {
+            return;
+        }
+
+        self.rebuild_search_matches(max_width, colors);
+        if self
+            .search_active_match
+            .is_some_and(|idx| idx >= self.search_matches.len())
+        {
+            self.search_active_match = self.search_matches.len().checked_sub(1);
+        }
+    }
+
+    fn rebuild_search_matches(&mut self, max_width: usize, colors: &ThemeColors) {
+        self.search_matches.clear();
+
+        if !self.search_query.is_empty() {
+            let needle = self.search_query.to_lowercase();
+            for (line_idx, line) in self.cached_lines.iter().enumerate() {
+                let haystack = plain_line_text(line);
+                let (lower, byte_map) = lowercase_with_original_byte_map(&haystack);
+                let mut offset = 0usize;
+
+                while offset <= lower.len() {
+                    let Some(found) = lower[offset..].find(&needle) else {
+                        break;
+                    };
+                    let start = offset + found;
+                    let end = start + needle.len();
+                    if let (Some(&original_start), Some(&original_end)) =
+                        (byte_map.get(start), byte_map.get(end))
+                    {
+                        self.search_matches.push(ChatSearchMatch {
+                            line: line_idx,
+                            start: original_start,
+                            end: original_end,
+                        });
+                    }
+                    offset = start.saturating_add(needle.len().max(1));
+                }
+            }
+        }
+
+        self.search_cached_revision = self.cached_revision;
+        self.search_cached_width = max_width;
+        self.search_cached_colors_hash = Self::cache_colors_hash(colors);
+    }
+
+    fn scroll_to_active_search_match(&mut self) {
+        let Some(idx) = self.search_active_match else {
+            return;
+        };
+        let Some(search_match) = self.search_matches.get(idx) else {
+            return;
+        };
+
+        let viewport = self.viewport_height.max(1);
+        let line = search_match.line;
+        if line < self.scroll_offset {
+            self.scroll_offset = line;
+        } else if line >= self.scroll_offset.saturating_add(viewport) {
+            self.scroll_offset = line.saturating_sub(viewport.saturating_sub(1));
+        }
+        self.user_scrolled_up = true;
+        self.update_scrollbar();
+    }
+
     pub fn render(
         &mut self,
         f: &mut Frame,
@@ -2428,9 +2642,7 @@ impl Chat {
         };
 
         let max_width = content_area.width as usize;
-        self.update_streaming_renderer(max_width.max(1), colors);
 
-        let colors_hash = Self::cache_colors_hash(colors);
         let has_active_tools = self.has_active_tool_messages();
         let animation_phase = if has_active_tools {
             Self::current_tool_marker_animation_phase()
@@ -2444,51 +2656,8 @@ impl Chat {
             }
         }
 
-        let cache_valid = self.cached_revision == self.render_revision
-            && self.cached_width == max_width
-            && self.cached_colors_hash == colors_hash;
-
-        if !cache_valid {
-            let can_rebuild_tail = self.cached_width == max_width
-                && self.cached_colors_hash == colors_hash
-                && self.cached_revision != 0
-                && self.render_dirty_from != 0
-                && self.render_dirty_from != usize::MAX
-                && self.render_dirty_from < self.messages.len()
-                && self.render_dirty_from < self.cached_positions.len();
-
-            if can_rebuild_tail {
-                let dirty_from = self.render_dirty_from;
-                let prefix_line_count = self.cached_positions[dirty_from];
-                let mut message_positions = self.cached_positions[..dirty_from].to_vec();
-                let (tail_lines, tail_positions) = self.build_lines_with_positions_from(
-                    dirty_from,
-                    prefix_line_count,
-                    max_width,
-                    model,
-                    colors,
-                );
-                let tail_lines = tail_lines
-                    .into_iter()
-                    .map(line_to_static)
-                    .collect::<Vec<_>>();
-                self.cached_lines.truncate(prefix_line_count);
-                self.cached_lines.extend(tail_lines);
-                message_positions.extend(tail_positions);
-                self.message_line_positions = message_positions.clone();
-                self.cached_positions = message_positions;
-            } else {
-                let (message_lines, message_positions) =
-                    self.build_all_lines_with_positions(max_width, model, colors);
-                self.cached_lines = message_lines.into_iter().map(line_to_static).collect();
-                self.message_line_positions = message_positions.clone();
-                self.cached_positions = message_positions;
-            }
-            self.cached_revision = self.render_revision;
-            self.cached_width = max_width;
-            self.cached_colors_hash = colors_hash;
-            self.render_dirty_from = usize::MAX;
-        }
+        self.ensure_render_cache(max_width, model, colors);
+        self.ensure_search_matches(max_width, colors);
 
         let all_lines = &self.cached_lines;
         let positions = &self.cached_positions;
@@ -2527,6 +2696,13 @@ impl Chat {
             visible_highlight_range,
             visible_start,
             highlight_bg,
+        );
+        apply_search_highlights_to_lines(
+            &mut content_lines,
+            &self.search_matches,
+            self.search_active_match,
+            visible_start,
+            colors,
         );
 
         let render_area = Rect {
@@ -4510,6 +4686,124 @@ fn apply_timeline_highlight_to_lines(
     }
 }
 
+fn apply_search_highlights_to_lines(
+    lines: &mut [Line<'static>],
+    matches: &[ChatSearchMatch],
+    active_match: Option<usize>,
+    visible_start: usize,
+    colors: &ThemeColors,
+) {
+    if matches.is_empty() || lines.is_empty() {
+        return;
+    }
+
+    let visible_end = visible_start.saturating_add(lines.len());
+    let match_bg = colors.warning;
+    let match_fg = crate::ui::components::find::find_match_fg(colors);
+    let active_bg = colors.success;
+    let active_fg = crate::theme::contrast_text(colors.success);
+
+    for (match_idx, search_match) in matches.iter().enumerate() {
+        if search_match.line < visible_start || search_match.line >= visible_end {
+            continue;
+        }
+        let line_idx = search_match.line - visible_start;
+        let style = if Some(match_idx) == active_match {
+            Style::default()
+                .fg(active_fg)
+                .bg(active_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(match_fg).bg(match_bg)
+        };
+        apply_byte_range_style_to_line(
+            &mut lines[line_idx],
+            search_match.start,
+            search_match.end,
+            style,
+        );
+    }
+}
+
+fn apply_byte_range_style_to_line(
+    line: &mut Line<'static>,
+    start: usize,
+    end: usize,
+    style: Style,
+) {
+    if start >= end {
+        return;
+    }
+
+    let mut new_spans = Vec::with_capacity(line.spans.len().saturating_add(2));
+    let mut line_offset = 0usize;
+
+    for span in std::mem::take(&mut line.spans) {
+        let content = span.content.into_owned();
+        let span_start = line_offset;
+        let span_end = span_start.saturating_add(content.len());
+        line_offset = span_end;
+
+        if end <= span_start || start >= span_end {
+            new_spans.push(Span::styled(content, span.style));
+            continue;
+        }
+
+        let local_start = start.saturating_sub(span_start).min(content.len());
+        let local_end = end.saturating_sub(span_start).min(content.len());
+
+        if local_start > 0 {
+            new_spans.push(Span::styled(content[..local_start].to_string(), span.style));
+        }
+        if local_end > local_start {
+            new_spans.push(Span::styled(
+                content[local_start..local_end].to_string(),
+                span.style.patch(style),
+            ));
+        }
+        if local_end < content.len() {
+            new_spans.push(Span::styled(content[local_end..].to_string(), span.style));
+        }
+    }
+
+    line.spans = new_spans;
+}
+
+fn plain_line_text(line: &Line<'_>) -> String {
+    let mut text = String::new();
+    for span in &line.spans {
+        text.push_str(span.content.as_ref());
+    }
+    text
+}
+
+fn lowercase_with_original_byte_map(text: &str) -> (String, Vec<usize>) {
+    let mut lower = String::with_capacity(text.len());
+    let mut byte_map = Vec::with_capacity(text.len() + 1);
+    byte_map.push(0);
+
+    for (original_start, ch) in text.char_indices() {
+        let original_end = original_start + ch.len_utf8();
+        for lower_ch in ch.to_lowercase() {
+            let lower_start = lower.len();
+            lower.push(lower_ch);
+            let lower_end = lower.len();
+            if byte_map.len() < lower_start + 1 {
+                byte_map.resize(lower_start + 1, original_start);
+            }
+            byte_map[lower_start] = original_start;
+            byte_map.resize(lower_end + 1, original_start);
+            byte_map[lower_end] = original_end;
+        }
+    }
+
+    if byte_map.len() < lower.len() + 1 {
+        byte_map.resize(lower.len() + 1, text.len());
+    }
+    byte_map[lower.len()] = text.len();
+    (lower, byte_map)
+}
+
 fn timeline_highlight_bg(message: &Message, colors: &ThemeColors) -> Color {
     if matches!(message.role, MessageRole::Assistant) {
         return blend_colors(colors.interactive, colors.background, 0.22)
@@ -4847,6 +5141,25 @@ mod tests {
         assert_eq!(chat.messages.len(), 1);
         assert_eq!(chat.messages[0].role, MessageRole::Assistant);
         assert_eq!(chat.messages[0].content, "response");
+    }
+
+    #[test]
+    fn chat_search_finds_and_cycles_rendered_matches() {
+        let colors = test_colors();
+        let mut chat = Chat::with_messages(vec![
+            Message::user("Find me here. find me again."),
+            Message::assistant("Nothing to see."),
+            Message::assistant("Another FIND target."),
+        ]);
+        chat.viewport_height = 4;
+
+        let count = chat.set_search_query("find", 80, "model", &colors);
+
+        assert_eq!(count, 3);
+        assert_eq!(chat.search_active_match_index(), Some(0));
+        assert_eq!(chat.cycle_search_match(1), Some(1));
+        assert_eq!(chat.search_active_match_index(), Some(1));
+        assert_eq!(chat.cycle_search_match(-1), Some(0));
     }
 
     #[test]

@@ -10,6 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::ThemeColors;
 use crate::ui::components::chat::Chat;
+use crate::ui::components::find::FindBar;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
 use crate::ui::components::wave_spinner::WaveSpinner;
@@ -87,6 +88,7 @@ pub fn render_chat(
     usage_text: &str,
     subagent_tabs: Option<SubagentTabs>,
     queued_messages: &[String],
+    find_bar: &mut FindBar,
 ) {
     let size = f.area();
     let is_subagent_view = subagent_tabs
@@ -162,6 +164,13 @@ pub fn render_chat(
 
         let status_bar = StatusBar::new(version, cwd, branch, agent, model);
         status_bar.render(f, main_chunks[1], colors);
+        if find_bar.is_active() {
+            find_bar.set_match_status(
+                chat_state.chat.search_match_count(),
+                chat_state.chat.search_active_match_index(),
+            );
+            find_bar.render(f, above_status_chunks[1], colors);
+        }
         return;
     }
 
@@ -233,6 +242,14 @@ pub fn render_chat(
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
     status_bar.render(f, main_chunks[1], colors);
+
+    if find_bar.is_active() {
+        find_bar.set_match_status(
+            chat_state.chat.search_match_count(),
+            chat_state.chat.search_active_match_index(),
+        );
+        find_bar.render(f, above_status_chunks[1], colors);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

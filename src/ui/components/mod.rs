@@ -2,6 +2,7 @@ pub mod action_dialog;
 pub mod api_key_input;
 pub mod chat;
 pub mod dialog;
+pub mod find;
 pub mod input;
 pub mod popup;
 pub mod status_bar;

@@ -18,6 +18,7 @@ pub enum CommandPaletteAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPaletteAppAction {
     ToggleAgentMode,
+    OpenFind,
     SetThinkingVisible(bool),
     CycleReasoningEffort,
     OpenStorage,
@@ -178,6 +179,7 @@ fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
             "toggle-agent-mode" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::ToggleAgentMode)
             }
+            "open-find" => CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenFind),
             "collapse-thinking" => CommandPaletteAction::RunAppAction(
                 CommandPaletteAppAction::SetThinkingVisible(false),
             ),
@@ -316,6 +318,22 @@ fn core_palette_items(
     );
 
     if is_chat {
+        items.insert(
+            items
+                .iter()
+                .position(|item| item.group == "Workspace")
+                .map(|idx| idx + 1)
+                .unwrap_or(items.len()),
+            app_action_item(
+                "open-find",
+                "Search / Find",
+                "Workspace",
+                "Search messages in the current chat",
+                Some("ctrl+f"),
+                &["find", "search", "chat search", "message search"],
+            ),
+        );
+
         let (id, name, description, hidden_tokens) = if thinking_visible {
             (
                 "collapse-thinking",
@@ -509,6 +527,7 @@ mod tests {
 
         assert!(state.dialog.items.iter().any(|item| item.id == "copy"));
         assert!(state.dialog.items.iter().any(|item| item.id == "fork"));
+        assert!(state.dialog.items.iter().any(|item| item.id == "open-find"));
     }
 
     #[test]
@@ -637,6 +656,23 @@ mod tests {
         assert_eq!(
             action_for_item(&expand),
             CommandPaletteAction::RunAppAction(CommandPaletteAppAction::SetThinkingVisible(true))
+        );
+    }
+
+    #[test]
+    fn palette_find_item_maps_to_open_find_action() {
+        let item = app_action_item(
+            "open-find",
+            "Search / Find",
+            "Workspace",
+            "Search messages in the current chat",
+            Some("ctrl+f"),
+            &["find", "search"],
+        );
+
+        assert_eq!(
+            action_for_item(&item),
+            CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenFind)
         );
     }
 
