@@ -299,3 +299,5 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 - [ ] OpenCode has a /move command.
 
 - [ ] Add 'search' (like search the chat panel for some messages) cmd palette
+
+- [x] perf: Optimize streaming

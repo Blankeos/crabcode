@@ -64,6 +64,9 @@ pub struct Chat {
     pub highlighted_message_index: Option<usize>,
     /// Monotonic marker for render-affecting message changes.
     render_revision: u64,
+    /// Earliest message index dirtied by append-only streaming updates.
+    /// A value of 0 means the next cache miss should rebuild everything.
+    render_dirty_from: usize,
     /// Render cache keyed by revision, width, and theme to skip expensive re-formatting.
     cached_lines: Vec<Line<'static>>,
     cached_positions: Vec<usize>,
@@ -1159,6 +1162,7 @@ impl Chat {
             pending_click_anchor: None,
             highlighted_message_index: None,
             render_revision: 1,
+            render_dirty_from: 0,
             cached_lines: Vec::new(),
             cached_positions: Vec::new(),
             cached_revision: 0,
@@ -1205,6 +1209,7 @@ impl Chat {
             pending_click_anchor: None,
             highlighted_message_index: None,
             render_revision: 1,
+            render_dirty_from: 0,
             cached_lines: Vec::new(),
             cached_positions: Vec::new(),
             cached_revision: 0,
@@ -1291,6 +1296,7 @@ impl Chat {
 
     pub fn append_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
         let chunk_str = chunk.as_ref();
+        let appended_idx;
 
         // Append only if the last message is the current streaming assistant segment.
         if self
@@ -1298,15 +1304,17 @@ impl Chat {
             .last()
             .is_some_and(|m| m.role == MessageRole::Assistant && !m.is_complete)
         {
+            appended_idx = self.messages.len().saturating_sub(1);
             if let Some(msg) = self.messages.last_mut() {
                 msg.append(chunk_str);
             }
         } else {
             // Start a new assistant segment (e.g. after tool rows).
-            self.add_message(Message::incomplete(chunk_str));
+            appended_idx = self.messages.len();
+            self.messages.push(Message::incomplete(chunk_str));
         }
 
-        self.invalidate_cache();
+        self.invalidate_cache_from(appended_idx);
 
         let now = std::time::Instant::now();
         if self.streaming_start_time.is_none() {
@@ -1328,22 +1336,25 @@ impl Chat {
 
     pub fn append_reasoning_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
         let chunk_str = chunk.as_ref();
+        let appended_idx;
 
         if self
             .messages
             .last()
             .is_some_and(|m| m.role == MessageRole::Assistant && !m.is_complete)
         {
+            appended_idx = self.messages.len().saturating_sub(1);
             if let Some(msg) = self.messages.last_mut() {
                 msg.append_reasoning(chunk_str);
             }
         } else {
+            appended_idx = self.messages.len();
             let mut msg = Message::incomplete("");
             msg.append_reasoning(chunk_str);
-            self.add_message(msg);
+            self.messages.push(msg);
         }
 
-        self.invalidate_cache();
+        self.invalidate_cache_from(appended_idx);
 
         let now = std::time::Instant::now();
         if self.streaming_start_time.is_none() {
@@ -1396,6 +1407,18 @@ impl Chat {
 
     fn invalidate_cache(&mut self) {
         self.render_revision = self.render_revision.wrapping_add(1).max(1);
+        self.render_dirty_from = 0;
+        self.cached_fingerprint = 0;
+        self.cached_active_tools_revision.set(0);
+    }
+
+    fn invalidate_cache_from(&mut self, message_idx: usize) {
+        self.render_revision = self.render_revision.wrapping_add(1).max(1);
+        self.render_dirty_from = if self.render_dirty_from == usize::MAX {
+            message_idx
+        } else {
+            self.render_dirty_from.min(message_idx)
+        };
         self.cached_fingerprint = 0;
         self.cached_active_tools_revision.set(0);
     }
@@ -1661,7 +1684,7 @@ impl Chat {
 
     /// Update the streaming markdown renderer for the current streaming message
     /// This should be called before render() to ensure the renderer is up to date
-    fn update_streaming_renderer(&mut self) {
+    fn update_streaming_renderer(&mut self, max_width: usize, colors: &ThemeColors) {
         // Check if we're streaming and have messages
         if !self.is_streaming() || self.messages.is_empty() {
             // Not streaming, clear renderer if it exists
@@ -1696,9 +1719,14 @@ impl Chat {
         // Update the renderer content if needed
         if let Some(ref mut renderer) = self.streaming_renderer {
             if let Some(msg) = self.messages.get(last_idx) {
-                if renderer.content() != msg.content {
+                if let Some(chunk) = msg.content.strip_prefix(renderer.content()) {
+                    renderer.append(chunk);
+                } else if renderer.content() != msg.content {
                     renderer.reset();
                     renderer.append(&msg.content);
+                }
+                if renderer.ensure_rendered(max_width, colors, false) {
+                    self.invalidate_cache_from(last_idx);
                 }
             }
         }
@@ -2392,8 +2420,6 @@ impl Chat {
     ) {
         self.viewport_height = area.height as usize;
 
-        self.update_streaming_renderer();
-
         let content_area = Rect {
             x: area.x,
             y: area.y,
@@ -2402,6 +2428,7 @@ impl Chat {
         };
 
         let max_width = content_area.width as usize;
+        self.update_streaming_renderer(max_width.max(1), colors);
 
         let colors_hash = Self::cache_colors_hash(colors);
         let has_active_tools = self.has_active_tool_messages();
@@ -2422,14 +2449,45 @@ impl Chat {
             && self.cached_colors_hash == colors_hash;
 
         if !cache_valid {
-            let (message_lines, message_positions) =
-                self.build_all_lines_with_positions(max_width, model, colors);
-            self.cached_lines = message_lines.into_iter().map(line_to_static).collect();
-            self.message_line_positions = message_positions.clone();
-            self.cached_positions = message_positions;
+            let can_rebuild_tail = self.cached_width == max_width
+                && self.cached_colors_hash == colors_hash
+                && self.cached_revision != 0
+                && self.render_dirty_from != 0
+                && self.render_dirty_from != usize::MAX
+                && self.render_dirty_from < self.messages.len()
+                && self.render_dirty_from < self.cached_positions.len();
+
+            if can_rebuild_tail {
+                let dirty_from = self.render_dirty_from;
+                let prefix_line_count = self.cached_positions[dirty_from];
+                let mut message_positions = self.cached_positions[..dirty_from].to_vec();
+                let (tail_lines, tail_positions) = self.build_lines_with_positions_from(
+                    dirty_from,
+                    prefix_line_count,
+                    max_width,
+                    model,
+                    colors,
+                );
+                let tail_lines = tail_lines
+                    .into_iter()
+                    .map(line_to_static)
+                    .collect::<Vec<_>>();
+                self.cached_lines.truncate(prefix_line_count);
+                self.cached_lines.extend(tail_lines);
+                message_positions.extend(tail_positions);
+                self.message_line_positions = message_positions.clone();
+                self.cached_positions = message_positions;
+            } else {
+                let (message_lines, message_positions) =
+                    self.build_all_lines_with_positions(max_width, model, colors);
+                self.cached_lines = message_lines.into_iter().map(line_to_static).collect();
+                self.message_line_positions = message_positions.clone();
+                self.cached_positions = message_positions;
+            }
             self.cached_revision = self.render_revision;
             self.cached_width = max_width;
             self.cached_colors_hash = colors_hash;
+            self.render_dirty_from = usize::MAX;
         }
 
         let all_lines = &self.cached_lines;
@@ -2568,17 +2626,31 @@ impl Chat {
         model: &'a str,
         colors: &'a ThemeColors,
     ) -> (Vec<Line<'a>>, Vec<usize>) {
+        self.build_lines_with_positions_from(0, 0, max_width, model, colors)
+    }
+
+    fn build_lines_with_positions_from<'a>(
+        &'a self,
+        start_idx: usize,
+        start_line: usize,
+        max_width: usize,
+        model: &'a str,
+        colors: &'a ThemeColors,
+    ) -> (Vec<Line<'a>>, Vec<usize>) {
         let mut all_lines: Vec<Line<'a>> = Vec::new();
         let message_count = self.messages.len();
         let streaming_idx = self.streaming_assistant_idx();
-        let streaming_content = self.streaming_renderer.as_ref().map(|r| r.get_content());
-        let mut positions = Vec::with_capacity(message_count);
-        let mut idx = 0usize;
+        let streaming_lines = self
+            .streaming_renderer
+            .as_ref()
+            .and_then(|r| r.rendered_lines());
+        let mut positions = Vec::with_capacity(message_count.saturating_sub(start_idx));
+        let mut idx = start_idx;
 
         while idx < self.messages.len() {
-            positions.push(all_lines.len());
+            positions.push(start_line + all_lines.len());
             if let Some(items) = self.task_group_at(idx) {
-                let group_start = all_lines.len();
+                let group_start = start_line + all_lines.len();
                 let group_len = items.len();
                 all_lines.extend(self.format_task_group(&items, max_width, colors));
                 all_lines.push(Line::from(""));
@@ -2588,7 +2660,7 @@ impl Chat {
             }
 
             if let Some(items) = self.exploration_group_at(idx) {
-                let group_start = all_lines.len();
+                let group_start = start_line + all_lines.len();
                 let group_len = items.len();
                 all_lines.extend(self.format_exploration_group(&items, max_width, colors));
                 all_lines.push(Line::from(""));
@@ -2623,7 +2695,7 @@ impl Chat {
                 max_width,
                 idx,
                 message_count,
-                streaming_content,
+                streaming_lines,
                 streaming_idx,
                 model,
                 colors,
@@ -2863,7 +2935,7 @@ impl Chat {
         max_width: usize,
         idx: usize,
         message_count: usize,
-        streaming_content: Option<&'a str>,
+        streaming_lines: Option<&'a [Line<'static>]>,
         streaming_idx: Option<usize>,
         model: &'a str,
         colors: &'a ThemeColors,
@@ -3246,10 +3318,10 @@ impl Chat {
                 }
 
                 if has_visible_content && is_streaming {
-                    // Use the streaming renderer content for markdown
-                    if let Some(content) = streaming_content {
-                        let markdown_lines = render_markdown(content, max_width, colors);
-                        lines.extend(markdown_lines);
+                    // Use the streaming renderer cache so fast token streams don't
+                    // force a full markdown parse on every UI frame.
+                    if let Some(cached_lines) = streaming_lines {
+                        lines.extend(cached_lines.iter().cloned());
                     } else {
                         // Fallback to plain text if renderer not available
                         let content = message.content.clone();

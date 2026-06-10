@@ -201,6 +201,28 @@ struct SessionStreamState {
     streaming_model: Option<String>,
     streaming_provider: Option<String>,
     chat_len_before_assistant: usize,
+    last_message_snapshot: std::time::Instant,
+    pending_message_snapshot: bool,
+}
+
+impl SessionStreamState {
+    fn new(
+        chunk_receiver: crate::llm::ChunkReceiver,
+        cancel_token: tokio_util::sync::CancellationToken,
+        streaming_model: Option<String>,
+        streaming_provider: Option<String>,
+        chat_len_before_assistant: usize,
+    ) -> Self {
+        Self {
+            chunk_receiver,
+            cancel_token,
+            streaming_model,
+            streaming_provider,
+            chat_len_before_assistant,
+            last_message_snapshot: std::time::Instant::now(),
+            pending_message_snapshot: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +230,24 @@ struct ExternalStreamState {
     streaming_model: Option<String>,
     streaming_provider: Option<String>,
     chat_len_before_assistant: usize,
+    last_message_snapshot: std::time::Instant,
+    pending_message_snapshot: bool,
+}
+
+impl ExternalStreamState {
+    fn new(
+        streaming_model: Option<String>,
+        streaming_provider: Option<String>,
+        chat_len_before_assistant: usize,
+    ) -> Self {
+        Self {
+            streaming_model,
+            streaming_provider,
+            chat_len_before_assistant,
+            last_message_snapshot: std::time::Instant::now(),
+            pending_message_snapshot: false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -238,6 +278,91 @@ enum SelectionAction {
 const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TERMINAL_TITLE_SPINNER_INTERVAL_MS: u128 = 100;
+const STREAM_CHUNK_DRAIN_LIMIT: usize = 256;
+const STREAM_MESSAGE_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+fn coalesce_streaming_chunks(
+    chunks: Vec<crate::llm::ChunkMessage>,
+) -> Vec<crate::llm::ChunkMessage> {
+    use crate::llm::ChunkMessage;
+
+    let mut coalesced = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        match chunk {
+            ChunkMessage::Text(text) => {
+                if text.is_empty() {
+                    continue;
+                }
+                if let Some(ChunkMessage::Text(previous)) = coalesced.last_mut() {
+                    previous.push_str(&text);
+                } else {
+                    coalesced.push(ChunkMessage::Text(text));
+                }
+            }
+            ChunkMessage::Reasoning(reasoning) => {
+                if reasoning.is_empty() {
+                    continue;
+                }
+                if let Some(ChunkMessage::Reasoning(previous)) = coalesced.last_mut() {
+                    previous.push_str(&reasoning);
+                } else {
+                    coalesced.push(ChunkMessage::Reasoning(reasoning));
+                }
+            }
+            ChunkMessage::SubagentChunk { session_id, chunk } => match *chunk {
+                ChunkMessage::Text(text) => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    if let Some(ChunkMessage::SubagentChunk {
+                        session_id: previous_session_id,
+                        chunk: previous_chunk,
+                    }) = coalesced.last_mut()
+                    {
+                        if previous_session_id == &session_id {
+                            if let ChunkMessage::Text(previous) = previous_chunk.as_mut() {
+                                previous.push_str(&text);
+                                continue;
+                            }
+                        }
+                    }
+                    coalesced.push(ChunkMessage::SubagentChunk {
+                        session_id,
+                        chunk: Box::new(ChunkMessage::Text(text)),
+                    });
+                }
+                ChunkMessage::Reasoning(reasoning) => {
+                    if reasoning.is_empty() {
+                        continue;
+                    }
+                    if let Some(ChunkMessage::SubagentChunk {
+                        session_id: previous_session_id,
+                        chunk: previous_chunk,
+                    }) = coalesced.last_mut()
+                    {
+                        if previous_session_id == &session_id {
+                            if let ChunkMessage::Reasoning(previous) = previous_chunk.as_mut() {
+                                previous.push_str(&reasoning);
+                                continue;
+                            }
+                        }
+                    }
+                    coalesced.push(ChunkMessage::SubagentChunk {
+                        session_id,
+                        chunk: Box::new(ChunkMessage::Reasoning(reasoning)),
+                    });
+                }
+                inner => coalesced.push(ChunkMessage::SubagentChunk {
+                    session_id,
+                    chunk: Box::new(inner),
+                }),
+            },
+            other => coalesced.push(other),
+        }
+    }
+
+    coalesced
+}
 
 type ReasoningEffortOverrides =
     std::collections::HashMap<(String, String), crate::model::reasoning::ReasoningEffort>;
@@ -1224,6 +1349,54 @@ impl App {
         self.session_manager
             .replace_session_messages(session_id, messages)
             .is_ok()
+    }
+
+    fn mark_streaming_snapshot_pending(&mut self, session_id: &str) {
+        if let Some(stream) = self.stream_for_session_mut(session_id) {
+            stream.pending_message_snapshot = true;
+        } else if let Some(stream) = self
+            .session_view_states
+            .get_mut(session_id)
+            .and_then(|state| state.external_stream.as_mut())
+        {
+            stream.pending_message_snapshot = true;
+        }
+    }
+
+    fn maybe_persist_streaming_snapshot_for_session(&mut self, session_id: &str, force: bool) {
+        let should_persist = self
+            .session_view_states
+            .get(session_id)
+            .is_some_and(|state| {
+                state.stream.as_ref().is_some_and(|stream| {
+                    stream.pending_message_snapshot
+                        && (force
+                            || stream.last_message_snapshot.elapsed()
+                                >= STREAM_MESSAGE_SNAPSHOT_INTERVAL)
+                }) || state.external_stream.as_ref().is_some_and(|stream| {
+                    stream.pending_message_snapshot
+                        && (force
+                            || stream.last_message_snapshot.elapsed()
+                                >= STREAM_MESSAGE_SNAPSHOT_INTERVAL)
+                })
+            });
+
+        if !should_persist || !self.persist_chat_messages_for_session(session_id) {
+            return;
+        }
+
+        if let Some(stream) = self.stream_for_session_mut(session_id) {
+            stream.pending_message_snapshot = false;
+            stream.last_message_snapshot = std::time::Instant::now();
+        }
+        if let Some(stream) = self
+            .session_view_states
+            .get_mut(session_id)
+            .and_then(|state| state.external_stream.as_mut())
+        {
+            stream.pending_message_snapshot = false;
+            stream.last_message_snapshot = std::time::Instant::now();
+        }
     }
 
     fn stream_for_session_mut(&mut self, session_id: &str) -> Option<&mut SessionStreamState> {
@@ -6240,7 +6413,7 @@ impl App {
             let mut disconnected = false;
 
             if let Some(stream) = self.stream_for_session_mut(&session_id) {
-                loop {
+                for _ in 0..STREAM_CHUNK_DRAIN_LIMIT {
                     match stream.chunk_receiver.try_recv() {
                         Ok(chunk) => chunks.push(chunk),
                         Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
@@ -6253,11 +6426,15 @@ impl App {
             }
 
             let mut keep_current_stream = true;
-            for chunk in chunks {
+            for chunk in coalesce_streaming_chunks(chunks) {
                 if !self.process_streaming_chunk_for_session(&session_id, chunk) {
                     keep_current_stream = false;
                     break;
                 }
+            }
+
+            if keep_current_stream {
+                self.maybe_persist_streaming_snapshot_for_session(&session_id, false);
             }
 
             if !keep_current_stream {
@@ -6301,14 +6478,14 @@ impl App {
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.append_to_last_assistant(&text);
                 }
-                self.persist_chat_messages_for_session(session_id);
+                self.mark_streaming_snapshot_pending(session_id);
                 true
             }
             crate::llm::ChunkMessage::Reasoning(reasoning) => {
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.append_reasoning_to_last_assistant(&reasoning);
                 }
-                self.persist_chat_messages_for_session(session_id);
+                self.mark_streaming_snapshot_pending(session_id);
                 true
             }
             crate::llm::ChunkMessage::Warning(msg) => {
@@ -6358,10 +6535,13 @@ impl App {
                 true
             }
             crate::llm::ChunkMessage::SubagentChunk { session_id, chunk } => {
-                let _ = self.process_streaming_chunk_for_session(&session_id, *chunk);
+                if self.process_streaming_chunk_for_session(&session_id, *chunk) {
+                    self.maybe_persist_streaming_snapshot_for_session(&session_id, false);
+                }
                 true
             }
             crate::llm::ChunkMessage::PermissionRequest(prompt) => {
+                self.maybe_persist_streaming_snapshot_for_session(session_id, true);
                 let _ = self.session_manager.set_session_status(
                     session_id,
                     crate::session::types::SessionStatus::Waiting,
@@ -6383,6 +6563,7 @@ impl App {
                 questions,
                 response_tx,
             } => {
+                self.maybe_persist_streaming_snapshot_for_session(session_id, true);
                 let _ = self.session_manager.set_session_status(
                     session_id,
                     crate::session::types::SessionStatus::Waiting,
@@ -6447,11 +6628,11 @@ impl App {
             }
             state.chat.mark_render_dirty();
             state.chat.begin_streaming_turn();
-            state.external_stream = Some(ExternalStreamState {
-                streaming_model: model.or_else(|| Some(self.model.clone())),
-                streaming_provider: provider.or_else(|| Some(self.provider_name.clone())),
-                chat_len_before_assistant: 1,
-            });
+            state.external_stream = Some(ExternalStreamState::new(
+                model.or_else(|| Some(self.model.clone())),
+                provider.or_else(|| Some(self.provider_name.clone())),
+                1,
+            ));
             state.unread_completed = true;
         }
 
@@ -6468,6 +6649,8 @@ impl App {
     }
 
     fn finish_streaming_session(&mut self, session_id: &str) {
+        self.maybe_persist_streaming_snapshot_for_session(session_id, true);
+
         if self.defer_finish_if_tools_are_running(session_id) {
             return;
         }
@@ -6652,6 +6835,8 @@ impl App {
     }
 
     fn fail_streaming_session(&mut self, session_id: &str, error: String) {
+        self.maybe_persist_streaming_snapshot_for_session(session_id, true);
+
         if self
             .finalize_and_persist_streamed_messages(session_id, Some(&error))
             .is_none()
@@ -6678,6 +6863,7 @@ impl App {
 
     fn cancelled_streaming_session(&mut self, session_id: &str) {
         self.mark_streamed_assistant_interrupted(session_id);
+        self.maybe_persist_streaming_snapshot_for_session(session_id, true);
 
         if self
             .finalize_and_persist_streamed_messages(session_id, Some("Streaming cancelled by user"))
@@ -6895,13 +7081,13 @@ impl App {
         self.chat_state.chat.begin_streaming_turn();
 
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
-            state.stream = Some(SessionStreamState {
-                chunk_receiver: receiver,
-                cancel_token: cancel_token.clone(),
-                streaming_model: streaming_model.clone(),
-                streaming_provider: streaming_provider.clone(),
+            state.stream = Some(SessionStreamState::new(
+                receiver,
+                cancel_token.clone(),
+                streaming_model.clone(),
+                streaming_provider.clone(),
                 chat_len_before_assistant,
-            });
+            ));
             state.tool_calls = ToolCallViewState::default();
             state.unread_completed = false;
         }
@@ -7494,13 +7680,13 @@ impl App {
         self.chat_state.chat.begin_streaming_turn();
 
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
-            state.stream = Some(SessionStreamState {
-                chunk_receiver: receiver,
-                cancel_token: cancel_token.clone(),
+            state.stream = Some(SessionStreamState::new(
+                receiver,
+                cancel_token.clone(),
                 streaming_model,
                 streaming_provider,
                 chat_len_before_assistant,
-            });
+            ));
             state.tool_calls = ToolCallViewState::default();
             state.unread_completed = false;
         }
@@ -7717,7 +7903,10 @@ impl App {
             self.chat_state.chat.messages.len(),
             self.chat_state.chat.render_revision(),
         );
-        if self.cached_usage_check != fingerprint {
+        let keep_streaming_usage_cache = self.is_streaming
+            && self.cached_usage_check.0 == fingerprint.0
+            && self.cached_usage_check.0 != usize::MAX;
+        if self.cached_usage_check != fingerprint && !keep_streaming_usage_cache {
             self.cached_usage_check = fingerprint;
             self.cached_usage_text = self.session_usage_text();
         }
@@ -8393,11 +8582,11 @@ mod tests {
             session.workspace_path = "/tmp/sheetpilot".to_string();
         }
         if let Some(state) = app.session_view_states.get_mut(&session_id) {
-            state.external_stream = Some(ExternalStreamState {
-                streaming_model: Some("test-model".to_string()),
-                streaming_provider: Some("test-provider".to_string()),
-                chat_len_before_assistant: 0,
-            });
+            state.external_stream = Some(ExternalStreamState::new(
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
         }
 
         let title = app.terminal_title_text();
@@ -8960,13 +9149,14 @@ mod tests {
         let session_id = app.create_new_session(Some("Queue".to_string()));
         app.base_focus = BaseFocus::Chat;
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        app.session_view_states.get_mut(&session_id).unwrap().stream = Some(SessionStreamState {
-            chunk_receiver: receiver,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            streaming_model: Some("test-model".to_string()),
-            streaming_provider: Some("test-provider".to_string()),
-            chat_len_before_assistant: 0,
-        });
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
         app.is_streaming = true;
         app.input.insert_str("Then about riolu");
 
@@ -9010,6 +9200,82 @@ mod tests {
         assert!(app.chat_state.chat.messages.is_empty());
     }
 
+    #[test]
+    fn streaming_text_chunks_are_coalesced() {
+        let chunks = coalesce_streaming_chunks(vec![
+            crate::llm::ChunkMessage::Text("hello".to_string()),
+            crate::llm::ChunkMessage::Text(" ".to_string()),
+            crate::llm::ChunkMessage::Text("world".to_string()),
+            crate::llm::ChunkMessage::Warning("careful".to_string()),
+            crate::llm::ChunkMessage::Reasoning("think".to_string()),
+            crate::llm::ChunkMessage::Reasoning("ing".to_string()),
+        ]);
+
+        assert_eq!(chunks.len(), 3);
+        match &chunks[0] {
+            crate::llm::ChunkMessage::Text(text) => assert_eq!(text, "hello world"),
+            _ => panic!("expected coalesced text chunk"),
+        }
+        match &chunks[2] {
+            crate::llm::ChunkMessage::Reasoning(text) => assert_eq!(text, "thinking"),
+            _ => panic!("expected coalesced reasoning chunk"),
+        }
+    }
+
+    #[test]
+    fn streaming_text_persistence_is_throttled_until_terminal_chunk() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Streaming throttle".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete(""));
+        app.chat_state.chat.begin_streaming_turn();
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender
+            .send(crate::llm::ChunkMessage::Text("hello".to_string()))
+            .unwrap();
+        sender
+            .send(crate::llm::ChunkMessage::Text(" world".to_string()))
+            .unwrap();
+
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+
+        app.process_streaming_chunks();
+
+        assert_eq!(app.chat_state.chat.messages[0].content, "hello world");
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .unwrap()
+                .messages
+                .get(0)
+                .map(|message| message.content.as_str()),
+            None
+        );
+
+        sender.send(crate::llm::ChunkMessage::End).unwrap();
+        app.process_streaming_chunks();
+
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .unwrap()
+                .messages[0]
+                .content,
+            "hello world"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn queued_messages_cancel_stream_after_next_tool_result() {
         let mut app = test_app();
@@ -9029,13 +9295,13 @@ mod tests {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let observed_cancel_token = cancel_token.clone();
         let state = app.session_view_states.get_mut(&session_id).unwrap();
-        state.stream = Some(SessionStreamState {
-            chunk_receiver: receiver,
+        state.stream = Some(SessionStreamState::new(
+            receiver,
             cancel_token,
-            streaming_model: Some("test-model".to_string()),
-            streaming_provider: Some("test-provider".to_string()),
-            chat_len_before_assistant: 0,
-        });
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            0,
+        ));
         state
             .tool_calls
             .tool_call_message_indices
@@ -9073,13 +9339,13 @@ mod tests {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let observed_cancel_token = cancel_token.clone();
         let state = app.session_view_states.get_mut(&session_id).unwrap();
-        state.stream = Some(SessionStreamState {
-            chunk_receiver: receiver,
+        state.stream = Some(SessionStreamState::new(
+            receiver,
             cancel_token,
-            streaming_model: Some("test-model".to_string()),
-            streaming_provider: Some("test-provider".to_string()),
-            chat_len_before_assistant: boundary,
-        });
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            boundary,
+        ));
         state.queued_messages.push_back(QueuedUserMessage {
             text: "Then about riolu".to_string(),
             image_paths: Vec::new(),
@@ -9209,13 +9475,14 @@ mod tests {
             ));
 
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        app.session_view_states.get_mut(&session_id).unwrap().stream = Some(SessionStreamState {
-            chunk_receiver: receiver,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            streaming_model: Some("test-model".to_string()),
-            streaming_provider: Some("test-provider".to_string()),
-            chat_len_before_assistant: 1,
-        });
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                1,
+            ));
         app.is_streaming = true;
 
         app.fail_streaming_session(&session_id, "Permission denied by user".to_string());
@@ -9287,13 +9554,14 @@ mod tests {
             ));
 
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        app.session_view_states.get_mut(&session_id).unwrap().stream = Some(SessionStreamState {
-            chunk_receiver: receiver,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            streaming_model: Some("test-model".to_string()),
-            streaming_provider: Some("test-provider".to_string()),
-            chat_len_before_assistant: 1,
-        });
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                1,
+            ));
         app.is_streaming = true;
 
         app.cancelled_streaming_session(&session_id);
@@ -9346,13 +9614,13 @@ mod tests {
 
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let state = app.session_view_states.get_mut(&session_id).unwrap();
-        state.stream = Some(SessionStreamState {
-            chunk_receiver: receiver,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            streaming_model: Some("test-model".to_string()),
-            streaming_provider: Some("test-provider".to_string()),
-            chat_len_before_assistant: 1,
-        });
+        state.stream = Some(SessionStreamState::new(
+            receiver,
+            tokio_util::sync::CancellationToken::new(),
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            1,
+        ));
         app.is_streaming = true;
 
         app.add_tool_calls_to_session(
@@ -9438,13 +9706,13 @@ mod tests {
 
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let state = app.session_view_states.get_mut(&session_id).unwrap();
-        state.stream = Some(SessionStreamState {
-            chunk_receiver: receiver,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            streaming_model: Some("test-model".to_string()),
-            streaming_provider: Some("test-provider".to_string()),
-            chat_len_before_assistant: 1,
-        });
+        state.stream = Some(SessionStreamState::new(
+            receiver,
+            tokio_util::sync::CancellationToken::new(),
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            1,
+        ));
         state
             .tool_calls
             .tool_call_message_indices
@@ -9529,13 +9797,13 @@ mod tests {
         drop(sender);
 
         let state = app.session_view_states.get_mut(&session_id).unwrap();
-        state.stream = Some(SessionStreamState {
-            chunk_receiver: receiver,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            streaming_model: Some("test-model".to_string()),
-            streaming_provider: Some("test-provider".to_string()),
-            chat_len_before_assistant: 1,
-        });
+        state.stream = Some(SessionStreamState::new(
+            receiver,
+            tokio_util::sync::CancellationToken::new(),
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            1,
+        ));
         state
             .tool_calls
             .tool_call_message_indices
@@ -9608,13 +9876,13 @@ mod tests {
         drop(sender);
 
         let state = app.session_view_states.get_mut(&session_id).unwrap();
-        state.stream = Some(SessionStreamState {
-            chunk_receiver: receiver,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            streaming_model: Some("test-model".to_string()),
-            streaming_provider: Some("test-provider".to_string()),
-            chat_len_before_assistant: 1,
-        });
+        state.stream = Some(SessionStreamState::new(
+            receiver,
+            tokio_util::sync::CancellationToken::new(),
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            1,
+        ));
         state
             .tool_calls
             .tool_call_message_indices

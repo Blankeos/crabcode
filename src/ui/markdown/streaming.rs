@@ -19,7 +19,14 @@ pub struct SimpleStreamingRenderer {
     content: String,
     last_content_hash: u64,
     needs_render: bool,
+    cached_lines: Vec<Line<'static>>,
+    cached_width: usize,
+    cached_colors_hash: u64,
+    last_rendered_at: Option<std::time::Instant>,
 }
+
+const STREAMING_MARKDOWN_RENDER_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
 
 impl SimpleStreamingRenderer {
     pub fn new() -> Self {
@@ -27,6 +34,10 @@ impl SimpleStreamingRenderer {
             content: String::new(),
             last_content_hash: 0,
             needs_render: true,
+            cached_lines: Vec::new(),
+            cached_width: 0,
+            cached_colors_hash: 0,
+            last_rendered_at: None,
         }
     }
 
@@ -35,6 +46,10 @@ impl SimpleStreamingRenderer {
         self.content.clear();
         self.last_content_hash = 0;
         self.needs_render = true;
+        self.cached_lines.clear();
+        self.cached_width = 0;
+        self.cached_colors_hash = 0;
+        self.last_rendered_at = None;
     }
 
     /// Append new content from the stream
@@ -57,12 +72,45 @@ impl SimpleStreamingRenderer {
     pub fn mark_rendered(&mut self) {
         self.needs_render = false;
         self.last_content_hash = compute_hash(&self.content);
+        self.last_rendered_at = Some(std::time::Instant::now());
     }
 
     /// Get the content to render
     /// Returns the markdown content that should be rendered
     pub fn get_content(&self) -> &str {
         &self.content
+    }
+
+    pub fn rendered_lines(&self) -> Option<&[Line<'static>]> {
+        (!self.cached_lines.is_empty() || self.content.is_empty()).then_some(&self.cached_lines)
+    }
+
+    pub fn ensure_rendered(&mut self, max_width: usize, colors: &ThemeColors, force: bool) -> bool {
+        let max_width = max_width.max(1);
+        let colors_hash = theme_colors_hash(colors);
+        let render_config_changed =
+            self.cached_width != max_width || self.cached_colors_hash != colors_hash;
+
+        if !force && !self.needs_render && !render_config_changed {
+            return false;
+        }
+
+        if !force
+            && self.needs_render
+            && !render_config_changed
+            && !self.cached_lines.is_empty()
+            && self
+                .last_rendered_at
+                .is_some_and(|last| last.elapsed() < STREAMING_MARKDOWN_RENDER_INTERVAL)
+        {
+            return false;
+        }
+
+        self.cached_lines = render_markdown(&self.content, max_width, colors);
+        self.cached_width = max_width;
+        self.cached_colors_hash = colors_hash;
+        self.mark_rendered();
+        true
     }
 }
 
@@ -79,6 +127,14 @@ fn compute_hash(content: &str) -> u64 {
 
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn theme_colors_hash(colors: &ThemeColors) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    colors.hash(&mut hasher);
     hasher.finish()
 }
 
