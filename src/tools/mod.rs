@@ -7,6 +7,7 @@ pub mod context;
 pub mod edit;
 pub mod fs;
 pub mod init;
+pub mod mutation;
 pub mod patch;
 pub mod permission;
 pub mod question;

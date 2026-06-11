@@ -1,3 +1,4 @@
+use crate::tools::mutation::FileMutation;
 use crate::tools::{
     get_string_param, validate_required, ParameterSchema, ParameterType, Tool, ToolContext,
     ToolError, ToolHandler, ToolResult,
@@ -5,7 +6,6 @@ use crate::tools::{
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
 
 pub struct WriteTool;
 pub struct WriteFilesTool;
@@ -23,27 +23,8 @@ impl WriteFilesTool {
 }
 
 fn write_one_file(file_path: &str, content: &str) -> Result<(bool, u64), ToolError> {
-    let path = Path::new(file_path);
-    let is_new = !path.exists();
-
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ToolError::Execution(format!("Failed to create directories: {}", e))
-            })?;
-        }
-    }
-
-    let temp_path = path.with_extension("tmp");
-
-    std::fs::write(&temp_path, content)
-        .map_err(|e| ToolError::Execution(format!("Failed to write temp file: {}", e)))?;
-
-    std::fs::rename(&temp_path, path)
-        .map_err(|e| ToolError::Execution(format!("Failed to rename file: {}", e)))?;
-
-    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    Ok((is_new, bytes))
+    let outcome = FileMutation::write(file_path, content.as_bytes())?;
+    Ok((!outcome.existed, outcome.bytes))
 }
 
 #[async_trait]

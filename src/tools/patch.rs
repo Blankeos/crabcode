@@ -1,3 +1,4 @@
+use crate::tools::mutation::{FileMutation, LockedFile, STALE_FILE_MESSAGE};
 use crate::tools::{
     get_string_param, validate_required, ParameterSchema, ParameterType, Tool, ToolContext,
     ToolError, ToolHandler, ToolResult,
@@ -218,40 +219,53 @@ fn apply_unified_patch(patch: &str) -> Result<PatchSummary, ToolError> {
         } else {
             new_path.as_str()
         };
-        let mut content = if old_path == "/dev/null" {
-            String::new()
-        } else {
-            read_file(target_path)?
-        };
-        let mut applied_hunks = 0usize;
 
-        while index < lines.len()
-            && !lines[index].starts_with("--- ")
-            && !lines[index].starts_with("diff --git ")
-        {
-            if !lines[index].starts_with("@@") {
+        FileMutation::with_lock_path(target_path, |locked| {
+            let (expected, mut content) = if old_path == "/dev/null" {
+                (None, String::new())
+            } else {
+                let bytes = locked.read()?;
+                let content = decode_utf8(&bytes)?;
+                (Some(bytes), content)
+            };
+            let mut applied_hunks = 0usize;
+
+            while index < lines.len()
+                && !lines[index].starts_with("--- ")
+                && !lines[index].starts_with("diff --git ")
+            {
+                if !lines[index].starts_with("@@") {
+                    index += 1;
+                    continue;
+                }
                 index += 1;
-                continue;
+                let (old_text, new_text, next_index) = collect_hunk(&lines, index);
+                content = replace_hunk(&content, &old_text, &new_text)?;
+                applied_hunks += 1;
+                index = next_index;
             }
-            index += 1;
-            let (old_text, new_text, next_index) = collect_hunk(&lines, index);
-            content = replace_hunk(&content, &old_text, &new_text)?;
-            applied_hunks += 1;
-            index = next_index;
-        }
 
-        if new_path == "/dev/null" {
-            std::fs::remove_file(target_path)
-                .map_err(|e| ToolError::Execution(format!("Failed to delete file: {}", e)))?;
-            summary.deleted += 1;
-        } else {
-            write_atomic(target_path, &content)?;
-            if old_path == "/dev/null" {
+            if new_path == "/dev/null" {
+                let expected = expected.ok_or_else(|| {
+                    ToolError::Validation("Delete hunk did not have source content".to_string())
+                })?;
+                locked.remove_if_unchanged(&expected)?;
+                summary.deleted += 1;
+            } else if old_path == "/dev/null" {
+                locked.create_new(content.as_bytes())?;
                 summary.added += 1;
-            } else if applied_hunks > 0 {
-                summary.updated += 1;
+            } else {
+                let expected = expected.ok_or_else(|| {
+                    ToolError::Validation("Update hunk did not have source content".to_string())
+                })?;
+                locked.write_if_unchanged(&expected, content.as_bytes())?;
+                if applied_hunks > 0 {
+                    summary.updated += 1;
+                }
             }
-        }
+
+            Ok(())
+        })?;
     }
 
     if summary.touched() == 0 {
@@ -323,22 +337,203 @@ fn replace_hunk(content: &str, old_text: &str, new_text: &str) -> Result<String,
         return Ok(out);
     }
 
-    if old_text.ends_with('\n') {
-        let old_trimmed = old_text.trim_end_matches('\n');
-        if let Some(pos) = content.find(old_trimmed) {
-            let new_trimmed = new_text.trim_end_matches('\n');
-            let mut out =
-                String::with_capacity(content.len() - old_trimmed.len() + new_trimmed.len());
-            out.push_str(&content[..pos]);
-            out.push_str(new_trimmed);
-            out.push_str(&content[pos + old_trimmed.len()..]);
-            return Ok(out);
-        }
+    if let Some((start, end, old_replacement, new_replacement)) =
+        find_controlled_hunk_match(content, old_text, new_text)
+    {
+        let mut out =
+            String::with_capacity(content.len() - old_replacement.len() + new_replacement.len());
+        out.push_str(&content[..start]);
+        out.push_str(&new_replacement);
+        out.push_str(&content[end..]);
+        return Ok(out);
     }
 
     Err(ToolError::NotFound(
         "Could not apply patch hunk: context was not found".to_string(),
     ))
+}
+
+fn find_controlled_hunk_match(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+) -> Option<(usize, usize, String, String)> {
+    let content_ending = detect_line_ending(content);
+    let old_lf = normalize_line_endings(old_text);
+    let new_lf = normalize_line_endings(new_text);
+    let old_variants = hunk_text_variants(&old_lf);
+
+    for old_variant_lf in old_variants {
+        let new_variant_lf = align_trailing_newline(&new_lf, old_variant_lf.ends_with('\n'));
+        for candidate_old in line_ending_variants(&old_variant_lf, content_ending) {
+            if let Some(pos) = content.find(&candidate_old) {
+                let candidate_new = convert_line_endings(&new_variant_lf, content_ending);
+                return Some((pos, pos + candidate_old.len(), candidate_old, candidate_new));
+            }
+        }
+    }
+
+    find_line_sequence_match(content, &old_lf).map(|(start, end, matched)| {
+        let new_replacement = convert_line_endings(
+            &align_trailing_newline(&new_lf, matched.ends_with(content_ending)),
+            content_ending,
+        );
+        (start, end, matched, new_replacement)
+    })
+}
+
+fn hunk_text_variants(text: &str) -> Vec<String> {
+    let mut variants = Vec::new();
+    push_unique(&mut variants, text.to_string());
+    if text.ends_with('\n') {
+        push_unique(&mut variants, text.trim_end_matches('\n').to_string());
+    }
+    variants
+}
+
+fn line_ending_variants(text_lf: &str, preferred: &str) -> Vec<String> {
+    let mut variants = Vec::new();
+    push_unique(&mut variants, convert_line_endings(text_lf, preferred));
+    push_unique(&mut variants, text_lf.to_string());
+    push_unique(&mut variants, convert_line_endings(text_lf, "\r\n"));
+    variants
+}
+
+fn find_line_sequence_match(content: &str, old_text_lf: &str) -> Option<(usize, usize, String)> {
+    let pattern = split_hunk_pattern(old_text_lf);
+    if pattern.is_empty() || pattern.len() > content.lines().count() {
+        return None;
+    }
+
+    let content_lines = split_content_lines_with_offsets(content);
+    if pattern.len() > content_lines.len() {
+        return None;
+    }
+
+    for start in 0..=content_lines.len().saturating_sub(pattern.len()) {
+        let window = &content_lines[start..start + pattern.len()];
+        if lines_match(window, &pattern, MatchMode::TrimEnd)
+            || lines_match(window, &pattern, MatchMode::Trim)
+            || lines_match(window, &pattern, MatchMode::Normalized)
+        {
+            let start_byte = window.first()?.start;
+            let end_byte = window.last()?.end;
+            return Some((
+                start_byte,
+                end_byte,
+                content[start_byte..end_byte].to_string(),
+            ));
+        }
+    }
+
+    None
+}
+
+#[derive(Clone, Copy)]
+enum MatchMode {
+    TrimEnd,
+    Trim,
+    Normalized,
+}
+
+struct ContentLine<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+}
+
+fn split_content_lines_with_offsets(content: &str) -> Vec<ContentLine<'_>> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for piece in content.split_inclusive('\n') {
+        let end = start + piece.len();
+        let text = piece.trim_end_matches('\n').trim_end_matches('\r');
+        lines.push(ContentLine { text, start, end });
+        start = end;
+    }
+    if start < content.len() {
+        lines.push(ContentLine {
+            text: &content[start..],
+            start,
+            end: content.len(),
+        });
+    }
+    lines
+}
+
+fn split_hunk_pattern(text_lf: &str) -> Vec<String> {
+    let mut lines: Vec<String> = text_lf.split('\n').map(ToString::to_string).collect();
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+fn lines_match(window: &[ContentLine<'_>], pattern: &[String], mode: MatchMode) -> bool {
+    window
+        .iter()
+        .zip(pattern)
+        .all(|(line, expected)| match mode {
+            MatchMode::TrimEnd => line.text.trim_end() == expected.trim_end(),
+            MatchMode::Trim => line.text.trim() == expected.trim(),
+            MatchMode::Normalized => {
+                normalize_patch_context(line.text) == normalize_patch_context(expected)
+            }
+        })
+}
+
+fn normalize_patch_context(value: &str) -> String {
+    let mut normalized = String::new();
+    for ch in value.trim().chars() {
+        match ch {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => normalized.push('-'),
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => normalized.push('\''),
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => normalized.push('"'),
+            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
+            | '\u{3000}' => normalized.push(' '),
+            '\u{2026}' => normalized.push_str("..."),
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+fn normalize_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn detect_line_ending(text: &str) -> &'static str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn convert_line_endings(text_lf: &str, ending: &str) -> String {
+    if ending == "\r\n" {
+        text_lf.replace('\n', "\r\n")
+    } else {
+        text_lf.to_string()
+    }
+}
+
+fn align_trailing_newline(text: &str, should_end_with_newline: bool) -> String {
+    if should_end_with_newline && !text.ends_with('\n') {
+        format!("{}\n", text)
+    } else if !should_end_with_newline && text.ends_with('\n') {
+        text.trim_end_matches('\n').to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
 }
 
 fn apply_codex_patch(patch: &str) -> Result<PatchSummary, ToolError> {
@@ -371,14 +566,17 @@ fn apply_codex_patch(patch: &str) -> Result<PatchSummary, ToolError> {
                 file_lines.push(content.to_string());
                 index += 1;
             }
-            write_atomic(path, &join_hunk_lines(&file_lines))?;
+            FileMutation::create_new(path, join_hunk_lines(&file_lines).as_bytes())?;
             summary.added += 1;
             continue;
         }
 
         if let Some(path) = line.strip_prefix("*** Delete File: ") {
-            std::fs::remove_file(path)
-                .map_err(|e| ToolError::Execution(format!("Failed to delete file: {}", e)))?;
+            FileMutation::with_lock_path(path, |locked| {
+                let expected = locked.read()?;
+                locked.remove_if_unchanged(&expected)?;
+                Ok(())
+            })?;
             summary.deleted += 1;
             index += 1;
             continue;
@@ -395,25 +593,48 @@ fn apply_codex_patch(patch: &str) -> Result<PatchSummary, ToolError> {
                 index += 1;
             }
 
-            let mut content = read_file(path)?;
             let mut hunk_count = 0usize;
-            while index < lines.len() && !lines[index].starts_with("*** ") {
-                if !lines[index].starts_with("@@") {
-                    index += 1;
-                    continue;
-                }
-                index += 1;
-                let (old_text, new_text, next_index) = collect_hunk(&lines, index);
-                content = replace_hunk(&content, &old_text, &new_text)?;
-                hunk_count += 1;
-                index = next_index;
-            }
-
             let target = move_to.as_deref().unwrap_or(path);
-            write_atomic(target, &content)?;
+            if target == path {
+                FileMutation::with_lock_path(path, |locked| {
+                    let expected = locked.read()?;
+                    let mut content = decode_utf8(&expected)?;
+                    while index < lines.len() && !lines[index].starts_with("*** ") {
+                        if !lines[index].starts_with("@@") {
+                            index += 1;
+                            continue;
+                        }
+                        index += 1;
+                        let (old_text, new_text, next_index) = collect_hunk(&lines, index);
+                        content = replace_hunk(&content, &old_text, &new_text)?;
+                        hunk_count += 1;
+                        index = next_index;
+                    }
+                    locked.write_if_unchanged(&expected, content.as_bytes())?;
+                    Ok(())
+                })?;
+            } else {
+                let target_path = PathBuf::from(target);
+                FileMutation::with_two_lock_paths(path, &target_path, |source, target_locked| {
+                    let expected = source.read()?;
+                    let mut content = decode_utf8(&expected)?;
+                    while index < lines.len() && !lines[index].starts_with("*** ") {
+                        if !lines[index].starts_with("@@") {
+                            index += 1;
+                            continue;
+                        }
+                        index += 1;
+                        let (old_text, new_text, next_index) = collect_hunk(&lines, index);
+                        content = replace_hunk(&content, &old_text, &new_text)?;
+                        hunk_count += 1;
+                        index = next_index;
+                    }
+                    write_move_if_unchanged(source, target_locked, &expected, content.as_bytes())?;
+                    Ok(())
+                })?;
+            }
             if let Some(target) = move_to {
                 if target != path {
-                    let _ = std::fs::remove_file(path);
                     summary.moved += 1;
                 } else if hunk_count > 0 {
                     summary.updated += 1;
@@ -439,26 +660,25 @@ fn apply_codex_patch(patch: &str) -> Result<PatchSummary, ToolError> {
     Ok(summary)
 }
 
-fn read_file(path: &str) -> Result<String, ToolError> {
-    std::fs::read_to_string(path)
-        .map_err(|e| ToolError::Execution(format!("Failed to read file '{}': {}", path, e)))
+fn decode_utf8(bytes: &[u8]) -> Result<String, ToolError> {
+    String::from_utf8(bytes.to_vec())
+        .map_err(|e| ToolError::Execution(format!("Failed to decode file as UTF-8: {}", e)))
 }
 
-fn write_atomic(path: &str, content: &str) -> Result<(), ToolError> {
-    let path = Path::new(path);
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ToolError::Execution(format!("Failed to create directories: {}", e))
-            })?;
-        }
+fn write_move_if_unchanged(
+    source: &LockedFile<'_>,
+    target: &LockedFile<'_>,
+    expected: &[u8],
+    content: &[u8],
+) -> Result<(), ToolError> {
+    if source.read()? != expected {
+        return Err(ToolError::Execution(STALE_FILE_MESSAGE.to_string()));
     }
-
-    let temp_path = path.with_extension("tmp");
-    std::fs::write(&temp_path, content)
-        .map_err(|e| ToolError::Execution(format!("Failed to write temp file: {}", e)))?;
-    std::fs::rename(&temp_path, path)
-        .map_err(|e| ToolError::Execution(format!("Failed to rename file: {}", e)))?;
+    target.create_new(content)?;
+    if let Err(error) = source.remove_if_unchanged(expected) {
+        let _ = target.remove_if_unchanged(content);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -515,6 +735,45 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read_to_string(file).unwrap(), "one\nthree\n");
+    }
+
+    #[tokio::test]
+    async fn apply_patch_matches_hunk_with_trailing_whitespace_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "one   \ntwo\n").unwrap();
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: {}\n@@\n one\n-two\n+three\n*** End Patch\n",
+            file.display()
+        );
+
+        ApplyPatchTool::new()
+            .execute(serde_json::json!({ "patch": patch }), &test_context())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "one\nthree\n");
+    }
+
+    #[tokio::test]
+    async fn apply_patch_add_refuses_to_overwrite_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "existing\n").unwrap();
+        let patch = format!(
+            "*** Begin Patch\n*** Add File: {}\n+replacement\n*** End Patch\n",
+            file.display()
+        );
+
+        let err = ApplyPatchTool::new()
+            .execute(serde_json::json!({ "patch": patch }), &test_context())
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("Refusing to overwrite existing file"));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "existing\n");
     }
 
     #[test]

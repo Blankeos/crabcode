@@ -1,3 +1,4 @@
+use crate::tools::mutation::FileMutation;
 use crate::tools::{
     get_bool_param, get_string_param, validate_required, ParameterSchema, ParameterType, Tool,
     ToolContext, ToolError, ToolHandler, ToolResult,
@@ -6,54 +7,30 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
 
-const SIMILARITY_THRESHOLD: f64 = 0.8;
-
 pub struct EditTool;
 
 impl EditTool {
     pub fn new() -> Self {
         Self
     }
+}
 
-    fn levenshtein_similarity(a: &str, b: &str) -> f64 {
-        let distance = strsim::levenshtein(a, b);
-        let max_len = a.len().max(b.len());
-        if max_len == 0 {
-            return 1.0;
-        }
-        1.0 - (distance as f64 / max_len as f64)
+fn count_occurrences(content: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
     }
 
-    fn find_best_match<'a>(content: &str, old_string: &str) -> Option<(usize, usize)> {
-        if let Some(pos) = content.find(old_string) {
-            return Some((pos, pos + old_string.len()));
-        }
-
-        let old_trimmed = old_string.trim();
-        if let Some(pos) = content.find(old_trimmed) {
-            return Some((pos, pos + old_trimmed.len()));
-        }
-
-        let lines: Vec<&str> = content.lines().collect();
-        let old_lines: Vec<&str> = old_string.lines().collect();
-
-        if old_lines.len() > 1 {
-            for i in 0..lines.len() {
-                if i + old_lines.len() <= lines.len() {
-                    let candidate: String = lines[i..i + old_lines.len()].join("\n");
-                    let similarity = Self::levenshtein_similarity(&candidate, old_string);
-
-                    if similarity >= SIMILARITY_THRESHOLD {
-                        let start = lines[..i].join("\n").len();
-                        let start = if i > 0 { start + 1 } else { start };
-                        return Some((start, start + candidate.len()));
-                    }
-                }
-            }
-        }
-
-        None
+    let mut count = 0;
+    let mut offset = 0;
+    while let Some(relative) = content[offset..].find(needle) {
+        count += 1;
+        offset += relative + needle.len();
     }
+    count
+}
+
+fn find_exact_occurrence(content: &str, needle: &str) -> Option<usize> {
+    content.find(needle)
 }
 
 #[async_trait]
@@ -61,7 +38,7 @@ impl ToolHandler for EditTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "edit".to_string(),
-            description: "Replace text in files with smart matching. Supports exact match, fuzzy match, and line-trimmed match.".to_string(),
+            description: "Replace exact text in a file. Fails if the old text is missing, or if it appears multiple times unless replace_all is true.".to_string(),
             parameters: vec![
                 ParameterSchema {
                     name: "file_path".to_string(),
@@ -71,7 +48,7 @@ impl ToolHandler for EditTool {
                 },
                 ParameterSchema {
                     name: "old_string".to_string(),
-                    description: "Text to replace".to_string(),
+                    description: "Exact text to replace, including whitespace and indentation".to_string(),
                     required: true,
                     param_type: ParameterType::String,
                 },
@@ -83,7 +60,7 @@ impl ToolHandler for EditTool {
                 },
                 ParameterSchema {
                     name: "replace_all".to_string(),
-                    description: "Replace all occurrences (default: false)".to_string(),
+                    description: "Replace all exact occurrences (default: false)".to_string(),
                     required: false,
                     param_type: ParameterType::Boolean,
                 },
@@ -106,71 +83,167 @@ impl ToolHandler for EditTool {
             .ok_or_else(|| ToolError::Validation("new_string is required".to_string()))?;
 
         let replace_all = get_bool_param(&params, "replace_all", false);
-
         let path = Path::new(&file_path);
 
-        if !path.exists() {
-            return Err(ToolError::NotFound(format!(
-                "File not found: {}",
-                file_path
-            )));
-        }
-
-        if !path.is_file() {
-            return Err(ToolError::Validation(format!(
-                "Path is not a file: {}",
-                file_path
-            )));
-        }
-
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ToolError::Execution(format!("Failed to read file: {}", e)))?;
-
-        if replace_all {
-            if !content.contains(&old_string) {
+        FileMutation::with_lock_path(path, |locked| {
+            if !locked.exists() {
                 return Err(ToolError::NotFound(format!(
-                    "Text not found in file: {}",
-                    old_string.chars().take(50).collect::<String>()
+                    "File not found: {}",
+                    file_path
                 )));
             }
 
-            let new_content = content.replace(&old_string, &new_string);
-            let count = content.matches(&old_string).count();
+            if !locked.is_file() {
+                return Err(ToolError::Validation(format!(
+                    "Path is not a file: {}",
+                    file_path
+                )));
+            }
 
-            std::fs::write(path, new_content)
-                .map_err(|e| ToolError::Execution(format!("Failed to write file: {}", e)))?;
+            if old_string.is_empty() {
+                return Err(ToolError::Validation(
+                    "old_string must not be empty".to_string(),
+                ));
+            }
 
-            return Ok(ToolResult::new(
-                format!("Edit: {}", file_path),
-                format!("Replaced {} occurrence(s)", count),
-            )
-            .with_metadata("replace_count", serde_json::json!(count)));
-        }
+            if old_string == new_string {
+                return Err(ToolError::Validation(
+                    "new_string must differ from old_string".to_string(),
+                ));
+            }
 
-        match Self::find_best_match(&content, &old_string) {
-            Some((start, end)) => {
+            let original = locked.read()?;
+            let content = String::from_utf8(original.clone()).map_err(|e| {
+                ToolError::Execution(format!("Failed to decode file as UTF-8: {}", e))
+            })?;
+
+            let count = count_occurrences(&content, &old_string);
+            if count == 0 {
+                return Err(ToolError::NotFound(
+                    "Could not find old_string in the file. It must match exactly, including whitespace and indentation.".to_string(),
+                ));
+            }
+
+            if !replace_all && count > 1 {
+                return Err(ToolError::Validation(
+                    "Found multiple exact matches for old_string. Provide more surrounding context or set replace_all to true.".to_string(),
+                ));
+            }
+
+            let (new_content, line_num) = if replace_all {
+                (content.replace(&old_string, &new_string), None)
+            } else {
+                let start = find_exact_occurrence(&content, &old_string)
+                    .expect("count was nonzero, so an exact occurrence must exist");
                 let mut new_content =
-                    String::with_capacity(content.len() - (end - start) + new_string.len());
+                    String::with_capacity(content.len() - old_string.len() + new_string.len());
                 new_content.push_str(&content[..start]);
                 new_content.push_str(&new_string);
-                new_content.push_str(&content[end..]);
-
-                std::fs::write(path, new_content)
-                    .map_err(|e| ToolError::Execution(format!("Failed to write file: {}", e)))?;
-
+                new_content.push_str(&content[start + old_string.len()..]);
                 let line_num = content[..start].chars().filter(|c| *c == '\n').count() + 1;
+                (new_content, Some(line_num))
+            };
 
-                Ok(ToolResult::new(
-                    format!("Edit: {}", file_path),
-                    format!("Replaced at line {}", line_num),
-                )
-                .with_metadata("line_number", serde_json::json!(line_num))
-                .with_metadata("replace_count", serde_json::json!(1)))
+            locked.write_if_unchanged(&original, new_content.as_bytes())?;
+
+            let mut result = ToolResult::new(
+                format!("Edit: {}", file_path),
+                if replace_all {
+                    format!("Replaced {} occurrence(s)", count)
+                } else {
+                    format!("Replaced at line {}", line_num.unwrap_or(1))
+                },
+            )
+            .with_metadata("replace_count", serde_json::json!(count));
+
+            if let Some(line_num) = line_num {
+                result = result.with_metadata("line_number", serde_json::json!(line_num));
             }
-            None => Err(ToolError::NotFound(format!(
-                "Could not find text to replace: {}",
-                old_string.chars().take(50).collect::<String>()
-            ))),
-        }
+
+            Ok(result)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::ToolHandler;
+
+    fn test_context() -> ToolContext {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        ToolContext::new("session", "message", "build", rx)
+    }
+
+    #[tokio::test]
+    async fn edit_rejects_multiple_matches_without_replace_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("matches.txt");
+        std::fs::write(&file, "same same").unwrap();
+
+        let err = EditTool::new()
+            .execute(
+                serde_json::json!({
+                    "file_path": file,
+                    "old_string": "same",
+                    "new_string": "after"
+                }),
+                &test_context(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("Found multiple exact matches for old_string"));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "same same");
+    }
+
+    #[tokio::test]
+    async fn edit_replace_all_replaces_exact_occurrences() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("matches.txt");
+        std::fs::write(&file, "same same").unwrap();
+
+        let result = EditTool::new()
+            .execute(
+                serde_json::json!({
+                    "file_path": file,
+                    "old_string": "same",
+                    "new_string": "after",
+                    "replace_all": true
+                }),
+                &test_context(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "after after");
+        assert_eq!(result.metadata["replace_count"], serde_json::json!(2));
+    }
+
+    #[tokio::test]
+    async fn edit_does_not_fuzzy_replace_tweaked_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tweaked.txt");
+        std::fs::write(&file, "alpha\nbravo changed\ngamma\n").unwrap();
+
+        let err = EditTool::new()
+            .execute(
+                serde_json::json!({
+                    "file_path": file,
+                    "old_string": "alpha\nbravo\ngamma",
+                    "new_string": "replacement"
+                }),
+                &test_context(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Could not find old_string"));
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap(),
+            "alpha\nbravo changed\ngamma\n"
+        );
     }
 }
