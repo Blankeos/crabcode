@@ -75,6 +75,8 @@ pub struct AgentDefinition {
     pub hidden: bool,
     hidden_explicit: bool,
     pub model: Option<String>,
+    pub reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
+    reasoning_effort_explicit: bool,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub max_steps: Option<usize>,
@@ -135,6 +137,10 @@ impl AgentDefinition {
             self.hidden = overlay.hidden;
         }
         self.model = overlay.model.or(self.model);
+        if overlay.reasoning_effort_explicit {
+            self.reasoning_effort = overlay.reasoning_effort;
+            self.reasoning_effort_explicit = true;
+        }
         self.temperature = overlay.temperature.or(self.temperature);
         self.top_p = overlay.top_p.or(self.top_p);
         self.max_steps = overlay.max_steps.or(self.max_steps);
@@ -312,6 +318,8 @@ fn builtin_agents() -> Vec<AgentDefinition> {
             hidden: false,
             hidden_explicit: true,
             model: None,
+            reasoning_effort: None,
+            reasoning_effort_explicit: false,
             temperature: None,
             top_p: None,
             max_steps: None,
@@ -329,6 +337,8 @@ fn builtin_agents() -> Vec<AgentDefinition> {
             hidden: false,
             hidden_explicit: true,
             model: None,
+            reasoning_effort: None,
+            reasoning_effort_explicit: false,
             temperature: None,
             top_p: None,
             max_steps: None,
@@ -367,6 +377,8 @@ fn builtin_agents() -> Vec<AgentDefinition> {
             hidden: false,
             hidden_explicit: true,
             model: None,
+            reasoning_effort: None,
+            reasoning_effort_explicit: false,
             temperature: None,
             top_p: None,
             max_steps: None,
@@ -383,6 +395,8 @@ fn builtin_agents() -> Vec<AgentDefinition> {
             hidden: false,
             hidden_explicit: true,
             model: None,
+            reasoning_effort: None,
+            reasoning_effort_explicit: false,
             temperature: None,
             top_p: None,
             max_steps: None,
@@ -533,6 +547,12 @@ fn parse_agent_definition(
     let hidden = hidden_value.and_then(Value::as_bool).unwrap_or(false);
     let hidden_explicit = hidden_value.and_then(Value::as_bool).is_some();
     let model = string_field(obj.get("model"));
+    let (reasoning_effort, reasoning_effort_explicit) = parse_reasoning_effort(
+        obj.get("reasoningEffort")
+            .or_else(|| obj.get("reasoning_effort")),
+        warnings,
+        &format!("{}.reasoningEffort", context),
+    );
     let temperature = number_field(
         obj.get("temperature"),
         warnings,
@@ -572,6 +592,8 @@ fn parse_agent_definition(
         hidden,
         hidden_explicit,
         model,
+        reasoning_effort,
+        reasoning_effort_explicit,
         temperature,
         top_p,
         max_steps,
@@ -580,6 +602,57 @@ fn parse_agent_definition(
         task_permissions,
         instructions,
     })
+}
+
+fn parse_reasoning_effort(
+    value: Option<&Value>,
+    warnings: &mut Vec<String>,
+    context: &str,
+) -> (Option<crate::model::reasoning::ReasoningEffort>, bool) {
+    use crate::model::reasoning::ReasoningEffort;
+
+    let Some(value) = value else {
+        return (None, false);
+    };
+
+    match value {
+        Value::Null => (None, true),
+        Value::Bool(false) => (None, true),
+        Value::Bool(true) => {
+            warnings.push(format!(
+                "{} must be null, false, or one of none, minimal, low, medium, high, xhigh, or max",
+                context
+            ));
+            (None, false)
+        }
+        Value::String(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase().replace('_', "-");
+            if normalized.is_empty()
+                || matches!(normalized.as_str(), "none" | "off" | "false" | "disabled")
+            {
+                return (None, true);
+            }
+
+            match raw.parse::<ReasoningEffort>() {
+                Ok(ReasoningEffort::None) => (None, true),
+                Ok(effort) => (Some(effort), true),
+                Err(_) => {
+                    warnings.push(format!(
+                        "{} must be null, false, or one of none, minimal, low, medium, high, xhigh, or max; got '{}'",
+                        context, raw
+                    ));
+                    (None, false)
+                }
+            }
+        }
+        _ => {
+            warnings.push(format!(
+                "{} must be null, false, or one of none, minimal, low, medium, high, xhigh, or max",
+                context
+            ));
+            (None, false)
+        }
+    }
 }
 
 fn string_field(value: Option<&Value>) -> Option<String> {
@@ -870,6 +943,7 @@ mod tests {
                     "mode": "subagent",
                     "hidden": true,
                     "model": "openai/gpt-5",
+                    "reasoningEffort": "low",
                     "temperature": 0.2,
                     "top_p": 0.9,
                     "max_steps": 7,
@@ -888,6 +962,10 @@ mod tests {
         assert_eq!(def.name, "reviewer");
         assert_eq!(def.mode, AgentMode::Subagent);
         assert!(def.hidden);
+        assert_eq!(
+            def.reasoning_effort,
+            Some(crate::model::reasoning::ReasoningEffort::Low)
+        );
         assert_eq!(def.max_steps, Some(7));
         assert_eq!(
             def.tools.as_deref(),
@@ -895,6 +973,62 @@ mod tests {
         );
         assert_eq!(def.instructions.as_deref(), Some("Read only."));
         assert_eq!(def.task_permissions.len(), 2);
+    }
+
+    #[test]
+    fn reasoning_effort_none_aliases_disable_agent_reasoning() {
+        let mut warnings = Vec::new();
+        let defs = parse_agent_definitions_from_config(
+            Some(&json!({
+                "fast": {
+                    "mode": "subagent",
+                    "reasoningEffort": null
+                },
+                "also-fast": {
+                    "mode": "subagent",
+                    "reasoningEffort": false
+                },
+                "string-off": {
+                    "mode": "subagent",
+                    "reasoningEffort": "none"
+                }
+            })),
+            &mut warnings,
+        );
+
+        assert!(warnings.is_empty());
+        assert_eq!(defs.len(), 3);
+        assert!(defs.iter().all(|def| def.reasoning_effort.is_none()));
+    }
+
+    #[test]
+    fn reasoning_effort_null_overrides_prior_agent_definition() {
+        let mut warnings = Vec::new();
+        let base = parse_agent_definitions_from_config(
+            Some(&json!({
+                "frontend-agent": {
+                    "mode": "subagent",
+                    "reasoningEffort": "high"
+                }
+            })),
+            &mut warnings,
+        );
+        let overlay = parse_agent_definitions_from_config(
+            Some(&json!({
+                "frontend-agent": {
+                    "mode": "subagent",
+                    "reasoningEffort": null
+                }
+            })),
+            &mut warnings,
+        );
+        let registry = AgentRegistry::with_definitions(None, base.into_iter().chain(overlay));
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            registry.get("frontend-agent").unwrap().reasoning_effort,
+            None
+        );
     }
 
     #[test]

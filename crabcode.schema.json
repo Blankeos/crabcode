@@ -50,6 +50,60 @@
       },
       "type": "object"
     },
+    "ReasoningEffort": {
+      "enum": [
+        "none",
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "extra-high",
+        "max"
+      ],
+      "type": "string"
+    },
+    "AgentConfigFile": {
+      "additionalProperties": true,
+      "properties": {
+        "reasoningEffort": {
+          "description": "Subagent reasoning effort override. Use null/false/none/off or omit to send no reasoning_effort parameter; use an effort string to send that explicit value.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasoningEffort"
+            },
+            {
+              "const": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasoning_effort": {
+          "description": "Alias for reasoningEffort.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasoningEffort"
+            },
+            {
+              "const": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AgentConfigMap": {
+      "additionalProperties": {
+        "$ref": "#/$defs/AgentConfigFile"
+      },
+      "type": "object"
+    },
     "TerminalNotificationMode": {
       "anyOf": [
         {
@@ -242,7 +296,16 @@
         "null"
       ]
     },
-    "agent": true,
+    "agent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentConfigMap"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "command": true,
     "compaction": true,
     "default_agent": true,

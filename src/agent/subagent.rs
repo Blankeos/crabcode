@@ -315,23 +315,30 @@ async fn resolve_subagent_session(
     sender: Option<&crate::llm::ChunkSender>,
 ) -> Result<crate::agent::config::LlmSessionConfig, String> {
     let Some(model_ref) = agent.model.as_deref() else {
-        return Ok(parent_session);
+        let mut session = parent_session;
+        session.reasoning_effort = agent.reasoning_effort;
+        return Ok(session);
     };
 
     let model_ref = model_ref.trim();
     if model_ref.is_empty() {
-        return Ok(parent_session);
+        let mut session = parent_session;
+        session.reasoning_effort = agent.reasoning_effort;
+        return Ok(session);
     }
 
     let Some((provider, model)) = model_ref.split_once('/') else {
         let mut session = parent_session;
         session.model = model_ref.to_string();
+        session.reasoning_effort = agent.reasoning_effort;
         return Ok(session);
     };
     let provider = provider.trim();
     let model = model.trim();
     if provider.is_empty() || model.is_empty() {
-        return Ok(parent_session);
+        let mut session = parent_session;
+        session.reasoning_effort = agent.reasoning_effort;
+        return Ok(session);
     }
 
     let (fallback_sender, _fallback_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -339,7 +346,7 @@ async fn resolve_subagent_session(
     crate::llm::client::build_subagent_llm_session(
         provider,
         model.to_string(),
-        parent_session.reasoning_effort,
+        agent.reasoning_effort,
         sender,
     )
     .await
@@ -356,7 +363,7 @@ fn normalize_subagent_output(output: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_subagent_output;
+    use super::{normalize_subagent_output, resolve_subagent_session};
 
     #[test]
     fn empty_subagent_output_is_not_an_error_payload() {
@@ -372,5 +379,93 @@ mod tests {
             normalize_subagent_output("Hi there".to_string()),
             "Hi there"
         );
+    }
+
+    #[test]
+    fn subagent_without_model_does_not_inherit_parent_reasoning_effort() {
+        let mut warnings = Vec::new();
+        let agent = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "frontend-agent": {
+                    "mode": "subagent",
+                    "reasoningEffort": null
+                }
+            })),
+            &mut warnings,
+        )
+        .pop()
+        .expect("agent definition");
+        let parent = test_session(Some(crate::model::reasoning::ReasoningEffort::High));
+
+        let session = tokio_test::block_on(resolve_subagent_session(&agent, parent, None))
+            .expect("resolved session");
+
+        assert!(warnings.is_empty());
+        assert_eq!(session.reasoning_effort, None);
+    }
+
+    #[test]
+    fn subagent_model_shorthand_does_not_inherit_parent_reasoning_effort() {
+        let mut warnings = Vec::new();
+        let agent = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "frontend-agent": {
+                    "mode": "subagent",
+                    "model": "child-model",
+                    "reasoningEffort": null
+                }
+            })),
+            &mut warnings,
+        )
+        .pop()
+        .expect("agent definition");
+        let parent = test_session(Some(crate::model::reasoning::ReasoningEffort::High));
+
+        let session = tokio_test::block_on(resolve_subagent_session(&agent, parent, None))
+            .expect("resolved session");
+
+        assert!(warnings.is_empty());
+        assert_eq!(session.model, "child-model");
+        assert_eq!(session.reasoning_effort, None);
+    }
+
+    #[test]
+    fn explicit_subagent_reasoning_effort_is_applied_to_parent_session() {
+        let mut warnings = Vec::new();
+        let agent = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "frontend-agent": {
+                    "mode": "subagent",
+                    "reasoningEffort": "low"
+                }
+            })),
+            &mut warnings,
+        )
+        .pop()
+        .expect("agent definition");
+        let parent = test_session(Some(crate::model::reasoning::ReasoningEffort::High));
+
+        let session = tokio_test::block_on(resolve_subagent_session(&agent, parent, None))
+            .expect("resolved session");
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            session.reasoning_effort,
+            Some(crate::model::reasoning::ReasoningEffort::Low)
+        );
+    }
+
+    fn test_session(
+        reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
+    ) -> crate::agent::config::LlmSessionConfig {
+        crate::agent::config::LlmSessionConfig {
+            provider_name: "parent-provider".to_string(),
+            model: "parent-model".to_string(),
+            api_key: None,
+            provider_kind: crate::agent::config::ProviderKind::OpenAICompatible,
+            base_url: "https://example.test".to_string(),
+            reasoning_effort,
+            supports_image_input: false,
+        }
     }
 }
