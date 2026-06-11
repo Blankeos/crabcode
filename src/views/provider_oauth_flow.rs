@@ -12,27 +12,29 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenAIOAuthFlowMode {
+pub enum ProviderOAuthFlowMode {
     BrowserWaiting,
     HeadlessPreparing,
     HeadlessCode,
 }
 
 #[derive(Debug)]
-pub struct OpenAIOAuthFlowState {
+pub struct ProviderOAuthFlowState {
     pub visible: bool,
-    pub mode: OpenAIOAuthFlowMode,
+    pub mode: ProviderOAuthFlowMode,
+    pub provider_label: String,
     pub url: Option<String>,
     pub code: Option<String>,
     dialog_area: Rect,
     link_area: Option<Rect>,
 }
 
-impl OpenAIOAuthFlowState {
+impl ProviderOAuthFlowState {
     pub fn new() -> Self {
         Self {
             visible: false,
-            mode: OpenAIOAuthFlowMode::BrowserWaiting,
+            mode: ProviderOAuthFlowMode::BrowserWaiting,
+            provider_label: "OpenAI".to_string(),
             url: None,
             code: None,
             dialog_area: Rect::default(),
@@ -41,22 +43,32 @@ impl OpenAIOAuthFlowState {
     }
 
     pub fn show_browser_waiting(&mut self) {
+        self.show_browser_waiting_for("OpenAI");
+    }
+
+    pub fn show_browser_waiting_for(&mut self, provider_label: impl Into<String>) {
         self.visible = true;
-        self.mode = OpenAIOAuthFlowMode::BrowserWaiting;
+        self.mode = ProviderOAuthFlowMode::BrowserWaiting;
+        self.provider_label = provider_label.into();
         self.url = None;
         self.code = None;
     }
 
     pub fn show_headless_preparing(&mut self) {
+        self.show_headless_preparing_for("OpenAI");
+    }
+
+    pub fn show_headless_preparing_for(&mut self, provider_label: impl Into<String>) {
         self.visible = true;
-        self.mode = OpenAIOAuthFlowMode::HeadlessPreparing;
+        self.mode = ProviderOAuthFlowMode::HeadlessPreparing;
+        self.provider_label = provider_label.into();
         self.url = None;
         self.code = None;
     }
 
     pub fn set_headless_code(&mut self, code: String, url: String) {
         self.visible = true;
-        self.mode = OpenAIOAuthFlowMode::HeadlessCode;
+        self.mode = ProviderOAuthFlowMode::HeadlessCode;
         self.url = Some(url);
         self.code = Some(code);
     }
@@ -73,77 +85,77 @@ impl OpenAIOAuthFlowState {
     }
 }
 
-impl Default for OpenAIOAuthFlowState {
+impl Default for ProviderOAuthFlowState {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OpenAIOAuthFlowAction {
+pub enum ProviderOAuthFlowAction {
     Handled,
     NotHandled,
     Close,
     CopyLink(String),
 }
 
-pub fn init_openai_oauth_flow() -> OpenAIOAuthFlowState {
-    OpenAIOAuthFlowState::new()
+pub fn init_provider_oauth_flow() -> ProviderOAuthFlowState {
+    ProviderOAuthFlowState::new()
 }
 
-pub fn handle_openai_oauth_flow_key_event(
-    state: &mut OpenAIOAuthFlowState,
+pub fn handle_provider_oauth_flow_key_event(
+    state: &mut ProviderOAuthFlowState,
     event: KeyEvent,
-) -> OpenAIOAuthFlowAction {
+) -> ProviderOAuthFlowAction {
     if !state.visible {
-        return OpenAIOAuthFlowAction::NotHandled;
+        return ProviderOAuthFlowAction::NotHandled;
     }
 
     if event.code == KeyCode::Esc {
         state.hide();
-        return OpenAIOAuthFlowAction::Close;
+        return ProviderOAuthFlowAction::Close;
     }
 
     if event.code == KeyCode::Char('y') && event.modifiers == KeyModifiers::CONTROL {
         if let Some(url) = &state.url {
-            return OpenAIOAuthFlowAction::CopyLink(url.clone());
+            return ProviderOAuthFlowAction::CopyLink(url.clone());
         }
     }
 
-    OpenAIOAuthFlowAction::Handled
+    ProviderOAuthFlowAction::Handled
 }
 
-pub fn handle_openai_oauth_flow_mouse_event(
-    state: &mut OpenAIOAuthFlowState,
+pub fn handle_provider_oauth_flow_mouse_event(
+    state: &mut ProviderOAuthFlowState,
     event: MouseEvent,
-) -> OpenAIOAuthFlowAction {
+) -> ProviderOAuthFlowAction {
     if !state.visible {
-        return OpenAIOAuthFlowAction::NotHandled;
+        return ProviderOAuthFlowAction::NotHandled;
     }
 
     if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
-        return OpenAIOAuthFlowAction::Handled;
+        return ProviderOAuthFlowAction::Handled;
     }
 
     let point = Position::new(event.column, event.row);
 
     if !state.dialog_area.contains(point) {
         state.hide();
-        return OpenAIOAuthFlowAction::Close;
+        return ProviderOAuthFlowAction::Close;
     }
 
     if let (Some(link_area), Some(url)) = (state.link_area, &state.url) {
         if link_area.contains(point) {
-            return OpenAIOAuthFlowAction::CopyLink(url.clone());
+            return ProviderOAuthFlowAction::CopyLink(url.clone());
         }
     }
 
-    OpenAIOAuthFlowAction::Handled
+    ProviderOAuthFlowAction::Handled
 }
 
-pub fn render_openai_oauth_flow(
+pub fn render_provider_oauth_flow(
     frame: &mut Frame,
-    state: &mut OpenAIOAuthFlowState,
+    state: &mut ProviderOAuthFlowState,
     area: Rect,
     colors: ThemeColors,
 ) {
@@ -203,7 +215,7 @@ pub fn render_openai_oauth_flow(
         .split(chunks[0]);
 
     let title = Line::from(vec![Span::styled(
-        "OpenAI OAuth",
+        format!("{} OAuth", state.provider_label),
         Style::default()
             .fg(colors.text)
             .add_modifier(Modifier::BOLD),
@@ -225,7 +237,7 @@ pub fn render_openai_oauth_flow(
     );
 
     match state.mode {
-        OpenAIOAuthFlowMode::BrowserWaiting => {
+        ProviderOAuthFlowMode::BrowserWaiting => {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![Span::raw(
                     "Complete login in your browser. Waiting for callback...",
@@ -243,11 +255,12 @@ pub fn render_openai_oauth_flow(
                 chunks[3],
             );
         }
-        OpenAIOAuthFlowMode::HeadlessPreparing => {
+        ProviderOAuthFlowMode::HeadlessPreparing => {
             frame.render_widget(
-                Paragraph::new(Line::from(vec![Span::raw(
-                    "Requesting device code from OpenAI...",
-                )]))
+                Paragraph::new(Line::from(vec![Span::raw(format!(
+                    "Requesting device code from {}...",
+                    state.provider_label
+                ))]))
                 .style(Style::default().fg(colors.text)),
                 chunks[2],
             );
@@ -261,7 +274,7 @@ pub fn render_openai_oauth_flow(
                 chunks[3],
             );
         }
-        OpenAIOAuthFlowMode::HeadlessCode => {
+        ProviderOAuthFlowMode::HeadlessCode => {
             let url = state.url.clone().unwrap_or_default();
             let code = state.code.clone().unwrap_or_default();
 

@@ -1,3 +1,5 @@
+pub mod oauth;
 pub mod openai_oauth;
+pub mod xai_oauth;
 
-pub use openai_oauth::OAuthCredentials;
+pub use oauth::OAuthCredentials;

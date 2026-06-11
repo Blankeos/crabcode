@@ -100,6 +100,7 @@ pub fn handle_connect<'a>(
                 ("opencode", "OpenCode"),
                 ("anthropic", "Anthropic"),
                 ("openai", "OpenAI"),
+                ("xai", "xAI"),
                 ("google", "Google"),
                 (
                     crate::model::ollama::PROVIDER_ID,
@@ -135,6 +136,7 @@ pub fn handle_connect<'a>(
             "opencode",
             "anthropic",
             "openai",
+            "xai",
             "google",
             "zai-coding-plan",
         ];

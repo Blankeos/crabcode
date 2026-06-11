@@ -7,20 +7,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::auth::OAuthCredentials;
+
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ISSUER: &str = "https://auth.openai.com";
 const OAUTH_SCOPE: &str = "openid profile email offline_access";
 const OAUTH_PORT: u16 = 1455;
 const OAUTH_POLLING_SAFETY_MARGIN_MS: u64 = 3_000;
-
-#[derive(Debug, Clone)]
-pub struct OAuthCredentials {
-    pub refresh: String,
-    pub access: String,
-    pub expires: i64,
-    pub account_id: Option<String>,
-    pub enterprise_url: Option<String>,
-}
 
 #[derive(Debug, Clone)]
 struct PkceCodes {

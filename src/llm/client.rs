@@ -394,7 +394,6 @@ pub async fn stream_llm_with_cancellation(
         &websearch_config,
     )
     .await;
-
     // Set LLM session config for subagent use
     crate::agent::config::set_llm_session(crate::agent::config::LlmSessionConfig {
         provider_name: request_config.provider_name.clone(),
@@ -657,10 +656,16 @@ async fn prepare_request_config(
     let supports_image_input = model_supports_image_input(&model, provider.models.get(&model));
     let model_route = resolve_model_route(&provider, model);
     let provider_kind = ProviderKind::from_provider(provider_name, &model_route.npm_package);
+    let base_url = if provider_name == "xai" && model_route.api.trim().is_empty() {
+        "https://api.x.ai".to_string()
+    } else {
+        provider_kind.normalize_base_url(&model_route.api)
+    };
+
     let mut request_config = ProviderRequestConfig::new(
         provider_kind,
         provider.name.clone(),
-        provider_kind.normalize_base_url(&model_route.api),
+        base_url,
         model_route.model_name,
         configured_api_key(auth_config.as_ref()),
         reasoning_effort,
@@ -668,6 +673,14 @@ async fn prepare_request_config(
     );
 
     maybe_apply_openai_oauth_overrides(
+        provider_name,
+        &auth_dao,
+        auth_config.as_ref(),
+        &mut request_config,
+        sender,
+    )
+    .await;
+    maybe_apply_xai_oauth_overrides(
         provider_name,
         &auth_dao,
         auth_config.as_ref(),
@@ -880,6 +893,74 @@ async fn maybe_apply_openai_oauth_overrides(
         );
         request_config.model_name = fallback_model;
     }
+}
+
+async fn maybe_apply_xai_oauth_overrides(
+    provider_name: &str,
+    auth_dao: &crate::persistence::AuthDAO,
+    auth_config: Option<&crate::persistence::AuthConfig>,
+    request_config: &mut ProviderRequestConfig,
+    sender: &crate::llm::ChunkSender,
+) {
+    if request_config.kind != ProviderKind::OpenAI || provider_name != "xai" {
+        return;
+    }
+
+    let Some(crate::persistence::AuthConfig::OAuth {
+        refresh,
+        access,
+        expires,
+        account_id,
+        enterprise_url,
+    }) = auth_config.cloned()
+    else {
+        return;
+    };
+
+    let mut oauth_refresh = refresh;
+    let mut oauth_access = access;
+    let mut oauth_expires = expires;
+    let oauth_account_id = account_id;
+    let oauth_enterprise_url = enterprise_url;
+
+    let expires_soon = oauth_expires <= crate::auth::xai_oauth::now_unix_ms() + 120_000
+        || crate::auth::xai_oauth::access_token_is_expiring(&oauth_access);
+
+    if expires_soon {
+        match crate::auth::xai_oauth::refresh_access_token(&oauth_refresh).await {
+            Ok(refreshed) => {
+                oauth_refresh = refreshed.refresh;
+                oauth_access = refreshed.access;
+                oauth_expires = refreshed.expires;
+
+                let _ = auth_dao.set_provider(
+                    provider_name.to_string(),
+                    crate::persistence::AuthConfig::OAuth {
+                        refresh: oauth_refresh.clone(),
+                        access: oauth_access.clone(),
+                        expires: oauth_expires,
+                        account_id: oauth_account_id.clone(),
+                        enterprise_url: oauth_enterprise_url.clone(),
+                    },
+                );
+            }
+            Err(err) => {
+                send_warning(
+                    sender,
+                    format!("Failed to refresh xAI OAuth token: {}", err),
+                );
+            }
+        }
+    }
+
+    request_config.api_key = Some(oauth_access);
+    request_config.base_url = "https://api.x.ai".to_string();
+    request_config.openai_options.additional_headers.insert(
+        "User-Agent".to_string(),
+        crate::auth::xai_oauth::build_user_agent(),
+    );
+
+    crate::emit_log!("Configured xAI OAuth transport");
 }
 
 fn send_warning(sender: &crate::llm::ChunkSender, warning: impl Into<String>) {
@@ -1813,6 +1894,34 @@ mod tests {
         assert_eq!(route.npm_package, "@ai-sdk/openai-compatible");
         assert_eq!(route.api, "https://opencode.ai/zen/go/v1");
         assert_eq!(route.model_name, "kimi-k2.6");
+    }
+
+    #[test]
+    fn xai_provider_uses_openai_responses_transport() {
+        let provider: crate::model::discovery::Provider =
+            serde_json::from_value(serde_json::json!({
+                "id": "xai",
+                "name": "xAI",
+                "api": "",
+                "npm": "@ai-sdk/xai",
+                "env": ["XAI_API_KEY"],
+                "models": {
+                    "grok-build-0.1": {
+                        "id": "grok-build-0.1",
+                        "name": "Grok Build 0.1"
+                    }
+                }
+            }))
+            .unwrap();
+
+        let route = resolve_model_route(&provider, "grok-build-0.1".to_string());
+        assert_eq!(route.npm_package, "@ai-sdk/xai");
+        assert_eq!(route.api, "");
+        assert_eq!(route.model_name, "grok-build-0.1");
+        assert_eq!(
+            ProviderKind::from_provider("xai", &route.npm_package),
+            ProviderKind::OpenAI
+        );
     }
 
     #[test]

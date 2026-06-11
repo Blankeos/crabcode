@@ -306,3 +306,7 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
       The more appropriate behavior is I cmd-backspace (erases to the start of the line). press cmd-backspace again (at that point), it goes to the previous line, but doesn't erase the previous line, just puts my cursor at the rightmost of the prev line. I press cmd-backspace again, it goes to the left-most of the line.
 
 - [x] publish to homebrew
+
+- [x] xAI support
+
+- [ ] Minor bug fix, when I ctrl-d disconnect from a provider. Don't change focus of current selection cursor to the first item again. Just stay on the same item.
