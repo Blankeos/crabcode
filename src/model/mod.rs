@@ -1,5 +1,4 @@
-pub mod commandcode;
 pub mod discovery;
-pub mod ollama;
+pub mod extensions;
 pub mod reasoning;
 pub mod types;

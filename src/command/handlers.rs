@@ -102,16 +102,26 @@ pub fn handle_connect<'a>(
                 ("openai", "OpenAI"),
                 ("xai", "xAI"),
                 ("google", "Google"),
-                (
-                    crate::model::ollama::PROVIDER_ID,
-                    crate::model::ollama::PROVIDER_NAME,
-                ),
             ] {
                 out.insert(
                     id.to_string(),
                     Provider {
                         id: id.to_string(),
                         name: name.to_string(),
+                        api: String::new(),
+                        doc: String::new(),
+                        env: Vec::new(),
+                        npm: String::new(),
+                        models: HashMap::new(),
+                    },
+                );
+            }
+            for integration in crate::model::extensions::ModelExtensions::runtime() {
+                out.insert(
+                    integration.provider_id().to_string(),
+                    Provider {
+                        id: integration.provider_id().to_string(),
+                        name: integration.provider_name().to_string(),
                         api: String::new(),
                         doc: String::new(),
                         env: Vec::new(),
@@ -130,7 +140,7 @@ pub fn handle_connect<'a>(
             },
             Err(_) => fallback_providers(),
         };
-        crate::model::ollama::inject_provider(&mut providers_map);
+        crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers_map);
 
         const POPULAR_PROVIDERS: &[&str] = &[
             "opencode",
@@ -144,7 +154,7 @@ pub fn handle_connect<'a>(
         let mut items: Vec<crate::command::registry::DialogItem> = providers_map
             .into_iter()
             .map(|(id, provider)| {
-                let group = if id == crate::model::ollama::PROVIDER_ID {
+                let group = if crate::model::extensions::ModelExtensions::is_runtime_provider(&id) {
                     "Local"
                 } else if POPULAR_PROVIDERS.contains(&id.as_str()) {
                     "Popular"
@@ -156,11 +166,10 @@ pub fn handle_connect<'a>(
                     id: id.clone(),
                     name: provider.name.clone(),
                     group: group.to_string(),
-                    description: if id == crate::model::ollama::PROVIDER_ID {
-                        "Local Ollama CLI".to_string()
-                    } else {
-                        id.clone()
-                    },
+                    description:
+                        crate::model::extensions::ModelExtensions::runtime_provider_description(&id)
+                            .unwrap_or(id.as_str())
+                            .to_string(),
                     tip: if is_connected {
                         Some("🟢 Connected".to_string())
                     } else {
@@ -227,33 +236,42 @@ pub fn handle_models<'a>(
             Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
         };
 
-        let provider_filter_matches_ollama = provider_filter.as_deref().map_or(false, |filter| {
+        let provider_filter_matches_runtime = provider_filter.as_deref().map_or(false, |filter| {
             let filter = filter.to_ascii_lowercase();
-            crate::model::ollama::PROVIDER_ID.contains(&filter)
-                || crate::model::ollama::PROVIDER_NAME
-                    .to_ascii_lowercase()
-                    .contains(&filter)
+            crate::model::extensions::ModelExtensions::runtime()
+                .iter()
+                .any(|integration| {
+                    integration.provider_id().contains(&filter)
+                        || integration
+                            .provider_name()
+                            .to_ascii_lowercase()
+                            .contains(&filter)
+                })
         });
 
-        let has_ollama = connected_providers.contains_key(crate::model::ollama::PROVIDER_ID)
+        let has_runtime = crate::model::extensions::ModelExtensions::runtime()
+            .iter()
+            .any(|integration| connected_providers.contains_key(integration.provider_id()))
             || (connected_providers.is_empty() && provider_filter.is_none())
-            || provider_filter_matches_ollama;
-        let has_non_ollama = connected_providers
-            .keys()
-            .any(|provider_id| !crate::model::ollama::is_ollama_provider(provider_id));
+            || provider_filter_matches_runtime;
+        let has_persistent = connected_providers.keys().any(|provider_id| {
+            !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_id)
+        });
 
         let discovery = Discovery::new();
-        let mut models: Vec<ModelType> = if has_non_ollama {
+        let mut models: Vec<ModelType> = if has_persistent {
             match discovery {
                 Ok(d) => match d.fetch_models().await {
                     Ok(models) => models
                         .into_iter()
                         .filter(|model| {
-                            !crate::model::ollama::is_ollama_provider(&model.provider_id)
+                            !crate::model::extensions::ModelExtensions::is_runtime_provider(
+                                &model.provider_id,
+                            )
                         })
                         .collect(),
                     Err(e) => {
-                        if has_ollama {
+                        if has_runtime {
                             push_toast(Toast::new(
                                 format!("Skipped models.dev models: {}", e),
                                 ToastLevel::Warning,
@@ -266,7 +284,7 @@ pub fn handle_models<'a>(
                     }
                 },
                 Err(e) => {
-                    if has_ollama {
+                    if has_runtime {
                         push_toast(Toast::new(
                             format!("Skipped models.dev models: {}", e),
                             ToastLevel::Warning,
@@ -285,12 +303,12 @@ pub fn handle_models<'a>(
             Vec::new()
         };
 
-        let mut ollama_error = None;
-        if has_ollama {
-            match crate::model::ollama::models_for_dialog_cached().await {
-                Ok(ollama_models) => models.extend(ollama_models),
-                Err(err) => ollama_error = Some(err.to_string()),
-            }
+        let mut runtime_errors = Vec::new();
+        if has_runtime {
+            let runtime_result =
+                crate::model::extensions::ModelExtensions::runtime_models_for_dialog_cached().await;
+            models.extend(runtime_result.models);
+            runtime_errors = runtime_result.errors;
         }
 
         let prefs = prefs_data;
@@ -300,7 +318,9 @@ pub fn handle_models<'a>(
 
         for model in &models {
             if (connected_providers.contains_key(&model.provider_id)
-                || crate::model::ollama::is_ollama_provider(&model.provider_id))
+                || crate::model::extensions::ModelExtensions::is_runtime_provider(
+                    &model.provider_id,
+                ))
                 && if let Some(filter) = &provider_filter {
                     model.provider_id.contains(filter)
                         || model.provider_name.to_lowercase().contains(filter)
@@ -403,7 +423,9 @@ pub fn handle_models<'a>(
             }
 
             if (connected_providers.contains_key(&model.provider_id)
-                || crate::model::ollama::is_ollama_provider(&model.provider_id))
+                || crate::model::extensions::ModelExtensions::is_runtime_provider(
+                    &model.provider_id,
+                ))
                 && if let Some(filter) = &provider_filter {
                     model.provider_id.contains(filter)
                         || model.provider_name.to_lowercase().contains(filter)
@@ -449,11 +471,15 @@ pub fn handle_models<'a>(
         });
 
         if items.is_empty() {
-            let filter_matches_ollama = provider_filter_matches_ollama || provider_filter.is_none();
+            let filter_matches_runtime =
+                provider_filter_matches_runtime || provider_filter.is_none();
 
-            if has_ollama && filter_matches_ollama {
-                if let Some(err) = ollama_error {
-                    return CommandResult::Error(format!("Failed to fetch Ollama models: {}", err));
+            if has_runtime && filter_matches_runtime {
+                if let Some(err) = runtime_errors.first() {
+                    return CommandResult::Error(format!(
+                        "Failed to fetch {} models: {}",
+                        err.provider_name, err.error
+                    ));
                 }
             }
 
@@ -635,9 +661,9 @@ pub fn handle_refreshmodels<'a>(
             }
         };
 
-        let (providers_result, ollama_result) = tokio::join!(
+        let (providers_result, runtime_result) = tokio::join!(
             discovery.refresh_cache(),
-            crate::model::ollama::refresh_model_cache()
+            crate::model::extensions::ModelExtensions::refresh_runtime_models()
         );
 
         let mut providers = match providers_result {
@@ -652,27 +678,35 @@ pub fn handle_refreshmodels<'a>(
             }
         };
 
-        let ollama_model_count = match ollama_result {
-            Ok(models) => models.len(),
-            Err(err) => {
-                push_toast(Toast::new(
-                    format!("Skipped Ollama refresh: {}", err),
-                    ToastLevel::Warning,
-                    Some(std::time::Duration::from_secs(3)),
-                ));
-                0
+        let mut runtime_model_count = 0;
+        for result in runtime_result {
+            match result {
+                crate::model::extensions::RefreshResult::Refreshed { model_count, .. } => {
+                    runtime_model_count += model_count;
+                }
+                crate::model::extensions::RefreshResult::Skipped {
+                    provider_name,
+                    error,
+                    ..
+                } => {
+                    push_toast(Toast::new(
+                        format!("Skipped {} refresh: {}", provider_name, error),
+                        ToastLevel::Warning,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                }
             }
-        };
+        }
 
-        crate::model::ollama::inject_provider(&mut providers);
+        crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
 
         let provider_count = providers.len();
         let model_count: usize = providers
             .values()
-            .filter(|p| !crate::model::ollama::is_ollama_provider(&p.id))
+            .filter(|p| !crate::model::extensions::ModelExtensions::is_runtime_provider(&p.id))
             .map(|p| p.models.len())
             .sum::<usize>()
-            + ollama_model_count;
+            + runtime_model_count;
 
         push_toast(Toast::new(
             format!(
@@ -989,8 +1023,8 @@ mod tests {
             CommandResult::ShowDialog { title, items } => {
                 assert_eq!(title, "Connect a provider");
                 assert!(items.iter().any(|item| {
-                    item.id == crate::model::ollama::PROVIDER_ID
-                        && item.name == crate::model::ollama::PROVIDER_NAME
+                    item.id == crate::model::extensions::ollama::PROVIDER_ID
+                        && item.name == crate::model::extensions::ollama::PROVIDER_NAME
                         && item.group == "Local"
                 }));
                 if items.len() >= 4 {
@@ -1053,11 +1087,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_models_shows_ollama_without_connection() {
+        let _guard = crate::model::extensions::ollama::test_cache_lock();
         let _ = crate::persistence::AuthDAO::cleanup_test();
-        crate::model::ollama::set_cached_models_for_test(vec![crate::model::ollama::OllamaModel {
-            id: "llama3.2:latest".to_string(),
-            name: "llama3.2:latest".to_string(),
-        }]);
+        crate::model::extensions::ollama::set_cached_models_for_test(vec![
+            crate::model::extensions::ollama::OllamaModel {
+                id: "llama3.2:latest".to_string(),
+                name: "llama3.2:latest".to_string(),
+            },
+        ]);
 
         let parsed = ParsedCommand {
             name: "models".to_string(),
@@ -1074,13 +1111,13 @@ mod tests {
                 assert_eq!(title, "Available Models");
                 assert!(items.iter().any(|item| {
                     item.id == "llama3.2:latest"
-                        && item.provider_id == crate::model::ollama::PROVIDER_ID
+                        && item.provider_id == crate::model::extensions::ollama::PROVIDER_ID
                 }));
             }
             other => panic!("Expected Ollama models dialog, got {:?}", other),
         }
 
-        crate::model::ollama::clear_cache_for_test();
+        crate::model::extensions::ollama::clear_cache_for_test();
         let _ = crate::persistence::AuthDAO::cleanup_test();
     }
 

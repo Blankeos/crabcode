@@ -641,8 +641,10 @@ async fn prepare_request_config(
     let auth_dao = crate::persistence::AuthDAO::new()?;
     let auth_config = auth_dao.get_provider(provider_name)?;
 
-    let provider = if crate::model::ollama::is_ollama_provider(provider_name) {
-        crate::model::ollama::provider()
+    let provider = if let Some(provider) =
+        crate::model::extensions::ModelExtensions::provider_for_request(provider_name)
+    {
+        provider
     } else {
         let discovery = crate::model::discovery::Discovery::new()?;
         let providers = discovery.fetch_providers().await?;
@@ -689,7 +691,8 @@ async fn prepare_request_config(
     )
     .await;
 
-    if request_config.api_key.is_none() && !crate::model::ollama::is_ollama_provider(provider_name)
+    if request_config.api_key.is_none()
+        && !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_name)
     {
         send_warning(
             sender,
@@ -1918,6 +1921,35 @@ mod tests {
         assert_eq!(route.npm_package, "@ai-sdk/xai");
         assert_eq!(route.api, "");
         assert_eq!(route.model_name, "grok-build-0.1");
+        assert_eq!(
+            ProviderKind::from_provider("xai", &route.npm_package),
+            ProviderKind::OpenAI
+        );
+    }
+
+    #[test]
+    fn xai_grok_composer_model_uses_openai_responses_transport() {
+        let provider: crate::model::discovery::Provider =
+            serde_json::from_value(serde_json::json!({
+                "id": "xai",
+                "name": "xAI",
+                "api": "",
+                "npm": "@ai-sdk/xai",
+                "env": ["XAI_API_KEY"],
+                "models": {
+                    "grok-composer-2.5-fast": {
+                        "id": "grok-composer-2.5-fast",
+                        "name": "Composer 2.5",
+                        "family": "grok-build"
+                    }
+                }
+            }))
+            .unwrap();
+
+        let route = resolve_model_route(&provider, "grok-composer-2.5-fast".to_string());
+        assert_eq!(route.npm_package, "@ai-sdk/xai");
+        assert_eq!(route.api, "");
+        assert_eq!(route.model_name, "grok-composer-2.5-fast");
         assert_eq!(
             ProviderKind::from_provider("xai", &route.npm_package),
             ProviderKind::OpenAI

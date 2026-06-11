@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -9,6 +11,50 @@ pub const NPM_PACKAGE: &str = "@ai-sdk/openai-compatible";
 
 const OLLAMA_LS_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub static EXTENSION: Extension = Extension;
+
+pub struct Extension;
+
+impl crate::model::extensions::ProviderCatalogExtension for Extension {
+    fn provider_id(&self) -> &'static str {
+        PROVIDER_ID
+    }
+
+    fn provider_name(&self) -> &'static str {
+        PROVIDER_NAME
+    }
+
+    fn provider_description(&self) -> &'static str {
+        "Local Ollama CLI"
+    }
+}
+
+impl crate::model::extensions::RuntimeProviderCatalogExtension for Extension {
+    fn provider(&self) -> crate::model::discovery::Provider {
+        provider()
+    }
+
+    fn refresh_models<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::model::extensions::RefreshSummary>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let model_count = refresh_model_cache().await?.len();
+            Ok(crate::model::extensions::RefreshSummary { model_count })
+        })
+    }
+
+    fn models_from_cache(&self) -> Vec<crate::model::types::Model> {
+        models_from_runtime_cache()
+    }
+
+    fn models_for_dialog_cached<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<crate::model::types::Model>>> + Send + 'a>> {
+        Box::pin(async move { models_for_dialog_cached().await })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OllamaModel {
     pub id: String,
@@ -17,12 +63,11 @@ pub struct OllamaModel {
 
 static MODEL_CACHE: OnceLock<Mutex<Option<Vec<OllamaModel>>>> = OnceLock::new();
 
+#[cfg(test)]
+static TEST_CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 fn cache() -> &'static Mutex<Option<Vec<OllamaModel>>> {
     MODEL_CACHE.get_or_init(|| Mutex::new(None))
-}
-
-pub fn is_ollama_provider(provider_id: &str) -> bool {
-    provider_id == PROVIDER_ID
 }
 
 pub fn provider() -> crate::model::discovery::Provider {
@@ -35,12 +80,6 @@ pub fn provider() -> crate::model::discovery::Provider {
         npm: NPM_PACKAGE.to_string(),
         models: cached_discovery_models().unwrap_or_default(),
     }
-}
-
-pub fn inject_provider(
-    providers: &mut std::collections::HashMap<String, crate::model::discovery::Provider>,
-) {
-    providers.insert(PROVIDER_ID.to_string(), provider());
 }
 
 pub async fn list_models_cached() -> Result<Vec<OllamaModel>> {
@@ -203,6 +242,14 @@ pub fn set_cached_models_for_test(models: Vec<OllamaModel>) {
 }
 
 #[cfg(test)]
+pub fn test_cache_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_CACHE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("ollama test cache lock")
+}
+
+#[cfg(test)]
 pub fn clear_cache_for_test() {
     if let Ok(mut guard) = cache().lock() {
         *guard = None;
@@ -236,6 +283,7 @@ mod tests {
 
     #[test]
     fn provider_uses_cached_models_without_running_cli() {
+        let _guard = test_cache_lock();
         set_cached_models_for_test(vec![OllamaModel {
             id: "llama3.2:latest".to_string(),
             name: "llama3.2:latest".to_string(),

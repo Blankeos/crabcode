@@ -5635,56 +5635,55 @@ impl App {
             Err(_) => return,
         };
 
-        let include_ollama = connected_providers.contains_key(crate::model::ollama::PROVIDER_ID)
-            || self.provider_name == crate::model::ollama::PROVIDER_ID
-            || self
-                .models_dialog_state
-                .dialog
-                .items
-                .iter()
-                .any(|item| item.provider_id == crate::model::ollama::PROVIDER_ID);
+        let include_runtime = crate::model::extensions::ModelExtensions::runtime()
+            .iter()
+            .any(|integration| connected_providers.contains_key(integration.provider_id()))
+            || crate::model::extensions::ModelExtensions::is_runtime_provider(&self.provider_name)
+            || self.models_dialog_state.dialog.items.iter().any(|item| {
+                crate::model::extensions::ModelExtensions::is_runtime_provider(&item.provider_id)
+            });
 
-        if connected_providers.is_empty() && !include_ollama {
+        if connected_providers.is_empty() && !include_runtime {
             return;
         }
 
-        let has_non_ollama = connected_providers
-            .keys()
-            .any(|provider_id| !crate::model::ollama::is_ollama_provider(provider_id));
+        let has_persistent = connected_providers.keys().any(|provider_id| {
+            !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_id)
+        });
 
-        let models = if has_non_ollama {
+        let models = if has_persistent {
             match Discovery::new() {
                 Ok(discovery) => match tokio::task::block_in_place(|| {
                     let rt = tokio::runtime::Handle::current();
                     rt.block_on(discovery.fetch_models())
                 }) {
                     Ok(models) => models,
-                    Err(err) if include_ollama => {
-                        let ollama_models = tokio::task::block_in_place(|| {
+                    Err(err) if include_runtime => {
+                        let runtime_models = tokio::task::block_in_place(|| {
                             let rt = tokio::runtime::Handle::current();
-                            rt.block_on(crate::model::ollama::models_for_dialog_cached_or_empty())
+                            rt.block_on(crate::model::extensions::ModelExtensions::runtime_models_for_dialog_cached_or_empty())
                         });
-                        if ollama_models.is_empty() {
+                        if runtime_models.is_empty() {
                             push_toast(Toast::new(
                                 format!("Failed to refresh models: {}", err),
                                 ToastLevel::Warning,
                                 Some(std::time::Duration::from_secs(3)),
                             ));
                         }
-                        ollama_models
+                        runtime_models
                     }
                     Err(_) => return,
                 },
-                Err(_) if include_ollama => tokio::task::block_in_place(|| {
+                Err(_) if include_runtime => tokio::task::block_in_place(|| {
                     let rt = tokio::runtime::Handle::current();
-                    rt.block_on(crate::model::ollama::models_for_dialog_cached_or_empty())
+                    rt.block_on(crate::model::extensions::ModelExtensions::runtime_models_for_dialog_cached_or_empty())
                 }),
                 Err(_) => return,
             }
-        } else if include_ollama {
+        } else if include_runtime {
             tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
-                rt.block_on(crate::model::ollama::models_for_dialog_cached_or_empty())
+                rt.block_on(crate::model::extensions::ModelExtensions::runtime_models_for_dialog_cached_or_empty())
             })
         } else {
             return;
@@ -5700,7 +5699,9 @@ impl App {
 
         for model in &models {
             if connected_providers.contains_key(&model.provider_id)
-                || crate::model::ollama::is_ollama_provider(&model.provider_id)
+                || crate::model::extensions::ModelExtensions::is_runtime_provider(
+                    &model.provider_id,
+                )
             {
                 model_lookup.insert((model.provider_id.clone(), model.id.clone()), model.clone());
             }
@@ -5797,7 +5798,9 @@ impl App {
             }
 
             if connected_providers.contains_key(&model.provider_id)
-                || crate::model::ollama::is_ollama_provider(&model.provider_id)
+                || crate::model::extensions::ModelExtensions::is_runtime_provider(
+                    &model.provider_id,
+                )
             {
                 provider_models
                     .entry(model.provider_name.clone())
@@ -6136,8 +6139,9 @@ impl App {
     ) {
         match self.connect_dialog_mode {
             ConnectDialogMode::ProviderSelection => {
-                if crate::model::ollama::is_ollama_provider(&selected_item.id) {
-                    self.connect_local_ollama();
+                if crate::model::extensions::ModelExtensions::is_runtime_provider(&selected_item.id)
+                {
+                    self.connect_local_provider(&selected_item.id);
                     return;
                 }
 
@@ -6189,17 +6193,29 @@ impl App {
         }
     }
 
-    fn connect_local_ollama(&mut self) {
+    fn connect_local_provider(&mut self, provider_id: &str) {
+        let Some(integration) =
+            crate::model::extensions::ModelExtensions::runtime_provider(provider_id)
+        else {
+            push_toast(Toast::new(
+                format!("Unknown local model provider: {}", provider_id),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(5)),
+            ));
+            self.overlay_focus = OverlayFocus::None;
+            return;
+        };
+
         let models_result = tokio::task::block_in_place(|| {
             let rt = tokio::runtime::Handle::current();
-            rt.block_on(crate::model::ollama::refresh_model_cache())
+            rt.block_on(integration.refresh_models())
         });
 
-        let models = match models_result {
-            Ok(models) => models,
+        let summary = match models_result {
+            Ok(summary) => summary,
             Err(err) => {
                 push_toast(Toast::new(
-                    format!("Failed to connect Ollama: {}", err),
+                    format!("Failed to connect {}: {}", integration.provider_name(), err),
                     ToastLevel::Error,
                     Some(std::time::Duration::from_secs(5)),
                 ));
@@ -6210,13 +6226,17 @@ impl App {
 
         match crate::persistence::AuthDAO::new().and_then(|dao| {
             dao.set_provider(
-                crate::model::ollama::PROVIDER_ID.to_string(),
+                integration.provider_id().to_string(),
                 crate::persistence::AuthConfig::Local,
             )
         }) {
             Ok(()) => {
                 push_toast(Toast::new(
-                    format!("Connected Ollama ({} local models)", models.len()),
+                    format!(
+                        "Connected {} ({} local models)",
+                        integration.provider_name(),
+                        summary.model_count
+                    ),
                     ToastLevel::Success,
                     None,
                 ));
@@ -6225,7 +6245,11 @@ impl App {
             }
             Err(err) => {
                 push_toast(Toast::new(
-                    format!("Failed to save Ollama connection: {}", err),
+                    format!(
+                        "Failed to save {} connection: {}",
+                        integration.provider_name(),
+                        err
+                    ),
                     ToastLevel::Error,
                     None,
                 ));

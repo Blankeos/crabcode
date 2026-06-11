@@ -177,35 +177,13 @@ impl Discovery {
         cached: Option<&HashMap<String, Provider>>,
     ) -> Result<HashMap<String, Provider>> {
         let mut providers = self.fetch_from_api().await?;
-        self.inject_internal_remote_providers(&mut providers, cached)
-            .await;
+        crate::model::extensions::ModelExtensions::augment_persistent_catalog(
+            &mut providers,
+            cached,
+            &self.client,
+        )
+        .await;
         Ok(providers)
-    }
-
-    async fn inject_internal_remote_providers(
-        &self,
-        providers: &mut HashMap<String, Provider>,
-        cached: Option<&HashMap<String, Provider>>,
-    ) {
-        if providers.contains_key(crate::model::commandcode::PROVIDER_ID) {
-            return;
-        }
-
-        if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
-            return;
-        }
-
-        match crate::model::commandcode::fetch_provider(&self.client).await {
-            Ok(provider) => crate::model::commandcode::inject_provider(providers, provider),
-            Err(err) => {
-                if let Some(provider) = cached
-                    .and_then(|cached| cached.get(crate::model::commandcode::PROVIDER_ID).cloned())
-                {
-                    crate::model::commandcode::inject_provider(providers, provider);
-                }
-                crate::emit_log!("Skipped CommandCode model discovery: {}", err);
-            }
-        }
     }
 
     fn load_from_cache(&self) -> Result<Option<HashMap<String, Provider>>> {
@@ -261,12 +239,15 @@ impl Discovery {
     pub async fn fetch_providers(&self) -> Result<HashMap<String, Provider>> {
         let mut providers = if let Some(cached) = self.load_from_cache()? {
             let mut providers = cached;
-            if !providers.contains_key(crate::model::commandcode::PROVIDER_ID) {
-                self.inject_internal_remote_providers(&mut providers, None)
-                    .await;
-                if providers.contains_key(crate::model::commandcode::PROVIDER_ID) {
-                    let _ = self.save_to_cache(&providers);
-                }
+            let mut cache_changed = false;
+            cache_changed |= crate::model::extensions::ModelExtensions::augment_persistent_catalog(
+                &mut providers,
+                None,
+                &self.client,
+            )
+            .await;
+            if cache_changed {
+                let _ = self.save_to_cache(&providers);
             }
             providers
         } else if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
@@ -274,8 +255,12 @@ impl Discovery {
             match self.fetch_from_api().await {
                 Ok(providers) => {
                     let mut providers = providers;
-                    self.inject_internal_remote_providers(&mut providers, None)
-                        .await;
+                    crate::model::extensions::ModelExtensions::augment_persistent_catalog(
+                        &mut providers,
+                        None,
+                        &self.client,
+                    )
+                    .await;
                     let _ = self.save_to_cache(&providers);
                     providers
                 }
@@ -309,7 +294,7 @@ impl Discovery {
             providers
         };
 
-        crate::model::ollama::inject_provider(&mut providers);
+        crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
 
         Ok(providers)
     }
@@ -318,12 +303,12 @@ impl Discovery {
         let cached = self.load_from_cache().ok().flatten();
         let mut providers = self.fetch_with_internal_providers(cached.as_ref()).await?;
         self.save_to_cache(&providers)?;
-        crate::model::ollama::inject_provider(&mut providers);
+        crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
         Ok(providers)
     }
 
     pub async fn fetch_models(&self) -> Result<Vec<crate::model::types::Model>> {
-        let mut models = crate::model::ollama::models_from_runtime_cache();
+        let mut models = crate::model::extensions::ModelExtensions::runtime_models_from_cache();
         let providers = match self.fetch_providers().await {
             Ok(providers) => providers,
             Err(_err) if !models.is_empty() => return Ok(models),
@@ -331,7 +316,7 @@ impl Discovery {
         };
 
         for (provider_id, provider) in providers {
-            if crate::model::ollama::is_ollama_provider(&provider_id) {
+            if crate::model::extensions::ModelExtensions::is_runtime_provider(&provider_id) {
                 continue;
             }
 
@@ -628,6 +613,46 @@ mod tests {
         let provider = model.provider.expect("provider override");
         assert_eq!(provider.npm.as_deref(), Some("@ai-sdk/anthropic"));
         assert_eq!(provider.api, None);
+    }
+
+    #[tokio::test]
+    async fn cached_xai_provider_is_migrated_and_saved_with_composer() {
+        const XAI_PROVIDER_ID: &str = "xai";
+        const GROK_COMPOSER_2_5_FAST_ID: &str = "grok-composer-2.5-fast";
+
+        let mut discovery = Discovery::new().unwrap();
+        let cache_path = unique_test_cache_path("xai_composer_cache_migration");
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        discovery.cache_path = cache_path.clone();
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            XAI_PROVIDER_ID.to_string(),
+            Provider {
+                id: XAI_PROVIDER_ID.to_string(),
+                name: "xAI".to_string(),
+                api: String::new(),
+                doc: String::new(),
+                env: vec!["XAI_API_KEY".to_string()],
+                npm: "@ai-sdk/xai".to_string(),
+                models: HashMap::new(),
+            },
+        );
+        discovery.save_to_cache(&providers).unwrap();
+
+        let loaded = discovery.fetch_providers().await.unwrap();
+        assert!(loaded
+            .get(XAI_PROVIDER_ID)
+            .is_some_and(|provider| { provider.models.contains_key(GROK_COMPOSER_2_5_FAST_ID) }));
+
+        let cached = discovery.load_from_cache().unwrap().unwrap();
+        assert!(cached
+            .get(XAI_PROVIDER_ID)
+            .is_some_and(|provider| { provider.models.contains_key(GROK_COMPOSER_2_5_FAST_ID) }));
+
+        let _ = fs::remove_file(cache_path);
     }
 
     #[tokio::test]

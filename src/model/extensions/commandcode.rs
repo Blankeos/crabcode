@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
-use std::collections::HashMap;
 
 pub const PROVIDER_ID: &str = "commandcode";
 pub const PROVIDER_NAME: &str = "Command Code";
@@ -12,6 +11,31 @@ pub const ANTHROPIC_NPM_PACKAGE: &str = "@ai-sdk/anthropic";
 pub const API_KEY_ENV: &str = "CMD_API_KEY";
 
 const DEFAULT_OUTPUT_LIMIT: u32 = 8_192;
+
+pub static EXTENSION: Extension = Extension;
+
+pub struct Extension;
+
+impl crate::model::extensions::ProviderCatalogExtension for Extension {
+    fn provider_id(&self) -> &'static str {
+        PROVIDER_ID
+    }
+
+    fn provider_name(&self) -> &'static str {
+        PROVIDER_NAME
+    }
+}
+
+impl crate::model::extensions::PersistentProviderCatalogExtension for Extension {
+    fn augment<'a>(
+        &'a self,
+        providers: &'a mut std::collections::HashMap<String, crate::model::discovery::Provider>,
+        cached: Option<&'a std::collections::HashMap<String, crate::model::discovery::Provider>>,
+        client: &'a Client,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { augment_catalog(providers, cached, client).await })
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct CommandCodeModel {
@@ -25,10 +49,6 @@ pub struct CommandCodeModel {
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Vec<CommandCodeModel>,
-}
-
-pub fn is_commandcode_provider(provider_id: &str) -> bool {
-    provider_id == PROVIDER_ID
 }
 
 pub async fn fetch_provider(client: &Client) -> Result<crate::model::discovery::Provider> {
@@ -53,11 +73,33 @@ pub async fn fetch_provider(client: &Client) -> Result<crate::model::discovery::
     Ok(provider_from_models(payload.data))
 }
 
-pub fn inject_provider(
-    providers: &mut HashMap<String, crate::model::discovery::Provider>,
-    provider: crate::model::discovery::Provider,
-) {
-    providers.insert(PROVIDER_ID.to_string(), provider);
+async fn augment_catalog(
+    providers: &mut std::collections::HashMap<String, crate::model::discovery::Provider>,
+    cached: Option<&std::collections::HashMap<String, crate::model::discovery::Provider>>,
+    client: &Client,
+) -> bool {
+    if providers.contains_key(PROVIDER_ID) {
+        return false;
+    }
+
+    if cfg!(test) || std::env::var("CRABCODE_TEST_MODE").is_ok() {
+        return false;
+    }
+
+    match fetch_provider(client).await {
+        Ok(provider) => {
+            providers.insert(PROVIDER_ID.to_string(), provider);
+            true
+        }
+        Err(err) => {
+            if let Some(provider) = cached.and_then(|cached| cached.get(PROVIDER_ID).cloned()) {
+                providers.insert(PROVIDER_ID.to_string(), provider);
+                return true;
+            }
+            crate::emit_log!("Skipped CommandCode model discovery: {}", err);
+            false
+        }
+    }
 }
 
 pub fn provider_from_models(models: Vec<CommandCodeModel>) -> crate::model::discovery::Provider {

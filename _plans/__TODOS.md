@@ -310,3 +310,24 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 - [x] xAI support
 
 - [x] Minor bug fix, when I ctrl-d disconnect from a provider. Don't change focus of current selection cursor to the first item again. Just stay on the same item.
+
+- [ ] Remote client mobile keyboard layout bug: when the keyboard opens, the chat message panel does not shrink into a scrollable viewport and instead gets pushed upward. Fix the mobile layout so the main messages area resizes correctly and remains scrollable above the keyboard. I think there should be a max height for the entire screen, and not zoomable on phone..
+
+- [ ] Remote client latency UX: sending messages feels delayed. Explore optimistic UI so submitted messages appear immediately in the chat panel, and/or add clear loading/sending states while waiting for the server.
+
+- [ ] Remote client mobile chat input: pressing Enter should insert a newline instead of submitting, but only on mobile. Keep desktop Enter-to-submit behavior unchanged.
+
+- [ ] Remote client streaming thinking accordions: during streaming, thinking accordions keep opening/closing and animating in a distracting way. Keep them stable/unobtrusive while streaming so they do not repeatedly auto-toggle or animate. This might be a re-rendering issue, it happens especially when there are items being added into a Thinking item block.
+
+- [ ] remote client Minor UI improvement, when opening sessions on the side, I wanna see the current "workspace" immediately. So maybe whatever the active workspace is, scroll to it when the sessions is open
+
+- [ ] in remote client, I don't like that thinking, text response, and ran command/added/appliedpatch are structured this way.. No changes in thinking, but text response and the ran command/added/appliedpatch tool blocks... I don't like the fact that those ran command, added, and applied patch, etc are always located at the very bottom of the ai response message block. I'd like those added/applied patch,etc (The ones that aren't grouped into the thinking block), to be okay with being mixed into the text responses... So it makes more sense when the Agent is like:
+  - text response: I'll do one more check by importing...
+  - tool call: Ran command
+  - text response: Fixed the white map! Also added the ...
+
+I think this is how the TUI works already anyway right?
+
+- [ ] In remote client, can we remove the "left" spacing within the "Thought Process" accoridon's content. For example the ✔︎ and 🔍 blocks are wayy to spaced to the right, Maybe we can just make it the same padding-left /margin-left as the thoguht process. So that even the subblocks inside of stuff like "Read" or "Updated" look just fine and not too spaced.
+
+- [ ] Sometimes, apply_patch fails because it has no "context". First, I don't know what "context" means in this context. Also it might be related that sometimes, I find that crabcode sometimes just makes changes even after I touched it personally just for small tweaks. And tends to replace what I changed. Tends to happen if it touched that file before and is confident it can edit ti again.

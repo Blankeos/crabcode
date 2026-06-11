@@ -230,7 +230,7 @@ pub fn capability_for_model(
     let family = family.to_ascii_lowercase();
     let haystack = format!("{provider} {npm} {model} {api} {name} {family}");
 
-    if provider == crate::model::commandcode::PROVIDER_ID {
+    if provider == crate::model::extensions::commandcode::PROVIDER_ID {
         return commandcode_capability(&haystack);
     }
 
