@@ -49,6 +49,16 @@
   }
 }
 
+/* https://github.com/tailwindlabs/tailwindcss-intellisense/issues/227#issuecomment-1221083129 */
+@utility no-scrollbar {
+  /* Hide scrollbar for Chrome, Safari and Opera */
+  &::-webkit-scrollbar {
+    display: none;
+  }
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
+
 @layer base {
   :root {
     color-scheme: dark;
@@ -90,6 +100,7 @@
 
     html.remote-input-focused,
     html.remote-input-focused body {
+      @apply no-scrollbar;
       height: auto;
       min-height: var(--dvh, 100dvh);
       max-height: none;

@@ -1,4 +1,4 @@
-import { useHotkeys } from "bagon-hooks"
+import { useHotkeys, useLocalStorage } from "bagon-hooks"
 import { createEffect, createMemo, createSignal, type JSX, onCleanup, onMount } from "solid-js"
 import { toast } from "solid-sonner"
 import { type AttachmentData } from "../../components/ai-elements/attachments"
@@ -46,6 +46,7 @@ import { buildThreadItems, sessionTranscript } from "./thread-model"
 import { resetMobileViewportScroll, useEnterSubmitsPrompt, useMobileKeyboardLayout } from "./mobile-utils"
 
 const TOKEN_KEY = "crabcode.remote.token"
+const OPEN_PROJECTS_KEY = "crabcode.remote.openProjects"
 
 export default function RemoteClient() {
   const [token, setToken] = createSignal(localStorage.getItem(TOKEN_KEY) || "")
@@ -58,8 +59,21 @@ export default function RemoteClient() {
   const [permissionBusy, setPermissionBusy] = createSignal(false)
   const [questionBusy, setQuestionBusy] = createSignal(false)
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
-  const [projectOpen, setProjectOpen] = createSignal<Set<string>>(new Set())
-  const [projectsInitialized, setProjectsInitialized] = createSignal(false)
+  const [projectOpenKeys, setProjectOpenKeys] = useLocalStorage<string[]>({
+    key: OPEN_PROJECTS_KEY,
+    defaultValue: [],
+    deserialize: (value) => {
+      if (!value) return []
+      try {
+        const parsed = JSON.parse(value) as unknown
+        return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
+      } catch {
+        return []
+      }
+    },
+    serialize: (value) => JSON.stringify(value),
+  })
+  const projectOpen = createMemo(() => new Set(projectOpenKeys()))
   const [projectPickerOpen, setProjectPickerOpen] = createSignal(false)
   const [projectPickerAddOpen, setProjectPickerAddOpen] = createSignal(false)
   const [newProjectOpen, setNewProjectOpen] = createSignal(false)
@@ -214,10 +228,7 @@ export default function RemoteClient() {
   const applyRemoteState = (next: RemoteState) => {
     setState(next)
     setOptimisticMessages([])
-    if (!projectsInitialized()) {
-      setProjectOpen(new Set(projectsFromState(next).map((project) => project.path || project.name)))
-      setProjectsInitialized(true)
-    }
+
   }
 
   const loadStateSnapshot = async () => {
@@ -1207,13 +1218,27 @@ export default function RemoteClient() {
   }
 
   const toggleProject = (key: string) => {
-    setProjectOpen((current) => {
+    setProjectOpenKeys((current) => {
       const next = new Set(current)
       if (next.has(key)) next.delete(key)
       else next.add(key)
-      return next
+      return [...next]
     })
   }
+
+  const toggleAllProjects = () => {
+    const keys = projects().map((project) => project.path || project.name)
+    const open = new Set(projectOpenKeys())
+    const allExpanded = keys.length > 0 && keys.every((key) => open.has(key))
+    setProjectOpenKeys(allExpanded ? [] : keys)
+  }
+
+  const allProjectsExpanded = createMemo(() => {
+    const keys = projects().map((project) => project.path || project.name)
+    if (keys.length === 0) return false
+    const open = projectOpen()
+    return keys.every((key) => open.has(key))
+  })
 
   const refreshCompletion = () => {
     const trigger = detectCompletionTrigger(prompt(), promptRef?.selectionStart ?? prompt().length)
@@ -1384,6 +1409,8 @@ export default function RemoteClient() {
       token,
       currentSessionId: () => state()?.current_session_id,
       onToggleProject: toggleProject,
+      allProjectsExpanded,
+      onToggleAllProjects: toggleAllProjects,
       onNewSession: startNewSession,
       onSwitchSession: switchSession,
       onArchiveSession: archiveSession,

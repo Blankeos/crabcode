@@ -158,10 +158,12 @@ export type SidebarController = {
   projectPathForm: ProjectPathFormController
   projects: Accessor<ProjectGroup[]>
   openProjects: Accessor<Set<string>>
+  allProjectsExpanded: Accessor<boolean>
   activeProjectPath: Accessor<string>
   token: Accessor<string>
   currentSessionId: Accessor<string | null | undefined>
   onToggleProject: (key: string) => void
+  onToggleAllProjects: () => void
   onNewSession: (workspacePath?: string) => MaybePromise
   onSwitchSession: (id: string) => MaybePromise
   onArchiveSession: (id: string) => MaybePromise

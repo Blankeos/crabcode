@@ -7,7 +7,7 @@ import {
   CommandItem,
   CommandList,
 } from "cmdk-solid"
-import { IconBrainGlyph } from "../../assets/icons"
+import { IconBrainGlyph, IconF7ChevronDownSquare } from "../../assets/icons"
 import { FadedEdgeEffect } from "../../components/remote/faded-edge-effect"
 import { ProjectFavicon } from "../../components/remote/project-favicon"
 import { ProjectList } from "../../components/remote/project-list"
@@ -143,19 +143,35 @@ function RemoteSidebar(props: { sidebar: SidebarController }) {
 
         <div class="flex items-center justify-between px-6 pb-2 text-[0.72rem] font-bold uppercase tracking-[0.08em] text-[var(--faint)]">
           <span>Projects</span>
-          <Popover
-            open={sidebar.newProjectOpen()}
-            onOpenChange={sidebar.onNewProjectOpenChange}
-            placement="bottom-end"
-            gutter={8}
-          >
-            <PopoverTrigger as="button" class={cx(ICON_BUTTON, "h-7 w-7")} type="button" title="Open folder">
-              <IconPlus class="h-4 w-4" />
-            </PopoverTrigger>
-            <PopoverContent class={cx(PANEL_BASE, POPOVER_ANIMATION, "z-[90] w-[min(24rem,calc(100vw-1.4rem))] p-3")}>
-              <ProjectPathInlineForm form={sidebar.projectPathForm} showError />
-            </PopoverContent>
-          </Popover>
+          <div class="flex items-center gap-0.5">
+            <button
+              class={cx(ICON_BUTTON, "h-7 w-7")}
+              type="button"
+              title={sidebar.allProjectsExpanded() ? "Collapse all projects" : "Expand all projects"}
+              onClick={sidebar.onToggleAllProjects}
+            >
+              <IconF7ChevronDownSquare
+                class="h-4 w-4 transition-transform duration-[180ms]"
+                aria-hidden="true"
+                style={{
+                  transform: sidebar.allProjectsExpanded() ? "rotate(0deg)" : "rotate(-90deg)",
+                }}
+              />
+            </button>
+            <Popover
+              open={sidebar.newProjectOpen()}
+              onOpenChange={sidebar.onNewProjectOpenChange}
+              placement="bottom-end"
+              gutter={8}
+            >
+              <PopoverTrigger as="button" class={cx(ICON_BUTTON, "h-7 w-7")} type="button" title="Open folder">
+                <IconPlus class="h-4 w-4" />
+              </PopoverTrigger>
+              <PopoverContent class={cx(PANEL_BASE, POPOVER_ANIMATION, "z-[90] w-[min(24rem,calc(100vw-1.4rem))] p-3")}>
+                <ProjectPathInlineForm form={sidebar.projectPathForm} showError />
+              </PopoverContent>
+            </Popover>
+          </div>
         </div>
 
         <ProjectList
