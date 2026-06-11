@@ -236,7 +236,7 @@ pub fn handle_models<'a>(
             Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
         };
 
-        let provider_filter_matches_runtime = provider_filter.as_deref().map_or(false, |filter| {
+        let provider_filter_matches_runtime = provider_filter.as_deref().is_some_and(|filter| {
             let filter = filter.to_ascii_lowercase();
             crate::model::extensions::ModelExtensions::runtime()
                 .iter()
@@ -249,6 +249,10 @@ pub fn handle_models<'a>(
                 })
         });
 
+        let provider_filter_matches_unauthenticated_free = provider_filter.as_deref().is_some_and(
+            crate::model::extensions::ModelExtensions::unauthenticated_free_provider_matches_filter,
+        );
+
         let has_runtime = crate::model::extensions::ModelExtensions::runtime()
             .iter()
             .any(|integration| connected_providers.contains_key(integration.provider_id()))
@@ -256,7 +260,8 @@ pub fn handle_models<'a>(
             || provider_filter_matches_runtime;
         let has_persistent = connected_providers.keys().any(|provider_id| {
             !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_id)
-        });
+        }) || provider_filter.is_none()
+            || provider_filter_matches_unauthenticated_free;
 
         let discovery = Discovery::new();
         let mut models: Vec<ModelType> = if has_persistent {
@@ -316,18 +321,19 @@ pub fn handle_models<'a>(
         let mut model_lookup: std::collections::HashMap<(String, String), ModelType> =
             std::collections::HashMap::new();
 
-        for model in &models {
-            if (connected_providers.contains_key(&model.provider_id)
-                || crate::model::extensions::ModelExtensions::is_runtime_provider(
-                    &model.provider_id,
+        let is_model_selectable = |model: &ModelType| {
+            (connected_providers.contains_key(&model.provider_id)
+                || crate::model::extensions::ModelExtensions::is_available_without_connection(
+                    model,
                 ))
-                && if let Some(filter) = &provider_filter {
-                    model.provider_id.contains(filter)
-                        || model.provider_name.to_lowercase().contains(filter)
-                } else {
-                    true
-                }
-            {
+                && crate::model::extensions::ModelExtensions::model_matches_provider_filter(
+                    model,
+                    provider_filter.as_deref(),
+                )
+        };
+
+        for model in &models {
+            if is_model_selectable(model) {
                 model_lookup.insert((model.provider_id.clone(), model.id.clone()), model.clone());
             }
         }
@@ -422,17 +428,7 @@ pub fn handle_models<'a>(
                 continue;
             }
 
-            if (connected_providers.contains_key(&model.provider_id)
-                || crate::model::extensions::ModelExtensions::is_runtime_provider(
-                    &model.provider_id,
-                ))
-                && if let Some(filter) = &provider_filter {
-                    model.provider_id.contains(filter)
-                        || model.provider_name.to_lowercase().contains(filter)
-                } else {
-                    true
-                }
-            {
+            if is_model_selectable(&model) {
                 provider_models
                     .entry(model.provider_name.clone())
                     .or_default()

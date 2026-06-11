@@ -5643,13 +5643,24 @@ impl App {
                 crate::model::extensions::ModelExtensions::is_runtime_provider(&item.provider_id)
             });
 
-        if connected_providers.is_empty() && !include_runtime {
+        let include_unauthenticated_free = connected_providers.is_empty()
+            || crate::model::extensions::ModelExtensions::is_unauthenticated_free_provider(
+                &self.provider_name,
+            )
+            || self.models_dialog_state.dialog.items.iter().any(|item| {
+                crate::model::extensions::ModelExtensions::is_unauthenticated_free_provider(
+                    &item.provider_id,
+                )
+            });
+
+        if connected_providers.is_empty() && !include_runtime && !include_unauthenticated_free {
             return;
         }
 
         let has_persistent = connected_providers.keys().any(|provider_id| {
             !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_id)
-        });
+        }) || include_unauthenticated_free
+            || connected_providers.is_empty();
 
         let models = if has_persistent {
             match Discovery::new() {
@@ -5697,12 +5708,13 @@ impl App {
         let mut model_lookup: std::collections::HashMap<(String, String), ModelType> =
             std::collections::HashMap::new();
 
+        let is_model_selectable = |model: &ModelType| {
+            connected_providers.contains_key(&model.provider_id)
+                || crate::model::extensions::ModelExtensions::is_available_without_connection(model)
+        };
+
         for model in &models {
-            if connected_providers.contains_key(&model.provider_id)
-                || crate::model::extensions::ModelExtensions::is_runtime_provider(
-                    &model.provider_id,
-                )
-            {
+            if is_model_selectable(model) {
                 model_lookup.insert((model.provider_id.clone(), model.id.clone()), model.clone());
             }
         }
@@ -5797,11 +5809,7 @@ impl App {
                 continue;
             }
 
-            if connected_providers.contains_key(&model.provider_id)
-                || crate::model::extensions::ModelExtensions::is_runtime_provider(
-                    &model.provider_id,
-                )
-            {
+            if is_model_selectable(&model) {
                 provider_models
                     .entry(model.provider_name.clone())
                     .or_default()

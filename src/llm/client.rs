@@ -668,7 +668,7 @@ async fn prepare_request_config(
         provider_kind,
         provider.name.clone(),
         base_url,
-        model_route.model_name,
+        model_route.model_name.clone(),
         configured_api_key(auth_config.as_ref()),
         reasoning_effort,
         supports_image_input,
@@ -690,6 +690,12 @@ async fn prepare_request_config(
         sender,
     )
     .await;
+
+    maybe_apply_unauthenticated_free_provider_key(
+        provider_name,
+        provider.models.get(&model_route.model_name),
+        &mut request_config,
+    );
 
     if request_config.api_key.is_none()
         && !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_name)
@@ -717,6 +723,28 @@ async fn prepare_request_config(
     );
 
     Ok(request_config)
+}
+
+fn maybe_apply_unauthenticated_free_provider_key(
+    provider_id: &str,
+    model: Option<&crate::model::discovery::Model>,
+    request_config: &mut ProviderRequestConfig,
+) {
+    if request_config.api_key.is_some()
+        || !crate::model::extensions::ModelExtensions::is_unauthenticated_free_provider(provider_id)
+    {
+        return;
+    }
+
+    let Some(model) = model else {
+        return;
+    };
+
+    if !matches!(model.status.as_deref(), Some("alpha" | "deprecated"))
+        && model.cost.as_ref().is_some_and(|cost| cost.input == 0.0)
+    {
+        request_config.api_key = Some("public".to_string());
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1779,8 +1807,9 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
 mod tests {
     use super::{
         convert_messages, convert_messages_for_model, is_openai_oauth_model_allowed,
-        model_supports_image_input, openai_request_instructions, resolve_model_route, AisdkMessage,
-        OpenAIRequestOptions, ProviderKind,
+        maybe_apply_unauthenticated_free_provider_key, model_supports_image_input,
+        openai_request_instructions, resolve_model_route, AisdkMessage, OpenAIRequestOptions,
+        ProviderKind, ProviderRequestConfig,
     };
 
     #[test]
@@ -1897,6 +1926,79 @@ mod tests {
         assert_eq!(route.npm_package, "@ai-sdk/openai-compatible");
         assert_eq!(route.api, "https://opencode.ai/zen/go/v1");
         assert_eq!(route.model_name, "kimi-k2.6");
+    }
+
+    #[test]
+    fn unauthenticated_opencode_free_model_uses_public_key() {
+        let model: crate::model::discovery::Model = serde_json::from_value(serde_json::json!({
+            "id": "big-pickle",
+            "name": "Big Pickle",
+            "cost": { "input": 0.0, "output": 0.0, "cache_read": 0.0 }
+        }))
+        .unwrap();
+        let mut config = test_request_config(None);
+
+        maybe_apply_unauthenticated_free_provider_key("opencode", Some(&model), &mut config);
+
+        assert_eq!(config.api_key.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn unauthenticated_opencode_paid_model_does_not_use_public_key() {
+        let model: crate::model::discovery::Model = serde_json::from_value(serde_json::json!({
+            "id": "gpt-5.2",
+            "name": "GPT-5.2",
+            "cost": { "input": 1.75, "output": 14.0 }
+        }))
+        .unwrap();
+        let mut config = test_request_config(None);
+
+        maybe_apply_unauthenticated_free_provider_key("opencode", Some(&model), &mut config);
+
+        assert_eq!(config.api_key, None);
+    }
+
+    #[test]
+    fn unauthenticated_opencode_deprecated_free_model_does_not_use_public_key() {
+        let model: crate::model::discovery::Model = serde_json::from_value(serde_json::json!({
+            "id": "kimi-k2.5-free",
+            "name": "Kimi K2.5 Free",
+            "status": "deprecated",
+            "cost": { "input": 0.0, "output": 0.0 }
+        }))
+        .unwrap();
+        let mut config = test_request_config(None);
+
+        maybe_apply_unauthenticated_free_provider_key("opencode", Some(&model), &mut config);
+
+        assert_eq!(config.api_key, None);
+    }
+
+    #[test]
+    fn configured_opencode_key_is_not_overwritten_by_public_key() {
+        let model: crate::model::discovery::Model = serde_json::from_value(serde_json::json!({
+            "id": "big-pickle",
+            "name": "Big Pickle",
+            "cost": { "input": 0.0, "output": 0.0 }
+        }))
+        .unwrap();
+        let mut config = test_request_config(Some("real-key".to_string()));
+
+        maybe_apply_unauthenticated_free_provider_key("opencode", Some(&model), &mut config);
+
+        assert_eq!(config.api_key.as_deref(), Some("real-key"));
+    }
+
+    fn test_request_config(api_key: Option<String>) -> ProviderRequestConfig {
+        ProviderRequestConfig::new(
+            ProviderKind::OpenAICompatible,
+            "OpenCode Zen".to_string(),
+            "https://opencode.ai/zen/v1".to_string(),
+            "big-pickle".to_string(),
+            api_key,
+            None,
+            false,
+        )
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
-const CACHE_SCHEMA_VERSION: u32 = 2;
+const CACHE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
@@ -49,6 +49,8 @@ pub struct Model {
     pub release_date: String,
     #[serde(default)]
     pub last_updated: String,
+    #[serde(default)]
+    pub status: Option<String>,
     #[serde(default)]
     pub modalities: Option<Modalities>,
     #[serde(default)]
@@ -320,7 +322,12 @@ impl Discovery {
                 continue;
             }
 
+            let provider_name = provider.name.clone();
             for (model_id, model) in provider.models {
+                if matches!(model.status.as_deref(), Some("alpha" | "deprecated")) {
+                    continue;
+                }
+
                 let mut capabilities = Vec::new();
 
                 if model.attachment {
@@ -335,6 +342,13 @@ impl Discovery {
                     capabilities.push("reasoning".to_string());
                 }
 
+                if crate::model::extensions::ModelExtensions::is_unauthenticated_free_provider(
+                    &provider_id,
+                ) && model.cost.as_ref().is_some_and(|cost| cost.input == 0.0)
+                {
+                    capabilities.push("free".to_string());
+                }
+
                 let is_text_model = model.modalities.as_ref().map_or(true, |m| {
                     m.output.contains(&"text".to_string())
                         && !m.output.contains(&"image".to_string())
@@ -346,7 +360,7 @@ impl Discovery {
                         name: model.name.clone(),
                         family: model.family.clone(),
                         provider_id: provider_id.clone(),
-                        provider_name: provider.name.clone(),
+                        provider_name: provider_name.clone(),
                         capabilities,
                         reasoning: model.reasoning,
                     });
@@ -613,6 +627,79 @@ mod tests {
         let provider = model.provider.expect("provider override");
         assert_eq!(provider.npm.as_deref(), Some("@ai-sdk/anthropic"));
         assert_eq!(provider.api, None);
+    }
+
+    #[tokio::test]
+    async fn fetch_models_filters_deprecated_models() {
+        let mut discovery = Discovery::new().unwrap();
+        let cache_path = unique_test_cache_path("deprecated_model_filter");
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        discovery.cache_path = cache_path.clone();
+
+        let mut models = HashMap::new();
+        models.insert(
+            "big-pickle".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "id": "big-pickle",
+                "name": "Big Pickle",
+                "release_date": "2025-10-17",
+                "last_updated": "2025-10-17",
+                "attachment": false,
+                "reasoning": true,
+                "temperature": true,
+                "tool_call": true,
+                "cost": { "input": 0.0, "output": 0.0 },
+                "modalities": { "input": ["text"], "output": ["text"] }
+            }))
+            .unwrap(),
+        );
+        models.insert(
+            "kimi-k2.5-free".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "id": "kimi-k2.5-free",
+                "name": "Kimi K2.5 Free",
+                "release_date": "2026-01-27",
+                "last_updated": "2026-01-27",
+                "status": "deprecated",
+                "attachment": true,
+                "reasoning": true,
+                "temperature": true,
+                "tool_call": true,
+                "cost": { "input": 0.0, "output": 0.0 },
+                "modalities": { "input": ["text"], "output": ["text"] }
+            }))
+            .unwrap(),
+        );
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "opencode".to_string(),
+            Provider {
+                id: "opencode".to_string(),
+                name: "OpenCode Zen".to_string(),
+                api: "https://opencode.ai/zen/v1".to_string(),
+                doc: String::new(),
+                env: vec!["OPENCODE_API_KEY".to_string()],
+                npm: "@ai-sdk/openai-compatible".to_string(),
+                models,
+            },
+        );
+        discovery.save_to_cache(&providers).unwrap();
+
+        let model_ids: Vec<_> = discovery
+            .fetch_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+
+        assert!(model_ids.contains(&"big-pickle".to_string()));
+        assert!(!model_ids.contains(&"kimi-k2.5-free".to_string()));
+
+        let _ = fs::remove_file(cache_path);
     }
 
     #[tokio::test]

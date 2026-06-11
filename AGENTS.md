@@ -66,4 +66,4 @@ The cache stores provider and model information from models.dev and expires afte
 
 ### References
 
-Use `devrefs list`, everything is in `.devrefs/references/*`
+There are important code references that you can check. For that the `devrefs --help` cli. Use `devrefs list` to get all current references, everything is in `.devrefs/references/*`

@@ -156,6 +156,7 @@ fn cached_discovery_models(
                         knowledge: String::new(),
                         release_date: String::new(),
                         last_updated: String::new(),
+                        status: None,
                         modalities: Some(crate::model::discovery::Modalities {
                             input: vec!["text".to_string()],
                             output: vec!["text".to_string()],

@@ -94,9 +94,9 @@ I tried crabcode specifically for these providers:
 - [x] **opencode-zen** and **opencode-go**
 - [x] **nano-gpt**
 - [x] **commandcode** (Pro)
-- [x] **ollama-cli**
-- [x] **zai**
+- [x] **ollama** (Local CLI)
 - [x] **ollama-cloud**
+- [x] **zai**
 - [x] **xiaomi-token-plan-sgp**
 - [x] **minimax**
 - [x] **fireworks**

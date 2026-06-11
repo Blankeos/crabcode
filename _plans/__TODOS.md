@@ -331,3 +331,4 @@ I think this is how the TUI works already anyway right?
 - [ ] In remote client, can we remove the "left" spacing within the "Thought Process" accoridon's content. For example the ✔︎ and 🔍 blocks are wayy to spaced to the right, Maybe we can just make it the same padding-left /margin-left as the thoguht process. So that even the subblocks inside of stuff like "Read" or "Updated" look just fine and not too spaced.
 
 - [ ] Sometimes, apply_patch fails because it has no "context". First, I don't know what "context" means in this context. Also it might be related that sometimes, I find that crabcode sometimes just makes changes even after I touched it personally just for small tweaks. And tends to replace what I changed. Tends to happen if it touched that file before and is confident it can edit ti again.
+      Execution error: Not found: Could not apply patch hunk: context was not found

@@ -147,6 +147,7 @@ fn discovery_model(
         knowledge: String::new(),
         release_date: String::new(),
         last_updated: String::new(),
+        status: None,
         modalities: Some(crate::model::discovery::Modalities {
             input: vec!["text".to_string(), "image".to_string()],
             output: vec!["text".to_string()],

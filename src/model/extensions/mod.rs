@@ -8,6 +8,10 @@ pub mod commandcode;
 pub mod ollama;
 
 const CATALOG_EXTENSIONS_JSON: &str = include_str!("catalog_extensions.json");
+static CATALOG_JSON_EXTENSION: CatalogJsonExtension = CatalogJsonExtension;
+static PERSISTENT_EXTENSIONS: [&dyn PersistentProviderCatalogExtension; 2] =
+    [&commandcode::EXTENSION, &CATALOG_JSON_EXTENSION];
+static RUNTIME_EXTENSIONS: [&dyn RuntimeProviderCatalogExtension; 1] = [&ollama::EXTENSION];
 
 /// Model provider catalog extensions that are not available directly from
 /// models.dev.
@@ -61,11 +65,11 @@ pub trait RuntimeProviderCatalogExtension: ProviderCatalogExtension {
 
 impl ModelExtensions {
     pub fn persistent() -> &'static [&'static dyn PersistentProviderCatalogExtension] {
-        &[&commandcode::EXTENSION, &CatalogJsonExtension]
+        &PERSISTENT_EXTENSIONS
     }
 
     pub fn runtime() -> &'static [&'static dyn RuntimeProviderCatalogExtension] {
-        &[&ollama::EXTENSION]
+        &RUNTIME_EXTENSIONS
     }
 
     pub async fn augment_persistent_catalog(
@@ -139,6 +143,40 @@ impl ModelExtensions {
         Self::runtime()
             .iter()
             .any(|extension| extension.provider_id() == provider_id)
+    }
+
+    pub fn is_unauthenticated_free_provider(provider_id: &str) -> bool {
+        provider_id == "opencode"
+    }
+
+    pub fn unauthenticated_free_provider_matches_filter(filter: &str) -> bool {
+        let filter = filter.to_ascii_lowercase();
+        ["opencode", "opencode zen"]
+            .iter()
+            .any(|provider| provider.contains(&filter))
+    }
+
+    pub fn is_unauthenticated_free_model(model: &crate::model::types::Model) -> bool {
+        Self::is_unauthenticated_free_provider(&model.provider_id)
+            && model
+                .capabilities
+                .iter()
+                .any(|capability| capability == "free")
+    }
+
+    pub fn is_available_without_connection(model: &crate::model::types::Model) -> bool {
+        Self::is_runtime_provider(&model.provider_id) || Self::is_unauthenticated_free_model(model)
+    }
+
+    pub fn model_matches_provider_filter(
+        model: &crate::model::types::Model,
+        provider_filter: Option<&str>,
+    ) -> bool {
+        provider_filter.is_none_or(|filter| {
+            let filter = filter.to_ascii_lowercase();
+            model.provider_id.to_ascii_lowercase().contains(&filter)
+                || model.provider_name.to_ascii_lowercase().contains(&filter)
+        })
     }
 
     pub fn runtime_provider(
@@ -326,5 +364,34 @@ mod tests {
         assert_eq!(provider.provider_name(), ollama::PROVIDER_NAME);
         assert_eq!(provider.provider_description(), "Local Ollama CLI");
         assert!(ModelExtensions::provider_for_request(ollama::PROVIDER_ID).is_some());
+    }
+
+    #[test]
+    fn opencode_zero_cost_models_are_available_without_connection() {
+        let free_model = crate::model::types::Model {
+            id: "big-pickle".to_string(),
+            name: "Big Pickle".to_string(),
+            family: String::new(),
+            provider_id: "opencode".to_string(),
+            provider_name: "OpenCode Zen".to_string(),
+            capabilities: vec!["free".to_string()],
+            reasoning: false,
+        };
+        let paid_model = crate::model::types::Model {
+            id: "gpt-5.3-codex".to_string(),
+            name: "GPT-5.3 Codex".to_string(),
+            family: String::new(),
+            provider_id: "opencode".to_string(),
+            provider_name: "OpenCode Zen".to_string(),
+            capabilities: Vec::new(),
+            reasoning: false,
+        };
+
+        assert!(ModelExtensions::is_available_without_connection(
+            &free_model
+        ));
+        assert!(!ModelExtensions::is_available_without_connection(
+            &paid_model
+        ));
     }
 }
