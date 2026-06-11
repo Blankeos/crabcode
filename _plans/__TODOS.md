@@ -340,3 +340,5 @@ I think this is how the TUI works already anyway right?
 - [ ] Remote client minor "git" viewer. so users can see changes.
 
 - [ ] Image inputs are not supported by this model, just strip the image, so the chat can still work.
+
+- [ ] Integrate `fff` for the search. Instead of nucleo??
