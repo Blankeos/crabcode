@@ -13,6 +13,17 @@ export function IconFolder(props: IconProps) {
   )
 }
 
+export function IconGitBranch(props: IconProps) {
+  return (
+    <svg viewBox="0 0 256 256" aria-hidden="true" {...props}>
+      <path
+        fill="currentColor"
+        d="M216 152a40 40 0 0 0-39.2 32H144a24 24 0 0 1-24-24V96a40 40 0 1 0-16 0v64a40 40 0 0 0 40 40h32.8a40 40 0 1 0 0-16H144a24 24 0 0 1-24-24V96a40 40 0 1 0-16 0v64a40 40 0 0 0 40 40h32.8A40 40 0 1 0 216 152M88 56a24 24 0 1 1 24 24a24 24 0 0 1-24-24m128 160a24 24 0 1 1 24-24a24 24 0 0 1-24 24"
+      />
+    </svg>
+  )
+}
+
 export function IconCaretDown(props: IconProps) {
   return (
     <svg viewBox="0 0 256 256" aria-hidden="true" {...props}>

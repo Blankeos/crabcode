@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@corvu/resizable": "^0.2.5",
     "@kobalte/core": "^0.13.11",
     "@tailwindcss/vite": "^4.1.18",
     "bagon-hooks": "^0.0.6",

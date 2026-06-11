@@ -115,6 +115,7 @@ Markdown agents live in `.opencode/agents/` or `~/.config/opencode/agents/`. YAM
 description: Review code without making edits
 mode: subagent
 hidden: false
+reasoningEffort: null
 tools:
   - read
   - grep
@@ -138,6 +139,7 @@ JSON agents use the same registry and override markdown definitions when names m
       "description": "Review code without making edits",
       "mode": "subagent",
       "hidden": false,
+      "reasoningEffort": null,
       "max_steps": 8,
       "tools": ["read", "grep", "glob"],
       "permission": {
@@ -152,7 +154,9 @@ JSON agents use the same registry and override markdown definitions when names m
 }
 ```
 
-Supported agent fields are `name`, `description`, `mode` (`primary`, `subagent`, or `all`), `hidden`, `model`, `temperature`, `top_p`, `steps`, `maxSteps`, `max_steps`, `tools`, `permission`, `task_permissions`, and `instructions`/`prompt`. Subagent `model` overrides are applied when the agent is invoked through Task or `@agent`; `temperature` and `top_p` are parsed for compatibility but are not yet applied to runtime requests.
+Supported agent fields are `name`, `description`, `mode` (`primary`, `subagent`, or `all`), `hidden`, `model`, `reasoningEffort`/`reasoning_effort`, `temperature`, `top_p`, `steps`, `maxSteps`, `max_steps`, `tools`, `permission`, `task_permissions`, and `instructions`/`prompt`. Subagent `model` overrides are applied when the agent is invoked through Task or `@agent`; `temperature` and `top_p` are parsed for compatibility but are not yet applied to runtime requests.
+
+Subagents do not inherit the parent model's reasoning effort. Set `reasoningEffort` to `"low"`, `"medium"`, `"high"`, `"xhigh"`, or `"max"` to send an explicit provider `reasoning_effort` value. Omit it, or set it to `null`, `false`, `"none"`, or `"off"`, to send no reasoning effort parameter.
 
 Direct `@agent` invocation is available for visible `subagent` and `all` agents. For example, `@explore trace config loading` starts a child session through the Task flow.
 

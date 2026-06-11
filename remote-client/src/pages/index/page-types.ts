@@ -3,6 +3,7 @@ import type { AttachmentData } from "../../components/ai-elements/attachments"
 import type { ProjectGroup } from "../../components/remote/project-list"
 import type {
   RemoteMessage,
+  RemoteGitStatus,
   RemoteModel,
   RemotePendingPermission,
   RemotePendingQuestion,
@@ -214,12 +215,29 @@ export type ServerPanelController = {
   onOpenServer: (server: SavedServer) => void
 }
 
+export type GitDiffViewMode = "file" | "all"
+
+export type GitViewerController = {
+  open: Accessor<boolean>
+  onOpenChange: (open: boolean) => void
+  loading: Accessor<boolean>
+  error: Accessor<string>
+  status: Accessor<RemoteGitStatus | null>
+  summary: Accessor<RemoteStatus["git_summary"] | null>
+  selectedPath: Accessor<string | null>
+  setSelectedPath: Setter<string | null>
+  viewMode: Accessor<GitDiffViewMode>
+  setViewMode: Setter<GitDiffViewMode>
+  onRefresh: () => MaybePromise
+}
+
 export type HeaderController = {
   setSidebarOpen: Setter<boolean>
   projectPicker: ProjectPickerController
   isEmptyChat: Accessor<boolean>
   onNewSession: (workspacePath?: string) => MaybePromise
   servers: ServerPanelController
+  gitViewer: GitViewerController
 }
 
 export type ThreadController = {

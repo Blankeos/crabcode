@@ -152,7 +152,7 @@ Replaced at line 239
 
 - [x] Mouse hover on "chat messages". So that when I click it, it opens the "timeline view" > enter option kinda thing. So it shows either the "Copy", "Fork", "Undo" actions, just like opencode.
 
-- [ ] I have a "complete", "error", "question" (use this in both 'question' and 'permission') sounds. I'd love for them to be bundled in, or at least downloaded by default via fetching from github raw link if it doesnt exist yet.
+- [x] I have a "complete", "error", "question" (use this in both 'question' and 'permission') sounds. I'd love for them to be bundled in, or at least downloaded by default via fetching from github raw link if it doesnt exist yet.
 
 - [x] Like opencode, let's make a command palette via `ctrl+p`.
   - [x] Additionally, since the bottom area takes up too much space with `/ commands ctrl+x shortcuts tab agents ctrl+cc quit`. Let's reduce it to just `ctrl+p`?.
@@ -337,7 +337,7 @@ I think this is how the TUI works already anyway right?
 
 - [ ] data: Every now and then, prune the empty workspaces from the db. remove them.
 
-- [ ] Remote client minor "git" viewer. so users can see changes.
+- [x] Remote client minor "git" viewer. so users can see changes.
 
 - [ ] Image inputs are not supported by this model, just strip the image, so the chat can still work.
 

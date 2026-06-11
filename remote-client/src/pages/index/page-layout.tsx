@@ -1,4 +1,4 @@
-import { For, Index, Show } from "solid-js"
+import { For, Index, Show, createMemo } from "solid-js"
 import {
   Command,
   CommandEmpty,
@@ -12,10 +12,11 @@ import { FadedEdgeEffect } from "../../components/remote/faded-edge-effect"
 import { ProjectFavicon } from "../../components/remote/project-favicon"
 import { ProjectList } from "../../components/remote/project-list"
 import { Popover, PopoverContent, PopoverTrigger } from "../../components/ui/popover"
-import { IconArrowLeft, IconCaretDown, IconCheck, IconDots, IconFolder, IconPlus, IconSearch, IconServers, IconSidebar, IconX } from "../../icons"
+import { Resizable, ResizableHandle, ResizablePanel } from "../../components/ui/resizable"
+import { IconArrowLeft, IconCaretDown, IconCheck, IconDots, IconFolder, IconGitBranch, IconPlus, IconSearch, IconServers, IconSidebar, IconX } from "../../icons"
 import { cx } from "../../lib/cx"
 import { ICON_BUTTON, INPUT_BASE, PANEL_BASE, POPOVER_ANIMATION } from "./page-constants"
-import type { CommandPaletteController, HeaderController, PairPanelController, ProjectPathFormController, ProjectPickerController, RemoteClientUi, ServerPanelController, SidebarController, ThreadController } from "./page-types"
+import type { CommandPaletteController, GitViewerController, HeaderController, PairPanelController, ProjectPathFormController, ProjectPickerController, RemoteClientUi, ServerPanelController, SidebarController, ThreadController } from "./page-types"
 import { ComposerDock } from "./composer-dock"
 import { EmptyThread } from "./empty-thread"
 import { QuestionRequestPanel, PermissionRequestPanel } from "./request-panels"
@@ -25,11 +26,37 @@ import { relativeTime } from "./shared-utils"
 
 export function RemoteClientPage(props: { ui: RemoteClientUi }) {
   const ui = props.ui
+  const git = ui.header.gitViewer
+  const gitPanelOpen = createMemo(() => Boolean(git.open() && git.summary()?.is_repo))
+  const mainColumn = () => (
+    <main class="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[#171717]">
+      <MainHeader header={ui.header} />
+      <ThreadViewport thread={ui.thread} />
+      <ComposerDock composer={ui.composer} />
+    </main>
+  )
+
+  const mainLayout = () => (
+    <>
+      {mainColumn()}
+
+      <Show when={gitPanelOpen()}>
+        <button
+          class="fixed inset-0 z-[75] bg-black/45 min-[901px]:hidden"
+          type="button"
+          aria-label="Close git changes"
+          onClick={() => git.onOpenChange(false)}
+        />
+        <GitSidePanel git={git} variant="mobile" />
+      </Show>
+    </>
+  )
 
   return (
     <div
       class={cx(
-        "remote-mobile-root grid h-dvh overflow-hidden bg-[var(--bg)] min-[901px]:grid-cols-[clamp(16.5rem,19vw,20rem)_minmax(0,1fr)] max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)] max-[900px]:min-h-0 max-[900px]:grid-cols-1"
+        "remote-mobile-root grid h-dvh overflow-hidden bg-[var(--bg)] max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)] max-[900px]:min-h-0 max-[900px]:grid-cols-1",
+        "min-[901px]:grid-cols-[clamp(16.5rem,19vw,20rem)_minmax(0,1fr)]"
       )}
       style={ui.themeStyle()}
     >
@@ -44,11 +71,31 @@ export function RemoteClientPage(props: { ui: RemoteClientUi }) {
         onClick={() => ui.sidebar.setOpen(false)}
       />
 
-      <main class="relative flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden bg-[#171717] max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)]">
-        <MainHeader header={ui.header} />
-        <ThreadViewport thread={ui.thread} />
-        <ComposerDock composer={ui.composer} />
-      </main>
+      <div class="relative min-h-0 min-w-0 h-dvh max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)]">
+        <Show
+          when={gitPanelOpen()}
+          fallback={
+            <div class="h-full min-h-0 min-w-0 max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)]">
+              {mainLayout()}
+            </div>
+          }
+        >
+          <div class="hidden h-full min-h-0 min-w-0 min-[901px]:block">
+            <Resizable class="h-full w-full min-h-0 min-w-0" initialSizes={[0.72, 0.28]} keyboardDelta={0.03}>
+              <ResizablePanel class="min-h-0 min-w-0 overflow-hidden" minSize={0.35} initialSize={0.72}>
+                {mainColumn()}
+              </ResizablePanel>
+              <ResizableHandle aria-label="Resize git panel" class="z-[2] w-px basis-px px-0 bg-[var(--line)] hover:bg-[var(--line-strong)]" />
+              <ResizablePanel class="min-h-0 min-w-0 overflow-hidden" minSize={0.18} maxSize={0.55} initialSize={0.28}>
+                <GitSidePanel git={git} variant="desktop" />
+              </ResizablePanel>
+            </Resizable>
+          </div>
+          <div class="h-full min-h-0 min-w-0 min-[901px]:hidden max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)]">
+            {mainLayout()}
+          </div>
+        </Show>
+      </div>
 
       <CommandPalette command={ui.commandPalette} />
       <ServerManagerDialog servers={ui.servers} />
@@ -216,10 +263,394 @@ function MainHeader(props: { header: HeaderController }) {
             <span class="max-[560px]:hidden">New chat</span>
           </button>
         </Show>
+        <GitPanelTrigger git={header.gitViewer} />
         <ServerPopover servers={header.servers} />
       </div>
     </header>
   )
+}
+
+function GitPanelTrigger(props: { git: GitViewerController }) {
+  const git = props.git
+  const summary = createMemo(() => git.summary())
+  const status = createMemo(() => git.status())
+  const branchLabel = createMemo(() => status()?.branch || summary()?.branch || "git")
+  const changedCount = createMemo(() => status()?.changed_files ?? null)
+
+  return (
+    <Show when={summary()?.is_repo}>
+      <button
+        class={cx(
+          "inline-flex h-[2.2rem] min-w-0 items-center gap-2 rounded-lg border px-2.5 text-[#d7d5d0] transition max-[560px]:aspect-square max-[560px]:w-[2.2rem] max-[560px]:justify-center max-[560px]:p-0",
+          git.open()
+            ? "border-[rgba(108,142,216,0.45)] bg-[#252a33] text-[var(--text)]"
+            : "border-[var(--line-strong)] bg-[#1f1f1f] hover:border-[rgba(255,255,255,0.18)] hover:bg-[#252525]"
+        )}
+        type="button"
+        aria-label="Toggle git changes"
+        aria-pressed={git.open()}
+        title="Git changes"
+        onClick={() => git.onOpenChange(!git.open())}
+      >
+        <IconGitBranch class="h-[1.05rem] w-[1.05rem] text-[var(--muted)]" />
+        <span class="max-w-[9rem] overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.76rem] font-semibold text-[var(--muted)] max-[560px]:hidden">
+          {branchLabel()}
+        </span>
+        <Show when={changedCount() !== null && changedCount()! > 0}>
+          <span class="rounded-full bg-[var(--brand-primary)]/20 px-1.5 py-0.5 font-mono text-[0.66rem] font-bold text-[var(--brand-primary)] max-[560px]:hidden">
+            {changedCount()}
+          </span>
+        </Show>
+      </button>
+    </Show>
+  )
+}
+
+function GitSidePanel(props: { git: GitViewerController; variant: "desktop" | "mobile" }) {
+  const git = props.git
+  const status = createMemo(() => git.status())
+  const branchLabel = createMemo(() => status()?.branch || git.summary()?.branch || "git")
+
+  return (
+    <aside
+      class={cx(
+        "flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden border-[var(--line)] bg-[var(--panel)]",
+        props.variant === "desktop"
+          ? "h-full w-full border-l"
+          : "fixed inset-y-0 right-0 z-[80] w-[min(25rem,92vw)] border-l shadow-[0_0_3rem_rgba(0,0,0,0.45)] min-[901px]:hidden"
+      )}
+    >
+      <div class="flex flex-none items-center justify-between gap-2 border-b border-[var(--line)] px-3 py-2.5">
+        <div class="min-w-0">
+          <div class="text-[0.84rem] font-bold text-[var(--text)]">Changes</div>
+          <div class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.68rem] text-[var(--faint)]">
+            {branchLabel()}
+          </div>
+        </div>
+        <div class="flex shrink-0 items-center gap-1">
+          <button
+            class="inline-flex h-7 items-center justify-center rounded-md border border-[var(--line-strong)] px-2.5 text-[0.72rem] font-semibold text-[var(--muted)] transition hover:bg-white/[0.045] hover:text-[var(--text)] disabled:opacity-55"
+            type="button"
+            disabled={git.loading()}
+            onClick={() => git.onRefresh()}
+          >
+            {git.loading() ? "…" : "Refresh"}
+          </button>
+          <button
+            class={cx(ICON_BUTTON, "h-7 w-7")}
+            type="button"
+            aria-label="Close git panel"
+            onClick={() => git.onOpenChange(false)}
+          >
+            <IconX class="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
+      <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2.5">
+        <Show when={git.error()}>
+          {(error) => (
+            <div class="mb-2 rounded-md border border-[rgba(200,108,116,0.28)] bg-[rgba(200,108,116,0.06)] px-2.5 py-1.5 text-[0.76rem] leading-snug text-[var(--red)]">
+              {error()}
+            </div>
+          )}
+        </Show>
+        <Show when={status()} fallback={<GitLoadingState loading={git.loading} />}>
+          {(current) => <GitStatusView git={git} status={current} loading={git.loading} />}
+        </Show>
+      </div>
+    </aside>
+  )
+}
+
+function GitLoadingState(props: { loading: () => boolean }) {
+  return (
+    <div class="py-6 text-center text-[0.8rem] text-[var(--muted)]">
+      {props.loading() ? "Loading changes…" : "Loading…"}
+    </div>
+  )
+}
+
+function GitStatusView(props: {
+  git: GitViewerController
+  status: () => NonNullable<ReturnType<GitViewerController["status"]>>
+  loading: () => boolean
+}) {
+  const status = props.status
+  const selectedDiff = createMemo(() => {
+    const path = props.git.selectedPath()
+    if (!path) return null
+    return status().diff_files.find((file) => file.path === path) ?? null
+  })
+
+  return (
+    <div class={cx("grid min-w-0 gap-2.5", props.loading() && "opacity-70")}>
+      <GitStatsRow
+        git={props.git}
+        hasDiffs={status().diff_files.length > 0}
+        additions={status().additions}
+        deletions={status().deletions}
+      />
+
+      <Show
+        when={status().changed_files > 0}
+        fallback={<div class="py-4 text-center text-[0.8rem] text-[var(--muted)]">Working tree is clean.</div>}
+      >
+        <section class="min-h-0 min-w-0">
+          <div class="mb-1 flex items-center gap-1.5 px-0.5 text-[0.66rem] font-bold uppercase tracking-[0.08em] text-[var(--faint)]">
+            <span>Files</span>
+            <span class="rounded-full border border-[var(--line)] bg-white/[0.04] px-1.5 py-px font-mono text-[0.58rem] leading-none tracking-normal text-[var(--muted)]">
+              {status().changed_files}
+            </span>
+          </div>
+          <div class="max-h-[min(14rem,28vh)] min-w-0 overflow-y-auto rounded-md border border-[var(--line)] bg-black/10 p-0.5">
+            <For each={status().files}>
+              {(file) => (
+                <GitFileRow
+                  file={file}
+                  selected={props.git.selectedPath() === file.path}
+                  onSelect={() => {
+                    props.git.setSelectedPath(file.path)
+                    props.git.setViewMode("file")
+                  }}
+                />
+              )}
+            </For>
+          </div>
+        </section>
+
+        <section class="min-h-0 min-w-0 overflow-hidden">
+          <Show
+            when={props.git.viewMode() === "all"}
+            fallback={
+              <Show
+                when={selectedDiff()}
+                fallback={
+                  <div class="rounded-md border border-[var(--line)] bg-white/[0.02] px-2.5 py-3 text-[0.76rem] text-[var(--faint)]">
+                    No diff preview for this file.
+                  </div>
+                }
+              >
+                {(file) => <GitDiffFile file={file()} compact />}
+              </Show>
+            }
+          >
+            <Show
+              when={status().diff_files.length > 0}
+              fallback={
+                <div class="rounded-md border border-[var(--line)] bg-white/[0.02] px-2.5 py-3 text-[0.76rem] text-[var(--faint)]">
+                  No textual diffs to preview.
+                </div>
+              }
+            >
+              <div class="grid min-w-0 gap-2">
+                <For each={status().diff_files}>{(file) => <GitDiffFile file={file} compact />}</For>
+              </div>
+            </Show>
+          </Show>
+        </section>
+
+        <Show when={status().truncated}>
+          <div class="rounded-md border border-[#c9a24a]/22 bg-[#c9a24a]/7 px-2.5 py-1.5 text-[0.72rem] leading-snug text-[#d4bc82]">
+            Large diff truncated. Refresh after narrowing changes for more.
+          </div>
+        </Show>
+      </Show>
+    </div>
+  )
+}
+
+function GitStatsRow(props: {
+  git: GitViewerController
+  hasDiffs: boolean
+  additions: number
+  deletions: number
+}) {
+  const mode = () => props.git.viewMode()
+  const tabClass = (active: boolean) =>
+    cx(
+      "rounded-[5px] px-2 py-0.5 font-semibold transition",
+      active ? "bg-white/[0.1] text-[var(--text)]" : "text-[var(--faint)] hover:bg-white/[0.04] hover:text-[var(--muted)]"
+    )
+
+  return (
+    <div class="flex flex-wrap items-center gap-1.5 text-[0.72rem]">
+      <Show when={props.hasDiffs}>
+        <span class="inline-flex items-center gap-0.5 rounded-md border border-[var(--line)] bg-black/10 p-0.5 font-mono">
+          <button class={tabClass(mode() === "file")} type="button" onClick={() => props.git.setViewMode("file")}>
+            File
+          </button>
+          <button class={tabClass(mode() === "all")} type="button" onClick={() => props.git.setViewMode("all")}>
+            All
+          </button>
+        </span>
+      </Show>
+      <span class="inline-flex items-center gap-1 rounded-md border border-[rgba(72,158,108,0.28)] bg-[rgba(46,120,82,0.12)] px-2 py-0.5 font-mono font-semibold text-[#6ecf9a]">
+        <span class="text-[0.62rem] font-bold uppercase tracking-[0.06em] text-[#5aab7d]">add</span>
+        +{props.additions}
+      </span>
+      <span class="inline-flex items-center gap-1 rounded-md border border-[rgba(196,98,108,0.28)] bg-[rgba(120,48,58,0.14)] px-2 py-0.5 font-mono font-semibold text-[#f08a96]">
+        <span class="text-[0.62rem] font-bold uppercase tracking-[0.06em] text-[#c4727c]">del</span>
+        −{props.deletions}
+      </span>
+    </div>
+  )
+}
+
+function GitFileRow(props: {
+  file: NonNullable<ReturnType<GitViewerController["status"]>>["files"][number]
+  selected: boolean
+  onSelect: () => void
+}) {
+  return (
+    <button
+      class={cx(
+        "grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1.5 rounded-[5px] px-1.5 py-1 text-left transition",
+        props.selected ? "bg-white/[0.08]" : "hover:bg-white/[0.04]"
+      )}
+      type="button"
+      onClick={props.onSelect}
+    >
+      <span class={cx("rounded px-1 py-px font-mono text-[0.6rem] font-bold uppercase", gitStatusClass(props.file.status))}>
+        {gitStatusLabel(props.file.status)}
+      </span>
+      <span
+        class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.7rem] text-[#d4d2cd]"
+        title={props.file.old_path ? `${props.file.old_path} → ${props.file.path}` : props.file.path}
+      >
+        <Show when={props.file.old_path} fallback={props.file.path}>
+          {(oldPath) => (
+            <>
+              {oldPath()} → {props.file.path}
+            </>
+          )}
+        </Show>
+      </span>
+      <span class="inline-flex items-center gap-1 whitespace-nowrap font-mono text-[0.65rem] font-semibold">
+        <Show
+          when={props.file.binary}
+          fallback={
+            <>
+              <span class="text-[#6ecf9a]">+{props.file.additions}</span>
+              <span class="text-[#f08a96]">−{props.file.deletions}</span>
+            </>
+          }
+        >
+          <span class="text-[var(--faint)]">bin</span>
+        </Show>
+      </span>
+    </button>
+  )
+}
+
+function GitDiffFile(props: {
+  file: NonNullable<ReturnType<GitViewerController["status"]>>["diff_files"][number]
+  compact?: boolean
+}) {
+  return (
+    <article class="w-full min-w-0 max-w-full overflow-hidden rounded-md border border-[var(--line)] bg-black/12">
+      <div class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-[var(--line)] px-2 py-1.5">
+        <div
+          class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.7rem] font-semibold text-[var(--text)]"
+          title={props.file.old_path ? `${props.file.old_path} → ${props.file.path}` : props.file.path}
+        >
+          <Show when={props.file.old_path} fallback={props.file.path}>
+            {(oldPath) => (
+              <>
+                {oldPath()} → {props.file.path}
+              </>
+            )}
+          </Show>
+        </div>
+        <span class="inline-flex items-center gap-1 whitespace-nowrap font-mono text-[0.65rem] font-semibold">
+          <span class="text-[#6ecf9a]">+{props.file.additions}</span>
+          <span class="text-[#f08a96]">−{props.file.deletions}</span>
+        </span>
+      </div>
+      <Show
+        when={!props.file.binary && props.file.lines.length > 0}
+        fallback={
+          <div class="px-2 py-2 text-[0.72rem] text-[var(--faint)]">
+            {props.file.binary ? "Binary file changed." : "No textual diff preview."}
+          </div>
+        }
+      >
+        <div class={cx("block w-full min-w-0 max-w-full overflow-x-auto p-1.5 font-mono text-[0.68rem] leading-[1.35]", props.compact && "max-h-[min(22rem,42vh)] overflow-y-auto")}>
+          <For each={props.file.lines}>{(line) => <GitDiffLine line={line} />}</For>
+          <Show when={props.file.truncated}>
+            <div class="px-1 py-0.5 text-[#d4bc82]">… truncated</div>
+          </Show>
+        </div>
+      </Show>
+    </article>
+  )
+}
+
+function GitDiffLine(props: { line: NonNullable<ReturnType<GitViewerController["status"]>>["diff_files"][number]["lines"][number] }) {
+  const line = props.line
+  const number = () => line.new_line ?? line.old_line ?? ""
+  const isAdd = () => line.kind === "add"
+  const isRemove = () => line.kind === "remove"
+  const isSemantic = () => isAdd() || isRemove()
+  return (
+    <div
+      class={cx(
+        "grid w-max min-w-full max-w-none grid-cols-[2.4rem_0.85rem_auto] gap-0",
+        line.kind === "context" && "text-[#8a8680]",
+        (line.kind === "hunk" || line.kind === "meta") && "text-[#c9a24a]"
+      )}
+    >
+      <span
+        class={cx(
+          "select-none px-1 text-right text-[var(--faint)]",
+          isAdd() && "bg-[#103a23] text-[#7dcf9d]",
+          isRemove() && "bg-[#4a1217] text-[#e58b96]"
+        )}
+      >
+        {number()}
+      </span>
+      <span
+        class={cx(
+          "select-none px-1 text-[var(--faint)]",
+          isAdd() && "bg-[#103a23] text-[#7dcf9d]",
+          isRemove() && "bg-[#4a1217] text-[#e58b96]"
+        )}
+      >
+        {gitDiffPrefix(line.kind)}
+      </span>
+      <code
+        class={cx(
+          "whitespace-pre px-1 [font:inherit] text-inherit",
+          isAdd() && "bg-[rgba(46,120,82,0.24)] text-[#9be7b9]",
+          isRemove() && "bg-[rgba(150,48,60,0.28)] text-[#f4a3ad]",
+          !isSemantic() && "pl-2"
+        )}
+      >
+        {line.text}
+      </code>
+    </div>
+  )
+}
+
+function gitStatusLabel(status: string) {
+  if (status === "added") return "A"
+  if (status === "deleted") return "D"
+  if (status === "renamed") return "R"
+  if (status === "untracked") return "U"
+  return "M"
+}
+
+function gitStatusClass(status: string) {
+  if (status === "added" || status === "untracked") return "bg-[#0c2613] text-[#8fd8aa]"
+  if (status === "deleted") return "bg-[#2b1012] text-[#e09299]"
+  if (status === "renamed") return "bg-[#1f2536] text-[#8fb7ff]"
+  return "bg-white/[0.055] text-[var(--muted)]"
+}
+
+function gitDiffPrefix(kind: string) {
+  if (kind === "add") return "+"
+  if (kind === "remove") return "-"
+  return " "
 }
 
 function ProjectPicker(props: { picker: ProjectPickerController }) {

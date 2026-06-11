@@ -26,20 +26,26 @@ use ratatui::{
 use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as TokioMutex;
 
 const DEFAULT_PAIR_TTL_SECS: i64 = 10 * 60;
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REMOTE_PROMPT_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const EVENT_DRAIN_LIMIT: usize = 256;
+const GIT_SUMMARY_CACHE_TTL: Duration = Duration::from_secs(15);
+const MAX_GIT_DIFF_BYTES: usize = 384 * 1024;
+const MAX_GIT_FILES: usize = 200;
+const MAX_GIT_PATCH_LINES_PER_FILE: usize = 180;
+const MAX_GIT_PATCH_LINE_CHARS: usize = 900;
 
 fn drain_pending_terminal_events(idle_timeout: Duration) {
     for _ in 0..EVENT_DRAIN_LIMIT {
@@ -107,6 +113,7 @@ struct HostState {
     pair_expires_at: Option<i64>,
     browser_url: String,
     suggested_alias: String,
+    git_summary_cache: Mutex<Option<GitSummaryCacheEntry>>,
 }
 
 impl HostState {
@@ -126,6 +133,7 @@ impl HostState {
             pair_expires_at,
             browser_url,
             suggested_alias,
+            git_summary_cache: Mutex::new(None),
         })
     }
 
@@ -177,12 +185,68 @@ struct RemoteStatus {
     auth_required: bool,
     pair_expires_at: i64,
     theme: RemoteTheme,
+    git_summary: RemoteGitSummary,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct RemoteTheme {
     primary: String,
     primary_dim: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+struct RemoteGitSummary {
+    is_repo: bool,
+    branch: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GitSummaryCacheEntry {
+    cwd: String,
+    checked_at: Instant,
+    summary: RemoteGitSummary,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct RemoteGitStatus {
+    is_repo: bool,
+    branch: Option<String>,
+    changed_files: usize,
+    additions: usize,
+    deletions: usize,
+    files: Vec<RemoteGitFileChange>,
+    diff_files: Vec<RemoteGitDiffFile>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct RemoteGitFileChange {
+    path: String,
+    old_path: Option<String>,
+    status: String,
+    additions: usize,
+    deletions: usize,
+    binary: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct RemoteGitDiffFile {
+    path: String,
+    old_path: Option<String>,
+    status: String,
+    additions: usize,
+    deletions: usize,
+    binary: bool,
+    lines: Vec<RemoteGitDiffLine>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct RemoteGitDiffLine {
+    kind: String,
+    text: String,
+    old_line: Option<usize>,
+    new_line: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -571,7 +635,7 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
         suggested_alias.clone(),
         options.pair_code.clone(),
     )?);
-    let app = Arc::new(Mutex::new(App::new_with_model_override(
+    let app = Arc::new(TokioMutex::new(App::new_with_model_override(
         options.model_override.as_deref(),
     )?));
 
@@ -1143,7 +1207,7 @@ fn render_terminal_snapshot(
 
 async fn handle_connection(
     socket: &mut TcpStream,
-    app: Arc<Mutex<App>>,
+    app: Arc<TokioMutex<App>>,
     host_state: Arc<HostState>,
 ) -> Result<()> {
     let Some(request) = read_http_request(socket).await? else {
@@ -1214,6 +1278,20 @@ async fn handle_connection(
                 return write_error_response(socket, 404, "project favicon not found").await;
             };
             write_response(socket, 200, content_type, &bytes).await
+        }
+        ("GET", "/api/git/status") => {
+            if !authorized(&request, host_state.as_ref()) {
+                return write_error_response(socket, 401, "pairing required").await;
+            }
+            let cwd = {
+                let app = app.lock().await;
+                app.remote_workspace_path()
+            };
+            let response = match remote_git_status(&cwd) {
+                Ok(status) => status,
+                Err(err) => return write_error_response(socket, 500, &err.to_string()).await,
+            };
+            write_json_response(socket, 200, &response).await
         }
         ("GET", "/api/local-image") => {
             if !authorized(&request, host_state.as_ref()) {
@@ -2043,7 +2121,7 @@ async fn write_empty_response(socket: &mut TcpStream, status: u16) -> Result<()>
 
 async fn write_state_events_response(
     socket: &mut TcpStream,
-    app: Arc<Mutex<App>>,
+    app: Arc<TokioMutex<App>>,
     host_state: Arc<HostState>,
 ) -> Result<()> {
     let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\n\r\n";
@@ -2184,10 +2262,11 @@ fn remote_state(app: &App, host_state: &HostState) -> RemoteState {
 }
 
 fn remote_status(app: &App, host_state: &HostState) -> RemoteStatus {
+    let cwd = app.remote_workspace_path();
     RemoteStatus {
         version: app.version.clone(),
         workspace: workspace_label(app),
-        cwd: app.remote_workspace_path(),
+        cwd: cwd.clone(),
         provider: app.provider_name.clone(),
         model: app.model.clone(),
         agent: app.agent.clone(),
@@ -2198,7 +2277,518 @@ fn remote_status(app: &App, host_state: &HostState) -> RemoteStatus {
         auth_required: host_state.auth_required(),
         pair_expires_at: host_state.pair_expires_at.unwrap_or(0),
         theme: remote_theme(app),
+        git_summary: remote_git_summary(host_state, &cwd),
     }
+}
+
+fn remote_git_summary(host_state: &HostState, cwd: &str) -> RemoteGitSummary {
+    let now = Instant::now();
+    if let Ok(cache) = host_state.git_summary_cache.lock() {
+        if let Some(entry) = cache.as_ref() {
+            if entry.cwd == cwd && now.duration_since(entry.checked_at) < GIT_SUMMARY_CACHE_TTL {
+                return entry.summary.clone();
+            }
+        }
+    }
+
+    let summary = git_summary_for_path(cwd).unwrap_or(RemoteGitSummary {
+        is_repo: false,
+        branch: None,
+    });
+
+    if let Ok(mut cache) = host_state.git_summary_cache.lock() {
+        *cache = Some(GitSummaryCacheEntry {
+            cwd: cwd.to_string(),
+            checked_at: now,
+            summary: summary.clone(),
+        });
+    }
+
+    summary
+}
+
+fn git_summary_for_path(cwd: &str) -> Option<RemoteGitSummary> {
+    let output = Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return Some(RemoteGitSummary {
+            is_repo: false,
+            branch: None,
+        });
+    }
+
+    Some(RemoteGitSummary {
+        is_repo: true,
+        branch: crate::utils::git::get_branch_for_path(cwd)
+            .or_else(|| git_short_head_for_path(cwd))
+            .or_else(|| Some("HEAD".to_string())),
+    })
+}
+
+fn git_short_head_for_path(cwd: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn remote_git_status(cwd: &str) -> Result<RemoteGitStatus> {
+    let Some(summary) = git_summary_for_path(cwd) else {
+        return Ok(empty_remote_git_status());
+    };
+    if !summary.is_repo {
+        return Ok(RemoteGitStatus {
+            branch: summary.branch,
+            ..empty_remote_git_status()
+        });
+    }
+
+    let has_head = git_has_head(cwd);
+    let numstat = if has_head {
+        git_output(cwd, &["diff", "--numstat", "HEAD", "--"])?
+    } else {
+        String::new()
+    };
+    let (mut files, mut truncated_files) = parse_git_numstat(&numstat);
+    append_untracked_git_files(cwd, &mut files, &mut truncated_files)?;
+    let diff = if has_head {
+        git_output_limited(
+            cwd,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--unified=3",
+                "--find-renames",
+                "--find-copies",
+                "HEAD",
+                "--",
+            ],
+            MAX_GIT_DIFF_BYTES,
+        )?
+    } else {
+        LimitedCommandOutput {
+            output: String::new(),
+            truncated: false,
+        }
+    };
+    let mut diff_files = parse_git_diff(&diff.output);
+
+    let diff_truncated = diff.truncated;
+    if diff_truncated {
+        if let Some(file) = diff_files.last_mut() {
+            file.truncated = true;
+        }
+    }
+
+    if files.is_empty() && !diff_files.is_empty() {
+        files = diff_files
+            .iter()
+            .map(|file| RemoteGitFileChange {
+                path: file.path.clone(),
+                old_path: file.old_path.clone(),
+                status: file.status.clone(),
+                additions: file.additions,
+                deletions: file.deletions,
+                binary: file.binary,
+            })
+            .collect();
+    }
+
+    merge_git_diff_file_metadata(&mut files, &diff_files);
+
+    if files.len() > MAX_GIT_FILES {
+        files.truncate(MAX_GIT_FILES);
+        truncated_files = true;
+    }
+    if diff_files.len() > MAX_GIT_FILES {
+        diff_files.truncate(MAX_GIT_FILES);
+    }
+
+    let additions = files.iter().map(|file| file.additions).sum();
+    let deletions = files.iter().map(|file| file.deletions).sum();
+    let changed_files = files.len();
+
+    Ok(RemoteGitStatus {
+        is_repo: true,
+        branch: summary.branch,
+        changed_files,
+        additions,
+        deletions,
+        files,
+        diff_files,
+        truncated: truncated_files || diff_truncated,
+    })
+}
+
+fn empty_remote_git_status() -> RemoteGitStatus {
+    RemoteGitStatus {
+        is_repo: false,
+        branch: None,
+        changed_files: 0,
+        additions: 0,
+        deletions: 0,
+        files: Vec::new(),
+        diff_files: Vec::new(),
+        truncated: false,
+    }
+}
+
+fn git_output(cwd: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "git {} failed{}",
+            args.join(" "),
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+struct LimitedCommandOutput {
+    output: String,
+    truncated: bool,
+}
+
+fn git_output_limited(cwd: &str, args: &[&str], max_bytes: usize) -> Result<LimitedCommandOutput> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+
+    let mut output = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut truncated = false;
+    if let Some(stdout) = child.stdout.as_mut() {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = stdout
+                .read(&mut buffer)
+                .with_context(|| format!("failed to read git {}", args.join(" ")))?;
+            if read == 0 {
+                break;
+            }
+            let remaining = max_bytes.saturating_sub(output.len());
+            if read <= remaining {
+                output.extend_from_slice(&buffer[..read]);
+            } else {
+                output.extend_from_slice(&buffer[..remaining]);
+                truncated = true;
+                let _ = child.kill();
+                break;
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for git {}", args.join(" ")))?;
+    if !status.success() && !truncated {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        let stderr = stderr.trim();
+        bail!(
+            "git {} failed{}",
+            args.join(" "),
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        );
+    }
+
+    Ok(LimitedCommandOutput {
+        output: String::from_utf8_lossy(&output).into_owned(),
+        truncated,
+    })
+}
+
+fn git_has_head(cwd: &str) -> bool {
+    Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--verify", "HEAD"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn append_untracked_git_files(
+    cwd: &str,
+    files: &mut Vec<RemoteGitFileChange>,
+    truncated: &mut bool,
+) -> Result<()> {
+    let output = git_output(cwd, &["ls-files", "--others", "--exclude-standard"])?;
+    for path in output.lines().filter(|line| !line.trim().is_empty()) {
+        if files.len() >= MAX_GIT_FILES {
+            *truncated = true;
+            break;
+        }
+        files.push(RemoteGitFileChange {
+            path: path.to_string(),
+            old_path: None,
+            status: "untracked".to_string(),
+            additions: 0,
+            deletions: 0,
+            binary: false,
+        });
+    }
+    Ok(())
+}
+
+fn merge_git_diff_file_metadata(
+    files: &mut [RemoteGitFileChange],
+    diff_files: &[RemoteGitDiffFile],
+) {
+    let by_path = diff_files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect::<HashMap<_, _>>();
+    for file in files.iter_mut() {
+        let Some(diff_file) = by_path.get(file.path.as_str()) else {
+            continue;
+        };
+        file.status = diff_file.status.clone();
+        file.old_path = file.old_path.clone().or_else(|| diff_file.old_path.clone());
+        file.binary = file.binary || diff_file.binary;
+    }
+}
+
+fn parse_git_numstat(output: &str) -> (Vec<RemoteGitFileChange>, bool) {
+    let mut files = Vec::new();
+    let mut truncated = false;
+    for line in output.lines() {
+        if files.len() >= MAX_GIT_FILES {
+            truncated = true;
+            break;
+        }
+        let mut fields = line.split('\t');
+        let added = fields.next().unwrap_or_default();
+        let deleted = fields.next().unwrap_or_default();
+        let Some(raw_path) = fields.next() else {
+            continue;
+        };
+        let binary = added == "-" || deleted == "-";
+        let (old_path, path) = parse_numstat_path(raw_path);
+        files.push(RemoteGitFileChange {
+            path,
+            old_path,
+            status: "modified".to_string(),
+            additions: added.parse().unwrap_or(0),
+            deletions: deleted.parse().unwrap_or(0),
+            binary,
+        });
+    }
+    (files, truncated)
+}
+
+fn parse_numstat_path(raw: &str) -> (Option<String>, String) {
+    if !raw.starts_with('{') || !raw.ends_with('}') {
+        return (None, raw.to_string());
+    }
+    let inner = &raw[1..raw.len().saturating_sub(1)];
+    let Some((prefix, suffix)) = inner.split_once(" => ") else {
+        return (None, raw.to_string());
+    };
+    (Some(prefix.to_string()), suffix.to_string())
+}
+
+fn parse_git_diff(output: &str) -> Vec<RemoteGitDiffFile> {
+    let mut files = Vec::new();
+    let mut current: Option<RemoteGitDiffFile> = None;
+    let mut old_line = 0_usize;
+    let mut new_line = 0_usize;
+
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            if let Some(file) = current.take() {
+                files.push(file);
+                if files.len() >= MAX_GIT_FILES {
+                    break;
+                }
+            }
+            let (old_path, path) = parse_diff_git_paths(rest);
+            current = Some(RemoteGitDiffFile {
+                path,
+                old_path,
+                status: "modified".to_string(),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+                lines: Vec::new(),
+                truncated: false,
+            });
+            old_line = 0;
+            new_line = 0;
+            continue;
+        }
+
+        let Some(file) = current.as_mut() else {
+            continue;
+        };
+
+        if line.starts_with("new file mode ") {
+            file.status = "added".to_string();
+            continue;
+        }
+        if line.starts_with("deleted file mode ") {
+            file.status = "deleted".to_string();
+            continue;
+        }
+        if line.starts_with("rename from ") {
+            file.status = "renamed".to_string();
+            continue;
+        }
+        if line.starts_with("Binary files ") {
+            file.binary = true;
+            continue;
+        }
+        if line.starts_with("--- ") || line.starts_with("+++ ") || line.starts_with("index ") {
+            continue;
+        }
+        if let Some((old_start, new_start)) = parse_hunk_header(line) {
+            old_line = old_start;
+            new_line = new_start;
+            push_git_diff_line(file, "hunk", line.to_string(), None, None);
+            continue;
+        }
+        if let Some(text) = line.strip_prefix('+') {
+            if line.starts_with("+++") {
+                continue;
+            }
+            let line_number = new_line;
+            new_line = new_line.saturating_add(1);
+            file.additions = file.additions.saturating_add(1);
+            push_git_diff_line(file, "add", text.to_string(), None, Some(line_number));
+            continue;
+        }
+        if let Some(text) = line.strip_prefix('-') {
+            if line.starts_with("---") {
+                continue;
+            }
+            let line_number = old_line;
+            old_line = old_line.saturating_add(1);
+            file.deletions = file.deletions.saturating_add(1);
+            push_git_diff_line(file, "remove", text.to_string(), Some(line_number), None);
+            continue;
+        }
+        if line.starts_with(' ') {
+            let line_number = new_line;
+            old_line = old_line.saturating_add(1);
+            new_line = new_line.saturating_add(1);
+            push_git_diff_line(
+                file,
+                "context",
+                line.strip_prefix(' ').unwrap_or(line).to_string(),
+                Some(old_line.saturating_sub(1)),
+                Some(line_number),
+            );
+            continue;
+        }
+        if line.starts_with("\\ No newline at end of file") {
+            push_git_diff_line(file, "meta", line.to_string(), None, None);
+        }
+    }
+
+    if let Some(file) = current.take() {
+        files.push(file);
+    }
+    files
+}
+
+fn push_git_diff_line(
+    file: &mut RemoteGitDiffFile,
+    kind: &str,
+    text: String,
+    old_line: Option<usize>,
+    new_line: Option<usize>,
+) {
+    if file.lines.len() >= MAX_GIT_PATCH_LINES_PER_FILE {
+        file.truncated = true;
+        return;
+    }
+    let text = truncate_chars(&text, MAX_GIT_PATCH_LINE_CHARS);
+    file.lines.push(RemoteGitDiffLine {
+        kind: kind.to_string(),
+        text,
+        old_line,
+        new_line,
+    });
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut iter = value.chars();
+    let truncated: String = iter.by_ref().take(max_chars).collect();
+    if iter.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn parse_diff_git_paths(rest: &str) -> (Option<String>, String) {
+    if let Some(rest) = rest.strip_prefix("a/") {
+        if let Some((old, new)) = rest.split_once(" b/") {
+            let old = old.to_string();
+            let new = new.to_string();
+            let old_path = (old != new && !old.is_empty()).then_some(old);
+            return (old_path, new);
+        }
+    }
+
+    let mut parts = rest.split_whitespace();
+    let old = parts.next().map(strip_diff_prefix).unwrap_or_default();
+    let new = parts
+        .next()
+        .map(strip_diff_prefix)
+        .unwrap_or_else(|| old.clone());
+    let old_path = (old != new && !old.is_empty()).then_some(old);
+    (old_path, new)
+}
+
+fn strip_diff_prefix(value: &str) -> String {
+    value
+        .strip_prefix("a/")
+        .or_else(|| value.strip_prefix("b/"))
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_part, rest) = rest.split_once(" +")?;
+    let (new_part, _) = rest.split_once(" @@")?;
+    Some((parse_hunk_start(old_part), parse_hunk_start(new_part)))
+}
+
+fn parse_hunk_start(part: &str) -> usize {
+    part.split(',')
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 fn remote_theme(app: &App) -> RemoteTheme {

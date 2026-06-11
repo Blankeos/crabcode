@@ -12,11 +12,55 @@ export type RemoteStatus = {
   auth_required: boolean
   pair_expires_at: number
   theme: RemoteTheme
+  git_summary: RemoteGitSummary
 }
 
 export type RemoteTheme = {
   primary: string
   primary_dim: string
+}
+
+export type RemoteGitSummary = {
+  is_repo: boolean
+  branch: string | null
+}
+
+export type RemoteGitStatus = {
+  is_repo: boolean
+  branch: string | null
+  changed_files: number
+  additions: number
+  deletions: number
+  files: RemoteGitFileChange[]
+  diff_files: RemoteGitDiffFile[]
+  truncated: boolean
+}
+
+export type RemoteGitFileChange = {
+  path: string
+  old_path: string | null
+  status: string
+  additions: number
+  deletions: number
+  binary: boolean
+}
+
+export type RemoteGitDiffFile = {
+  path: string
+  old_path: string | null
+  status: string
+  additions: number
+  deletions: number
+  binary: boolean
+  lines: RemoteGitDiffLine[]
+  truncated: boolean
+}
+
+export type RemoteGitDiffLine = {
+  kind: "add" | "remove" | "context" | "hunk" | "meta" | string
+  text: string
+  old_line: number | null
+  new_line: number | null
 }
 
 export type RemoteSession = {
@@ -199,6 +243,7 @@ export function createRemoteApi(getToken: () => string) {
   return {
     status: () => request<RemoteStatus>("/api/status"),
     state: () => request<RemoteState>("/api/state"),
+    gitStatus: () => request<RemoteGitStatus>("/api/git/status"),
     stateEvents: (
       onState: (state: RemoteState) => void,
       onError?: (error: Event) => void

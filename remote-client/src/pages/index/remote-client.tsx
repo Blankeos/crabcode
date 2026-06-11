@@ -6,6 +6,7 @@ import { cx } from "../../lib/cx"
 import {
   createRemoteApi,
   RemoteApiError,
+  type RemoteGitStatus,
   type RemoteMessage,
   type RemoteModel,
   type RemotePromptImage,
@@ -89,6 +90,13 @@ export default function RemoteClient() {
   const [serverUsername, setServerUsername] = createSignal("")
   const [serverPassword, setServerPassword] = createSignal("")
   const [savedServers, setSavedServers] = createSignal<SavedServer[]>(loadSavedServers())
+  const [gitOpen, setGitOpen] = createSignal(false)
+  const [gitLoading, setGitLoading] = createSignal(false)
+  const [gitError, setGitError] = createSignal("")
+  const [gitStatus, setGitStatus] = createSignal<RemoteGitStatus | null>(null)
+  const [gitLoadedPath, setGitLoadedPath] = createSignal("")
+  const [gitSelectedPath, setGitSelectedPath] = createSignal<string | null>(null)
+  const [gitViewMode, setGitViewMode] = createSignal<"file" | "all">("file")
   const [agentOpen, setAgentOpen] = createSignal(false)
   const [reasoningOpen, setReasoningOpen] = createSignal(false)
   const [modelOpen, setModelOpen] = createSignal(false)
@@ -214,6 +222,27 @@ export default function RemoteClient() {
   })
 
   createEffect(() => {
+    projectPath()
+    setGitOpen(false)
+    setGitStatus(null)
+    setGitLoadedPath("")
+    setGitError("")
+    setGitSelectedPath(null)
+    setGitViewMode("file")
+  })
+
+  createEffect(() => {
+    const status = gitStatus()
+    if (!status || status.files.length === 0) {
+      setGitSelectedPath(null)
+      return
+    }
+    const selected = gitSelectedPath()
+    if (selected && status.files.some((file) => file.path === selected)) return
+    setGitSelectedPath(status.diff_files[0]?.path ?? status.files[0]?.path ?? null)
+  })
+
+  createEffect(() => {
     const index = composerSuggestionIndex()
     composerSuggestions().length
     const list = composerSuggestionsRef
@@ -324,6 +353,7 @@ export default function RemoteClient() {
   })
   const reasoningOptions = createMemo(() => state()?.status.reasoning_efforts ?? [])
   const reasoningLabel = createMemo(() => state()?.status.reasoning_effort || "off")
+  const gitSummary = createMemo(() => state()?.status.git_summary ?? null)
   const pendingPermission = createMemo(() => state()?.pending_permission ?? null)
   const pendingQuestion = createMemo(() => state()?.pending_question ?? null)
 
@@ -1174,6 +1204,31 @@ export default function RemoteClient() {
     }
   }
 
+  const loadGitStatus = async (force = false) => {
+    const cwd = projectPath()
+    if (!gitSummary()?.is_repo || !cwd || gitLoading()) return
+    if (!force && gitStatus() && gitLoadedPath() === cwd) return
+
+    setGitLoading(true)
+    setGitError("")
+    try {
+      const next = await api().gitStatus()
+      if (projectPath() !== cwd) return
+      setGitStatus(next)
+      setGitLoadedPath(cwd)
+    } catch (error) {
+      if (projectPath() !== cwd) return
+      setGitError(errorToastMessage(error, "Could not load git changes."))
+    } finally {
+      setGitLoading(false)
+    }
+  }
+
+  const handleGitOpenChange = (open: boolean) => {
+    setGitOpen(open)
+    if (open) void loadGitStatus(false)
+  }
+
   const selectServerPanelTab = (tab: ServerPanelTab) => {
     setServerPanelTab(tab)
     if (tab === "skills") void loadSkills()
@@ -1433,6 +1488,19 @@ export default function RemoteClient() {
       isEmptyChat,
       onNewSession: startNewSession,
       servers: serversController,
+      gitViewer: {
+        open: gitOpen,
+        onOpenChange: handleGitOpenChange,
+        loading: gitLoading,
+        error: gitError,
+        status: gitStatus,
+        summary: gitSummary,
+        selectedPath: gitSelectedPath,
+        setSelectedPath: setGitSelectedPath,
+        viewMode: gitViewMode,
+        setViewMode: setGitViewMode,
+        onRefresh: () => loadGitStatus(true),
+      },
     },
     thread: {
       setScrollRef: (element) => setThreadScrollEl(element),
