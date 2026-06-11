@@ -6057,7 +6057,7 @@ impl App {
             let _ = self
                 .connect_dialog_state
                 .dialog
-                .select_item_by_key(provider_id, "");
+                .select_item_by_id(provider_id);
         }
     }
 

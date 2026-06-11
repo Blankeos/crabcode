@@ -258,8 +258,8 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
 - [x] ~Generate images with a codex exec call. No oauth spoofing needed. Just needs codex to be there.~ (For now, no... lol)
 
-- [ ] Scroll is not intuitive for interruptions. I'm using Logitech MX Master 3s, if I scroll the mouse SUPER down like at super speed. The scroll seems to just get stuck even if I scroll the other direction or just stop.
-  - [ ] Also slightly unperformant. I can definitely notice the animations slowing down when I scroll
+- [x] Scroll is not intuitive for interruptions. I'm using Logitech MX Master 3s, if I scroll the mouse SUPER down like at super speed. The scroll seems to just get stuck even if I scroll the other direction or just stop.
+  - [x] Also slightly unperformant. I can definitely notice the animations slowing down when I scroll
 
 - [x] Add commandcode.ai since opencode is not planning to.
 
@@ -309,4 +309,4 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
 - [x] xAI support
 
-- [ ] Minor bug fix, when I ctrl-d disconnect from a provider. Don't change focus of current selection cursor to the first item again. Just stay on the same item.
+- [x] Minor bug fix, when I ctrl-d disconnect from a provider. Don't change focus of current selection cursor to the first item again. Just stay on the same item.

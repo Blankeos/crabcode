@@ -80,3 +80,37 @@ pub fn handle_connect_dialog_mouse_event(
 ) -> bool {
     dialog_state.dialog.handle_mouse_event(event)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider_item(id: &str, name: &str) -> DialogItem {
+        DialogItem {
+            id: id.to_string(),
+            name: name.to_string(),
+            group: "Popular".to_string(),
+            description: id.to_string(),
+            tip: None,
+            provider_id: id.to_string(),
+            active: false,
+        }
+    }
+
+    #[test]
+    fn provider_selection_can_be_restored_by_id_after_refresh() {
+        let mut state = ConnectDialogState::with_items(
+            "Connect a provider",
+            vec![
+                provider_item("anthropic", "Anthropic"),
+                provider_item("openai", "OpenAI"),
+            ],
+        );
+
+        assert!(state.dialog.select_item_by_id("openai"));
+        assert_eq!(
+            state.dialog.get_selected().map(|item| item.id.as_str()),
+            Some("openai")
+        );
+    }
+}
