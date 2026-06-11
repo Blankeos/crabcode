@@ -34,6 +34,7 @@ export type RemoteWorkspace = {
   name: string
   path: string
   sort_order: number
+  last_opened_at: number
 }
 
 export type RemoteJsonValue =
@@ -103,6 +104,7 @@ export type RemoteState = {
   current_session_id: string | null
   messages: RemoteMessage[]
   is_streaming: boolean
+  queued_messages: string[]
   pending_permission: RemotePendingPermission | null
   pending_question: RemotePendingQuestion | null
 }
@@ -242,6 +244,8 @@ export function createRemoteApi(getToken: () => string) {
       }),
     cancel: () =>
       request<{ cancelled: boolean }>("/api/cancel", { method: "POST", json: {} }),
+    sendQueuedNow: () =>
+      request<RemoteState>("/api/queue/send-now", { method: "POST", json: {} }),
     answerPermission: (response: "deny" | "allow_once" | "allow_always") =>
       request<RemoteState>("/api/permission", { method: "POST", json: { response } }),
     answerQuestion: (answers: string[][]) =>

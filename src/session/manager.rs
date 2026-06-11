@@ -38,6 +38,7 @@ pub struct WorkspaceInfo {
     pub path: String,
     pub name: String,
     pub sort_order: i64,
+    pub last_opened_at: i64,
 }
 
 pub struct SessionManager {
@@ -401,6 +402,7 @@ impl SessionManager {
                         path: workspace.root_path,
                         name: workspace.display_name,
                         sort_order: workspace.sort_order,
+                        last_opened_at: workspace.last_opened_at,
                     })
                     .collect::<Vec<_>>()
             })
@@ -415,6 +417,7 @@ impl SessionManager {
                 path: self.current_workspace_path.clone(),
                 name: self.current_workspace_name.clone(),
                 sort_order: self.workspace_sort_order(self.current_workspace_id),
+                last_opened_at: i64::MAX,
             });
         }
 

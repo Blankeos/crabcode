@@ -65,11 +65,58 @@
     --brand-primary: var(--blue);
     --brand-dim: #4a639f;
     --composer: #1d1d1d;
+    --composer-queue: #181818;
     --shadow: rgba(0, 0, 0, 0.28);
   }
 
   * { box-sizing: border-box; }
-  html, body, #root, #page-view { height: 100%; min-height: 0; }
+  html, body, #root, #page-view { height: 100%; min-height: 0; overflow: hidden; }
+  @media (max-width: 900px) {
+    html.remote-keyboard-layout,
+    html.remote-keyboard-layout body,
+    html.remote-keyboard-layout #root,
+    html.remote-keyboard-layout #page-view {
+      height: var(--visual-viewport-bottom, var(--dvh, 100dvh));
+      max-height: var(--visual-viewport-bottom, var(--dvh, 100dvh));
+      overflow: hidden;
+    }
+
+    html.remote-keyboard-layout .remote-mobile-root {
+      height: var(--dvh, 100dvh);
+      max-height: var(--dvh, 100dvh);
+      margin-top: var(--visual-viewport-offset-top, 0px);
+      overflow: hidden;
+    }
+
+    html.remote-input-focused,
+    html.remote-input-focused body {
+      height: auto;
+      min-height: var(--dvh, 100dvh);
+      max-height: none;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior-y: none;
+    }
+
+    html.remote-input-focused #root,
+    html.remote-input-focused #page-view {
+      height: var(--visual-viewport-bottom, var(--dvh, 100dvh));
+      max-height: var(--visual-viewport-bottom, var(--dvh, 100dvh));
+      overflow: hidden;
+    }
+
+    html.remote-input-focused body::after {
+      content: "";
+      display: block;
+      height: calc(var(--keyboard-height, 0px) + var(--visual-viewport-offset-top, 0px) + 1px);
+    }
+  }
+  @media (max-width: 900px) and (max-height: 540px) {
+    .remote-mobile-root .remote-empty-mascot { display: none; }
+    .remote-mobile-root .remote-empty-logo {
+      font-size: clamp(0.4rem, 1.9vw, 0.7rem) !important;
+    }
+  }
   body {
     margin: 0;
     overflow: hidden;

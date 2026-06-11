@@ -25,6 +25,7 @@ type ProjectListProps = {
   activeProjectPath: Accessor<string | null | undefined>
   token: Accessor<string>
   currentSessionId: Accessor<string | null | undefined>
+  sidebarOpen?: Accessor<boolean>
   onToggleProject: (key: string) => void
   onNewSession: (workspacePath?: string) => void
   onSwitchSession: (id: string) => void
@@ -35,6 +36,18 @@ type ProjectListProps = {
 export function ProjectList(props: ProjectListProps) {
   const [scrollEl, setScrollEl] = createSignal<HTMLDivElement>()
   const edges = useScrollEdges(scrollEl)
+
+  createEffect(() => {
+    if (props.sidebarOpen && !props.sidebarOpen()) return
+    const path = props.activeProjectPath()?.trim()
+    if (!path) return
+    queueMicrotask(() => {
+      const root = scrollEl()
+      if (!root) return
+      const row = root.querySelector<HTMLElement>(`[data-project-path="${cssEscapeAttr(path)}"]`)
+      row?.scrollIntoView({ block: "nearest", behavior: "smooth" })
+    })
+  })
 
   return (
     <div class="relative min-h-0 flex-1">
@@ -48,7 +61,7 @@ export function ProjectList(props: ProjectListProps) {
             const open = () => props.openProjects().has(key())
             const active = () => isActiveProject(project().path, props.activeProjectPath())
             return (
-              <section class="min-w-0">
+              <section class="min-w-0" data-project-path={project().path || project().name}>
                 <div class="sticky top-0 z-20 -mx-3 bg-[var(--panel)] px-3 py-0.5">
                   <ContextMenu>
                     <ContextMenuTrigger as="div">
@@ -136,6 +149,13 @@ function isActiveProject(projectPath: string, activeProjectPath: string | null |
   const project = projectPath.trim()
   const active = activeProjectPath?.trim()
   return Boolean(project && active && project === active)
+}
+
+function cssEscapeAttr(value: string) {
+  if (typeof CSS !== "undefined" && "escape" in CSS) {
+    return CSS.escape(value)
+  }
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
 }
 
 function SessionRow(props: {

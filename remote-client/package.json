@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bunx --bun vike dev --host 127.0.0.1 --port 4271",
+    "dev": "bunx --bun vike dev --host --port 4271",
     "build": "bunx --bun vike build",
     "typecheck": "tsc --noEmit"
   },
@@ -22,6 +22,7 @@
     "vite-tsconfig-paths": "^6.0.4"
   },
   "devDependencies": {
+    "@types/node": "^25.9.3",
     "typescript": "^5.9.3"
   }
 }

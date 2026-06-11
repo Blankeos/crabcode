@@ -7,6 +7,13 @@ dev:
 remote-client-build:
     cd remote-client && bun install && bun run build
 
+remote-host-dev bind="127.0.0.1:8421":
+    cargo r -- serve --bind "{{ bind }}"
+
+# Phone on same LAN: http://<this-machine-ip>:4271 (API proxied to {{ api }} on the host)
+remote-client-dev api="http://127.0.0.1:8421":
+    cd remote-client && CRABCODE_REMOTE_API_ORIGIN="{{ api }}" bun run dev
+
 dist-build *args:
     just remote-client-build
     dist build {{ args }}

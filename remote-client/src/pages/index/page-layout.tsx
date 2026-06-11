@@ -29,7 +29,7 @@ export function RemoteClientPage(props: { ui: RemoteClientUi }) {
   return (
     <div
       class={cx(
-        "grid h-dvh overflow-hidden bg-[var(--bg)] min-[901px]:grid-cols-[clamp(16.5rem,19vw,20rem)_minmax(0,1fr)] max-[900px]:grid-cols-1"
+        "remote-mobile-root grid h-dvh overflow-hidden bg-[var(--bg)] min-[901px]:grid-cols-[clamp(16.5rem,19vw,20rem)_minmax(0,1fr)] max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)] max-[900px]:min-h-0 max-[900px]:grid-cols-1"
       )}
       style={ui.themeStyle()}
     >
@@ -44,7 +44,7 @@ export function RemoteClientPage(props: { ui: RemoteClientUi }) {
         onClick={() => ui.sidebar.setOpen(false)}
       />
 
-      <main class="relative flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden bg-[#171717]">
+      <main class="relative flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden bg-[#171717] max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)]">
         <MainHeader header={ui.header} />
         <ThreadViewport thread={ui.thread} />
         <ComposerDock composer={ui.composer} />
@@ -225,9 +225,15 @@ function ProjectPicker(props: { picker: ProjectPickerController }) {
     >
       <PopoverTrigger
         as="button"
-        class="grid min-w-0 max-w-[min(36rem,52vw)] flex-[0_1_auto] grid-cols-[minmax(0,auto)_auto] items-center justify-start gap-2 rounded-lg px-2 py-1.5 text-left transition hover:bg-white/[0.035]"
+        class="grid min-w-0 max-w-[min(36rem,52vw)] flex-[0_1_auto] grid-cols-[auto_minmax(0,auto)_auto] items-center justify-start gap-2 rounded-lg px-2 py-1.5 text-left transition hover:bg-white/[0.035]"
         type="button"
       >
+        <ProjectFavicon
+          cwd={picker.projectPath()}
+          label={picker.projectName()}
+          token={picker.token()}
+          class="h-[1.8rem] w-[1.8rem]"
+        />
         <span class="flex min-w-0 flex-col gap-0.5">
           <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[1.12rem] font-bold text-[var(--text)]">
             {picker.projectName()}
@@ -431,8 +437,10 @@ function ThreadViewport(props: { thread: ThreadController }) {
       <div
         ref={thread.setScrollRef}
         class={cx(
-          "h-full min-h-0 overflow-y-auto overflow-x-hidden px-4 pt-5",
-          thread.isEmptyChat() ? "overflow-hidden pb-[clamp(8rem,22vh,12rem)]" : "pb-52"
+          "remote-thread-scroll h-full min-h-0 overflow-y-auto overflow-x-hidden px-4 pt-5 overscroll-contain",
+          thread.isEmptyChat()
+            ? "overflow-hidden pb-[clamp(8rem,22vh,12rem)] max-[900px]:pb-4"
+            : "pb-52 max-[900px]:pb-4 max-[900px]:pt-2"
         )}
       >
         <div ref={thread.setContentRef} class={cx("mx-auto w-[min(100%,64rem)]", thread.isEmptyChat() && "grid h-full")}>

@@ -55,6 +55,11 @@ export type ThreadItem =
   | { type: "activity"; tools: ToolMessage[] }
   | { type: "action"; tool: ToolMessage }
 
+export type AssistantSegment =
+  | { kind: "text"; text: string }
+  | { kind: "action"; tool: ToolMessage }
+  | { kind: "activity"; tools: ToolMessage[] }
+
 export type ComposerAttachment = {
   id: string
   name: string
@@ -290,6 +295,12 @@ export type ComposerController = {
   onSelectReasoningEffort: (effort: string) => MaybePromise
   status: Accessor<RemoteStatus | null>
   streaming: Accessor<boolean>
+  canQueuePrompt: Accessor<boolean>
+  promptSending: Accessor<boolean>
+  enterSubmitsPrompt: Accessor<boolean>
+  queuedMessages: Accessor<string[]>
+  queueBusy: Accessor<boolean>
+  onSendQueuedNow: () => MaybePromise
 }
 
 export type CommandPaletteController = {

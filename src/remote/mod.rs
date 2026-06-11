@@ -202,6 +202,7 @@ struct RemoteWorkspace {
     name: String,
     path: String,
     sort_order: i64,
+    last_opened_at: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -264,6 +265,7 @@ struct RemoteState {
     current_session_id: Option<String>,
     messages: Vec<RemoteMessage>,
     is_streaming: bool,
+    queued_messages: Vec<String>,
     pending_permission: Option<RemotePermissionPrompt>,
     pending_question: Option<RemoteQuestionPrompt>,
 }
@@ -1434,6 +1436,21 @@ async fn handle_connection(
             };
             write_json_response(socket, 200, &CancelResponse { cancelled }).await
         }
+        ("POST", "/api/queue/send-now") => {
+            if !authorized(&request, host_state.as_ref()) {
+                return write_error_response(socket, 401, "pairing required").await;
+            }
+            let response = {
+                let mut app = app.lock().await;
+                if !app.remote_send_queued_now() {
+                    return write_error_response(socket, 400, "cannot send queued messages now")
+                        .await;
+                }
+                tick_remote_host_app(&mut app);
+                remote_state(&app, host_state.as_ref())
+            };
+            write_json_response(socket, 200, &response).await
+        }
         ("POST", "/api/permission") => {
             if !authorized(&request, host_state.as_ref()) {
                 return write_error_response(socket, 401, "pairing required").await;
@@ -2160,6 +2177,7 @@ fn remote_state(app: &App, host_state: &HostState) -> RemoteState {
         current_session_id,
         messages,
         is_streaming: app.is_streaming,
+        queued_messages: app.remote_queued_message_previews(),
         pending_permission: remote_permission_prompt(app),
         pending_question: remote_question_prompt(app),
     }
@@ -2278,28 +2296,51 @@ fn workspace_label(app: &App) -> String {
 
 fn remote_workspaces(app: &App, sessions: &[SessionInfo]) -> Vec<RemoteWorkspace> {
     let mut by_key = HashMap::<String, RemoteWorkspace>::new();
+    let current_path = app.remote_workspace_path();
+    let last_opened_by_path = app
+        .session_manager
+        .list_workspaces()
+        .into_iter()
+        .map(|workspace| (workspace.path, workspace.last_opened_at))
+        .collect::<HashMap<_, _>>();
 
     for session in sessions {
+        let last_opened_at = last_opened_by_path
+            .get(&session.workspace_path)
+            .copied()
+            .unwrap_or(0);
         insert_remote_workspace(
             &mut by_key,
             RemoteWorkspace {
                 name: session.workspace_name.clone(),
                 path: session.workspace_path.clone(),
                 sort_order: session.workspace_sort_order,
+                last_opened_at,
             },
         );
     }
 
-    insert_remote_workspace(
-        &mut by_key,
-        RemoteWorkspace {
-            name: app.remote_workspace_name(),
-            path: app.remote_workspace_path(),
-            sort_order: app
-                .session_manager
-                .workspace_sort_order(app.session_manager.current_workspace_id()),
-        },
-    );
+    if !current_path.trim().is_empty() {
+        let current_name = app.remote_workspace_name();
+        let current_sort = app
+            .session_manager
+            .workspace_sort_order(app.session_manager.current_workspace_id());
+        if let Some(existing) = by_key.get_mut(&current_path) {
+            existing.last_opened_at = i64::MAX;
+            existing.name = current_name;
+            existing.sort_order = current_sort;
+        } else {
+            insert_remote_workspace(
+                &mut by_key,
+                RemoteWorkspace {
+                    name: current_name,
+                    path: current_path,
+                    sort_order: current_sort,
+                    last_opened_at: i64::MAX,
+                },
+            );
+        }
+    }
 
     let mut workspaces = by_key.into_values().collect::<Vec<_>>();
     workspaces.sort_by(|a, b| {

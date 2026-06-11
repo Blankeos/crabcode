@@ -7723,6 +7723,17 @@ impl App {
             .unwrap_or_default()
     }
 
+    pub fn remote_queued_message_previews(&self) -> Vec<String> {
+        self.queued_message_previews_for_current_session()
+    }
+
+    pub fn remote_send_queued_now(&mut self) -> bool {
+        let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
+            return false;
+        };
+        self.interrupt_streaming_to_send_queued_for_session(&session_id)
+    }
+
     pub fn remote_cancel_current(&mut self) -> bool {
         let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
             return false;

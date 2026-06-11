@@ -1,4 +1,4 @@
-import { type Accessor, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js"
+import { type Accessor, createEffect, createMemo, createSignal, For, Index, onCleanup, Show } from "solid-js"
 import { StreamMarkdown } from "solid-streamdown"
 import "solid-streamdown/styles.css"
 import {
@@ -101,35 +101,42 @@ function ToolActivityGroup(props: { tools: Accessor<ToolMessage[]> }) {
 function ToolActivityTimeline(props: {
   steps: Accessor<ToolActivityStep[]>
   state: Accessor<ToolVisualState>
+  steady?: Accessor<boolean>
 }) {
   return (
     <section class="flex w-[min(100%,30rem)] flex-col text-[#d8d6d1]" aria-label="Tool activity">
-      <For each={props.steps()}>{(step) => <ToolTimelineStep step={step} />}</For>
+      <Index each={props.steps()}>{(step) => <ToolTimelineStep step={step} steady={props.steady} />}</Index>
       <Show when={props.state() === "complete"}>
         <ToolTimelineStep
-          step={{
+          steady={props.steady}
+          step={() => ({
             key: "done",
             label: "Done",
             icon: "check",
             state: "complete",
             details: [],
-          }}
+          })}
         />
       </Show>
     </section>
   )
 }
 
-function ToolTimelineStep(props: { step: ToolActivityStep }) {
-  const [open, setOpen] = createSignal(props.step.defaultOpen ?? false)
-  const hasDetails = () => props.step.details.length > 0 || Boolean(props.step.preview)
+function ToolTimelineStep(props: { step: Accessor<ToolActivityStep>; steady?: Accessor<boolean> }) {
+  const [open, setOpen] = createSignal(props.step().defaultOpen ?? false)
+  const [userToggled, setUserToggled] = createSignal(false)
+  const hasDetails = () => props.step().details.length > 0 || Boolean(props.step().preview)
+
+  createEffect(() => {
+    if (!userToggled() && props.step().defaultOpen) setOpen(true)
+  })
 
   return (
     <div class="relative grid min-w-0 grid-cols-[1.7rem_minmax(0,1fr)] gap-3 py-1 before:absolute before:top-[1.35rem] before:-bottom-1 before:left-[0.85rem] before:w-px before:-translate-x-1/2 before:rounded-full before:bg-[var(--line-strong)] before:content-[''] last:before:hidden">
       <div class="relative grid h-[1.7rem] w-[1.7rem] place-items-center text-[var(--muted)]">
         <ToolIcon
-          kind={props.step.icon}
-          class={cx("relative z-[1] h-[1.08rem] w-[1.08rem]", toolStateClass(props.step.state))}
+          kind={props.step().icon}
+          class={cx("relative z-[1] h-[1.08rem] w-[1.08rem]", toolStateClass(props.step().state))}
         />
       </div>
       <div class="min-w-0 pb-1">
@@ -138,16 +145,20 @@ function ToolTimelineStep(props: { step: ToolActivityStep }) {
           class="inline-flex min-w-0 max-w-full items-center gap-1.5 py-0.5 text-left text-[14px] font-medium leading-snug text-[#dedbd4] disabled:cursor-default [&[aria-expanded=true]_.tool-chevron]:rotate-180"
           disabled={!hasDetails()}
           aria-expanded={open()}
-          onClick={() => hasDetails() && setOpen((value) => !value)}
+          onClick={() => {
+            if (!hasDetails()) return
+            setUserToggled(true)
+            setOpen((value) => !value)
+          }}
         >
-          <span class="min-w-0 [overflow-wrap:anywhere]">{props.step.label}</span>
+          <span class="min-w-0 [overflow-wrap:anywhere]">{props.step().label}</span>
           <Show when={hasDetails()}>
             <IconCaretDown class="tool-chevron h-3 w-3 shrink-0 text-[var(--faint)] transition-transform duration-150" />
           </Show>
         </button>
         <Show when={hasDetails()}>
-          <CollapsiblePanel open={open()} class="w-full">
-            <ToolDetails details={props.step.details} preview={props.step.preview} compact />
+          <CollapsiblePanel open={open()} steady={props.steady?.()} class="w-full">
+            <ToolDetails details={props.step().details} preview={props.step().preview} compact />
           </CollapsiblePanel>
         </Show>
       </div>
@@ -399,11 +410,16 @@ function MessageView(props: {
   const userAttachments = createMemo(() => messageImageAttachmentData(props.message(), props.token()))
   const hasThoughtProcess = () =>
     Boolean(props.message().reasoning?.trim()) || props.activityTools().length > 0
+  const visibleAssistantContent = () => assistantVisibleContent(props.message())
   const showAssistantBubble = () =>
-    props.message().content.trim().length > 0 || (!props.message().is_complete && props.activityTools().length === 0)
+    !isUser() &&
+    (visibleAssistantContent().trim().length > 0 || showStreamingPlaceholder())
   const showStreamingPlaceholder = () =>
-    !isUser() && !props.message().is_complete && !props.message().content.trim()
-  const copyContent = () => props.message().content || ""
+    !isUser() &&
+    !props.message().is_complete &&
+    !visibleAssistantContent().trim() &&
+    props.activityTools().length === 0
+  const copyContent = () => (isUser() ? props.message().content : visibleAssistantContent()) || ""
   return (
     <Message from={props.message().role} class={cx(!isUser() && "w-full items-stretch")}>
       <MessageContent class={cx("w-full", isUser() && "flex flex-col items-end")}>
@@ -422,7 +438,7 @@ function MessageView(props: {
                 <div class="mt-1 w-full whitespace-normal break-words pl-2 text-[0.95rem] leading-relaxed text-[#d7d5d0]">
                   <Show
                     when={showStreamingPlaceholder()}
-                    fallback={<MessageResponse content={props.message().content} />}
+                    fallback={<MessageResponse content={visibleAssistantContent()} />}
                   >
                     <Shimmer class="text-[0.95rem] leading-relaxed" duration={1.6}>
                       Working...
@@ -430,12 +446,14 @@ function MessageView(props: {
                   </Show>
                 </div>
               </Show>
-              <MessageToolbar class="mt-2 w-full justify-start pl-2">
-                <AssistantMetadata message={props.message} status={props.status} />
-              </MessageToolbar>
-              <MessageActions class="mt-1">
-                <CopyMessageAction content={copyContent} />
-              </MessageActions>
+              <Show when={showAssistantBubble()}>
+                <MessageToolbar class="mt-2 w-full justify-start pl-2">
+                  <AssistantMetadata message={props.message} status={props.status} />
+                </MessageToolbar>
+                <MessageActions class="mt-1">
+                  <CopyMessageAction content={copyContent} />
+                </MessageActions>
+              </Show>
             </>
           }
         >
@@ -600,6 +618,19 @@ function CopyMessageAction(props: { content: Accessor<string> }) {
   )
 }
 
+function assistantVisibleContent(message: RemoteMessage) {
+  const parts = Array.isArray(message.parts) ? message.parts : []
+  if (parts.some((part) => part.type === "tool_call" || part.type === "tool_result")) {
+    return parts
+      .filter((part) => part.type === "text")
+      .map((part) => (typeof part.text === "string" ? part.text.trim() : ""))
+      .filter((text) => text && !text.trimStart().startsWith("[tool result:"))
+      .join("\n\n")
+  }
+
+  return message.content || ""
+}
+
 function ThinkingAccordion(props: {
   text: string
   activityTools: Accessor<ToolMessage[]>
@@ -612,22 +643,18 @@ function ThinkingAccordion(props: {
     return "complete"
   })
   const hasActivity = () => props.activityTools().length > 0
-  const [open, setOpen] = createSignal(props.streaming || hasActivity())
-  let hasAutoClosed = false
+  const [open, setOpen] = createSignal(false)
+  const [userToggled, setUserToggled] = createSignal(false)
+  const steadyActivity = createMemo(() => props.streaming || (open() && hasActivity()))
 
   createEffect(() => {
-    if (props.streaming || state() === "active" || state() === "error") {
-      hasAutoClosed = false
+    if (userToggled()) return
+    if (props.streaming) {
       setOpen(true)
       return
     }
-
-    if (open() && !hasAutoClosed && !hasActivity()) {
-      const timer = window.setTimeout(() => {
-        hasAutoClosed = true
-        setOpen(false)
-      }, 1000)
-      onCleanup(() => window.clearTimeout(timer))
+    if (state() === "active" || state() === "error") {
+      setOpen(true)
     }
   })
 
@@ -637,20 +664,25 @@ function ThinkingAccordion(props: {
         class="inline-flex min-h-[1.9rem] items-center gap-2 rounded-full px-2 py-1 text-[14px] font-medium text-[var(--muted)] transition hover:bg-white/[0.045] hover:text-[var(--text)] [&[aria-expanded=true]_.thinking-chevron]:rotate-180"
         type="button"
         aria-expanded={open()}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          setUserToggled(true)
+          setOpen((value) => !value)
+        }}
       >
         <IconBrainGlyph class="h-4 w-4 text-[var(--faint)]" />
-        <span>{props.streaming ? "Thinking" : "Thought process"}</span>
+        <Show when={props.streaming} fallback={<span>Thought process</span>}>
+          <Shimmer class="font-medium">Thinking...</Shimmer>
+        </Show>
         <IconCaretDown class="thinking-chevron h-3 w-3 text-[var(--faint)] transition-transform duration-150" />
       </button>
-      <CollapsiblePanel open={open()} class="w-full">
-        <div class="w-full overflow-x-auto pl-4 pt-1 text-[14px] leading-relaxed text-[var(--muted)]">
+      <CollapsiblePanel open={open()} steady={steadyActivity()} class="w-full">
+        <div class="w-full overflow-x-auto pt-1 text-[14px] leading-relaxed text-[var(--muted)]">
           <Show when={props.text.trim()}>
             <StreamMarkdown content={props.text} class="streamdown remote-markdown text-[var(--muted)]" />
           </Show>
           <Show when={hasActivity()}>
             <div class="mt-1 [&_.tool-activity]:w-[min(100%,34rem)]">
-              <ToolActivityTimeline steps={steps} state={state} />
+              <ToolActivityTimeline steps={steps} state={state} steady={steadyActivity} />
             </div>
           </Show>
         </div>

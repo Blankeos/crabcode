@@ -1,5 +1,18 @@
 import type { RemoteMessage, RemoteMessagePart, RemoteStatus } from "../../remote-api"
-import type { ActionDescriptor, DiffLine, DiffSection, JsonObject, JsonValue, ParsedToolMessage, ThreadItem, ToolActivityStep, ToolMessage, ToolStepDetail, ToolVisualState } from "./page-types"
+import type {
+  ActionDescriptor,
+  AssistantSegment,
+  DiffLine,
+  DiffSection,
+  JsonObject,
+  JsonValue,
+  ParsedToolMessage,
+  ThreadItem,
+  ToolActivityStep,
+  ToolMessage,
+  ToolStepDetail,
+  ToolVisualState,
+} from "./page-types"
 import { basename, cuid, formatSeconds } from "./shared-utils"
 
 const THINKING_TOOL_NAMES = new Set([
@@ -29,9 +42,73 @@ export function buildThreadItems(messages: RemoteMessage[], cwd: string): Thread
     orphanActivityTools = []
   }
 
+  const pushOrderedAssistantMessage = (message: RemoteMessage) => {
+    const segments = buildAssistantSegments(message, cwd)
+    let pendingText: string[] = []
+    let pendingActivityTools: ToolMessage[] = []
+    let emittedMessage = false
+
+    const flushMessage = (forceReasoningOnly = false) => {
+      const text = pendingText.join("\n\n")
+      const hasVisibleMessage = text.trim() || pendingActivityTools.length > 0
+      if (!hasVisibleMessage && !forceReasoningOnly) return
+
+      const nextMessage = assistantTextMessage(
+        message,
+        text,
+        emittedMessage ? null : message.reasoning
+      )
+
+      if (activeAssistantItem) {
+        activeAssistantItem.message = mergeAssistantTurnMessages(
+          activeAssistantItem.message,
+          nextMessage
+        )
+        activeAssistantItem.activityTools.push(...pendingActivityTools)
+        emittedMessage = true
+        pendingText = []
+        pendingActivityTools = []
+        return
+      }
+
+      const item: Extract<ThreadItem, { type: "message" }> = {
+        type: "message",
+        message: nextMessage,
+        activityTools: pendingActivityTools,
+      }
+      items.push(item)
+      activeAssistantItem = item
+      emittedMessage = true
+      pendingText = []
+      pendingActivityTools = []
+    }
+
+    for (const segment of segments) {
+      if (segment.kind === "text") {
+        pendingText.push(segment.text)
+        continue
+      }
+
+      if (segment.kind === "activity") {
+        pendingActivityTools.push(...segment.tools)
+        continue
+      }
+
+      flushMessage()
+      items.push({ type: "action", tool: segment.tool })
+      activeAssistantItem = null
+    }
+
+    flushMessage(Boolean(message.reasoning?.trim()) && !emittedMessage)
+  }
+
   for (const message of messages) {
     if (message.role !== "tool") {
-      if (message.role === "assistant" && activeAssistantItem) {
+      if (
+        message.role === "assistant" &&
+        activeAssistantItem &&
+        !assistantHasOrderedParts(message)
+      ) {
         activeAssistantItem.message = mergeAssistantTurnMessages(
           activeAssistantItem.message,
           message
@@ -40,6 +117,12 @@ export function buildThreadItems(messages: RemoteMessage[], cwd: string): Thread
       }
 
       flushOrphanActivity()
+
+      if (message.role === "assistant" && assistantHasOrderedParts(message)) {
+        pushOrderedAssistantMessage(message)
+        continue
+      }
+
       const item: ThreadItem = { type: "message", message, activityTools: [] }
       items.push(item)
       activeAssistantItem = message.role === "assistant" ? item : null
@@ -71,6 +154,110 @@ export function buildThreadItems(messages: RemoteMessage[], cwd: string): Thread
 
   flushOrphanActivity()
   return items
+}
+
+function assistantHasOrderedParts(message: RemoteMessage): boolean {
+  const parts = message.parts ?? []
+  return parts.some((part) => part.type === "tool_call" || part.type === "tool_result")
+}
+
+function assistantTextMessage(
+  base: RemoteMessage,
+  text: string,
+  reasoning: string | null = null
+): RemoteMessage {
+  return {
+    ...base,
+    content: text,
+    reasoning,
+    parts: [],
+    is_complete: base.is_complete,
+  }
+}
+
+export function buildAssistantSegments(message: RemoteMessage, cwd: string): AssistantSegment[] {
+  const parts = message.parts ?? []
+  if (!assistantHasOrderedParts(message)) return []
+
+  const resultIds = new Set(
+    parts
+      .filter((part) => part.type === "tool_result")
+      .map(toolPartId)
+      .filter((id): id is string => Boolean(id))
+  )
+  const callsById = new Map<string, RemoteMessagePart>()
+  const segments: AssistantSegment[] = []
+  let pendingActivity: ToolMessage[] = []
+
+  const flushActivity = () => {
+    if (pendingActivity.length === 0) return
+    segments.push({ kind: "activity", tools: pendingActivity })
+    pendingActivity = []
+  }
+
+  const pushText = (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    const last = segments[segments.length - 1]
+    if (last?.kind === "text") {
+      last.text = joinMessageParts(last.text, trimmed)
+      return
+    }
+    segments.push({ kind: "text", text: trimmed })
+  }
+
+  for (const part of parts) {
+    if (part.type === "text") {
+      const text = partTextValue(part)
+      if (!text || isSyntheticToolResultText(text)) continue
+      flushActivity()
+      pushText(text)
+      continue
+    }
+
+    if (part.type === "reasoning") continue
+
+    if (part.type === "tool_call") {
+      const id = toolPartId(part)
+      if (id) callsById.set(id, part)
+      if (id && resultIds.has(id)) continue
+      const payload = { ...toolPartPayload(part), status: stringValue(part.status) || "running" }
+      const tool = toolMessageFromPayload(message, payload, cwd)
+      if (isActivityTool(tool)) {
+        pendingActivity.push(tool)
+      } else {
+        flushActivity()
+        segments.push({ kind: "action", tool })
+      }
+      continue
+    }
+
+    if (part.type === "tool_result") {
+      const id = toolPartId(part)
+      const call = id ? callsById.get(id) : undefined
+      const payload = toolPartPayload(part)
+      if (payload.args === undefined && call?.args !== undefined) payload.args = call.args
+      const tool = toolMessageFromPayload(message, payload, cwd)
+      if (isActivityTool(tool)) {
+        pendingActivity.push(tool)
+      } else {
+        flushActivity()
+        segments.push({ kind: "action", tool })
+      }
+    }
+  }
+
+  flushActivity()
+  return segments
+}
+
+function partTextValue(part: RemoteMessagePart): string | null {
+  const text = stringValue(part.text)
+  return text ?? null
+}
+
+function isSyntheticToolResultText(text: string): boolean {
+  return text.trimStart().startsWith("[tool result:")
 }
 
 export function assistantPartToolMessages(message: RemoteMessage, cwd: string): ToolMessage[] {

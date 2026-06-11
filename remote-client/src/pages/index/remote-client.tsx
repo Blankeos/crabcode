@@ -6,6 +6,7 @@ import { cx } from "../../lib/cx"
 import {
   createRemoteApi,
   RemoteApiError,
+  type RemoteMessage,
   type RemoteModel,
   type RemotePromptImage,
   type RemoteSkill,
@@ -38,10 +39,11 @@ import {
   renumberImagePlaceholdersAfterRemoval,
   savePromptHistory,
 } from "./prompt-utils"
-import { projectsFromState } from "./projects"
+import { projectsForPicker, projectsFromState } from "./projects"
 import { browserOrigin, isActiveServer, loadSavedServers, normalizeServerAddress, saveSavedServers } from "./server-utils"
 import { basename, errorToastMessage, fallbackCopyText, handleChoiceMenuKeyDown, sameToken, showErrorToast, useStickToBottom, cuid } from "./shared-utils"
 import { buildThreadItems, sessionTranscript } from "./thread-model"
+import { resetMobileViewportScroll, useEnterSubmitsPrompt, useMobileKeyboardLayout } from "./mobile-utils"
 
 const TOKEN_KEY = "crabcode.remote.token"
 
@@ -98,7 +100,14 @@ export default function RemoteClient() {
   const [mascotFrame, setMascotFrame] = createSignal(0)
   const [threadScrollEl, setThreadScrollEl] = createSignal<HTMLDivElement>()
   const [threadContentEl, setThreadContentEl] = createSignal<HTMLDivElement>()
+  const [promptSending, setPromptSending] = createSignal(false)
+  const [queueBusy, setQueueBusy] = createSignal(false)
+  const [optimisticMessages, setOptimisticMessages] = createSignal<RemoteMessage[]>([])
+  const [optimisticQueuedMessages, setOptimisticQueuedMessages] = createSignal<string[]>([])
   const threadScroll = useStickToBottom(threadScrollEl, threadContentEl)
+  const enterSubmitsPrompt = useEnterSubmitsPrompt()
+
+  useMobileKeyboardLayout()
 
   let promptRef: HTMLTextAreaElement | undefined
   let promptOverlayRef: HTMLDivElement | undefined
@@ -204,6 +213,7 @@ export default function RemoteClient() {
 
   const applyRemoteState = (next: RemoteState) => {
     setState(next)
+    setOptimisticMessages([])
     if (!projectsInitialized()) {
       setProjectOpen(new Set(projectsFromState(next).map((project) => project.path || project.name)))
       setProjectsInitialized(true)
@@ -275,6 +285,7 @@ export default function RemoteClient() {
     () => state()?.status.workspace || basename(projectPath()) || "Project"
   )
   const projects = createMemo(() => projectsFromState(state()))
+  const pickerProjects = createMemo(() => projectsForPicker(state()))
   const activeServerUrl = createMemo(() => state()?.status.browser_url || browserOrigin())
   const servers = createMemo(() => {
     const activeUrl = activeServerUrl()
@@ -317,7 +328,7 @@ export default function RemoteClient() {
   })
   const projectCommandResults = createMemo(() => {
     const query = commandQuery().trim().toLowerCase()
-    const list = projects()
+    const list = pickerProjects()
     if (!query) return list.slice(0, 8)
     return list
       .filter((project) => `${project.name} ${project.path}`.toLowerCase().includes(query))
@@ -341,8 +352,49 @@ export default function RemoteClient() {
     setModelActiveIndex((index) => Math.max(0, Math.min(index || Math.max(active, 0), Math.max(list.length - 1, 0))))
   })
 
-  const visibleMessages = createMemo(() =>
-    (state()?.messages ?? []).filter((message) => message.role !== "system")
+  const streamingAssistantPlaceholder = (): RemoteMessage => ({
+    role: "assistant",
+    content: "",
+    reasoning: null,
+    parts: [],
+    is_complete: false,
+    agent_mode: null,
+    token_count: null,
+    duration_ms: null,
+    t0_ms: null,
+    t1_ms: null,
+    tn_ms: null,
+    output_tokens: null,
+    model: null,
+    provider: null,
+    local_image_paths: [],
+    was_interrupted: false,
+  })
+
+  const visibleMessages = createMemo(() => {
+    const server = (state()?.messages ?? []).filter((message) => message.role !== "system")
+    const pending = optimisticMessages()
+    const merged = pending.length > 0 ? [...server, ...pending] : server
+
+    const awaitingOptimisticReply =
+      promptSending() && pending.length > 0
+    const awaitingReply =
+      Boolean(state()?.is_streaming) || awaitingOptimisticReply
+    if (!awaitingReply || merged.length === 0) return merged
+
+    const last = merged[merged.length - 1]
+    if (last.role === "user") {
+      return [...merged, streamingAssistantPlaceholder()]
+    }
+    if (last.role === "assistant" && !last.is_complete) {
+      return merged
+    }
+    return merged
+  })
+  const hasSendablePrompt = createMemo(
+    () =>
+      promptTextWithAttachmentPlaceholders(prompt(), composerAttachments().length).trim().length > 0
+      || composerAttachments().length > 0
   )
   const promptHistoryEntries = createMemo(() =>
     mergePromptHistoryEntries(browserPromptHistory(), messagePromptHistoryEntries(visibleMessages()))
@@ -355,7 +407,11 @@ export default function RemoteClient() {
 
   createEffect(() => {
     state()?.current_session_id
-    queueMicrotask(() => threadScroll.scrollToBottom(false))
+    resetMobileViewportScroll()
+    queueMicrotask(() => {
+      resetMobileViewportScroll()
+      threadScroll.scrollToBottom(false)
+    })
   })
 
   const pair = async (event: SubmitEvent) => {
@@ -773,6 +829,15 @@ export default function RemoteClient() {
     resizePrompt()
   }
 
+  const removeOptimisticQueuedMessage = (text: string) => {
+    setOptimisticQueuedMessages((messages) => {
+      const next = [...messages]
+      const index = next.indexOf(text)
+      if (index >= 0) next.splice(index, 1)
+      return next
+    })
+  }
+
   const submitPromptText = async (
     rawText: string,
     restoreOnError = true,
@@ -790,24 +855,73 @@ export default function RemoteClient() {
     }
 
     clearComposer()
+
+    const queueWhileStreaming =
+      Boolean(state()?.is_streaming) && !parseSlashCommand(text)
+    if (queueWhileStreaming) {
+      setOptimisticQueuedMessages((messages) => [...messages, text])
+    } else {
+      const optimisticUser: RemoteMessage = {
+        role: "user",
+        content: text,
+        reasoning: null,
+        parts: [],
+        is_complete: true,
+        agent_mode: null,
+        token_count: null,
+        duration_ms: null,
+        t0_ms: null,
+        t1_ms: null,
+        tn_ms: null,
+        output_tokens: null,
+        model: null,
+        provider: null,
+        local_image_paths: [],
+        was_interrupted: false,
+      }
+      setOptimisticMessages([optimisticUser])
+      queueMicrotask(() => threadScroll.scrollToBottom(true))
+    }
+
+    setPromptSending(true)
     try {
       await api().prompt(text, promptImages(attachments))
       addPromptHistoryEntry(text)
       await loadStateSnapshot()
+      if (queueWhileStreaming) removeOptimisticQueuedMessage(text)
     } catch (error) {
+      setOptimisticMessages([])
+      if (queueWhileStreaming) removeOptimisticQueuedMessage(text)
       if (restoreOnError) {
         setPrompt(text)
         setComposerAttachments(attachments)
         resizePrompt()
       }
       toast.error(error instanceof Error ? error.message : "Prompt failed.")
+    } finally {
+      setPromptSending(false)
+    }
+  }
+
+  const sendQueuedNow = async () => {
+    if (queueBusy()) return
+    setQueueBusy(true)
+    try {
+      const next = await api().sendQueuedNow()
+      applyRemoteState(next)
+      await loadStateSnapshot()
+    } catch (error) {
+      showErrorToast(error, "Could not send queued messages now.")
+      await loadStateSnapshot().catch(() => {})
+    } finally {
+      setQueueBusy(false)
     }
   }
 
   const submitPrompt = async (event: SubmitEvent) => {
     event.preventDefault()
 
-    if (state()?.is_streaming) {
+    if (state()?.is_streaming && !hasSendablePrompt()) {
       try {
         await api().cancel()
         await loadStateSnapshot()
@@ -1176,6 +1290,7 @@ export default function RemoteClient() {
     if (event.key === "ArrowDown" && navigatePromptHistory("down", event)) return
 
     if (event.key === "Enter" && !event.shiftKey) {
+      if (!enterSubmitsPrompt()) return
       event.preventDefault()
       event.currentTarget.form?.requestSubmit()
     }
@@ -1283,7 +1398,7 @@ export default function RemoteClient() {
         onOpenChange: handleProjectPickerOpenChange,
         projectName,
         projectPath,
-        projects,
+        projects: pickerProjects,
         token,
         form: projectPathForm,
         onSelectWorkspace: selectWorkspace,
@@ -1376,6 +1491,20 @@ export default function RemoteClient() {
       onSelectReasoningEffort: selectReasoningEffort,
       status: () => state()?.status ?? null,
       streaming: () => Boolean(state()?.is_streaming),
+      canQueuePrompt: hasSendablePrompt,
+      promptSending,
+      enterSubmitsPrompt,
+      queuedMessages: () => {
+        const server = state()?.queued_messages ?? []
+        const optimistic = [...optimisticQueuedMessages()]
+        for (const queued of server) {
+          const index = optimistic.indexOf(queued)
+          if (index >= 0) optimistic.splice(index, 1)
+        }
+        return [...server, ...optimistic]
+      },
+      queueBusy,
+      onSendQueuedNow: sendQueuedNow,
     },
     commandPalette: {
       rendered: commandRendered,

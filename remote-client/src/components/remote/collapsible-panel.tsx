@@ -1,7 +1,13 @@
 import { createEffect, createSignal, type JSX, onCleanup, onMount } from "solid-js"
 import { cx } from "../../lib/cx"
 
-export function CollapsiblePanel(props: { open: boolean; class?: string; children: JSX.Element }) {
+export function CollapsiblePanel(props: {
+  open: boolean
+  class?: string
+  children: JSX.Element
+  /** When true, height updates skip transition (e.g. streaming tool steps). */
+  steady?: boolean
+}) {
   const [height, setHeight] = createSignal(0)
   const [animateHeight, setAnimateHeight] = createSignal(true)
   let innerRef: HTMLDivElement | undefined
@@ -23,7 +29,7 @@ export function CollapsiblePanel(props: { open: boolean; class?: string; childre
   onMount(() => {
     measure(false)
     const resizeObserver = new ResizeObserver(() => {
-      if (props.open) measure(false)
+      if (props.open) measure(props.steady ? false : false)
     })
     if (innerRef) resizeObserver.observe(innerRef)
     onCleanup(() => {
@@ -36,7 +42,8 @@ export function CollapsiblePanel(props: { open: boolean; class?: string; childre
     const open = props.open
     const changed = open !== previousOpen
     previousOpen = open
-    queueMicrotask(() => measure(changed))
+    const animate = changed && !props.steady
+    queueMicrotask(() => measure(animate))
   })
 
   return (

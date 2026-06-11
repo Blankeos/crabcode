@@ -32,9 +32,10 @@ import { providerLabel, sameToken } from "./shared-utils"
 
 export function ComposerDock(props: { composer: ComposerController }) {
   const composer = props.composer
+  const showStop = () => composer.streaming() && !composer.canQueuePrompt()
 
   return (
-    <div class="pointer-events-none absolute right-0 bottom-0 left-0 z-30 grid grid-cols-[minmax(0,1fr)] flex-none gap-3 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] max-[900px]:px-3">
+    <div class="pointer-events-none absolute right-0 bottom-0 left-0 z-30 grid flex-none grid-cols-[minmax(0,1fr)] gap-3 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] max-[900px]:relative max-[900px]:right-auto max-[900px]:bottom-auto max-[900px]:left-auto max-[900px]:z-auto max-[900px]:mt-auto max-[900px]:gap-2 max-[900px]:px-3 max-[900px]:pb-2">
       <Show when={composer.pendingPermission()}>
         {(permission) => (
           <PermissionRequestPanel
@@ -54,8 +55,17 @@ export function ComposerDock(props: { composer: ComposerController }) {
           />
         )}
       </Show>
-      <form
-        class="pointer-events-auto relative mx-auto w-[min(100%,67rem)] overflow-visible rounded-[18px] border border-[var(--line-strong)] bg-[var(--composer)] shadow-[0_0.5rem_2.5rem_var(--shadow)]"
+      <div class="pointer-events-auto mx-auto flex w-[min(100%,67rem)] flex-col">
+        <Show when={composer.queuedMessages().length > 0}>
+          <QueuedMessagesStrip composer={composer} />
+        </Show>
+        <form
+          class={cx(
+            "relative overflow-visible border border-[var(--line-strong)] bg-[var(--composer)] shadow-[0_0.5rem_2.5rem_var(--shadow)]",
+            composer.queuedMessages().length > 0
+              ? "rounded-b-[18px] rounded-t-none border-t-0"
+              : "rounded-[18px]"
+          )}
         onSubmit={composer.onSubmit}
         onDragOver={(event) => event.preventDefault()}
         onDrop={composer.onDrop}
@@ -101,9 +111,11 @@ export function ComposerDock(props: { composer: ComposerController }) {
           <div
             ref={composer.setPromptOverlayRef}
             class={cx(
-              "pointer-events-none absolute inset-0 max-h-56 min-h-[4.9rem] overflow-hidden whitespace-pre-wrap break-words border-0 bg-transparent text-[var(--text)]",
-              COMPOSER_TEXT_CLASS
+              "pointer-events-none absolute inset-0 max-h-56 min-h-[3.35rem] overflow-hidden whitespace-pre-wrap break-words border-0 bg-transparent text-[var(--text)] max-[900px]:min-h-[2.9rem] max-[900px]:px-3 max-[900px]:pt-3 max-[900px]:pb-1",
+              COMPOSER_TEXT_CLASS,
+              "!text-[16px]"
             )}
+            style={{ "font-size": "16px" }}
             aria-hidden="true"
           >
             <For each={promptTextParts(composer.prompt(), composer.promptAttachmentCount())}>
@@ -121,8 +133,9 @@ export function ComposerDock(props: { composer: ComposerController }) {
           <textarea
             ref={composer.setPromptRef}
             class={cx(
-              "relative z-10 block max-h-56 min-h-[4.9rem] w-full resize-none border-0 bg-transparent text-transparent caret-[var(--text)] outline-none placeholder:text-[#54524e] selection:bg-[rgba(126,157,234,0.28)]",
-              COMPOSER_TEXT_CLASS
+              "relative z-10 block max-h-56 min-h-[3.35rem] w-full resize-none border-0 bg-transparent text-transparent caret-[var(--text)] outline-none placeholder:text-[#54524e] selection:bg-[rgba(126,157,234,0.28)] max-[900px]:min-h-[2.9rem] max-[900px]:px-3 max-[900px]:pt-3 max-[900px]:pb-1",
+              COMPOSER_TEXT_CLASS,
+              "!text-[16px]"
             )}
             value={composer.prompt()}
             onInput={composer.onPromptInput}
@@ -131,12 +144,16 @@ export function ComposerDock(props: { composer: ComposerController }) {
             onClick={composer.onRefreshCompletion}
             onScroll={composer.onPromptScroll}
             onPaste={composer.onPromptPaste}
+            autocapitalize="sentences"
+            autocomplete="off"
+            enterkeyhint={composer.enterSubmitsPrompt() ? "send" : "enter"}
             placeholder="Ask for follow-up changes or attach images"
             rows={1}
+            style={{ "font-size": "16px" }}
           />
         </div>
         <ComposerSuggestions composer={composer} />
-        <div class="flex items-center justify-between gap-4 px-4 pt-2 pb-2.5">
+        <div class="flex items-center justify-between gap-4 px-4 pt-2 pb-2.5 max-[900px]:gap-2 max-[900px]:px-3 max-[900px]:pt-1 max-[900px]:pb-2">
           <div class="flex min-w-0 flex-1 items-center gap-3 max-[560px]:gap-2">
             <button
               class={cx(ICON_BUTTON, "h-[1.95rem] w-[1.95rem] shrink-0 border border-[var(--line)] bg-[#202020]")}
@@ -155,23 +172,55 @@ export function ComposerDock(props: { composer: ComposerController }) {
             <button
               class={cx(
                 "grid h-11 w-11 place-items-center rounded-full transition shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]",
-                composer.streaming()
+                showStop()
                   ? "bg-[#3c2528] text-[#d4929a] hover:bg-[#482b2f]"
-                  : "bg-[var(--brand-primary)] text-[#111318] hover:bg-[#7d9dea]"
+                  : composer.promptSending()
+                    ? "bg-[var(--brand-primary)]/75 text-[#111318]"
+                    : "bg-[var(--brand-primary)] text-[#111318] hover:bg-[#7d9dea]"
               )}
               type="submit"
-              aria-label={composer.streaming() ? "Stop" : "Send"}
+              aria-label={showStop() ? "Stop" : composer.promptSending() ? "Sending" : "Send"}
+              aria-busy={composer.promptSending()}
             >
-              <Show
-                when={composer.streaming()}
-                fallback={<IconArrowUp class="h-[1.15rem] w-[1.15rem]" />}
-              >
+              <Show when={showStop()} fallback={<IconArrowUp class="h-[1.15rem] w-[1.15rem]" />}>
                 <span class="h-3 w-3 rounded-[2px] bg-current" />
               </Show>
             </button>
           </div>
         </div>
       </form>
+      </div>
+    </div>
+  )
+}
+
+function QueuedMessagesStrip(props: { composer: ComposerController }) {
+  const composer = props.composer
+  const previews = () => composer.queuedMessages()
+
+  return (
+    <div class="relative rounded-t-[18px] border border-b-0 border-[var(--line-strong)] bg-[var(--composer-queue)] px-3.5 py-2.5 pr-[6.5rem] shadow-[0_0.5rem_2.5rem_var(--shadow)]">
+      <button
+        type="button"
+        class={cx(
+          "absolute top-2.5 right-3 rounded-[8px] border border-[var(--line)] bg-[#222] px-2.5 py-1 text-[0.78rem] font-medium text-[var(--text)] transition hover:bg-[#2a2a2a] disabled:opacity-50"
+        )}
+        disabled={composer.queueBusy()}
+        onClick={() => void composer.onSendQueuedNow()}
+      >
+        Send now
+      </button>
+      <p class="mb-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.06em] text-[var(--muted)]">
+        Queued — sends after next tool call
+      </p>
+      <For each={previews()}>
+        {(preview) => (
+          <p class="m-0 min-w-0 py-0.5 text-[0.88rem] leading-snug text-[var(--text)] first:pt-0">
+            <span class="mr-1.5 text-[var(--muted)]">↳</span>
+            <span class="break-words">{preview}</span>
+          </p>
+        )}
+      </For>
     </div>
   )
 }
