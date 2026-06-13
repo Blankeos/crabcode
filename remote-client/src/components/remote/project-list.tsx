@@ -107,7 +107,10 @@ export function ProjectList(props: ProjectListProps) {
                       </div>
                     </ContextMenuTrigger>
                     <ContextMenuContent>
-                      <ContextMenuItem onSelect={() => props.onNewSession(project().path)}>
+                      <ContextMenuItem
+                        class="whitespace-nowrap"
+                        onSelect={() => props.onNewSession(project().path)}
+                      >
                         New chat
                       </ContextMenuItem>
                       <ContextMenuSeparator />

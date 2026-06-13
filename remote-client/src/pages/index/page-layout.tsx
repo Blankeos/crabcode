@@ -255,12 +255,13 @@ function MainHeader(props: { header: HeaderController }) {
       <div class="ml-auto flex items-center gap-2">
         <Show when={!header.isEmptyChat()}>
           <button
-            class="inline-flex h-[2.2rem] items-center gap-2 rounded-lg border border-[var(--line-strong)] bg-[#222222] px-3 text-[0.86rem] font-semibold text-[#d7d5d0] transition hover:border-[rgba(255,255,255,0.18)] hover:bg-[#2b2b2b] hover:text-[var(--text)] max-[560px]:aspect-square max-[560px]:w-[2.2rem] max-[560px]:justify-center max-[560px]:p-0"
+            class="inline-flex h-[2.2rem] max-w-[9.5rem] min-w-0 items-center gap-2 rounded-lg border border-[var(--line-strong)] bg-[#222222] px-3 text-[0.86rem] font-semibold text-[#d7d5d0] transition hover:border-[rgba(255,255,255,0.18)] hover:bg-[#2b2b2b] hover:text-[var(--text)] max-[560px]:aspect-square max-[560px]:w-[2.2rem] max-[560px]:max-w-none max-[560px]:justify-center max-[560px]:p-0"
             type="button"
+            title="New chat"
             onClick={() => header.onNewSession()}
           >
-            <IconPlus class="h-4 w-4" />
-            <span class="max-[560px]:hidden">New chat</span>
+            <IconPlus class="h-4 w-4 shrink-0" />
+            <span class="min-w-0 truncate whitespace-nowrap max-[560px]:hidden">New chat</span>
           </button>
         </Show>
         <GitPanelTrigger git={header.gitViewer} />
@@ -962,9 +963,9 @@ function CommandPalette(props: { command: CommandPaletteController }) {
                     onSelect={() => command.onNewSession()}
                     forceMount
                   >
-                    <div>
-                      <div class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[0.86rem] font-semibold">New chat</div>
-                      <div class="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[0.72rem] text-[var(--faint)]">Start a blank session in this workspace</div>
+                    <div class="min-w-0 flex-1">
+                      <div class="min-w-0 truncate text-[0.86rem] font-semibold">New chat</div>
+                      <div class="block min-w-0 truncate text-[0.72rem] text-[var(--faint)]">Start a blank session in this workspace</div>
                     </div>
                     <IconPlus class="h-4 w-4" />
                   </CommandItem>
