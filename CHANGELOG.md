@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.4] - 2026-06-14
+
+### Bug Fixes
+
+- Make file mutations atomic and context-safe by @Blankeos
+- Preserve selected provider by id during refresh by @Blankeos
+
+### Documentation
+
+- Update install docs and TODOs for search migration by @Blankeos
+
+### Features
+
+- Add vision subagent fallback for non-vision image turns by @Blankeos
+- Prevent new chat actions from wrapping by @Blankeos
+- Add git status side panel and remote git API by @Blankeos
+- Add configurable reasoning effort for subagent configs by @Blankeos
+- Add persistent project expansion and expand-all sidebar control by @Blankeos
+- Improve mobile chat layout and enable queued streaming prompts by @Blankeos
+- Support unauthenticated free model browsing and requests by @Blankeos
+- Add pluggable provider extension framework for models by @Blankeos
+- Add xAI OAuth support and generalize provider OAuth flow by @Blankeos
+
+### Ci
+
+- Harden release pipeline and Homebrew publish flow by @Blankeos
+
 ## [0.0.3] - 2026-06-10
 
 ### Bug Fixes
