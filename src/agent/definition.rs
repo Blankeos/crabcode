@@ -36,6 +36,19 @@ IMPORTANT RULES:
 
 You will receive a detailed task description from the primary agent. Complete it and return your findings in a single comprehensive message."#;
 
+const VLM_SYSTEM_PROMPT: &str = r#"You are a focused vision analysis subagent.
+
+Your job is to inspect local image files provided by the primary agent and return a concise, useful visual analysis.
+
+Rules:
+- Always use the view_image tool for every image path you are asked to analyze.
+- Do not edit files or run unrelated tools.
+- If there are multiple images, label your observations by path.
+- Return only the visual findings the primary agent needs in order to answer the user.
+- Be specific about text, UI elements, logos, layout, colors, and visible state when relevant."#;
+
+pub const VLM_AGENT_NAME: &str = "vlm-agent";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
     Primary,
@@ -146,10 +159,10 @@ impl AgentDefinition {
         self.max_steps = overlay.max_steps.or(self.max_steps);
         self.tools = overlay.tools.or(self.tools);
         if !overlay.permissions.is_empty() {
-            self.permissions = overlay.permissions;
+            self.permissions.extend(overlay.permissions);
         }
         if !overlay.task_permissions.is_empty() {
-            self.task_permissions = overlay.task_permissions;
+            self.task_permissions.extend(overlay.task_permissions);
         }
         self.instructions = overlay.instructions.or(self.instructions);
         self
@@ -228,6 +241,7 @@ impl AgentRegistry {
     pub fn task_target(&self, name: &str) -> Option<&AgentDefinition> {
         self.get(name)
             .filter(|agent| agent.mode.can_run_as_subagent())
+            .filter(|agent| !is_unconfigured_vlm_agent(agent))
     }
 
     pub fn can_agent_invoke(&self, parent: &str, target: &str) -> bool {
@@ -242,6 +256,7 @@ impl AgentRegistry {
         self.agents
             .values()
             .filter(|agent| agent.visible_subagent())
+            .filter(|agent| !is_unconfigured_vlm_agent(agent))
             .collect()
     }
 
@@ -273,6 +288,14 @@ impl AgentRegistry {
             .filter_map(|(name, agent)| agent.max_steps.map(|steps| (name.clone(), steps)))
             .collect()
     }
+}
+
+fn is_unconfigured_vlm_agent(agent: &AgentDefinition) -> bool {
+    agent.name == VLM_AGENT_NAME
+        && agent
+            .model
+            .as_deref()
+            .is_none_or(|model| model.trim().is_empty())
 }
 
 pub fn parse_agent_definitions_from_config(
@@ -409,6 +432,29 @@ fn builtin_agents() -> Vec<AgentDefinition> {
             permissions: Vec::new(),
             task_permissions: Vec::new(),
             instructions: Some(EXPLORE_SYSTEM_PROMPT.to_string()),
+        },
+        AgentDefinition {
+            name: VLM_AGENT_NAME.to_string(),
+            description: "Analyze local images for models that cannot receive image input directly. Configure agent.vlm-agent.model to enable this fallback."
+                .to_string(),
+            mode: AgentMode::Subagent,
+            mode_explicit: true,
+            hidden: false,
+            hidden_explicit: true,
+            model: None,
+            reasoning_effort: None,
+            reasoning_effort_explicit: false,
+            temperature: None,
+            top_p: None,
+            max_steps: None,
+            tools: Some(vec!["view_image".to_string()]),
+            permissions: vec![PermissionRule {
+                permission: "external_directory".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionPolicyAction::Allow,
+            }],
+            task_permissions: Vec::new(),
+            instructions: Some(VLM_SYSTEM_PROMPT.to_string()),
         },
     ]
 }
@@ -931,6 +977,81 @@ mod tests {
 
         assert!(registry.can_agent_invoke("Plan", "explore"));
         assert!(!registry.can_agent_invoke("Plan", "general"));
+    }
+
+    #[test]
+    fn builtin_vlm_agent_is_hidden_until_model_is_configured() {
+        let registry = AgentRegistry::default();
+
+        assert!(registry.get(VLM_AGENT_NAME).is_some());
+        assert!(registry.task_target(VLM_AGENT_NAME).is_none());
+        assert!(!registry
+            .visible_agent_names_for_mentions()
+            .contains(&VLM_AGENT_NAME.to_string()));
+    }
+
+    #[test]
+    fn builtin_vlm_agent_is_available_and_model_configurable() {
+        let mut warnings = Vec::new();
+        let registry = AgentRegistry::with_definitions(
+            None,
+            parse_agent_definitions_from_config(
+                Some(&json!({
+                    "vlm-agent": {
+                        "model": "xai/grok-4.3"
+                    }
+                })),
+                &mut warnings,
+            ),
+        );
+
+        assert!(warnings.is_empty());
+        let agent = registry.get(VLM_AGENT_NAME).expect("vlm-agent");
+        assert!(agent.visible_subagent());
+        assert!(registry.task_target(VLM_AGENT_NAME).is_some());
+        assert_eq!(agent.model.as_deref(), Some("xai/grok-4.3"));
+        assert_eq!(
+            agent.tools.as_ref().map(Vec::as_slice),
+            Some(&["view_image".to_string()][..])
+        );
+        assert_eq!(
+            agent.permissions,
+            vec![PermissionRule {
+                permission: "external_directory".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionPolicyAction::Allow,
+            }]
+        );
+        assert!(agent
+            .instructions
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("view_image")));
+    }
+
+    #[tokio::test]
+    async fn builtin_vlm_agent_can_view_external_image_paths_without_prompt() {
+        let mut warnings = Vec::new();
+        let registry = AgentRegistry::with_definitions(
+            None,
+            parse_agent_definitions_from_config(
+                Some(&json!({
+                    "vlm-agent": {
+                        "model": "xai/grok-4.3"
+                    }
+                })),
+                &mut warnings,
+            ),
+        );
+        let params = serde_json::json!({
+            "path": "/var/folders/example/crabcode-clipboard.png"
+        });
+        let permissions = crate::tools::ToolPermissions::new("/tmp/workspace")
+            .with_agent_permission_rules(registry.permission_rules_map());
+
+        assert!(permissions
+            .preflight(VLM_AGENT_NAME, "view_image", &params, None)
+            .await
+            .is_ok());
     }
 
     #[test]

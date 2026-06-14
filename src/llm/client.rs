@@ -383,12 +383,10 @@ pub async fn stream_llm_with_cancellation(
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &sender).await?;
 
-    let aisdk_messages = convert_messages_for_model(&messages, request_config.supports_image_input);
-
     let tool_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
         Some(sender.clone()),
         tool_permissions.clone(),
-        agent_registry,
+        agent_registry.clone(),
         cancel_token.clone(),
         Some(&request_config.provider_name),
         &websearch_config,
@@ -409,7 +407,27 @@ pub async fn stream_llm_with_cancellation(
         supports_image_input: request_config.supports_image_input,
     });
 
-    let aisdk_tools = convert_to_aisdk_tools(
+    let show_vlm_agent_hint = !request_config.supports_image_input
+        && vlm_agent_has_model(&agent_registry)
+        && messages_have_user_images(&messages);
+    let text_only_image_turn =
+        !request_config.supports_image_input && messages_have_user_images(&messages);
+
+    if text_only_image_turn && !show_vlm_agent_hint {
+        send_warning(
+            &sender,
+            "This model cannot receive images directly. Configure agent.vlm-agent.model to enable the built-in vision subagent."
+                .to_string(),
+        );
+    }
+
+    let aisdk_messages = convert_messages_for_model(
+        &messages,
+        request_config.supports_image_input,
+        show_vlm_agent_hint,
+    );
+
+    let mut aisdk_tools = convert_to_aisdk_tools(
         &tool_registry,
         Some(sender.clone()),
         agent_mode,
@@ -420,6 +438,9 @@ pub async fn stream_llm_with_cancellation(
         cancel_token.clone(),
     )
     .await;
+    if text_only_image_turn {
+        aisdk_tools.retain(|tool| tool.name != "view_image");
+    }
 
     let message_count = aisdk_messages.len();
     let tool_count = aisdk_tools.len();
@@ -796,7 +817,7 @@ fn model_supports_image_input(
     }
 
     let Some(model) = model else {
-        return true;
+        return false;
     };
 
     if is_text_only_image_model(&model.id) || is_text_only_image_model(&model.name) {
@@ -811,8 +832,37 @@ fn model_supports_image_input(
 }
 
 fn is_text_only_image_model(model: &str) -> bool {
+    const TEXT_ONLY_IMAGE_MODELS: &[&str] = &[
+        "gpt-5.3-codex-spark",
+        "grok-composer-2.5-fast",
+        "deepseek-v4-flash",
+        "mimo-v2.5-pro",
+        "mimo-2.5-pro",
+    ];
+
     let normalized = model.trim().to_ascii_lowercase();
-    normalized == "gpt-5.3-codex-spark" || normalized.ends_with("/gpt-5.3-codex-spark")
+    let slug = normalized.replace([' ', '_'], "-");
+
+    TEXT_ONLY_IMAGE_MODELS.iter().any(|model_id| {
+        normalized == *model_id
+            || normalized.ends_with(&format!("/{model_id}"))
+            || slug == *model_id
+            || slug.ends_with(&format!("/{model_id}"))
+    })
+}
+
+fn vlm_agent_has_model(agent_registry: &crate::agent::definition::AgentRegistry) -> bool {
+    agent_registry
+        .task_target(crate::agent::definition::VLM_AGENT_NAME)
+        .and_then(|agent| agent.model.as_deref())
+        .is_some_and(|model| !model.trim().is_empty())
+}
+
+fn messages_have_user_images(messages: &[crate::session::types::Message]) -> bool {
+    messages.iter().any(|message| {
+        message.role == crate::session::types::MessageRole::User
+            && !message.local_image_paths.is_empty()
+    })
 }
 
 fn configured_api_key(auth_config: Option<&crate::persistence::AuthConfig>) -> Option<String> {
@@ -1369,12 +1419,13 @@ fn estimate_tokens(content: &str) -> usize {
 }
 
 fn convert_messages(messages: &[crate::session::types::Message]) -> Vec<AisdkMessage> {
-    convert_messages_for_model(messages, true)
+    convert_messages_for_model(messages, true, false)
 }
 
 fn convert_messages_for_model(
     messages: &[crate::session::types::Message],
     supports_image_input: bool,
+    show_vlm_agent_hint: bool,
 ) -> Vec<AisdkMessage> {
     let mut aisdk_messages = Vec::new();
 
@@ -1385,14 +1436,26 @@ fn convert_messages_for_model(
 
         match msg.role {
             crate::session::types::MessageRole::System => {
-                aisdk_messages.push(AisdkMessage::system(msg.content.clone()));
+                aisdk_messages.push(AisdkMessage::system(
+                    crate::utils::sanitize::strip_legacy_image_descriptions(&msg.content),
+                ));
             }
             crate::session::types::MessageRole::User => {
+                let content = crate::utils::sanitize::strip_legacy_image_descriptions(&msg.content);
                 if !supports_image_input && !msg.local_image_paths.is_empty() {
-                    aisdk_messages.push(AisdkMessage::user(content_with_unsupported_image_note(
-                        &msg.content,
-                        msg.local_image_paths.len(),
-                    )));
+                    if show_vlm_agent_hint {
+                        aisdk_messages.push(AisdkMessage::user(content_with_vlm_agent_hint(
+                            &content,
+                            &msg.local_image_paths,
+                        )));
+                    } else {
+                        aisdk_messages.push(AisdkMessage::user(
+                            content_with_unsupported_image_note(
+                                &content,
+                                msg.local_image_paths.len(),
+                            ),
+                        ));
+                    }
                     continue;
                 }
 
@@ -1419,10 +1482,9 @@ fn convert_messages_for_model(
                     .collect::<Vec<_>>();
 
                 if images.is_empty() {
-                    aisdk_messages.push(AisdkMessage::user(msg.content.clone()));
+                    aisdk_messages.push(AisdkMessage::user(content));
                 } else {
-                    aisdk_messages
-                        .push(AisdkMessage::user_with_images(msg.content.clone(), images));
+                    aisdk_messages.push(AisdkMessage::user_with_images(content, images));
                 }
             }
             crate::session::types::MessageRole::Assistant => {
@@ -1438,7 +1500,11 @@ fn convert_messages_for_model(
                         supports_image_input,
                     );
                 } else if !msg.content.trim().is_empty() {
-                    aisdk_messages.push(AisdkMessage::assistant(msg.content.clone()));
+                    let content =
+                        crate::utils::sanitize::strip_legacy_image_descriptions(&msg.content);
+                    if !content.trim().is_empty() {
+                        aisdk_messages.push(AisdkMessage::assistant(content));
+                    }
                 }
             }
             crate::session::types::MessageRole::Tool => {
@@ -1473,8 +1539,13 @@ fn append_assistant_parts_for_model(
                     continue;
                 };
 
+                let text = crate::utils::sanitize::strip_legacy_image_descriptions(text);
+                if text.trim().is_empty() {
+                    continue;
+                }
+
                 emitted_text = true;
-                aisdk_messages.push(AisdkMessage::assistant(text.to_string()));
+                aisdk_messages.push(AisdkMessage::assistant(text));
             }
             "tool_call" => {
                 if pending_tools.is_complete() {
@@ -1636,7 +1707,7 @@ fn tool_output_message_from_model_obj(
     let output = if name == "view_image" && !is_error && !supports_image_input {
         content_with_unsupported_image_note(output, 1)
     } else {
-        output.to_string()
+        crate::utils::sanitize::strip_legacy_image_descriptions(output)
     };
 
     Some(AisdkMessage::tool_output_with_images(
@@ -1808,8 +1879,8 @@ mod tests {
     use super::{
         convert_messages, convert_messages_for_model, is_openai_oauth_model_allowed,
         maybe_apply_unauthenticated_free_provider_key, model_supports_image_input,
-        openai_request_instructions, resolve_model_route, AisdkMessage, OpenAIRequestOptions,
-        ProviderKind, ProviderRequestConfig,
+        openai_request_instructions, resolve_model_route, vlm_agent_has_model, AisdkMessage,
+        OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
     };
 
     #[test]
@@ -2059,6 +2130,30 @@ mod tests {
     }
 
     #[test]
+    fn grok_composer_is_text_only_for_raw_image_transport() {
+        let stale_image_model: crate::model::discovery::Model =
+            serde_json::from_value(serde_json::json!({
+                "id": "grok-composer-2.5-fast",
+                "name": "Composer 2.5",
+                "attachment": true,
+                "modalities": {
+                    "input": ["text", "image"],
+                    "output": ["text"]
+                }
+            }))
+            .unwrap();
+
+        assert!(!model_supports_image_input(
+            "grok-composer-2.5-fast",
+            Some(&stale_image_model)
+        ));
+        assert!(!model_supports_image_input(
+            "xai/grok-composer-2.5-fast",
+            None
+        ));
+    }
+
+    #[test]
     fn tool_history_replays_structured_tool_call_and_output() {
         let tool_message = crate::session::types::Message::tool(
             serde_json::json!({
@@ -2281,7 +2376,7 @@ mod tests {
         let mut user_message = crate::session::types::Message::user("what is in this?");
         user_message.local_image_paths = vec!["/tmp/example.png".to_string()];
 
-        let messages = convert_messages_for_model(&[user_message], false);
+        let messages = convert_messages_for_model(&[user_message], false, false);
 
         assert_eq!(messages.len(), 1);
         match &messages[0] {
@@ -2294,6 +2389,124 @@ mod tests {
             }
             other => panic!("expected user message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn text_only_model_with_vlm_agent_configured_shows_paths_in_hint() {
+        let mut user_message = crate::session::types::Message::user("what is this?");
+        user_message.local_image_paths =
+            vec!["/var/folders/tq/crabcode-clipboard-3vCHpv.png".to_string()];
+
+        let messages = convert_messages_for_model(&[user_message], false, true);
+
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            AisdkMessage::User(message) => {
+                assert!(message.images.is_empty());
+                assert!(message.content.contains("what is this?"));
+                assert!(message.content.contains("crabcode-clipboard-3vCHpv.png"));
+                assert!(message.content.contains("subagent_type: \"vlm-agent\""));
+                assert!(message
+                    .content
+                    .contains("description: \"Analyze attached image(s)\""));
+                assert!(message
+                    .content
+                    .contains("Use view_image on every image path below"));
+                assert!(message
+                    .content
+                    .contains("must not call view_image directly"));
+                assert!(message
+                    .content
+                    .contains("After the vlm-agent subagent returns, use its result"));
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vlm_hint_strips_legacy_image_description_blocks_but_keeps_paths() {
+        let mut user_message = crate::session::types::Message::user(
+            "[Image #1]\n\n<image_description source=\"vlm-agent\">\nPermission denied - path outside working directory\n</image_description>\nwhat is this?",
+        );
+        user_message.local_image_paths =
+            vec!["/var/folders/tq/crabcode-clipboard-gYi30o.png".to_string()];
+
+        let messages = convert_messages_for_model(&[user_message], false, true);
+
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            AisdkMessage::User(message) => {
+                assert!(message.content.contains("[Image #1]"));
+                assert!(message.content.contains("what is this?"));
+                assert!(message.content.contains("crabcode-clipboard-gYi30o.png"));
+                assert!(message.content.contains("subagent_type: \"vlm-agent\""));
+                assert!(!message.content.contains("<image_description"));
+                assert!(!message.content.contains("Permission denied"));
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_image_description_blocks_are_stripped_from_history_text() {
+        let stripped = crate::utils::sanitize::strip_legacy_image_descriptions(
+            "before\n<image_description source=\"vlm-agent\">\nstale\n</image_description>\nafter",
+        );
+        assert_eq!(stripped, "before\n\nafter");
+
+        let assistant = crate::session::types::Message::assistant(
+            "visible\n<image_description source=\"vlm-agent\">hidden</image_description>",
+        );
+        let messages = convert_messages(&[assistant]);
+
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            AisdkMessage::Assistant(message) => {
+                assert_eq!(message.content, "visible");
+            }
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vlm_agent_model_check_requires_runnable_task_target() {
+        let config = serde_json::json!({
+            "vlm-agent": {
+                "model": "xai/grok-4.3",
+                "mode": "primary"
+            }
+        });
+        let mut warnings = Vec::new();
+        let registry = crate::agent::definition::AgentRegistry::with_definitions(
+            None,
+            crate::agent::definition::parse_agent_definitions_from_config(
+                Some(&config),
+                &mut warnings,
+            ),
+        );
+
+        assert!(warnings.is_empty());
+        assert!(!vlm_agent_has_model(&registry));
+    }
+
+    #[test]
+    fn vlm_agent_model_check_accepts_configured_subagent() {
+        let config = serde_json::json!({
+            "vlm-agent": {
+                "model": "xai/grok-4.3"
+            }
+        });
+        let mut warnings = Vec::new();
+        let registry = crate::agent::definition::AgentRegistry::with_definitions(
+            None,
+            crate::agent::definition::parse_agent_definitions_from_config(
+                Some(&config),
+                &mut warnings,
+            ),
+        );
+
+        assert!(warnings.is_empty());
+        assert!(vlm_agent_has_model(&registry));
     }
 
     #[test]
@@ -2314,7 +2527,7 @@ mod tests {
             .to_string(),
         );
 
-        let messages = convert_messages_for_model(&[tool_message], false);
+        let messages = convert_messages_for_model(&[tool_message], false, false);
 
         assert_eq!(messages.len(), 2);
         match &messages[1] {
@@ -2378,7 +2591,7 @@ mod tests {
             "legacy-text",
             Some(&no_attachment_model)
         ));
-        assert!(model_supports_image_input("unknown", None));
+        assert!(!model_supports_image_input("unknown", None));
     }
 
     #[test]
@@ -2406,6 +2619,52 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v4_flash_is_text_only_for_image_input_even_with_missing_or_stale_metadata() {
+        let stale_image_model: crate::model::discovery::Model =
+            serde_json::from_value(serde_json::json!({
+                "id": "deepseek-v4-flash",
+                "name": "DeepSeek V4 Flash",
+                "attachment": true,
+                "modalities": {
+                    "input": ["text", "image"],
+                    "output": ["text"]
+                }
+            }))
+            .unwrap();
+
+        assert!(!model_supports_image_input(
+            "deepseek-v4-flash",
+            Some(&stale_image_model)
+        ));
+        assert!(!model_supports_image_input(
+            "deepseek/deepseek-v4-flash",
+            None
+        ));
+    }
+
+    #[test]
+    fn mimo_v25_pro_is_text_only_for_image_input_even_with_missing_or_stale_metadata() {
+        let stale_image_model: crate::model::discovery::Model =
+            serde_json::from_value(serde_json::json!({
+                "id": "mimo-v2.5-pro",
+                "name": "MiMo V2.5 Pro",
+                "attachment": true,
+                "modalities": {
+                    "input": ["text", "image"],
+                    "output": ["text"]
+                }
+            }))
+            .unwrap();
+
+        assert!(!model_supports_image_input(
+            "mimo-v2.5-pro",
+            Some(&stale_image_model)
+        ));
+        assert!(!model_supports_image_input("mimo v2.5 pro", None));
+        assert!(!model_supports_image_input("minimax/mimo-v2.5-pro", None));
+    }
+
+    #[test]
     fn compaction_marker_is_not_sent_to_model() {
         let stats = crate::session::types::CompactionStats {
             before_tokens: 12_000,
@@ -2422,5 +2681,26 @@ mod tests {
             AisdkMessage::User(message) => assert_eq!(message.content, "tail"),
             other => panic!("expected user message, got {other:?}"),
         }
+    }
+}
+fn content_with_vlm_agent_hint(content: &str, image_paths: &[String]) -> String {
+    let paths = image_paths
+        .iter()
+        .map(|path| format!("- {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let user_request = if content.trim().is_empty() {
+        "No additional user text was provided. Analyze the image(s)."
+    } else {
+        content
+    };
+    let hint = format!(
+        "The attached image(s) cannot be sent to this model directly.\n\nYou must not call view_image directly in this parent turn. Before answering the user's image request, call the task tool with:\n- subagent_type: \"{}\"\n- description: \"Analyze attached image(s)\"\n- prompt: \"Use view_image on every image path below. Return the visual findings needed to answer the user's request.\n\nImage paths:\n{paths}\n\nUser request:\n{user_request}\"\n\nAfter the vlm-agent subagent returns, use its result to answer the user.",
+        crate::agent::definition::VLM_AGENT_NAME
+    );
+    if content.trim().is_empty() {
+        hint
+    } else {
+        format!("{content}\n\n{hint}")
     }
 }

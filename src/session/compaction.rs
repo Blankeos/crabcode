@@ -326,6 +326,7 @@ fn message_content_for_prompt(message: &Message) -> String {
         }
         _ => message.content.clone(),
     };
+    content = crate::utils::sanitize::strip_legacy_image_descriptions(&content);
 
     if !message.local_image_paths.is_empty() {
         if !content.trim().is_empty() {
@@ -624,5 +625,19 @@ mod tests {
         assert!(prompt.contains("\"old_string\": \"before\""));
         assert!(prompt.contains("\"new_string\": \"after\""));
         assert!(prompt.contains("Tool output:\nReplaced at line 4"));
+    }
+
+    #[test]
+    fn compaction_prompt_strips_legacy_image_description_blocks() {
+        let message = Message::user(
+            "[Image #1]\n\n<image_description source=\"vlm-agent\">\nPermission denied\n</image_description>\nkeep this",
+        );
+
+        let prompt = build_prompt(&[message]);
+
+        assert!(prompt.contains("[Image #1]"));
+        assert!(prompt.contains("keep this"));
+        assert!(!prompt.contains("<image_description"));
+        assert!(!prompt.contains("Permission denied"));
     }
 }

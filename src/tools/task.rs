@@ -201,9 +201,13 @@ impl ToolHandler for TaskTool {
             return Err(ToolError::Execution("Subagent cancelled".to_string()));
         }
         let subagent_cancel_token = ctx.cancel_token.clone();
-        let permissions = self.permissions.clone().unwrap_or_else(|| {
-            crate::tools::ToolPermissions::new(crate::utils::cwd::current_dir_or_dot())
-        });
+        let permissions = self
+            .permissions
+            .clone()
+            .unwrap_or_else(|| {
+                crate::tools::ToolPermissions::new(crate::utils::cwd::current_dir_or_dot())
+            })
+            .with_agent_permission_rules(self.agent_registry.permission_rules_map());
         let max_steps = subagent.max_steps;
 
         let child_session_id = cuid2::create_id();

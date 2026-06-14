@@ -338,10 +338,17 @@ mod tests {
         assert_eq!(model.id, "grok-composer-2.5-fast");
         assert_eq!(model.name, "Composer 2.5");
         assert_eq!(model.family, "grok-build");
-        assert!(model.attachment);
+        assert!(!model.attachment);
         assert!(model.tool_call);
         assert!(model.structured_output);
         assert!(!model.reasoning);
+        assert_eq!(
+            model
+                .modalities
+                .as_ref()
+                .map(|modalities| modalities.input.as_slice()),
+            Some(["text".to_string(), "pdf".to_string()].as_slice())
+        );
         assert_eq!(
             model.limit.as_ref().map(|limit| limit.context),
             Some(256_000)

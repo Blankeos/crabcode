@@ -59,3 +59,23 @@ Other examples:
 ```
 
 If `args` is omitted, crabcode uses `["{path}"]`.
+
+## Vision subagent
+
+Some coding models can work with images only when another vision-capable model describes the image first. Crabcode ships a built-in `vlm-agent` subagent for that workflow instead of sending raw images to models that reject image input.
+
+Configure the built-in subagent with a vision-capable model:
+
+```jsonc title="crabcode.jsonc"
+{
+  "agent": {
+    "vlm-agent": {
+      "model": "xai/grok-4.3",
+    },
+  },
+}
+```
+
+When the active model cannot receive raw images and `agent.vlm-agent.model` is configured, Crabcode exposes `vlm-agent` as an available subagent and includes the existing local image paths in the text prompt. The active model is instructed to call the `task` tool with `subagent_type: "vlm-agent"`; the subagent uses `view_image` directly on those paths and returns visual findings for the active model to use in its answer. During this fallback turn, the parent model is not given direct `view_image` access, so image inspection goes through `vlm-agent` instead of the parent guessing a path.
+
+If the active model cannot receive raw images and `agent.vlm-agent.model` is not configured, Crabcode shows a warning toast with the config hint and sends a text-only note instead of making a failing image request.
