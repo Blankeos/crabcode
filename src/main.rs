@@ -41,6 +41,10 @@ mod provider {
     pub use crate::aisdk::provider::*;
 }
 
+mod retry {
+    pub use crate::aisdk::retry::*;
+}
+
 mod stop {
     pub use crate::aisdk::stop::*;
 }

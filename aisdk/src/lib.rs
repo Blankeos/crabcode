@@ -27,6 +27,10 @@ pub mod response {
     pub use crate::shared::response::*;
 }
 
+pub mod retry {
+    pub use crate::shared::retry::*;
+}
+
 pub mod stop {
     pub use crate::shared::stop::*;
 }

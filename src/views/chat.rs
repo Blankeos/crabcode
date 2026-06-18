@@ -85,6 +85,7 @@ pub fn render_chat(
     colors: &ThemeColors,
     is_streaming: bool,
     is_compacting: bool,
+    retry_status: Option<&crate::app::StreamingRetryStatus>,
     usage_text: &str,
     subagent_tabs: Option<SubagentTabs>,
     queued_messages: &[String],
@@ -141,6 +142,7 @@ pub fn render_chat(
                 colors,
                 is_streaming,
                 is_compacting,
+                retry_status,
                 &mut chat_state.wave_spinner,
             );
         }
@@ -190,6 +192,7 @@ pub fn render_chat(
             &chat_state.wave_spinner,
             colors,
             is_compacting,
+            retry_status,
         )
     } else {
         0
@@ -218,6 +221,7 @@ pub fn render_chat(
             &chat_state.wave_spinner,
             colors,
             is_compacting,
+            retry_status,
             available_width,
         );
         let streaming_paragraph = Paragraph::new(Line::from(streaming_text));
@@ -291,12 +295,14 @@ fn streaming_status_desired_width(
     wave_spinner: &WaveSpinner,
     colors: &ThemeColors,
     is_compacting: bool,
+    retry_status: Option<&crate::app::StreamingRetryStatus>,
 ) -> u16 {
     spans_width(&streaming_status_spans(
         chat,
         wave_spinner,
         colors,
         is_compacting,
+        retry_status,
         u16::MAX,
     ))
 }
@@ -306,6 +312,7 @@ fn streaming_status_spans(
     wave_spinner: &WaveSpinner,
     colors: &ThemeColors,
     is_compacting: bool,
+    retry_status: Option<&crate::app::StreamingRetryStatus>,
     available_width: u16,
 ) -> Vec<Span<'static>> {
     let spinner_width = if available_width < STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH {
@@ -315,6 +322,54 @@ fn streaming_status_spans(
     };
     let mut streaming_text = wave_spinner.spans_for_width(spinner_width);
     if streaming_text.is_empty() {
+        return streaming_text;
+    }
+
+    if let Some(retry) = retry_status {
+        let seconds = retry_seconds_remaining(retry.next_epoch_ms);
+        let retrying = if seconds > 0 {
+            format!("retrying in {}s", seconds)
+        } else {
+            "retrying now".to_string()
+        };
+        let attempt = format!("attempt #{}", retry.attempt);
+        let controls = "esc to stop";
+        let fixed_width = spans_width(&streaming_text)
+            .saturating_add(1)
+            .saturating_add(3)
+            .saturating_add(UnicodeWidthStr::width(retrying.as_str()) as u16)
+            .saturating_add(3)
+            .saturating_add(UnicodeWidthStr::width(attempt.as_str()) as u16)
+            .saturating_add(2)
+            .saturating_add(UnicodeWidthStr::width(controls) as u16);
+        let message = if available_width == u16::MAX {
+            retry.message.clone()
+        } else {
+            truncate_to_width(
+                &retry.message,
+                available_width.saturating_sub(fixed_width) as usize,
+            )
+        };
+        streaming_text.push(Span::raw(" "));
+        if !message.is_empty() {
+            streaming_text.push(Span::styled(message, Style::default().fg(colors.warning)));
+            streaming_text.push(Span::raw(" · "));
+        }
+        streaming_text.push(Span::styled(retrying, Style::default().fg(colors.info)));
+        streaming_text.push(Span::raw(" · "));
+        streaming_text.push(Span::styled(
+            attempt,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+        streaming_text.push(Span::raw("  "));
+        streaming_text.push(Span::styled(
+            controls,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
         return streaming_text;
     }
 
@@ -359,6 +414,7 @@ fn subagent_streaming_status_spans(
     wave_spinner: &WaveSpinner,
     colors: &ThemeColors,
     is_compacting: bool,
+    retry_status: Option<&crate::app::StreamingRetryStatus>,
     max_width: u16,
 ) -> Vec<Span<'static>> {
     let mut streaming_text = wave_spinner.spans_for_width(max_width);
@@ -371,6 +427,31 @@ fn subagent_streaming_status_spans(
         streaming_text.push(Span::styled(
             "compacting context",
             Style::default().fg(colors.info),
+        ));
+    } else if let Some(retry) = retry_status {
+        let seconds = retry_seconds_remaining(retry.next_epoch_ms);
+        let retrying = if seconds > 0 {
+            format!("retrying in {}s", seconds)
+        } else {
+            "retrying now".to_string()
+        };
+        let attempt = format!("attempt #{}", retry.attempt);
+        let fixed_width = spans_width(&streaming_text)
+            .saturating_add(1)
+            .saturating_add(UnicodeWidthStr::width(retrying.as_str()) as u16)
+            .saturating_add(3)
+            .saturating_add(UnicodeWidthStr::width(attempt.as_str()) as u16);
+        let message = truncate_to_width(
+            &retry.message,
+            max_width.saturating_sub(fixed_width).min(48) as usize,
+        );
+        if !message.is_empty() {
+            streaming_text.push(Span::styled(message, Style::default().fg(colors.warning)));
+            streaming_text.push(Span::raw(" · "));
+        }
+        streaming_text.push(Span::styled(
+            format!("{} · {}", retrying, attempt),
+            Style::default().fg(colors.warning),
         ));
     } else {
         streaming_text.push(Span::styled(
@@ -385,6 +466,15 @@ fn subagent_streaming_status_spans(
 
 fn spans_width(spans: &[Span<'static>]) -> u16 {
     Line::from(spans.to_vec()).width().min(u16::MAX as usize) as u16
+}
+
+fn retry_seconds_remaining(next_epoch_ms: u64) -> u64 {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    next_epoch_ms.saturating_sub(now_ms).div_ceil(1000)
 }
 
 fn subagent_nav_width(content_width: u16, is_streaming: bool, nav_desired_width: u16) -> u16 {
@@ -568,6 +658,7 @@ fn render_subagent_footer(
     colors: &ThemeColors,
     is_streaming: bool,
     is_compacting: bool,
+    retry_status: Option<&crate::app::StreamingRetryStatus>,
     wave_spinner: &mut WaveSpinner,
 ) {
     if tabs.tabs.is_empty() || area.width == 0 || area.height == 0 {
@@ -649,6 +740,7 @@ fn render_subagent_footer(
             wave_spinner,
             colors,
             is_compacting,
+            retry_status,
             chunks[0].width,
         ));
         left_spans.push(Span::raw("  "));
@@ -851,6 +943,7 @@ mod tests {
             &spinner,
             &colors,
             false,
+            None,
             STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
         );
 
@@ -868,10 +961,36 @@ mod tests {
             &spinner,
             &colors,
             false,
+            None,
             STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH - 1,
         );
 
         assert_eq!(spans[0].content.as_ref(), "⠋");
+    }
+
+    #[test]
+    fn streaming_status_shows_retry_countdown() {
+        let chat = Chat::new();
+        let colors = test_colors();
+        let spinner = WaveSpinner::new(Color::Blue);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let retry = crate::app::StreamingRetryStatus {
+            attempt: 2,
+            message: "Too Many Requests".to_string(),
+            next_epoch_ms: now_ms + 2_000,
+        };
+
+        let line = streaming_status_spans(&chat, &spinner, &colors, false, Some(&retry), 96)
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+
+        assert!(line.contains("Too Many Requests"));
+        assert!(line.contains("retrying in"));
+        assert!(line.contains("attempt #2"));
     }
 
     #[test]

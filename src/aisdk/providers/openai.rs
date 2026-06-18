@@ -2,6 +2,7 @@ use crate::chunk::{ChunkType, MessagePhase};
 use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
+use crate::retry::RetryError;
 use crate::tool::Tool;
 use async_trait::async_trait;
 use eventsource_stream::{EventStreamError, Eventsource};
@@ -322,17 +323,18 @@ impl Provider for OpenAI {
             .send()
             .await
             .map_err(|err| {
-                Error::Provider(format_openai_request_error(
+                Error::RetryableProvider(RetryError::from_message(format_openai_request_error(
                     "send",
                     &url,
                     &err,
                     Some(&request_diagnostics),
-                ))
+                )))
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let response_url = sanitized_url(response.url());
+            let headers = response.headers().clone();
             let text = match response.text().await {
                 Ok(text) => truncate_log_value(&text, OPENAI_ERROR_BODY_MAX_CHARS),
                 Err(err) => format!(
@@ -340,10 +342,17 @@ impl Provider for OpenAI {
                     format_reqwest_error("read_error_body", &err)
                 ),
             };
-            return Err(Error::Provider(format!(
+            let message = format!(
                 "OpenAI API error: status={} url={} body={}",
                 status, response_url, text
-            )));
+            );
+            let retry_error = RetryError::new(message)
+                .with_status(status.as_u16())
+                .with_headers(&headers);
+            if crate::retry::retryable(&retry_error) {
+                return Err(Error::RetryableProvider(retry_error));
+            }
+            return Err(Error::Provider(retry_error.message));
         }
 
         let request_url = url.clone();
@@ -354,7 +363,9 @@ impl Provider for OpenAI {
                 Ok(event) => futures::future::ready(response_sse_data_to_chunk(&event.data)),
                 Err(e) => {
                     let err = format_openai_sse_error(&e, &request_url);
-                    futures::future::ready(Some(Ok(ChunkType::Failed(err))))
+                    futures::future::ready(Some(Ok(ChunkType::RetryableFailure(
+                        RetryError::from_message(err),
+                    ))))
                 }
             })
             .boxed();

@@ -105,6 +105,23 @@ pub fn parse_model_ref(model: &str) -> (String, String) {
     ("opencode".to_string(), model.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamingRetryStatus {
+    pub attempt: usize,
+    pub message: String,
+    pub next_epoch_ms: u64,
+}
+
+impl From<crate::aisdk::retry::RetryStatus> for StreamingRetryStatus {
+    fn from(status: crate::aisdk::retry::RetryStatus) -> Self {
+        Self {
+            attempt: status.attempt,
+            message: status.message,
+            next_epoch_ms: status.next_epoch_ms,
+        }
+    }
+}
+
 fn titlecase_agent_name(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
@@ -357,6 +374,13 @@ fn coalesce_streaming_chunks(
                     coalesced.push(ChunkMessage::Reasoning(reasoning));
                 }
             }
+            ChunkMessage::Retry(status) => {
+                if let Some(ChunkMessage::Retry(previous)) = coalesced.last_mut() {
+                    *previous = status;
+                } else {
+                    coalesced.push(ChunkMessage::Retry(status));
+                }
+            }
             ChunkMessage::SubagentChunk { session_id, chunk } => match *chunk {
                 ChunkMessage::Text(text) => {
                     if text.is_empty() {
@@ -398,6 +422,24 @@ fn coalesce_streaming_chunks(
                     coalesced.push(ChunkMessage::SubagentChunk {
                         session_id,
                         chunk: Box::new(ChunkMessage::Reasoning(reasoning)),
+                    });
+                }
+                ChunkMessage::Retry(status) => {
+                    if let Some(ChunkMessage::SubagentChunk {
+                        session_id: previous_session_id,
+                        chunk: previous_chunk,
+                    }) = coalesced.last_mut()
+                    {
+                        if previous_session_id == &session_id {
+                            if let ChunkMessage::Retry(previous) = previous_chunk.as_mut() {
+                                *previous = status;
+                                continue;
+                            }
+                        }
+                    }
+                    coalesced.push(ChunkMessage::SubagentChunk {
+                        session_id,
+                        chunk: Box::new(ChunkMessage::Retry(status)),
                     });
                 }
                 inner => coalesced.push(ChunkMessage::SubagentChunk {
@@ -453,6 +495,7 @@ struct ClientSessionState {
     queued_messages: std::collections::VecDeque<QueuedUserMessage>,
     find_bar: FindBar,
     unread_completed: bool,
+    retry_status: Option<StreamingRetryStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -472,6 +515,7 @@ impl ClientSessionState {
             queued_messages: std::collections::VecDeque::new(),
             find_bar: FindBar::new(),
             unread_completed: false,
+            retry_status: None,
         }
     }
 }
@@ -1464,6 +1508,26 @@ impl App {
         self.session_view_states
             .get(session_id)
             .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some())
+    }
+
+    fn current_session_retry_status(&self) -> Option<StreamingRetryStatus> {
+        let session_id = self.session_manager.get_current_session_id()?;
+        self.session_view_states
+            .get(session_id)
+            .and_then(|state| state.retry_status.clone())
+    }
+
+    fn has_active_retry_status(&self) -> bool {
+        self.session_view_states
+            .values()
+            .any(|state| state.retry_status.is_some())
+    }
+
+    fn set_session_retry_status(&mut self, session_id: &str, status: Option<StreamingRetryStatus>) {
+        self.ensure_session_view_state(session_id);
+        if let Some(state) = self.session_view_states.get_mut(session_id) {
+            state.retry_status = status;
+        }
     }
 
     fn session_has_active_compaction(&self, session_id: &str) -> bool {
@@ -6604,6 +6668,7 @@ impl App {
             state.stream = None;
             state.external_stream = None;
             state.tool_calls.deferred_finish = false;
+            state.retry_status = None;
         }
 
         if was_active {
@@ -6685,6 +6750,7 @@ impl App {
             || self.has_active_selection_edge_scroll()
             || self.is_streaming
             || self.chat_state.chat.has_active_tool_messages()
+            || self.has_active_retry_status()
             || self.compaction_receiver.is_some()
             || self.storage_receiver.is_some()
             || self
@@ -6784,6 +6850,7 @@ impl App {
     ) -> bool {
         match chunk {
             crate::llm::ChunkMessage::Text(text) => {
+                self.set_session_retry_status(session_id, None);
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.append_to_last_assistant(&text);
                 }
@@ -6791,10 +6858,15 @@ impl App {
                 true
             }
             crate::llm::ChunkMessage::Reasoning(reasoning) => {
+                self.set_session_retry_status(session_id, None);
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
                     chat.append_reasoning_to_last_assistant(&reasoning);
                 }
                 self.mark_streaming_snapshot_pending(session_id);
+                true
+            }
+            crate::llm::ChunkMessage::Retry(status) => {
+                self.set_session_retry_status(session_id, Some(status.into()));
                 true
             }
             crate::llm::ChunkMessage::Warning(msg) => {
@@ -6815,6 +6887,7 @@ impl App {
             }
             crate::llm::ChunkMessage::Metrics { .. } => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
+                self.set_session_retry_status(session_id, None);
                 self.add_tool_calls_to_session(session_id, tool_calls);
                 true
             }
@@ -6937,6 +7010,7 @@ impl App {
             }
             state.chat.mark_render_dirty();
             state.chat.begin_streaming_turn();
+            state.retry_status = None;
             state.external_stream = Some(ExternalStreamState::new(
                 model.or_else(|| Some(self.model.clone())),
                 provider.or_else(|| Some(self.provider_name.clone())),
@@ -7399,6 +7473,7 @@ impl App {
             ));
             state.tool_calls = ToolCallViewState::default();
             state.unread_completed = false;
+            state.retry_status = None;
         }
         self.persist_chat_messages_for_session(&session_id);
         let _ = self.session_manager.set_session_status(
@@ -8009,6 +8084,7 @@ impl App {
             ));
             state.tool_calls = ToolCallViewState::default();
             state.unread_completed = false;
+            state.retry_status = None;
         }
         self.persist_chat_messages_for_session(&session_id);
         let _ = self.session_manager.set_session_status(
@@ -8270,6 +8346,7 @@ impl App {
                 let subagent_tabs = self.subagent_tabs_for_current_session();
                 let queued_messages = self.queued_message_previews_for_current_session();
                 let (display_agent, display_model) = self.current_session_agent_model_for_display();
+                let retry_status = self.current_session_retry_status();
                 render_chat(
                     f,
                     &mut self.chat_state,
@@ -8284,6 +8361,7 @@ impl App {
                     &colors,
                     self.is_streaming,
                     self.compaction_receiver.is_some(),
+                    retry_status.as_ref(),
                     &usage_text,
                     subagent_tabs,
                     &queued_messages,

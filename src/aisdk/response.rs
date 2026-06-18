@@ -1,7 +1,8 @@
 use crate::chunk::{ChunkType, FinishReason, MessagePhase};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::message::Message;
-use crate::provider::Provider;
+use crate::provider::{Provider, ProviderStream};
+use crate::retry::RetryError;
 use crate::stop::{StopReason, StopWhenFn};
 use crate::tool::{Tool, ToolOutput};
 use futures::{future::join_all, StreamExt};
@@ -11,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT: usize = 1;
+const PROVIDER_STEP_MAX_RETRIES: usize = 10;
 
 pub struct StreamTextResponse {
     pub stream: LanguageModelStream,
@@ -71,6 +73,7 @@ pub async fn stream_with_tools<P: Provider>(
     max_steps: Option<usize>,
     stop_when: Option<StopWhenFn>,
     headers: HashMap<String, String>,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<StreamTextResponse> {
     let (mut response, tx) = StreamTextResponse::create();
     let _ = tx.send(ChunkType::Start);
@@ -96,6 +99,16 @@ pub async fn stream_with_tools<P: Provider>(
                 break;
             }
 
+            if cancel_token
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                let err = "Streaming cancelled by user".to_string();
+                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                break;
+            }
+
             if let Some(ref hook) = stop_when {
                 if hook(step_idx) {
                     *stop_reason_arc.lock().await = Some(StopReason::Hook);
@@ -112,24 +125,31 @@ pub async fn stream_with_tools<P: Provider>(
                 step_summary
             )));
 
-            let stream_result = provider_clone
-                .stream_text(&current_messages, &tools, &headers)
-                .await;
-
-            let mut stream = match stream_result {
-                Ok(s) => s,
-                Err(e) => {
-                    let err = format!(
-                        "provider_step_error step={} messages={} tools={} {} error={}",
+            let mut attempt = 1usize;
+            let mut stream = match open_provider_stream_with_retries(
+                &provider_clone,
+                &current_messages,
+                &tools,
+                &headers,
+                &tx_loop,
+                step_idx,
+                &mut attempt,
+                cancel_token.as_ref(),
+            )
+            .await
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let err = provider_step_error_message(
                         step_idx,
                         current_messages.len(),
                         tools.len(),
-                        step_summary,
-                        e
+                        &step_summary,
+                        error,
                     );
                     let _ = tx_loop.send(ChunkType::Failed(err.clone()));
                     *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                    break;
+                    return;
                 }
             };
 
@@ -142,6 +162,7 @@ pub async fn stream_with_tools<P: Provider>(
             let mut provider_finish_reason = None;
             let mut last_assistant_message_phase = None;
             let mut current_assistant_message_phase = None;
+            let mut emitted_non_replayable_output = false;
 
             while let Some(chunk) = stream.next().await {
                 match chunk {
@@ -161,15 +182,18 @@ pub async fn stream_with_tools<P: Provider>(
                         )));
                     }
                     Ok(ChunkType::Text(text)) => {
+                        emitted_non_replayable_output = true;
                         last_assistant_message_phase = current_assistant_message_phase;
                         accumulated_text.push_str(&text);
                         let _ = tx_loop.send(ChunkType::Text(text));
                     }
                     Ok(ChunkType::Reasoning(reasoning)) => {
+                        emitted_non_replayable_output = true;
                         accumulated_reasoning.push_str(&reasoning);
                         let _ = tx_loop.send(ChunkType::Reasoning(reasoning));
                     }
                     Ok(ChunkType::ToolCall(json_str)) => {
+                        emitted_non_replayable_output = true;
                         has_tool_call = true;
                         let _ = tx_loop.send(ChunkType::ToolCall(json_str.clone()));
                         if let Err(err) = tool_call_accumulator.ingest(&json_str) {
@@ -195,6 +219,70 @@ pub async fn stream_with_tools<P: Provider>(
                     Ok(ChunkType::Metadata(msg)) => {
                         let _ = tx_loop.send(ChunkType::Metadata(msg));
                     }
+                    Ok(ChunkType::Retry(status)) => {
+                        let _ = tx_loop.send(ChunkType::Retry(status));
+                    }
+                    Ok(ChunkType::RetryableFailure(retry_error)) => {
+                        if !emitted_non_replayable_output && attempt <= PROVIDER_STEP_MAX_RETRIES {
+                            if !emit_retry_and_sleep(
+                                &tx_loop,
+                                step_idx,
+                                attempt,
+                                &retry_error,
+                                cancel_token.as_ref(),
+                            )
+                            .await
+                            {
+                                let err = "Streaming cancelled by user".to_string();
+                                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                return;
+                            }
+                            attempt += 1;
+                            stream = match open_provider_stream_with_retries(
+                                &provider_clone,
+                                &current_messages,
+                                &tools,
+                                &headers,
+                                &tx_loop,
+                                step_idx,
+                                &mut attempt,
+                                cancel_token.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(stream) => stream,
+                                Err(error) => {
+                                    let err = provider_step_error_message(
+                                        step_idx,
+                                        current_messages.len(),
+                                        tools.len(),
+                                        &step_summary,
+                                        error,
+                                    );
+                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                    return;
+                                }
+                            };
+                            continue;
+                        }
+
+                        let err = if emitted_non_replayable_output {
+                            format!(
+                                "Provider stream failed after emitting output; not retrying to avoid duplicate output: {}",
+                                retry_error.message
+                            )
+                        } else {
+                            format!(
+                                "Provider stream failed after {} retries: {}",
+                                PROVIDER_STEP_MAX_RETRIES, retry_error.message
+                            )
+                        };
+                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                        *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                        return;
+                    }
                     Ok(ChunkType::Incomplete(msg)) => {
                         let err = format!("Provider response incomplete: {}", msg);
                         let _ = tx_loop.send(ChunkType::Failed(err.clone()));
@@ -202,6 +290,55 @@ pub async fn stream_with_tools<P: Provider>(
                         return;
                     }
                     Ok(ChunkType::Failed(err)) => {
+                        let retry_error = RetryError::from_message(err.clone());
+                        if !emitted_non_replayable_output
+                            && crate::retry::retryable(&retry_error)
+                            && attempt <= PROVIDER_STEP_MAX_RETRIES
+                        {
+                            if !emit_retry_and_sleep(
+                                &tx_loop,
+                                step_idx,
+                                attempt,
+                                &retry_error,
+                                cancel_token.as_ref(),
+                            )
+                            .await
+                            {
+                                let err = "Streaming cancelled by user".to_string();
+                                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                return;
+                            }
+                            attempt += 1;
+                            stream = match open_provider_stream_with_retries(
+                                &provider_clone,
+                                &current_messages,
+                                &tools,
+                                &headers,
+                                &tx_loop,
+                                step_idx,
+                                &mut attempt,
+                                cancel_token.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(stream) => stream,
+                                Err(error) => {
+                                    let err = provider_step_error_message(
+                                        step_idx,
+                                        current_messages.len(),
+                                        tools.len(),
+                                        &step_summary,
+                                        error,
+                                    );
+                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                    return;
+                                }
+                            };
+                            continue;
+                        }
+
                         let _ = tx_loop.send(ChunkType::Failed(err.clone()));
                         *stop_reason_arc.lock().await = Some(StopReason::Error(err));
                         return;
@@ -213,6 +350,72 @@ pub async fn stream_with_tools<P: Provider>(
                         let _ = tx_loop.send(ChunkType::NotSupported(msg));
                     }
                     Err(e) => {
+                        if !emitted_non_replayable_output {
+                            match retry_error_from_provider_error(e) {
+                                Ok(retry_error) if attempt <= PROVIDER_STEP_MAX_RETRIES => {
+                                    if !emit_retry_and_sleep(
+                                        &tx_loop,
+                                        step_idx,
+                                        attempt,
+                                        &retry_error,
+                                        cancel_token.as_ref(),
+                                    )
+                                    .await
+                                    {
+                                        let err = "Streaming cancelled by user".to_string();
+                                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                        *stop_reason_arc.lock().await =
+                                            Some(StopReason::Error(err));
+                                        return;
+                                    }
+                                    attempt += 1;
+                                    stream = match open_provider_stream_with_retries(
+                                        &provider_clone,
+                                        &current_messages,
+                                        &tools,
+                                        &headers,
+                                        &tx_loop,
+                                        step_idx,
+                                        &mut attempt,
+                                        cancel_token.as_ref(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(stream) => stream,
+                                        Err(error) => {
+                                            let err = provider_step_error_message(
+                                                step_idx,
+                                                current_messages.len(),
+                                                tools.len(),
+                                                &step_summary,
+                                                error,
+                                            );
+                                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                            *stop_reason_arc.lock().await =
+                                                Some(StopReason::Error(err));
+                                            return;
+                                        }
+                                    };
+                                    continue;
+                                }
+                                Ok(retry_error) => {
+                                    let err = format!(
+                                        "Provider stream failed after {} retries: {}",
+                                        PROVIDER_STEP_MAX_RETRIES, retry_error.message
+                                    );
+                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                    return;
+                                }
+                                Err(error) => {
+                                    let err = error.to_string();
+                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                    return;
+                                }
+                            }
+                        }
+
                         let err = e.to_string();
                         let _ = tx_loop.send(ChunkType::Failed(err.clone()));
                         *stop_reason_arc.lock().await = Some(StopReason::Error(err));
@@ -634,6 +837,96 @@ fn log_preview(text: &str, max_chars: usize) -> String {
     preview
 }
 
+fn retry_error_from_provider_error(error: Error) -> std::result::Result<RetryError, Error> {
+    match error {
+        Error::RetryableProvider(retry_error) if crate::retry::retryable(&retry_error) => {
+            Ok(retry_error)
+        }
+        Error::Provider(message) => {
+            let retry_error = RetryError::from_message(message);
+            if crate::retry::retryable(&retry_error) {
+                Ok(retry_error)
+            } else {
+                Err(Error::Provider(retry_error.message))
+            }
+        }
+        Error::Http(error) => Ok(RetryError::from_message(error.to_string())),
+        other => Err(other),
+    }
+}
+
+async fn open_provider_stream_with_retries<P: Provider>(
+    provider: &P,
+    messages: &[Message],
+    tools: &[Tool],
+    headers: &HashMap<String, String>,
+    tx: &mpsc::UnboundedSender<ChunkType>,
+    step_idx: usize,
+    attempt: &mut usize,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> std::result::Result<ProviderStream, Error> {
+    loop {
+        match provider.stream_text(messages, tools, headers).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => match retry_error_from_provider_error(error) {
+                Ok(retry_error) if *attempt <= PROVIDER_STEP_MAX_RETRIES => {
+                    if !emit_retry_and_sleep(tx, step_idx, *attempt, &retry_error, cancel_token)
+                        .await
+                    {
+                        return Err(Error::Provider("Streaming cancelled by user".to_string()));
+                    }
+                    *attempt += 1;
+                }
+                Ok(retry_error) => {
+                    return Err(Error::Provider(format!(
+                        "{} retries_exhausted={}",
+                        retry_error.message, PROVIDER_STEP_MAX_RETRIES
+                    )));
+                }
+                Err(error) => return Err(error),
+            },
+        }
+    }
+}
+
+fn provider_step_error_message(
+    step_idx: usize,
+    message_count: usize,
+    tool_count: usize,
+    step_summary: &str,
+    error: Error,
+) -> String {
+    format!(
+        "provider_step_error step={} messages={} tools={} {} error={}",
+        step_idx, message_count, tool_count, step_summary, error
+    )
+}
+
+async fn emit_retry_and_sleep(
+    tx: &mpsc::UnboundedSender<ChunkType>,
+    step_idx: usize,
+    attempt: usize,
+    retry_error: &RetryError,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+) -> bool {
+    let status = crate::retry::status_for_attempt(retry_error, attempt);
+    let delay = std::time::Duration::from_millis(status.delay_ms);
+    let _ = tx.send(ChunkType::Metadata(format!(
+        "provider_step_retry step={} attempt={} delay_ms={} next_epoch_ms={} error={}",
+        step_idx, status.attempt, status.delay_ms, status.next_epoch_ms, status.message,
+    )));
+    let _ = tx.send(ChunkType::Retry(status));
+    if let Some(cancel_token) = cancel_token {
+        tokio::select! {
+            _ = cancel_token.cancelled() => false,
+            _ = tokio::time::sleep(delay) => true,
+        }
+    } else {
+        tokio::time::sleep(delay).await;
+        true
+    }
+}
+
 #[derive(Debug, Default)]
 struct ToolCallAccumulator {
     calls: Vec<PendingToolCall>,
@@ -955,6 +1248,47 @@ mod tests {
         observed_follow_up: Arc<Mutex<Option<String>>>,
     }
 
+    #[derive(Debug, Clone)]
+    struct RecoveringRateLimitProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for RecoveringRateLimitProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            if request == 0 {
+                let retry_error = crate::retry::RetryError {
+                    message: "Too Many Requests".to_string(),
+                    status: Some(429),
+                    headers: HashMap::from([("retry-after-ms".to_string(), "0".to_string())]),
+                    replay_safe: true,
+                };
+                return Err(crate::error::Error::RetryableProvider(retry_error));
+            }
+
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ChunkType::Text("recovered".to_string())),
+                Ok(ChunkType::End {
+                    reason: Some(FinishReason::Stop),
+                }),
+            ])))
+        }
+    }
+
     #[async_trait]
     impl Provider for TwoToolCallProvider {
         fn name(&self) -> &str {
@@ -1261,6 +1595,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retries_retryable_provider_errors_before_output() {
+        let provider = RecoveringRateLimitProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("hello")],
+            Vec::new(),
+            None,
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut saw_retry = false;
+        let mut text = String::new();
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::Retry(status) => {
+                    saw_retry = true;
+                    assert_eq!(status.attempt, 1);
+                    assert_eq!(status.message, "Too Many Requests");
+                }
+                ChunkType::Text(delta) => text.push_str(&delta),
+                _ => {}
+            }
+        }
+
+        assert!(saw_retry);
+        assert_eq!(text, "recovered");
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn executes_same_step_tool_calls_concurrently() {
         let provider = TwoToolCallProvider {
             requests: Arc::new(AtomicUsize::new(0)),
@@ -1293,6 +1664,7 @@ mod tests {
             None,
             None,
             HashMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1348,6 +1720,7 @@ mod tests {
             Some(3),
             None,
             HashMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1394,6 +1767,7 @@ mod tests {
             None,
             None,
             HashMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1433,6 +1807,7 @@ mod tests {
             None,
             None,
             HashMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1467,6 +1842,7 @@ mod tests {
             Some(3),
             None,
             HashMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1512,6 +1888,7 @@ mod tests {
             Some(5),
             None,
             HashMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1567,6 +1944,7 @@ mod tests {
             Some(5),
             None,
             HashMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1596,6 +1974,7 @@ mod tests {
             Some(1),
             None,
             HashMap::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1643,6 +2022,7 @@ mod tests {
             Some(3),
             None,
             HashMap::new(),
+            None,
         )
         .await
         .unwrap();

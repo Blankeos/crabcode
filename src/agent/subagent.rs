@@ -90,8 +90,15 @@ pub async fn run_subagent(
         sender.is_some()
     );
 
-    let mut response: StreamTextResponse =
-        start_subagent_stream(&session, messages, aisdk_tools, max_steps, headers).await?;
+    let mut response: StreamTextResponse = start_subagent_stream(
+        &session,
+        messages,
+        aisdk_tools,
+        max_steps,
+        headers,
+        Some(cancel_token.clone()),
+    )
+    .await?;
 
     let mut collected_text = String::new();
     let mut tool_call_count = 0usize;
@@ -157,6 +164,17 @@ pub async fn run_subagent(
                     message
                 );
             }
+            ChunkType::Retry(status) => {
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
+                }
+            }
+            ChunkType::RetryableFailure(err) => {
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send(crate::llm::ChunkMessage::Failed(err.message.clone()));
+                }
+                return Err(format!("Subagent streaming failed: {}", err.message));
+            }
             _ => {}
         }
     }
@@ -179,6 +197,7 @@ pub async fn run_subagent(
             Vec::new(),
             None,
             HashMap::new(),
+            Some(cancel_token.clone()),
         )
         .await?;
 
@@ -224,6 +243,17 @@ pub async fn run_subagent(
                         message
                     );
                 }
+                ChunkType::Retry(status) => {
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
+                    }
+                }
+                ChunkType::RetryableFailure(err) => {
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender.send(crate::llm::ChunkMessage::Failed(err.message.clone()));
+                    }
+                    return Err(format!("Subagent max-step summary failed: {}", err.message));
+                }
                 _ => {}
             }
         }
@@ -250,6 +280,7 @@ async fn start_subagent_stream(
     tools: Vec<crate::aisdk::core::Tool>,
     max_steps: Option<usize>,
     headers: std::collections::HashMap<String, String>,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<crate::aisdk::core::response::StreamTextResponse, String> {
     use crate::aisdk::core::response::stream_with_tools;
     use crate::aisdk::{Anthropic, OpenAI, OpenAICompatible};
@@ -268,9 +299,17 @@ async fn start_subagent_stream(
                 .build()
                 .map_err(|e| format!("Failed to build OpenAICompatible provider: {}", e))?;
 
-            stream_with_tools(provider, messages, tools, max_steps, None, headers)
-                .await
-                .map_err(|e| format!("Stream error: {}", e))
+            stream_with_tools(
+                provider,
+                messages,
+                tools,
+                max_steps,
+                None,
+                headers,
+                cancel_token,
+            )
+            .await
+            .map_err(|e| format!("Stream error: {}", e))
         }
         ProviderKind::Anthropic => {
             let mut builder = Anthropic::builder()
@@ -285,9 +324,17 @@ async fn start_subagent_stream(
                 .build()
                 .map_err(|e| format!("Failed to build Anthropic provider: {}", e))?;
 
-            stream_with_tools(provider, messages, tools, max_steps, None, headers)
-                .await
-                .map_err(|e| format!("Stream error: {}", e))
+            stream_with_tools(
+                provider,
+                messages,
+                tools,
+                max_steps,
+                None,
+                headers,
+                cancel_token,
+            )
+            .await
+            .map_err(|e| format!("Stream error: {}", e))
         }
         ProviderKind::OpenAI => {
             let mut builder = OpenAI::builder()
@@ -302,9 +349,17 @@ async fn start_subagent_stream(
                 .build()
                 .map_err(|e| format!("Failed to build OpenAI provider: {}", e))?;
 
-            stream_with_tools(provider, messages, tools, max_steps, None, headers)
-                .await
-                .map_err(|e| format!("Stream error: {}", e))
+            stream_with_tools(
+                provider,
+                messages,
+                tools,
+                max_steps,
+                None,
+                headers,
+                cancel_token,
+            )
+            .await
+            .map_err(|e| format!("Stream error: {}", e))
         }
     }
 }

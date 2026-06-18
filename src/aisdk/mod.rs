@@ -4,6 +4,7 @@ pub mod message;
 pub mod provider;
 pub mod providers;
 pub mod response;
+pub mod retry;
 pub mod stop;
 pub mod tool;
 

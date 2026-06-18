@@ -14,6 +14,9 @@ pub enum Error {
     #[error("Provider error: {0}")]
     Provider(String),
 
+    #[error("Retryable provider error: {0}")]
+    RetryableProvider(#[from] crate::retry::RetryError),
+
     #[error("Missing field: {0}")]
     MissingField(String),
 

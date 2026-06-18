@@ -2,6 +2,7 @@ use crate::chunk::{ChunkType, FinishReason};
 use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
+use crate::retry::RetryError;
 use crate::tool::Tool;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -192,15 +193,20 @@ impl Provider for Anthropic {
             .headers(request_headers)
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|err| Error::RetryableProvider(RetryError::from_message(err.to_string())))?;
 
         if !response.status().is_success() {
             let status = response.status();
+            let headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!(
-                "Anthropic API error {}: {}",
-                status, text
-            )));
+            let retry_error = RetryError::new(format!("Anthropic API error {}: {}", status, text))
+                .with_status(status.as_u16())
+                .with_headers(&headers);
+            if crate::retry::retryable(&retry_error) {
+                return Err(Error::RetryableProvider(retry_error));
+            }
+            return Err(Error::Provider(retry_error.message));
         }
 
         let stream = response
@@ -225,10 +231,9 @@ impl Provider for Anthropic {
                         ))))),
                     }
                 }
-                Err(e) => {
-                    let err = format!("SSE error: {}", e);
-                    futures::future::ready(Some(Ok(ChunkType::Failed(err))))
-                }
+                Err(e) => futures::future::ready(Some(Ok(ChunkType::RetryableFailure(
+                    RetryError::from_message(format!("SSE error: {}", e)),
+                )))),
             })
             .boxed();
 

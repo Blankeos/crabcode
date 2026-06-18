@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 pub enum ChunkMessage {
     Text(String),
     Reasoning(String),
+    Retry(crate::aisdk::retry::RetryStatus),
     Warning(String),
     ToolCalls(Vec<ToolCall>),
     ToolResult(ToolCallResult),

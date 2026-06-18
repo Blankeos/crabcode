@@ -458,6 +458,7 @@ pub async fn stream_llm_with_cancellation(
         aisdk_messages,
         aisdk_tools,
         agent_max_steps,
+        Some(cancel_token.clone()),
     )
     .await?;
 
@@ -533,8 +534,14 @@ pub async fn stream_llm_with_cancellation(
     );
     log_stream_request(summary_log_context, &request_config);
 
-    let mut summary_response =
-        stream_provider_request(&request_config, follow_up_messages, Vec::new(), None).await?;
+    let mut summary_response = stream_provider_request(
+        &request_config,
+        follow_up_messages,
+        Vec::new(),
+        None,
+        Some(cancel_token.clone()),
+    )
+    .await?;
 
     match relay_stream_to_sender(
         &mut summary_response.stream,
@@ -622,7 +629,8 @@ pub async fn summarize_for_compaction(
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &warning_sender).await?;
     let messages = vec![AisdkMessage::user(prompt)];
-    let mut response = stream_provider_request(&request_config, messages, Vec::new(), None).await?;
+    let mut response =
+        stream_provider_request(&request_config, messages, Vec::new(), None, None).await?;
 
     let mut summary = String::new();
     while let Some(chunk) = response.stream.next().await {
@@ -639,6 +647,8 @@ pub async fn summarize_for_compaction(
             | ChunkType::End { .. }
             | ChunkType::AssistantMessagePhase { .. }
             | ChunkType::ResponseCompleted { .. }
+            | ChunkType::Retry(_)
+            | ChunkType::RetryableFailure(_)
             | ChunkType::Metadata(_)
             | ChunkType::Start
             | ChunkType::Incomplete(_) => {}
@@ -1053,6 +1063,7 @@ async fn stream_provider_request(
     messages: Vec<AisdkMessage>,
     tools: Vec<Tool>,
     max_steps: Option<usize>,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<StreamTextResponse, DynError> {
     let headers = HashMap::new();
 
@@ -1069,9 +1080,17 @@ async fn stream_provider_request(
                 builder = builder.api_key(key);
             }
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
-            stream_with_tools(provider, messages, tools, max_steps, None, headers)
-                .await
-                .map_err(|e| Box::new(e) as DynError)
+            stream_with_tools(
+                provider,
+                messages,
+                tools,
+                max_steps,
+                None,
+                headers,
+                cancel_token,
+            )
+            .await
+            .map_err(|e| Box::new(e) as DynError)
         }
         ProviderKind::Anthropic => {
             let mut builder = Anthropic::builder()
@@ -1085,9 +1104,17 @@ async fn stream_provider_request(
                 builder = builder.api_key(key);
             }
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
-            stream_with_tools(provider, messages, tools, max_steps, None, headers)
-                .await
-                .map_err(|e| Box::new(e) as DynError)
+            stream_with_tools(
+                provider,
+                messages,
+                tools,
+                max_steps,
+                None,
+                headers,
+                cancel_token,
+            )
+            .await
+            .map_err(|e| Box::new(e) as DynError)
         }
         ProviderKind::OpenAI => {
             let mut builder = OpenAI::builder()
@@ -1126,9 +1153,17 @@ async fn stream_provider_request(
             }
 
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
-            stream_with_tools(provider, messages, tools, max_steps, None, headers)
-                .await
-                .map_err(|e| Box::new(e) as DynError)
+            stream_with_tools(
+                provider,
+                messages,
+                tools,
+                max_steps,
+                None,
+                headers,
+                cancel_token,
+            )
+            .await
+            .map_err(|e| Box::new(e) as DynError)
         }
     }
 }
@@ -1358,11 +1393,39 @@ async fn relay_stream_to_sender(
                 stats.record_metadata(&message);
                 crate::emit_log!("[RELAY] Metadata {}", message);
             }
+            ChunkType::Retry(status) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("Retry", elapsed_ms);
+                crate::emit_log!(
+                    "[RELAY] Retry attempt={} delay_ms={} next_epoch_ms={} message={}",
+                    status.attempt,
+                    status.delay_ms,
+                    status.next_epoch_ms,
+                    status.message,
+                );
+                let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
+            }
             ChunkType::Start => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("Start", elapsed_ms);
                 stats.start_chunks += 1;
                 crate::emit_log!("[RELAY] Start chunk received");
+            }
+            ChunkType::RetryableFailure(retry_error) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_failed_chunk();
+                let err = retry_error.message.clone();
+                let _ = sender.send(crate::llm::ChunkMessage::Failed(err.clone()));
+                crate::emit_log!("Stream Chunk RetryableFailure without retry loop {}", err);
+                crate::emit_log!(
+                    "[STREAM_ERROR] {} elapsed_ms={} token_estimate={} {} error={}",
+                    context.describe(),
+                    elapsed_ms,
+                    *token_count,
+                    stats.describe_at(Some(elapsed_ms)),
+                    err,
+                );
+                return Err(anyhow::anyhow!("Streaming failed: {}", err).into());
             }
             ChunkType::Failed(err) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
