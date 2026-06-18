@@ -255,6 +255,12 @@ fn core_palette_items(
             "Create a new session from this transcript",
         ),
         (
+            "move",
+            "Move Session",
+            "Workspace",
+            "Move to another project dir",
+        ),
+        (
             "home",
             "Go Home",
             "Workspace",
@@ -534,6 +540,7 @@ mod tests {
 
         assert!(state.dialog.items.iter().any(|item| item.id == "copy"));
         assert!(state.dialog.items.iter().any(|item| item.id == "fork"));
+        assert!(state.dialog.items.iter().any(|item| item.id == "move"));
         assert!(state.dialog.items.iter().any(|item| item.id == "open-find"));
     }
 

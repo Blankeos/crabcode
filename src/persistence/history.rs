@@ -390,6 +390,30 @@ impl HistoryDAO {
         Ok(true)
     }
 
+    pub fn move_session_to_workspace(&self, session_id: i64, workspace_id: i64) -> Result<bool> {
+        let exists: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM workspaces WHERE id = ?1",
+                params![workspace_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Ok(false);
+        }
+
+        let changed = self.conn.execute(
+            "UPDATE sessions
+             SET workspace_id = ?1,
+                 updated_at = strftime('%s', 'now')
+             WHERE id = ?2",
+            params![workspace_id, session_id],
+        )?;
+
+        Ok(changed > 0)
+    }
+
     pub fn add_message(&self, msg: &Message) -> Result<()> {
         let parts_json = serde_json::to_string(&msg.parts)?;
 

@@ -558,6 +558,22 @@ pub fn handle_fork<'a>(
     })
 }
 
+pub fn handle_move<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error("Usage: /move".to_string());
+        }
+
+        // The app intercepts /move because it needs the active session and TUI state.
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_skills<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
@@ -827,6 +843,14 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "Fork the current session".to_string(),
         handler: handle_fork,
         hidden_tokens: vec!["branch".to_string()],
+        chat_only: true,
+    });
+
+    registry.register(Command {
+        name: "move".to_string(),
+        description: "Move to another project dir".to_string(),
+        handler: handle_move,
+        hidden_tokens: vec![],
         chat_only: true,
     });
 
@@ -1185,7 +1209,7 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 16);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
@@ -1200,9 +1224,11 @@ mod tests {
         assert!(names.contains(&"timeline".to_string()));
         assert!(names.contains(&"compact".to_string()));
         assert!(names.contains(&"fork".to_string()));
+        assert!(names.contains(&"move".to_string()));
         assert!(names.contains(&"skills".to_string()));
         assert!(registry.is_chat_only("compact"));
         assert!(registry.is_chat_only("fork"));
+        assert!(registry.is_chat_only("move"));
         assert!(registry.is_chat_only("branch"));
         assert_eq!(registry.get("branch").unwrap().name, "fork");
     }

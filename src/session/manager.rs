@@ -500,6 +500,51 @@ impl SessionManager {
         Ok(moved)
     }
 
+    pub fn move_session_to_workspace(
+        &mut self,
+        session_id: &str,
+        workspace_id: i64,
+    ) -> Result<bool, SessionError> {
+        if !self.sessions.contains_key(session_id) {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
+
+        let Some(workspace) = self
+            .list_workspaces()
+            .into_iter()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return Ok(false);
+        };
+
+        if let Some(session) = self.sessions.get(session_id) {
+            if session.workspace_id == workspace_id {
+                return Ok(false);
+            }
+        }
+
+        if let Some(ref dao) = self.history_dao {
+            if let Some(db_id) = self.id_mapping.get(session_id) {
+                let moved = dao
+                    .move_session_to_workspace(*db_id, workspace_id)
+                    .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+                if !moved {
+                    return Ok(false);
+                }
+            }
+        }
+
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.workspace_id = workspace.id;
+            session.workspace_path = workspace.path;
+            session.workspace_name = workspace.name;
+            session.workspace_sort_order = workspace.sort_order;
+            session.updated_at = SystemTime::now();
+        }
+
+        Ok(true)
+    }
+
     pub fn clear_current_session(&mut self) {
         self.current_session_id = None;
     }

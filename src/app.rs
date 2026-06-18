@@ -43,6 +43,10 @@ use crate::views::models_dialog::{
     handle_models_dialog_key_event, handle_models_dialog_mouse_event, init_models_dialog,
     render_models_dialog,
 };
+use crate::views::move_session_dialog::{
+    handle_move_session_dialog_key_event, handle_move_session_dialog_mouse_event,
+    init_move_session_dialog, render_move_session_dialog, MoveSessionDialogAction,
+};
 use crate::views::permission_dialog::{
     handle_permission_dialog_key_event, handle_permission_dialog_mouse_event,
     init_permission_dialog, render_permission_dialog, PermissionDialogAction,
@@ -81,9 +85,10 @@ use crate::views::themes_dialog::{
     render_themes_dialog,
 };
 use crate::views::{
-    ChatState, ConnectDialogState, HomeState, ModelsDialogState, PermissionDialogState,
-    ProviderOAuthFlowState, QuestionDialogState, RemoteDialogState, SessionRenameDialogState,
-    SessionsDialogState, StorageDialogState, SuggestionsPopupState, ThemesDialogState,
+    ChatState, ConnectDialogState, HomeState, ModelsDialogState, MoveSessionDialogState,
+    PermissionDialogState, ProviderOAuthFlowState, QuestionDialogState, RemoteDialogState,
+    SessionRenameDialogState, SessionsDialogState, StorageDialogState, SuggestionsPopupState,
+    ThemesDialogState,
 };
 
 use crate::{
@@ -157,6 +162,7 @@ pub enum OverlayFocus {
     SuggestionsPopup,
     SessionsDialog,
     SessionRenameDialog,
+    MoveSessionDialog,
     PermissionDialog,
     QuestionDialog,
     RemoteDialog,
@@ -537,6 +543,7 @@ pub struct App {
     connect_dialog_mode: ConnectDialogMode,
     provider_oauth_flow_state: ProviderOAuthFlowState,
     pub sessions_dialog_state: SessionsDialogState,
+    pub move_session_dialog_state: MoveSessionDialogState,
     pub session_rename_dialog_state: SessionRenameDialogState,
     pub permission_dialog_state: PermissionDialogState,
     pub question_dialog_state: QuestionDialogState,
@@ -634,6 +641,7 @@ impl App {
         let connect_dialog_state = init_connect_dialog();
         let provider_oauth_flow_state = init_provider_oauth_flow();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
+        let move_session_dialog_state = init_move_session_dialog();
         let permission_dialog_state = init_permission_dialog();
         let question_dialog_state = init_question_dialog();
         let remote_dialog_state = init_remote_dialog();
@@ -813,6 +821,7 @@ impl App {
             connect_dialog_mode: ConnectDialogMode::ProviderSelection,
             provider_oauth_flow_state,
             sessions_dialog_state,
+            move_session_dialog_state,
             session_rename_dialog_state,
             permission_dialog_state,
             question_dialog_state,
@@ -2809,6 +2818,11 @@ impl App {
                     }
                 }
             }
+            OverlayFocus::MoveSessionDialog => {
+                let action =
+                    handle_move_session_dialog_key_event(&mut self.move_session_dialog_state, key);
+                self.handle_move_session_dialog_action(action)
+            }
             OverlayFocus::PermissionDialog => {
                 let action =
                     handle_permission_dialog_key_event(&mut self.permission_dialog_state, key);
@@ -3912,6 +3926,15 @@ impl App {
             {
                 self.overlay_focus = OverlayFocus::None;
             }
+        } else if self.overlay_focus == OverlayFocus::MoveSessionDialog {
+            let action =
+                handle_move_session_dialog_mouse_event(&mut self.move_session_dialog_state, mouse);
+            self.handle_move_session_dialog_action(action);
+            if !self.move_session_dialog_state.dialog.is_visible()
+                && self.overlay_focus == OverlayFocus::MoveSessionDialog
+            {
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::StorageDialog {
             let action = handle_storage_dialog_mouse_event(&mut self.storage_dialog_state, mouse);
             self.handle_storage_dialog_action(action);
@@ -4968,6 +4991,10 @@ impl App {
                     self.open_timeline_dialog();
                     return;
                 }
+                if parsed.name == "move" && self.base_focus == BaseFocus::Chat {
+                    self.handle_move_command(&parsed.args);
+                    return;
+                }
                 if parsed.name == "compact" && self.base_focus == BaseFocus::Chat {
                     if !parsed.args.is_empty() {
                         self.play_sound_event(crate::sound::SoundEvent::Error);
@@ -5176,6 +5203,10 @@ impl App {
         }
         if parsed.name == "timeline" && self.base_focus == BaseFocus::Chat {
             self.open_timeline_dialog();
+            return;
+        }
+        if parsed.name == "move" && self.base_focus == BaseFocus::Chat {
+            self.handle_move_command(&parsed.args);
             return;
         }
         if parsed.name == "compact" && self.base_focus == BaseFocus::Chat {
@@ -5979,6 +6010,90 @@ impl App {
 
         self.sessions_dialog_state.dialog.show();
         self.overlay_focus = OverlayFocus::SessionsDialog;
+    }
+
+    fn open_move_session_dialog(&mut self) {
+        if self.session_manager.get_current_session_id().is_none() {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "No active session to move",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        let current_workspace_id = self
+            .session_manager
+            .get_current_session_id()
+            .and_then(|id| self.session_manager.get_session_ref(id))
+            .map(|session| session.workspace_id)
+            .unwrap_or_else(|| self.session_manager.current_workspace_id());
+        self.move_session_dialog_state
+            .refresh_workspaces(self.session_manager.list_workspaces(), current_workspace_id);
+        self.move_session_dialog_state.show();
+        self.overlay_focus = OverlayFocus::MoveSessionDialog;
+    }
+
+    fn handle_move_command(&mut self, args: &[String]) {
+        if !args.is_empty() {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "Usage: /move",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        self.open_move_session_dialog();
+    }
+
+    fn handle_move_session_dialog_action(&mut self, action: MoveSessionDialogAction) -> bool {
+        match action {
+            MoveSessionDialogAction::None => false,
+            MoveSessionDialogAction::Close => {
+                self.overlay_focus = OverlayFocus::None;
+                true
+            }
+            MoveSessionDialogAction::MoveToWorkspace(workspace_id) => {
+                self.overlay_focus = OverlayFocus::None;
+                let Some(session_id) = self.session_manager.get_current_session_id().cloned()
+                else {
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
+                    push_toast(Toast::new(
+                        "No active session to move",
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                    return true;
+                };
+
+                match self
+                    .session_manager
+                    .move_session_to_workspace(&session_id, workspace_id)
+                {
+                    Ok(true) => {
+                        self.refresh_sessions_dialog();
+                        push_toast(Toast::new(
+                            "Session moved",
+                            ToastLevel::Info,
+                            Some(std::time::Duration::from_secs(3)),
+                        ));
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        self.play_sound_event(crate::sound::SoundEvent::Error);
+                        push_toast(Toast::new(
+                            format!("Failed to move session: {:?}", err),
+                            ToastLevel::Error,
+                            Some(std::time::Duration::from_secs(3)),
+                        ));
+                    }
+                }
+                true
+            }
+        }
     }
 
     fn show_themes_dialog(&mut self) {
@@ -8442,6 +8557,12 @@ impl App {
             render_sessions_dialog(f, &mut self.sessions_dialog_state, size, colors);
         }
 
+        if self.overlay_focus == OverlayFocus::MoveSessionDialog
+            && self.move_session_dialog_state.dialog.is_visible()
+        {
+            render_move_session_dialog(f, &mut self.move_session_dialog_state, size, colors);
+        }
+
         if self.overlay_focus == OverlayFocus::SkillsDialog
             && self.skills_dialog_state.dialog.is_visible()
         {
@@ -8869,6 +8990,7 @@ mod tests {
             connect_dialog_mode: ConnectDialogMode::ProviderSelection,
             provider_oauth_flow_state: init_provider_oauth_flow(),
             sessions_dialog_state: init_sessions_dialog("Sessions", vec![]),
+            move_session_dialog_state: init_move_session_dialog(),
             session_rename_dialog_state: init_session_rename_dialog(colors),
             permission_dialog_state: init_permission_dialog(),
             question_dialog_state: init_question_dialog(),
