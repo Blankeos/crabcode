@@ -409,13 +409,13 @@ impl OpenAI {
             "model": self.model_name,
             "input": input,
             "stream": true,
-            "tool_choice": "auto",
-            "parallel_tool_calls": true,
             "include": [],
         });
 
         if !tool_params.is_empty() {
             body["tools"] = serde_json::Value::Array(tool_params);
+            body["tool_choice"] = serde_json::Value::String("auto".to_string());
+            body["parallel_tool_calls"] = serde_json::Value::Bool(true);
         }
 
         if let Some(instructions) = &self.default_instructions {
@@ -1371,6 +1371,8 @@ mod tests {
     };
     use crate::chunk::{ChunkType, MessagePhase};
     use crate::message::Message;
+    use crate::tool::{Tool, ToolExecute};
+    use schemars::Schema;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1540,6 +1542,51 @@ mod tests {
         assert_eq!(output[0]["type"], "input_text");
         assert_eq!(output[1]["type"], "input_image");
         assert_eq!(output[1]["image_url"], "data:image/png;base64,AAA");
+    }
+
+    #[test]
+    fn responses_body_omits_tool_options_without_tools() {
+        let provider = OpenAI::builder()
+            .base_url("https://api.openai.com")
+            .api_key("test-key")
+            .model_name("gpt-test")
+            .build()
+            .unwrap();
+
+        let body = provider.build_responses_body(
+            vec![serde_json::json!({"role": "user", "content": "summarize"})],
+            &[],
+        );
+
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    #[test]
+    fn responses_body_includes_tool_options_with_tools() {
+        let provider = OpenAI::builder()
+            .base_url("https://api.openai.com")
+            .api_key("test-key")
+            .model_name("gpt-test")
+            .build()
+            .unwrap();
+        let tools = vec![Tool::builder()
+            .name("read")
+            .description("Read a file")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(|_| async { Ok("ok") }))
+            .build()
+            .unwrap()];
+
+        let body = provider.build_responses_body(
+            vec![serde_json::json!({"role": "user", "content": "read Cargo.toml"})],
+            &tools,
+        );
+
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert_eq!(body["tools"].as_array().map(Vec::len), Some(1));
     }
 
     #[tokio::test]

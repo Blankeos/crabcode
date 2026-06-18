@@ -3119,13 +3119,6 @@ impl App {
             KeyCode::Char('t') if key.modifiers == event::KeyModifiers::CONTROL => {
                 self.cycle_active_reasoning_effort()
             }
-            KeyCode::Char('e')
-                if key.modifiers == event::KeyModifiers::CONTROL
-                    && self.base_focus == BaseFocus::Chat =>
-            {
-                self.chat_state.chat.toggle_thinking_visible();
-                true
-            }
             KeyCode::Left
                 if key.modifiers == event::KeyModifiers::NONE
                     && self.should_handle_child_session_arrow() =>
@@ -3315,6 +3308,9 @@ impl App {
         }
 
         if self.is_subagent_session_active() {
+            if Self::is_input_navigation_key(key) {
+                self.input.handle_event(key);
+            }
             clear_suggestions(&mut self.suggestions_popup_state);
             self.overlay_focus = OverlayFocus::None;
             return;
@@ -3380,6 +3376,16 @@ impl App {
                 self.update_suggestions();
             }
         }
+    }
+
+    fn is_input_navigation_key(key: KeyEvent) -> bool {
+        let command = key
+            .modifiers
+            .intersects(event::KeyModifiers::SUPER | event::KeyModifiers::META);
+        let control = key.modifiers.contains(event::KeyModifiers::CONTROL);
+
+        matches!(key.code, KeyCode::Left | KeyCode::Right if command)
+            || matches!(key.code, KeyCode::Char('a' | 'e') if control)
     }
 
     fn can_submit_input(input_type: &InputType, is_streaming: bool) -> bool {
@@ -10486,22 +10492,24 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_e_toggles_thinking_from_chat() {
+    fn ctrl_e_moves_input_cursor_to_end_from_chat() {
         let mut app = test_app();
         app.base_focus = BaseFocus::Chat;
+        app.input.insert_str("draft prompt");
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('a'),
+            event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.input.cursor(), (0, 0));
         assert!(app.chat_state.chat.thinking_visible());
 
         app.handle_keys(KeyEvent::new(
             KeyCode::Char('e'),
             event::KeyModifiers::CONTROL,
         ));
-        assert!(!app.chat_state.chat.thinking_visible());
 
-        app.handle_keys(KeyEvent::new(
-            KeyCode::Char('e'),
-            event::KeyModifiers::CONTROL,
-        ));
         assert!(app.chat_state.chat.thinking_visible());
+        assert_eq!(app.input.cursor(), (0, "draft prompt".chars().count()));
     }
 
     #[test]
@@ -10792,6 +10800,101 @@ mod tests {
         app.handle_paste(" pasted".to_string());
 
         assert_eq!(app.input.get_text(), "");
+    }
+
+    #[test]
+    fn subagent_session_allows_input_cursor_navigation() {
+        let mut app = test_app();
+        let parent_id = app.create_new_session(Some("Parent".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        app.start_subagent_session(
+            parent_id,
+            "child-a".to_string(),
+            "General task (@general subagent)".to_string(),
+            "general".to_string(),
+            Some("sub-model".to_string()),
+            Some("sub-provider".to_string()),
+            "General task".to_string(),
+            "Check implementation".to_string(),
+        );
+
+        assert!(app.switch_to_first_child_session());
+        app.input.insert_str("draft prompt");
+        app.input
+            .handle_event(KeyEvent::new(KeyCode::Left, event::KeyModifiers::NONE));
+        app.handle_keys(KeyEvent::new(KeyCode::Right, event::KeyModifiers::SUPER));
+
+        assert_eq!(app.input.get_text(), "draft prompt");
+        assert_eq!(app.input.cursor(), (0, "draft prompt".chars().count()));
+    }
+
+    #[test]
+    fn chat_session_allows_command_right_input_cursor_navigation() {
+        let mut app = test_app();
+        app.create_new_session(Some("Chat".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.input.insert_str("draft prompt");
+        app.handle_keys(KeyEvent::new(KeyCode::Left, event::KeyModifiers::SUPER));
+        assert_eq!(app.input.cursor(), (0, 0));
+
+        app.handle_keys(KeyEvent::new(KeyCode::Right, event::KeyModifiers::SUPER));
+
+        assert_eq!(app.input.get_text(), "draft prompt");
+        assert_eq!(app.input.cursor(), (0, "draft prompt".chars().count()));
+    }
+
+    #[test]
+    fn chat_session_allows_control_e_terminal_encoding_for_command_right() {
+        let mut app = test_app();
+        app.create_new_session(Some("Chat".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.input.insert_str("draft prompt");
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('a'),
+            event::KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.input.cursor(), (0, 0));
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('e'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert_eq!(app.input.get_text(), "draft prompt");
+        assert_eq!(app.input.cursor(), (0, "draft prompt".chars().count()));
+        assert!(app.chat_state.chat.thinking_visible());
+    }
+
+    #[test]
+    fn subagent_session_still_ignores_editing_shortcuts() {
+        let mut app = test_app();
+        let parent_id = app.create_new_session(Some("Parent".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        app.start_subagent_session(
+            parent_id,
+            "child-a".to_string(),
+            "General task (@general subagent)".to_string(),
+            "general".to_string(),
+            Some("sub-model".to_string()),
+            Some("sub-provider".to_string()),
+            "General task".to_string(),
+            "Check implementation".to_string(),
+        );
+
+        assert!(app.switch_to_first_child_session());
+        app.input.insert_str("draft prompt");
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('u'),
+            event::KeyModifiers::CONTROL,
+        ));
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Backspace,
+            event::KeyModifiers::SUPER,
+        ));
+
+        assert_eq!(app.input.get_text(), "draft prompt");
     }
 
     #[test]

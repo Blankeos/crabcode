@@ -360,7 +360,7 @@ fn core_palette_items(
                 name,
                 "Appearance",
                 description,
-                Some("ctrl+e"),
+                Some("ctrl+x e"),
                 &hidden_tokens,
             ),
         );

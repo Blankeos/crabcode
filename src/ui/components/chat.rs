@@ -3171,7 +3171,7 @@ impl Chat {
             Span::raw(" "),
             Span::styled(label, title_style),
             Span::styled(" · ", hint_style),
-            Span::styled("ctrl+e", hint_key_style),
+            Span::styled("ctrl+x e", hint_key_style),
             Span::raw(" "),
             Span::styled(action, hint_style),
         ]);

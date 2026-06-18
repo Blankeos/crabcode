@@ -179,6 +179,11 @@ impl Input {
         area.contains(point)
     }
 
+    #[cfg(test)]
+    pub(crate) fn cursor(&self) -> (usize, usize) {
+        self.textarea.cursor()
+    }
+
     pub fn clear_hover(&mut self) {
         self.hovered_image_placeholder = None;
     }
