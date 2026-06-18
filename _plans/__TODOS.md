@@ -350,3 +350,7 @@ I think this is how the TUI works already anyway right?
 - [x] Format the thinking results properly, make it look more like part of the TUI because currently it's literally just a concatenation of tokens to form a flat string without any formatting. I think it should be as markdowny as the markdown text responses. Also this might be minor or notadd a ctrl-e for expand thinking and collapse thinking. Also in ctrl-x e for that btw.
 
 - [x] Noticed cmd-right for the chat input stops working when im already in a running session. cmd-right as in when I try to move my input cursor to the very right. It just doesnt work.
+
+- [ ] low prio: title generation? maybe, maybenot, just a waste of tokens honestly.
+
+- [ ] better permission asking. Like if it's going to ask for reading a directory, just ask multiple anyway so it doesnt need to ask so much?

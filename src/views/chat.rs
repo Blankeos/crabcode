@@ -19,7 +19,8 @@ pub const SUBAGENT_FOOTER_HEIGHT: u16 = 3;
 const QUEUED_MESSAGES_MAX_VISIBLE: usize = 3;
 const QUEUED_MESSAGES_TOP_PADDING: u16 = 1;
 const QUEUED_MESSAGES_BOTTOM_PADDING: u16 = 1;
-const STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH: u16 = 48;
+const STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH: u16 = 64;
+const SUBAGENT_FOOTER_NAV_GAP: &str = "   ";
 
 #[derive(Debug)]
 pub struct ChatState {
@@ -415,9 +416,15 @@ fn subagent_streaming_status_spans(
     colors: &ThemeColors,
     is_compacting: bool,
     retry_status: Option<&crate::app::StreamingRetryStatus>,
+    available_width: u16,
     max_width: u16,
 ) -> Vec<Span<'static>> {
-    let mut streaming_text = wave_spinner.spans_for_width(max_width);
+    let spinner_width = if available_width < STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH {
+        1
+    } else {
+        WaveSpinner::WIDTH
+    };
+    let mut streaming_text = wave_spinner.spans_for_width(spinner_width.min(max_width));
     if streaming_text.is_empty() {
         return streaming_text;
     }
@@ -702,6 +709,7 @@ fn render_subagent_footer(
     }
 
     let nav_line = Line::from(vec![
+        Span::raw(SUBAGENT_FOOTER_NAV_GAP),
         Span::styled(
             "Parent ",
             Style::default()
@@ -741,6 +749,7 @@ fn render_subagent_footer(
             colors,
             is_compacting,
             retry_status,
+            area.width,
             chunks[0].width,
         ));
         left_spans.push(Span::raw("  "));
@@ -848,7 +857,8 @@ fn centered_subagent_footer_content(area: Rect) -> Rect {
 mod tests {
     use super::{
         chat_status_layout_widths, display_agent_name, streaming_status_spans, subagent_nav_width,
-        ChatStatusLayoutWidths, STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
+        subagent_streaming_status_spans, ChatStatusLayoutWidths,
+        STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
     };
     use crate::theme::ThemeColors;
     use crate::ui::components::{chat::Chat, wave_spinner::WaveSpinner};
@@ -966,6 +976,32 @@ mod tests {
         );
 
         assert_eq!(spans[0].content.as_ref(), "⠋");
+    }
+
+    #[test]
+    fn subagent_streaming_status_uses_parent_compact_breakpoint() {
+        let colors = test_colors();
+        let spinner = WaveSpinner::new(Color::Blue);
+
+        let compact = subagent_streaming_status_spans(
+            &spinner,
+            &colors,
+            false,
+            None,
+            STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH - 1,
+            80,
+        );
+        let full = subagent_streaming_status_spans(
+            &spinner,
+            &colors,
+            false,
+            None,
+            STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
+            80,
+        );
+
+        assert_eq!(compact[0].content.as_ref(), "⠋");
+        assert_eq!(full[0].content.as_ref(), "■");
     }
 
     #[test]
