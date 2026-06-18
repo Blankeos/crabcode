@@ -342,3 +342,7 @@ I think this is how the TUI works already anyway right?
 - [x] Image inputs are not supported by this model, just strip the image, so the chat can still work.
 
 - [ ] Integrate `fff` for the search. Instead of nucleo??
+
+- [x] opt-backspace and opt-left opt-right cmd-left, cmd-right doesn't work in "type your own answer" in the question dialog tool.
+
+- [ ] Add retries and backoff just like opencode. For instance, if it hits a rate limit / error caused by hitting the api too frequently. Make it backoff and show that it will submit the next call after a while, not immediately stop and show error. Make sure it shows an indicator (not in toast messages), about when it'll retry and stuff

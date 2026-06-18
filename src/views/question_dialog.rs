@@ -110,6 +110,18 @@ fn delete_char_before_cursor(text: &mut String, cursor: &mut usize) {
     *cursor -= 1;
 }
 
+fn delete_to_start_before_cursor(text: &mut String, cursor: &mut usize) {
+    let len = char_count(text);
+    *cursor = (*cursor).min(len);
+    if *cursor == 0 {
+        return;
+    }
+
+    let end = char_to_byte(text, *cursor);
+    text.replace_range(0..end, "");
+    *cursor = 0;
+}
+
 fn delete_word_before_cursor(text: &mut String, cursor: &mut usize) {
     let mut chars: Vec<char> = text.chars().collect();
     *cursor = (*cursor).min(chars.len());
@@ -172,6 +184,46 @@ fn move_word_right(text: &str, cursor: &mut usize) {
             *cursor += 1;
         }
     }
+}
+
+fn has_command_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META)
+}
+
+fn has_option_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::ALT)
+}
+
+fn is_custom_start_key(event: KeyEvent) -> bool {
+    matches!(event.code, KeyCode::Home)
+        || matches!(event.code, KeyCode::Char('a') if event.modifiers.contains(KeyModifiers::CONTROL))
+        || matches!(event.code, KeyCode::Left if has_command_modifier(event.modifiers))
+}
+
+fn is_custom_end_key(event: KeyEvent) -> bool {
+    matches!(event.code, KeyCode::End)
+        || matches!(event.code, KeyCode::Char('e') if event.modifiers.contains(KeyModifiers::CONTROL))
+        || matches!(event.code, KeyCode::Right if has_command_modifier(event.modifiers))
+}
+
+fn is_custom_word_left_key(event: KeyEvent) -> bool {
+    matches!(event.code, KeyCode::Left if has_option_modifier(event.modifiers))
+        || matches!(event.code, KeyCode::Char('b') if has_option_modifier(event.modifiers))
+}
+
+fn is_custom_word_right_key(event: KeyEvent) -> bool {
+    matches!(event.code, KeyCode::Right if has_option_modifier(event.modifiers))
+        || matches!(event.code, KeyCode::Char('f') if has_option_modifier(event.modifiers))
+}
+
+fn is_custom_line_delete_key(event: KeyEvent) -> bool {
+    matches!(event.code, KeyCode::Backspace if has_command_modifier(event.modifiers))
+        || matches!(event.code, KeyCode::Char('u') if event.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn is_custom_word_delete_key(event: KeyEvent) -> bool {
+    matches!(event.code, KeyCode::Backspace if has_option_modifier(event.modifiers))
+        || matches!(event.code, KeyCode::Char('w') if event.modifiers.contains(KeyModifiers::CONTROL))
 }
 
 struct QuestionDialogRequest {
@@ -593,16 +645,15 @@ impl QuestionDialogRequest {
         self.sync_custom_selection_from_text();
     }
 
-    fn clear_custom_text(&mut self) {
+    fn delete_custom_text_to_start(&mut self) {
         if !self.current_is_text_entry() {
             return;
         }
 
         if let Some(answer) = self.current_answer_mut() {
-            answer.custom_text.clear();
-            answer.custom_cursor = 0;
-            answer.custom_selected = false;
+            delete_to_start_before_cursor(&mut answer.custom_text, &mut answer.custom_cursor);
         }
+        self.sync_custom_selection_from_text();
     }
 
     fn sync_custom_selection_from_text(&mut self) {
@@ -779,31 +830,19 @@ pub fn handle_question_dialog_key_event(
                 QuestionDialogAction::Cancel
             }
         }
-        KeyCode::Left
-            if request.current_is_text_entry()
-                && (event.modifiers.contains(KeyModifiers::SUPER)
-                    || event.modifiers.contains(KeyModifiers::META)) =>
-        {
+        _ if request.current_is_text_entry() && is_custom_start_key(event) => {
             request.move_custom_cursor_start();
             QuestionDialogAction::Handled
         }
-        KeyCode::Right
-            if request.current_is_text_entry()
-                && (event.modifiers.contains(KeyModifiers::SUPER)
-                    || event.modifiers.contains(KeyModifiers::META)) =>
-        {
+        _ if request.current_is_text_entry() && is_custom_end_key(event) => {
             request.move_custom_cursor_end();
             QuestionDialogAction::Handled
         }
-        KeyCode::Left
-            if request.current_is_text_entry() && event.modifiers.contains(KeyModifiers::ALT) =>
-        {
+        _ if request.current_is_text_entry() && is_custom_word_left_key(event) => {
             request.move_custom_cursor_word_left();
             QuestionDialogAction::Handled
         }
-        KeyCode::Right
-            if request.current_is_text_entry() && event.modifiers.contains(KeyModifiers::ALT) =>
-        {
+        _ if request.current_is_text_entry() && is_custom_word_right_key(event) => {
             request.move_custom_cursor_word_right();
             QuestionDialogAction::Handled
         }
@@ -869,25 +908,12 @@ pub fn handle_question_dialog_key_event(
         KeyCode::Tab | KeyCode::BackTab if request.current_is_text_entry() => {
             QuestionDialogAction::Handled
         }
-        KeyCode::Backspace
-            if request.current_is_text_entry()
-                && (event.modifiers.contains(KeyModifiers::SUPER)
-                    || event.modifiers.contains(KeyModifiers::META)) =>
-        {
-            request.clear_custom_text();
+        _ if request.current_is_text_entry() && is_custom_line_delete_key(event) => {
+            request.delete_custom_text_to_start();
             QuestionDialogAction::Handled
         }
-        KeyCode::Backspace
-            if request.current_is_text_entry() && event.modifiers.contains(KeyModifiers::ALT) =>
-        {
+        _ if request.current_is_text_entry() && is_custom_word_delete_key(event) => {
             request.delete_word_backward();
-            QuestionDialogAction::Handled
-        }
-        KeyCode::Char('u')
-            if request.current_is_text_entry()
-                && event.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            request.clear_custom_text();
             QuestionDialogAction::Handled
         }
         KeyCode::Backspace if request.current_is_text_entry() => {
@@ -2531,16 +2557,74 @@ mod tests {
     }
 
     #[test]
-    fn custom_text_supports_command_backspace_clear() {
+    fn option_custom_text_supports_common_terminal_navigation_sequences() {
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "Pick",
+                "header": "Choice",
+                "options": [{ "label": "A" }]
+            }]),
+            tx,
+        );
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Down, KeyModifiers::NONE));
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        state.insert_text("hello brave world");
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Char('b'), KeyModifiers::ALT));
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.answers[0].custom_cursor, 12);
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Backspace, KeyModifiers::ALT));
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.answers[0].custom_text, "hello world");
+        assert_eq!(request.answers[0].custom_cursor, 6);
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Char('f'), KeyModifiers::ALT));
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.answers[0].custom_cursor, 11);
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Home, KeyModifiers::NONE));
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.answers[0].custom_cursor, 0);
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::End, KeyModifiers::NONE));
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.answers[0].custom_cursor, 11);
+    }
+
+    #[test]
+    fn custom_text_supports_command_arrow_navigation() {
         let (tx, _rx) = oneshot::channel();
         let mut state = QuestionDialogState::new();
         state.enqueue(json!([{ "question": "Explain", "header": "Details" }]), tx);
         state.insert_text("hello world");
 
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Left, KeyModifiers::SUPER));
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.answers[0].custom_cursor, 0);
+
+        handle_question_dialog_key_event(&mut state, key(KeyCode::Right, KeyModifiers::SUPER));
+        let request = state.current.as_ref().unwrap();
+        assert_eq!(request.answers[0].custom_cursor, 11);
+    }
+
+    #[test]
+    fn custom_text_supports_command_backspace_delete_to_start() {
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(json!([{ "question": "Explain", "header": "Details" }]), tx);
+        state.insert_text("hello world");
+        for _ in 0..5 {
+            handle_question_dialog_key_event(&mut state, key(KeyCode::Left, KeyModifiers::NONE));
+        }
+
         handle_question_dialog_key_event(&mut state, key(KeyCode::Backspace, KeyModifiers::SUPER));
 
         let request = state.current.as_ref().unwrap();
-        assert_eq!(request.answers[0].custom_text, "");
+        assert_eq!(request.answers[0].custom_text, "world");
         assert_eq!(request.answers[0].custom_cursor, 0);
     }
 
