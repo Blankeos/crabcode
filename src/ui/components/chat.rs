@@ -5,7 +5,7 @@ use crate::ui::scrollbar::{
     render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
 };
 use crate::ui::selection::{non_selectable_style, EdgeScrollDirection, Selection};
-use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
+use crate::ui::wrapping::{wrap_styled_line, wrap_styled_lines, WrapOptions};
 use crate::utils::token_counter::StreamingTokenCounter;
 use ratatui::{
     crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
@@ -1293,6 +1293,10 @@ impl Chat {
 
         self.thinking_visible = visible;
         self.invalidate_cache();
+    }
+
+    pub fn toggle_thinking_visible(&mut self) {
+        self.set_thinking_visible(!self.thinking_visible);
     }
 
     fn should_autoscroll(&self) -> bool {
@@ -3001,6 +3005,7 @@ impl Chat {
         let gutter_style = Style::default()
             .fg(colors.text_weak)
             .add_modifier(Modifier::DIM);
+        let gutter_style = non_selectable_style(gutter_style);
         let type_style = Style::default()
             .fg(colors.text)
             .add_modifier(Modifier::BOLD);
@@ -3121,6 +3126,106 @@ impl Chat {
                 Line::from(Span::styled(" ".repeat(indent_width), gutter_style)),
             );
         }
+
+        out
+    }
+
+    fn format_thinking_block(
+        &self,
+        reasoning: &str,
+        max_width: usize,
+        colors: &ThemeColors,
+    ) -> Vec<Line<'static>> {
+        let max_width = max_width.max(1);
+        let marker_style = Style::default()
+            .fg(colors.info)
+            .add_modifier(Modifier::BOLD);
+        let title_style = Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC);
+        let hint_key_style = Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::BOLD);
+        let hint_style = Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM | Modifier::ITALIC);
+        let gutter_style = Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM);
+        let gutter_style = non_selectable_style(gutter_style);
+
+        let mut out = Vec::new();
+        let label = if self.thinking_visible {
+            "Thinking"
+        } else {
+            "Thinking collapsed"
+        };
+        let action = if self.thinking_visible {
+            "collapse"
+        } else {
+            "expand"
+        };
+
+        let header = Line::from(vec![
+            Span::styled("💭", marker_style),
+            Span::raw(" "),
+            Span::styled(label, title_style),
+            Span::styled(" · ", hint_style),
+            Span::styled("ctrl+e", hint_key_style),
+            Span::raw(" "),
+            Span::styled(action, hint_style),
+        ]);
+        out.extend(wrap_styled_line(
+            &header,
+            WrapOptions::new(max_width)
+                .subsequent_indent(Line::from(Span::styled("   ", gutter_style))),
+        ));
+
+        if !self.thinking_visible {
+            return out;
+        }
+
+        let content_width = max_width.saturating_sub(2).max(1);
+        let mut reasoning_colors = *colors;
+        reasoning_colors.markdown_text = colors.text_weak;
+        reasoning_colors.markdown_heading = colors.text_weak;
+        reasoning_colors.markdown_link = colors.info;
+        reasoning_colors.markdown_link_text = colors.info;
+        reasoning_colors.markdown_code = colors.text;
+        reasoning_colors.markdown_block_quote = colors.text_weak;
+        reasoning_colors.markdown_emph = colors.text_weak;
+        reasoning_colors.markdown_strong = colors.text;
+        reasoning_colors.markdown_horizontal_rule = colors.text_weak;
+        reasoning_colors.markdown_list_item = colors.text_weak;
+        reasoning_colors.markdown_list_enumeration = colors.text_weak;
+        reasoning_colors.markdown_code_block = colors.text;
+
+        let rendered = render_markdown(reasoning, content_width, &reasoning_colors)
+            .into_iter()
+            .map(|mut line| {
+                line.style = line.style.patch(Style::default().fg(colors.text_weak));
+                for span in &mut line.spans {
+                    span.style = Style::default()
+                        .fg(colors.text_weak)
+                        .add_modifier(Modifier::ITALIC)
+                        .patch(span.style);
+                }
+                line
+            })
+            .collect::<Vec<_>>();
+
+        let content_lines = wrap_styled_lines(rendered.iter(), WrapOptions::new(content_width));
+        out.extend(content_lines.into_iter().map(|line| {
+            let mut spans = Vec::with_capacity(line.spans.len() + 2);
+            spans.push(Span::styled("│", gutter_style));
+            spans.push(Span::styled(" ", gutter_style));
+            spans.extend(line.spans);
+            Line {
+                spans,
+                style: line.style,
+                alignment: line.alignment,
+            }
+        }));
 
         out
     }
@@ -3325,29 +3430,9 @@ impl Chat {
                                     &mut emitted_anything,
                                 );
                                 emitted_anything = true;
-                                let reasoning_style = Style::default()
-                                    .fg(colors.text_weak)
-                                    .add_modifier(Modifier::ITALIC);
-                                let reasoning_prefix = if self.thinking_visible {
-                                    "💭 Thinking..."
-                                } else {
-                                    "💭 Thinking collapsed"
-                                };
-                                lines.push(Line::from(vec![Span::styled(
-                                    reasoning_prefix,
-                                    reasoning_style,
-                                )]));
-
-                                if self.thinking_visible {
-                                    let reasoning_line = Line::from(Span::styled(
-                                        reasoning.to_string(),
-                                        reasoning_style,
-                                    ));
-                                    lines.extend(wrap_styled_line(
-                                        &reasoning_line,
-                                        WrapOptions::new(max_width.max(1)),
-                                    ));
-                                }
+                                lines.extend(
+                                    self.format_thinking_block(reasoning, max_width, colors),
+                                );
                                 lines.push(Line::from(""));
                             }
                             "text" => {
@@ -3482,29 +3567,11 @@ impl Chat {
                     let reasoning_trimmed = reasoning.trim();
                     if !reasoning_trimmed.is_empty() {
                         emitted_anything = true;
-                        let reasoning_style = Style::default()
-                            .fg(colors.text_weak)
-                            .add_modifier(Modifier::ITALIC);
-                        let reasoning_prefix = if self.thinking_visible {
-                            "💭 Thinking..."
-                        } else {
-                            "💭 Thinking collapsed"
-                        };
-                        lines.push(Line::from(vec![Span::styled(
-                            reasoning_prefix,
-                            reasoning_style,
-                        )]));
-
-                        if self.thinking_visible {
-                            let reasoning_line = Line::from(Span::styled(
-                                reasoning_trimmed.to_string(),
-                                reasoning_style,
-                            ));
-                            lines.extend(wrap_styled_line(
-                                &reasoning_line,
-                                WrapOptions::new(max_width.max(1)),
-                            ));
-                        }
+                        lines.extend(self.format_thinking_block(
+                            reasoning_trimmed,
+                            max_width,
+                            colors,
+                        ));
 
                         // Add separator between reasoning and content (only if there's content)
                         if has_visible_content {
@@ -5138,6 +5205,54 @@ mod tests {
     }
 
     #[test]
+    fn assistant_reasoning_renders_as_markdown_block() {
+        let mut assistant = Message::assistant("Final answer");
+        assistant.reasoning = Some("# Plan\n\n- Inspect files\n- **Patch** renderer".to_string());
+        let chat = Chat::with_messages(vec![assistant]);
+        let colors = test_colors();
+
+        let lines = chat
+            .build_all_lines(100, "model", &colors)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(lines.iter().any(|line| line.contains("Thinking")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains('│') && line.contains("Plan")));
+        assert!(lines.iter().any(|line| line.contains("│ - Inspect files")));
+        assert!(lines.iter().any(|line| line.contains("│ - Patch renderer")));
+    }
+
+    #[test]
+    fn ordered_part_reasoning_renders_as_markdown_block() {
+        let mut assistant = Message::assistant("");
+        assistant.parts = vec![
+            crate::session::types::MessagePart::reasoning("## Steps\n\n1. Read\n2. Render"),
+            crate::session::types::MessagePart::tool_call(
+                "call_1",
+                "bash",
+                serde_json::json!({"command":"true"}),
+            ),
+        ];
+        let chat = Chat::with_messages(vec![assistant]);
+        let colors = test_colors();
+
+        let lines = chat
+            .build_all_lines(100, "model", &colors)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains('│') && line.contains("Steps")));
+        assert!(lines.iter().any(|line| line.contains("│ 1. Read")));
+        assert!(lines.iter().any(|line| line.contains("│ 2. Render")));
+    }
+
+    #[test]
     fn test_chat_add_message() {
         let mut chat = Chat::new();
         chat.add_message(Message::user("test"));
@@ -6139,6 +6254,49 @@ codex exec --skip-git-repo-check \
 
         assert_eq!(selected, "control if\njust quickly bloats it.");
         assert!(!selected.contains('▌'));
+    }
+
+    #[test]
+    fn selected_thinking_text_excludes_gutter_pipe() {
+        let colors = test_colors();
+        let mut assistant = Message::assistant("Final answer");
+        assistant.reasoning = Some("First thought\n\nSecond thought".to_string());
+        let mut chat = Chat::with_messages(vec![assistant]);
+        let rendered_width = 60;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(rendered_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = 20;
+        chat.scroll_offset = 0;
+
+        let first_line = chat
+            .cached_lines
+            .iter()
+            .position(|line| line_text(line).contains("First thought"))
+            .expect("first thinking text line");
+        let second_line = chat
+            .cached_lines
+            .iter()
+            .position(|line| line_text(line).contains("Second thought"))
+            .expect("second thinking text line");
+        let second_line_width =
+            UnicodeWidthStr::width(line_text(&chat.cached_lines[second_line]).as_str());
+
+        chat.selection.active = true;
+        chat.selection.start_line = first_line;
+        chat.selection.start_col = 0;
+        chat.selection.end_line = second_line;
+        chat.selection.end_col = second_line_width;
+
+        let selected = chat
+            .get_selected_text(rendered_width, "model", &colors)
+            .expect("selected thinking text");
+
+        assert_eq!(selected, "First thought\nSecond thought");
+        assert!(!selected.contains('│'));
     }
 
     #[test]

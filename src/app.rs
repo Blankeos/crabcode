@@ -3016,6 +3016,10 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         self.open_timeline_dialog();
                     }
+                    crate::views::which_key::WhichKeyAction::ToggleThinking => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.chat_state.chat.toggle_thinking_visible();
+                    }
                     crate::views::which_key::WhichKeyAction::GoChild => {
                         self.overlay_focus = OverlayFocus::None;
                         let _ = self.switch_to_first_child_session();
@@ -3114,6 +3118,13 @@ impl App {
             }
             KeyCode::Char('t') if key.modifiers == event::KeyModifiers::CONTROL => {
                 self.cycle_active_reasoning_effort()
+            }
+            KeyCode::Char('e')
+                if key.modifiers == event::KeyModifiers::CONTROL
+                    && self.base_focus == BaseFocus::Chat =>
+            {
+                self.chat_state.chat.toggle_thinking_visible();
+                true
             }
             KeyCode::Left
                 if key.modifiers == event::KeyModifiers::NONE
@@ -10472,6 +10483,41 @@ mod tests {
         assert!(!handled);
         assert!(app.session_manager.get_current_session_id().is_some());
         assert_eq!(app.session_manager.list_sessions().len(), 1);
+    }
+
+    #[test]
+    fn ctrl_e_toggles_thinking_from_chat() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        assert!(app.chat_state.chat.thinking_visible());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('e'),
+            event::KeyModifiers::CONTROL,
+        ));
+        assert!(!app.chat_state.chat.thinking_visible());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('e'),
+            event::KeyModifiers::CONTROL,
+        ));
+        assert!(app.chat_state.chat.thinking_visible());
+    }
+
+    #[test]
+    fn ctrl_x_e_toggles_thinking_from_chat() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        assert!(app.chat_state.chat.thinking_visible());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('x'),
+            event::KeyModifiers::CONTROL,
+        ));
+        app.handle_keys(KeyEvent::new(KeyCode::Char('e'), event::KeyModifiers::NONE));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert!(!app.chat_state.chat.thinking_visible());
     }
 
     #[test]

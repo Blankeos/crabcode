@@ -18,6 +18,7 @@ pub enum WhichKeyAction {
     ShowThemes,
     ShowSessions,
     ShowTimeline,
+    ToggleThinking,
     GoChild,
     GoParent,
     PreviousChild,
@@ -102,6 +103,11 @@ impl WhichKeyState {
                 action: WhichKeyAction::ShowTimeline,
             },
             KeyBinding {
+                key: "e".to_string(),
+                description: "Expand/collapse thinking".to_string(),
+                action: WhichKeyAction::ToggleThinking,
+            },
+            KeyBinding {
                 key: "k".to_string(),
                 description: "Scroll up".to_string(),
                 action: WhichKeyAction::ScrollUp,
@@ -154,6 +160,10 @@ impl WhichKeyState {
             KeyCode::Char('g') | KeyCode::Char('G') if self.is_chat_active => {
                 self.hide();
                 WhichKeyAction::ShowTimeline
+            }
+            KeyCode::Char('e') | KeyCode::Char('E') if self.is_chat_active => {
+                self.hide();
+                WhichKeyAction::ToggleThinking
             }
             KeyCode::Down if self.is_chat_active => {
                 self.hide();

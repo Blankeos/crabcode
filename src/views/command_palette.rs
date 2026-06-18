@@ -355,7 +355,14 @@ fn core_palette_items(
                 .iter()
                 .position(|item| item.group == "Appearance")
                 .unwrap_or(items.len()),
-            app_action_item(id, name, "Appearance", description, None, &hidden_tokens),
+            app_action_item(
+                id,
+                name,
+                "Appearance",
+                description,
+                Some("ctrl+e"),
+                &hidden_tokens,
+            ),
         );
     }
 

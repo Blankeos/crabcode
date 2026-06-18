@@ -346,3 +346,5 @@ I think this is how the TUI works already anyway right?
 - [x] opt-backspace and opt-left opt-right cmd-left, cmd-right doesn't work in "type your own answer" in the question dialog tool.
 
 - [x] Add retries and backoff just like opencode. For instance, if it hits a rate limit / error caused by hitting the api too frequently. Make it backoff and show that it will submit the next call after a while, not immediately stop and show error. Make sure it shows an indicator (not in toast messages), about when it'll retry and stuff
+
+- [x] Format the thinking results properly, make it look more like part of the TUI because currently it's literally just a concatenation of tokens to form a flat string without any formatting. I think it should be as markdowny as the markdown text responses. Also this might be minor or notadd a ctrl-e for expand thinking and collapse thinking. Also in ctrl-x e for that btw.
