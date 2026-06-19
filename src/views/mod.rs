@@ -1,3 +1,4 @@
+pub mod agents_dialog;
 pub mod chat;
 pub mod command_palette;
 pub mod connect_dialog;
@@ -17,6 +18,7 @@ pub mod themes_dialog;
 pub mod timeline_dialog;
 pub mod which_key;
 
+pub use agents_dialog::AgentsDialogState;
 pub use chat::ChatState;
 pub use connect_dialog::ConnectDialogState;
 pub use home::HomeState;

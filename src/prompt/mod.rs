@@ -37,6 +37,7 @@ pub struct SystemPromptComposer {
     print_mode: bool,
     tool_registry: Option<ToolRegistry>,
     agent_registry: Option<crate::agent::definition::AgentRegistry>,
+    active_agent: Option<String>,
 }
 
 impl SystemPromptComposer {
@@ -54,6 +55,7 @@ impl SystemPromptComposer {
             print_mode: false,
             tool_registry: None,
             agent_registry: None,
+            active_agent: None,
         }
     }
 
@@ -67,6 +69,11 @@ impl SystemPromptComposer {
         registry: crate::agent::definition::AgentRegistry,
     ) -> Self {
         self.agent_registry = Some(registry);
+        self
+    }
+
+    pub fn with_active_agent(mut self, agent: impl Into<String>) -> Self {
+        self.active_agent = Some(agent.into());
         self
     }
 
@@ -354,6 +361,21 @@ Tool use:
             .agent_registry
             .clone()
             .unwrap_or_else(crate::agent::definition::AgentRegistry::default);
+        if let Some(active_agent) = self.active_agent.as_deref() {
+            if let Some(agent) = registry.primary_agent(active_agent) {
+                if let Some(agent_instructions) = agent
+                    .instructions
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|instructions| !instructions.is_empty())
+                {
+                    if !instructions.is_empty() {
+                        instructions.push_str("\n\n");
+                    }
+                    instructions.push_str(agent_instructions);
+                }
+            }
+        }
         let subagents = registry.visible_subagents();
         if !subagents.is_empty() {
             let subagents_xml = subagents
@@ -433,5 +455,29 @@ mod tests {
         assert!(context.contains("write_files"));
         assert!(context.contains("one-off formatters"));
         assert!(context.contains("stop"));
+    }
+
+    #[tokio::test]
+    async fn active_primary_agent_instructions_are_included() {
+        let mut warnings = Vec::new();
+        let defs = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "frontend-agent": {
+                    "mode": "all",
+                    "prompt": "Build polished frontends."
+                }
+            })),
+            &mut warnings,
+        );
+        let registry = crate::agent::definition::AgentRegistry::with_definitions(None, defs);
+
+        let prompt = SystemPromptComposer::new("gpt-5", ".", true, "test")
+            .with_agent_registry(registry)
+            .with_active_agent("frontend-agent")
+            .compose()
+            .await;
+
+        assert!(warnings.is_empty());
+        assert!(prompt.contains("Build polished frontends."));
     }
 }

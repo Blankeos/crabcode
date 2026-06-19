@@ -18,6 +18,7 @@ pub enum CommandPaletteAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPaletteAppAction {
     ToggleAgentMode,
+    OpenAgentsDialog,
     OpenFind,
     SetThinkingVisible(bool),
     CycleReasoningEffort,
@@ -179,6 +180,9 @@ fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
             "toggle-agent-mode" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::ToggleAgentMode)
             }
+            "open-agents-dialog" => {
+                CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenAgentsDialog)
+            }
             "open-find" => CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenFind),
             "collapse-thinking" => CommandPaletteAction::RunAppAction(
                 CommandPaletteAppAction::SetThinkingVisible(false),
@@ -315,13 +319,27 @@ fn core_palette_items(
         2.min(items.len()),
         app_action_item(
             "toggle-agent-mode",
-            "Toggle Agent Mode",
-            "Workspace",
-            "Switch between Build and Plan",
+            "Agent Cycle",
+            "Agent",
+            "Cycle through primary agents",
             Some("tab"),
             &[],
         ),
     );
+
+    if registry.get("agents").is_some() {
+        items.insert(
+            3.min(items.len()),
+            app_action_item(
+                "open-agents-dialog",
+                "Switch Agent",
+                "Agent",
+                "Choose the active primary agent",
+                None,
+                &["agents", "agent mode", "primary agent"],
+            ),
+        );
+    }
 
     if is_chat {
         items.insert(
@@ -687,6 +705,28 @@ mod tests {
         assert_eq!(
             action_for_item(&item),
             CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenFind)
+        );
+    }
+
+    #[test]
+    fn palette_includes_agent_picker_action() {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+        let mut state = init_command_palette();
+
+        state.refresh_items(&registry, false, true);
+
+        let item = state
+            .dialog
+            .items
+            .iter()
+            .find(|item| item.id == "open-agents-dialog")
+            .expect("agent picker should be listed");
+        assert_eq!(item.name, "Switch Agent");
+        assert_eq!(item.group, "Agent");
+        assert_eq!(
+            action_for_item(item),
+            CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenAgentsDialog)
         );
     }
 

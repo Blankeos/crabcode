@@ -238,6 +238,21 @@ impl AgentRegistry {
             .filter(|agent| matches!(agent.mode, AgentMode::Primary | AgentMode::All))
     }
 
+    pub fn visible_primary_agents(&self) -> Vec<&AgentDefinition> {
+        self.agents
+            .values()
+            .filter(|agent| matches!(agent.mode, AgentMode::Primary | AgentMode::All))
+            .filter(|agent| !agent.hidden)
+            .collect()
+    }
+
+    pub fn visible_primary_agent_names(&self) -> Vec<String> {
+        self.visible_primary_agents()
+            .into_iter()
+            .map(|agent| agent.name.clone())
+            .collect()
+    }
+
     pub fn task_target(&self, name: &str) -> Option<&AgentDefinition> {
         self.get(name)
             .filter(|agent| agent.mode.can_run_as_subagent())
@@ -1236,5 +1251,39 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(reviewer.mode, AgentMode::All);
         assert!(!reviewer.hidden);
+    }
+
+    #[test]
+    fn visible_primary_agents_include_primary_and_all_modes_only() {
+        let mut warnings = Vec::new();
+        let defs = parse_agent_definitions_from_config(
+            Some(&json!({
+                "designer": {
+                    "description": "Design UI",
+                    "mode": "all"
+                },
+                "internal": {
+                    "mode": "primary",
+                    "hidden": true
+                },
+                "reviewer": {
+                    "mode": "subagent"
+                }
+            })),
+            &mut warnings,
+        );
+        let registry = AgentRegistry::with_definitions(None, defs);
+        let names = registry
+            .visible_primary_agents()
+            .into_iter()
+            .map(|agent| agent.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(warnings.is_empty());
+        assert!(names.contains(&"build"));
+        assert!(names.contains(&"plan"));
+        assert!(names.contains(&"designer"));
+        assert!(!names.contains(&"reviewer"));
+        assert!(!names.contains(&"internal"));
     }
 }

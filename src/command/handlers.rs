@@ -207,6 +207,23 @@ pub fn handle_remote<'a>(
     })
 }
 
+pub fn handle_agents<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error(
+                "This command only opens the agents dialog. Usage: /agents".to_string(),
+            );
+        }
+
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_models<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
@@ -787,6 +804,14 @@ pub fn register_all_commands(registry: &mut Registry) {
         description: "List available models".to_string(),
         handler: handle_models,
         hidden_tokens: vec![],
+        chat_only: false,
+    });
+
+    registry.register(Command {
+        name: "agents".to_string(),
+        description: "Switch agent".to_string(),
+        handler: handle_agents,
+        hidden_tokens: vec!["agent".to_string(), "mode".to_string()],
         chat_only: false,
     });
 

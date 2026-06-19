@@ -26,6 +26,10 @@ use crate::ui::components::popup::Popup;
 use crate::ui::hyperlink::HyperlinkTarget;
 use crate::utils::git;
 
+use crate::views::agents_dialog::{
+    handle_agents_dialog_key_event, handle_agents_dialog_mouse_event, init_agents_dialog,
+    render_agents_dialog, AgentsDialogAction,
+};
 use crate::views::chat::{
     agent_color_for_tab, init_chat, queued_messages_height, render_chat, SubagentTab, SubagentTabs,
     SUBAGENT_FOOTER_HEIGHT,
@@ -85,10 +89,10 @@ use crate::views::themes_dialog::{
     render_themes_dialog,
 };
 use crate::views::{
-    ChatState, ConnectDialogState, HomeState, ModelsDialogState, MoveSessionDialogState,
-    PermissionDialogState, ProviderOAuthFlowState, QuestionDialogState, RemoteDialogState,
-    SessionRenameDialogState, SessionsDialogState, StorageDialogState, SuggestionsPopupState,
-    ThemesDialogState,
+    AgentsDialogState, ChatState, ConnectDialogState, HomeState, ModelsDialogState,
+    MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState, QuestionDialogState,
+    RemoteDialogState, SessionRenameDialogState, SessionsDialogState, StorageDialogState,
+    SuggestionsPopupState, ThemesDialogState,
 };
 
 use crate::{
@@ -154,6 +158,7 @@ pub enum BaseFocus {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OverlayFocus {
     None,
+    AgentsDialog,
     ModelsDialog,
     ThemesDialog,
     ConnectDialog,
@@ -535,6 +540,7 @@ pub struct App {
     pub home_state: HomeState,
     pub chat_state: ChatState,
     pub suggestions_popup_state: SuggestionsPopupState,
+    pub agents_dialog_state: AgentsDialogState,
     pub models_dialog_state: ModelsDialogState,
     pub themes_dialog_state: ThemesDialogState,
     themes_dialog_original_theme_index: usize,
@@ -636,6 +642,7 @@ impl App {
         let mut agent = "Build".to_string();
         let chat = Chat::new();
         let suggestions_popup_state = init_suggestions_popup(Popup::new());
+        let agents_dialog_state = init_agents_dialog("Select agent", vec![]);
         let models_dialog_state = init_models_dialog("Models", vec![]);
         let themes_dialog_state = init_themes_dialog("Themes", vec![]);
         let connect_dialog_state = init_connect_dialog();
@@ -813,6 +820,7 @@ impl App {
             home_state,
             chat_state,
             suggestions_popup_state,
+            agents_dialog_state,
             models_dialog_state,
             themes_dialog_state,
             themes_dialog_original_theme_index: 0,
@@ -1198,6 +1206,25 @@ impl App {
         true
     }
 
+    fn active_primary_agent_definition(&self) -> Option<crate::agent::definition::AgentDefinition> {
+        self.agent_registry.primary_agent(&self.agent).cloned()
+    }
+
+    fn active_primary_agent_model_provider(&self) -> (String, String) {
+        self.active_primary_agent_definition()
+            .and_then(|agent| agent.model)
+            .map(|model| parse_model_ref(&model))
+            .unwrap_or_else(|| (self.provider_name.clone(), self.model.clone()))
+    }
+
+    fn active_primary_agent_reasoning_effort(
+        &self,
+    ) -> Option<crate::model::reasoning::ReasoningEffort> {
+        self.active_primary_agent_definition()
+            .and_then(|agent| agent.reasoning_effort)
+            .or_else(|| self.active_reasoning_effort())
+    }
+
     fn is_subagent_session_active(&self) -> bool {
         self.session_manager
             .get_current_session_id()
@@ -1328,10 +1355,11 @@ impl App {
             return (self.agent.clone(), self.model.clone());
         };
         if self.session_manager.parent_id_of(session_id).is_none() {
+            let (_, configured_model) = self.active_primary_agent_model_provider();
             return (
                 self.agent.clone(),
                 self.session_active_stream_model(session_id)
-                    .unwrap_or_else(|| self.model.clone()),
+                    .unwrap_or(configured_model),
             );
         }
         self.session_agent_model_for_display(session_id, &self.agent, &self.model)
@@ -2463,6 +2491,21 @@ impl App {
                     input_handled
                 }
             }
+            OverlayFocus::AgentsDialog => {
+                let action = handle_agents_dialog_key_event(&mut self.agents_dialog_state, key);
+                match action {
+                    AgentsDialogAction::SelectAgent { agent } => {
+                        self.select_agent_from_dialog(&agent);
+                        self.overlay_focus = OverlayFocus::None;
+                    }
+                    AgentsDialogAction::None => {}
+                }
+
+                if !self.agents_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
             OverlayFocus::FindBar => {
                 self.handle_find_bar_key(key);
                 true
@@ -3195,22 +3238,20 @@ impl App {
     }
 
     fn toggle_agent_mode(&mut self) {
-        if self.agent.eq_ignore_ascii_case("plan") {
-            self.agent = "Build".to_string();
-        } else {
-            self.agent = "Plan".to_string();
+        let agents = self.agent_registry.visible_primary_agent_names();
+        if agents.is_empty() {
+            return;
         }
 
-        let colors = self.get_current_theme_colors();
-        let agent_color = crate::theme::agent_color(&self.agent, &colors);
-        self.chat_state.wave_spinner.set_color(agent_color);
+        let current = self.agent.to_ascii_lowercase();
+        let current_index = agents
+            .iter()
+            .position(|agent| agent.eq_ignore_ascii_case(&current));
+        let next_index = current_index.map_or(0, |index| (index + 1) % agents.len());
+        let _ = self.set_agent_mode(&agents[next_index]);
     }
 
-    pub fn remote_toggle_agent_mode(&mut self) {
-        self.toggle_agent_mode();
-    }
-
-    pub fn remote_set_agent_mode(&mut self, agent: String) -> bool {
+    fn set_agent_mode(&mut self, agent: &str) -> bool {
         let agent = agent.trim();
         let Some(definition) = self.agent_registry.primary_agent(agent) else {
             return false;
@@ -3221,6 +3262,14 @@ impl App {
         let agent_color = crate::theme::agent_color(&self.agent, &colors);
         self.chat_state.wave_spinner.set_color(agent_color);
         true
+    }
+
+    pub fn remote_toggle_agent_mode(&mut self) {
+        self.toggle_agent_mode();
+    }
+
+    pub fn remote_set_agent_mode(&mut self, agent: String) -> bool {
+        self.set_agent_mode(&agent)
     }
 
     pub fn remote_reasoning_effort_label(&self) -> Option<String> {
@@ -3617,7 +3666,19 @@ impl App {
             return;
         }
 
-        if self.overlay_focus == OverlayFocus::ModelsDialog {
+        if self.overlay_focus == OverlayFocus::AgentsDialog {
+            let action = handle_agents_dialog_mouse_event(&mut self.agents_dialog_state, mouse);
+            match action {
+                AgentsDialogAction::SelectAgent { agent } => {
+                    self.select_agent_from_dialog(&agent);
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                AgentsDialogAction::None => {}
+            }
+            if !self.agents_dialog_state.dialog.is_visible() {
+                self.overlay_focus = OverlayFocus::None;
+            }
+        } else if self.overlay_focus == OverlayFocus::ModelsDialog {
             let action = handle_models_dialog_mouse_event(&mut self.models_dialog_state, mouse);
             match action {
                 crate::views::models_dialog::ModelsDialogAction::SelectModel {
@@ -4201,6 +4262,20 @@ impl App {
                 }
                 self.input.insert_paste(&text);
             }
+            (_, OverlayFocus::AgentsDialog) => {
+                self.agents_dialog_state
+                    .dialog
+                    .search_textarea
+                    .insert_str(&text);
+                self.agents_dialog_state.dialog.set_search_query(
+                    self.agents_dialog_state
+                        .dialog
+                        .search_textarea
+                        .lines()
+                        .join(""),
+                );
+                self.agents_dialog_state.dialog.selected_index = 0;
+            }
             (_, OverlayFocus::ModelsDialog) => {
                 self.models_dialog_state
                     .dialog
@@ -4537,6 +4612,7 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
                 match action {
                     CommandPaletteAppAction::ToggleAgentMode => self.toggle_agent_mode(),
+                    CommandPaletteAppAction::OpenAgentsDialog => self.open_agents_dialog(),
                     CommandPaletteAppAction::OpenFind => self.open_find_bar(),
                     CommandPaletteAppAction::SetThinkingVisible(visible) => {
                         self.chat_state.chat.set_thinking_visible(visible);
@@ -4946,6 +5022,10 @@ impl App {
                     self.open_sessions_dialog();
                     return;
                 }
+                if parsed.name == "agents" {
+                    self.open_agents_dialog();
+                    return;
+                }
                 if parsed.name == "new" {
                     let title = if parsed.args.is_empty() {
                         None
@@ -5161,6 +5241,10 @@ impl App {
         }
         if parsed.name == "sessions" {
             self.open_sessions_dialog();
+            return;
+        }
+        if parsed.name == "agents" {
+            self.open_agents_dialog();
             return;
         }
         if parsed.name == "new" {
@@ -5960,6 +6044,85 @@ impl App {
         });
 
         self.models_dialog_state.refresh_items(items);
+    }
+
+    fn agent_dialog_items(&self) -> Vec<crate::ui::components::dialog::DialogItem> {
+        let active = self.agent.to_ascii_lowercase();
+        let mut items: Vec<crate::ui::components::dialog::DialogItem> = self
+            .agent_registry
+            .visible_primary_agents()
+            .into_iter()
+            .map(|agent| {
+                let mode = match agent.mode {
+                    crate::agent::definition::AgentMode::Primary => "Primary",
+                    crate::agent::definition::AgentMode::All => "Primary + Subagent",
+                    crate::agent::definition::AgentMode::Subagent => "Subagent",
+                };
+                let model = agent
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty());
+                let mut hidden_tokens = vec![agent.name.clone(), mode.to_ascii_lowercase()];
+                if let Some(model) = model {
+                    hidden_tokens.push(model.to_string());
+                }
+
+                crate::ui::components::dialog::DialogItem {
+                    id: agent.name.clone(),
+                    name: agent.name.clone(),
+                    group: mode.to_string(),
+                    description: agent.description.clone(),
+                    tip: model.map(str::to_string),
+                    provider_id: hidden_tokens.join(" "),
+                    active: agent.name.eq_ignore_ascii_case(&active),
+                }
+            })
+            .collect();
+
+        items.sort_by(|left, right| {
+            left.group
+                .cmp(&right.group)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        items
+    }
+
+    fn refresh_agents_dialog(&mut self) {
+        let items = self.agent_dialog_items();
+        self.agents_dialog_state.refresh_items(items);
+        let _ = self
+            .agents_dialog_state
+            .dialog
+            .select_item_by_id(&self.agent.to_ascii_lowercase());
+    }
+
+    fn open_agents_dialog(&mut self) {
+        self.refresh_agents_dialog();
+        self.agents_dialog_state.dialog.show();
+        let _ = self
+            .agents_dialog_state
+            .dialog
+            .select_item_by_id(&self.agent.to_ascii_lowercase());
+        self.overlay_focus = OverlayFocus::AgentsDialog;
+    }
+
+    fn select_agent_from_dialog(&mut self, agent: &str) {
+        if self.set_agent_mode(agent) {
+            push_toast(Toast::new(
+                format!("Switched agent to: {}", self.agent),
+                ToastLevel::Info,
+                None,
+            ));
+            self.refresh_agents_dialog();
+        } else {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                format!("Unknown primary agent: {}", agent),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+        }
     }
 
     fn show_models_dialog(
@@ -7614,13 +7777,12 @@ impl App {
             None,
         );
 
-        let provider_name = self.provider_name.clone();
-        let model = self.model.clone();
-        let reasoning_effort = self.active_reasoning_effort();
         let agent_mode = self.agent.clone();
+        let (provider_name, model) = self.active_primary_agent_model_provider();
+        let reasoning_effort = self.active_primary_agent_reasoning_effort();
         let provider_timeout = self
             .provider_timeouts
-            .get(&self.provider_name.to_ascii_lowercase())
+            .get(&provider_name.to_ascii_lowercase())
             .copied();
         let agent_max_steps = self
             .agent_steps
@@ -7669,7 +7831,8 @@ impl App {
                 std::env::consts::OS,
             )
             .with_tool_registry(prompt_registry)
-            .with_agent_registry(agent_registry.clone());
+            .with_agent_registry(agent_registry.clone())
+            .with_active_agent(agent_mode.clone());
             let system_prompt = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async { composer.compose().await })
             });
@@ -8461,6 +8624,7 @@ impl App {
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
+                    && self.overlay_focus != OverlayFocus::AgentsDialog
                     && self.overlay_focus != OverlayFocus::ModelsDialog
                     && self.overlay_focus != OverlayFocus::ThemesDialog
                 {
@@ -8501,6 +8665,7 @@ impl App {
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
+                    && self.overlay_focus != OverlayFocus::AgentsDialog
                     && self.overlay_focus != OverlayFocus::ModelsDialog
                     && self.overlay_focus != OverlayFocus::ThemesDialog
                 {
@@ -8514,6 +8679,12 @@ impl App {
                     );
                 }
             }
+        }
+
+        if self.overlay_focus == OverlayFocus::AgentsDialog
+            && self.agents_dialog_state.dialog.is_visible()
+        {
+            render_agents_dialog(f, &mut self.agents_dialog_state, size, colors);
         }
 
         if self.overlay_focus == OverlayFocus::ModelsDialog
@@ -8982,6 +9153,7 @@ mod tests {
             home_state: init_home(),
             chat_state: init_chat(Chat::new(), "Build", &colors),
             suggestions_popup_state: init_suggestions_popup(Popup::new()),
+            agents_dialog_state: init_agents_dialog("Select agent", vec![]),
             models_dialog_state: init_models_dialog("Models", vec![]),
             themes_dialog_state: init_themes_dialog("Themes", vec![]),
             themes_dialog_original_theme_index: 0,
@@ -9141,6 +9313,150 @@ mod tests {
         app.overlay_focus = OverlayFocus::PermissionDialog;
 
         assert_eq!(app.terminal_title_text(), "[!] sheetpilot");
+    }
+
+    #[tokio::test]
+    async fn agents_command_opens_primary_agent_dialog() {
+        let mut app = test_app();
+
+        app.process_input("/agents").await;
+
+        assert_eq!(app.overlay_focus, OverlayFocus::AgentsDialog);
+        assert!(app.agents_dialog_state.dialog.is_visible());
+        assert_eq!(app.agents_dialog_state.dialog.title, "Select agent");
+        assert!(app
+            .agents_dialog_state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "build" && item.name == "build" && item.active));
+        assert!(app
+            .agents_dialog_state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "plan"));
+        assert!(!app
+            .agents_dialog_state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "general"));
+    }
+
+    #[test]
+    fn agent_dialog_includes_config_all_mode_agents() {
+        let mut app = test_app();
+        let mut warnings = Vec::new();
+        let defs = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "designer": {
+                    "description": "Design UI",
+                    "mode": "all",
+                    "model": "openai/gpt-5"
+                },
+                "reviewer": {
+                    "description": "Review code",
+                    "mode": "subagent"
+                }
+            })),
+            &mut warnings,
+        );
+        app.agent_registry = crate::agent::definition::AgentRegistry::with_definitions(None, defs);
+
+        let items = app.agent_dialog_items();
+
+        assert!(warnings.is_empty());
+        assert!(items.iter().any(|item| {
+            item.id == "designer"
+                && item.name == "designer"
+                && item.group == "Primary + Subagent"
+                && item.tip.as_deref() == Some("openai/gpt-5")
+        }));
+        assert!(!items.iter().any(|item| item.id == "reviewer"));
+    }
+
+    #[test]
+    fn agent_dialog_excludes_subagents_even_when_they_are_mentionable() {
+        let mut app = test_app();
+        let mut warnings = Vec::new();
+        let defs = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "frontend-agent": {
+                    "description": "Fast frontend subagent",
+                    "mode": "subagent",
+                    "model": "xai/grok-composer-2.5-fast",
+                    "prompt": "Build polished frontends."
+                }
+            })),
+            &mut warnings,
+        );
+        app.agent_registry = crate::agent::definition::AgentRegistry::with_definitions(None, defs);
+
+        assert!(warnings.is_empty());
+        assert!(app
+            .agent_registry
+            .visible_agent_names_for_mentions()
+            .contains(&"frontend-agent".to_string()));
+        assert!(!app
+            .agent_dialog_items()
+            .iter()
+            .any(|item| item.id == "frontend-agent"));
+        assert!(!app.set_agent_mode("frontend-agent"));
+    }
+
+    #[test]
+    fn mode_all_agent_can_be_selected_and_overrides_model_and_reasoning() {
+        let mut app = test_app();
+        let mut warnings = Vec::new();
+        let defs = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "frontend-agent": {
+                    "description": "Fast frontend agent",
+                    "mode": "all",
+                    "model": "xai/grok-composer-2.5-fast",
+                    "reasoningEffort": "low",
+                    "prompt": "Build polished frontends."
+                }
+            })),
+            &mut warnings,
+        );
+        app.agent_registry = crate::agent::definition::AgentRegistry::with_definitions(None, defs);
+
+        assert!(warnings.is_empty());
+        assert!(app.set_agent_mode("frontend-agent"));
+        assert_eq!(app.agent, "Frontend-agent");
+        assert_eq!(
+            app.active_primary_agent_model_provider(),
+            ("xai".to_string(), "grok-composer-2.5-fast".to_string())
+        );
+        assert_eq!(
+            app.active_primary_agent_reasoning_effort(),
+            Some(crate::model::reasoning::ReasoningEffort::Low)
+        );
+    }
+
+    #[test]
+    fn tab_cycles_through_config_primary_agents() {
+        let mut app = test_app();
+        let mut warnings = Vec::new();
+        let defs = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "designer": {
+                    "description": "Design UI",
+                    "mode": "all"
+                }
+            })),
+            &mut warnings,
+        );
+        app.agent_registry = crate::agent::definition::AgentRegistry::with_definitions(None, defs);
+
+        assert!(warnings.is_empty());
+        assert_eq!(app.agent, "Build");
+        app.toggle_agent_mode();
+        assert_eq!(app.agent, "Designer");
+        app.toggle_agent_mode();
+        assert_eq!(app.agent, "Plan");
     }
 
     #[tokio::test]

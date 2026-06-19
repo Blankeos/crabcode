@@ -354,3 +354,5 @@ I think this is how the TUI works already anyway right?
 - [ ] low prio: title generation? maybe, maybenot, just a waste of tokens honestly.
 
 - [ ] better permission asking. Like if it's going to ask for reading a directory, just ask multiple anyway so it doesnt need to ask so much?
+
+- [x] More than build | plan agents. /agents command (like opencode, opens a select agent cmdk dialog basically). and inferring what's in the "agents" config. command palette as well.
