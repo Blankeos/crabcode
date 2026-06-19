@@ -769,9 +769,10 @@ impl Input {
             None => return,
         };
 
-        // Find the word start by walking chars backwards from the cursor
-        let safe_col = char_boundary_before(line, cursor_col);
-        if safe_col == 0 {
+        // Find the word start by walking chars backwards from the cursor.
+        // tui-textarea cursor columns are character indexes, not byte offsets.
+        let cursor_col = cursor_col.min(line.chars().count());
+        if cursor_col == 0 {
             // At start of line: join with previous line if possible
             if row > 0 {
                 self.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
@@ -781,34 +782,35 @@ impl Input {
         }
 
         // Walk backwards from the cursor to find the word boundary
-        let prefix = &line[..safe_col];
-        let chars_rev: Vec<(usize, char)> = prefix.char_indices().rev().collect();
+        let chars: Vec<char> = line.chars().collect();
+        let chars_rev = chars[..cursor_col].iter().enumerate().rev();
 
-        if chars_rev.is_empty() {
+        let mut chars_rev = chars_rev.peekable();
+        if chars_rev.peek().is_none() {
             return;
         }
 
         // Determine the category of the character just before the cursor
-        let (_, first_char) = chars_rev[0];
-        let first_kind = char_kind(first_char);
+        let (_, first_char) = chars_rev.next().expect("non-empty cursor prefix");
+        let first_kind = char_kind(*first_char);
 
         // Scan backward to find where the word starts
-        let mut word_start = safe_col;
-        for (byte_idx, c) in chars_rev.iter().skip(1) {
+        let mut word_start = cursor_col - 1;
+        for (char_idx, c) in chars_rev {
             let kind = char_kind(*c);
             if kind != first_kind {
-                // Boundary found at the byte after this character
-                word_start = byte_idx + c.len_utf8();
+                // Boundary found at the character after this one.
+                word_start = char_idx + 1;
                 break;
             }
-            word_start = *byte_idx;
+            word_start = char_idx;
         }
 
-        // Delete from word_start to safe_col
-        if word_start < safe_col {
-            let char_count = line[word_start..safe_col].chars().count();
+        // Delete from word_start to cursor_col
+        if word_start < cursor_col {
+            let char_count = cursor_col - word_start;
             self.textarea
-                .move_cursor(CursorMove::Jump(row as u16, safe_col as u16));
+                .move_cursor(CursorMove::Jump(row as u16, cursor_col as u16));
             for _ in 0..char_count {
                 self.textarea.delete_char();
             }
@@ -2253,6 +2255,36 @@ mod tests {
 
         assert!(input.handle_event(modified_key_event(KeyCode::Backspace, KeyModifiers::SUPER)));
         assert_eq!(input.get_text(), "\n");
+        assert_eq!(input.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn test_alt_backspace_deletes_single_character_words() {
+        let mut input = Input::new();
+        let alt_backspace = modified_key_event(KeyCode::Backspace, KeyModifiers::ALT);
+        input.insert_str("1. ");
+
+        assert!(input.handle_event(alt_backspace));
+        assert_eq!(input.get_text(), "1.");
+        assert_eq!(input.textarea.cursor(), (0, 2));
+
+        assert!(input.handle_event(alt_backspace));
+        assert_eq!(input.get_text(), "1");
+        assert_eq!(input.textarea.cursor(), (0, 1));
+
+        assert!(input.handle_event(alt_backspace));
+        assert_eq!(input.get_text(), "");
+        assert_eq!(input.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn test_alt_backspace_deletes_single_multibyte_character() {
+        let mut input = Input::new();
+        input.insert_str("🙂");
+
+        assert!(input.handle_event(modified_key_event(KeyCode::Backspace, KeyModifiers::ALT,)));
+
+        assert_eq!(input.get_text(), "");
         assert_eq!(input.textarea.cursor(), (0, 0));
     }
 
