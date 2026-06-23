@@ -356,3 +356,7 @@ I think this is how the TUI works already anyway right?
 - [ ] better permission asking. Like if it's going to ask for reading a directory, just ask multiple anyway so it doesnt need to ask so much?
 
 - [x] More than build | plan agents. /agents command (like opencode, opens a select agent cmdk dialog basically). and inferring what's in the "agents" config. command palette as well.
+
+- [x] I want the user input cursor + mousescroll behavior to be more like the browser. So the current issue is when I have multiple lines in the chat input and it's scrollable.
+  - Current: When I scroll with my mouse, the cursor also changes along with the scroll view.
+  - Expected: When I scroll with my mouse, the cursor stays in place, does not change, even when out of bounds. Then when I type, even when out of bounds, the scroll goes back to where my cursor is.

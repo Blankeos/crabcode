@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tui_textarea::{CursorMove, Input as TuiInput, TextArea};
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
@@ -47,6 +48,7 @@ fn char_kind(c: char) -> u8 {
 
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
 const MAX_TEXTAREA_HEIGHT: usize = 6;
+const POST_KEY_SCROLL_SUPPRESSION: Duration = Duration::from_millis(160);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VisualLine {
@@ -66,6 +68,8 @@ pub struct Input {
     pub autocomplete: Option<AutoComplete>,
     textarea_area: Option<Rect>,
     viewport_top: usize,
+    manual_viewport_scroll: bool,
+    suppress_scroll_until: Option<Instant>,
     preferred_visual_col: Option<usize>,
     selection_drag_active: bool,
     selection_edge_scroll: Option<SelectionEdgeScroll>,
@@ -118,6 +122,8 @@ impl Input {
             autocomplete: None,
             textarea_area: None,
             viewport_top: 0,
+            manual_viewport_scroll: false,
+            suppress_scroll_until: None,
             preferred_visual_col: None,
             selection_drag_active: false,
             selection_edge_scroll: None,
@@ -131,6 +137,7 @@ impl Input {
     }
 
     fn move_to_line_start(&mut self) {
+        self.reveal_cursor_after_key_input();
         self.preferred_visual_col = None;
         let (row, _) = self.textarea.cursor();
         self.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
@@ -145,6 +152,7 @@ impl Input {
     }
 
     fn move_to_line_end(&mut self) {
+        self.reveal_cursor_after_key_input();
         self.preferred_visual_col = None;
         let (row, _) = self.textarea.cursor();
         let col = self.line_end_col(row);
@@ -153,13 +161,45 @@ impl Input {
     }
 
     fn delete_to_line_start(&mut self) {
+        self.reveal_cursor_after_key_input();
         self.preferred_visual_col = None;
         textarea_delete_to_line_start(&mut self.textarea);
     }
 
     fn command_backspace_to_line_start(&mut self) {
+        self.reveal_cursor_after_key_input();
         self.preferred_visual_col = None;
         textarea_command_backspace_to_line_start(&mut self.textarea);
+    }
+
+    fn reveal_cursor_on_next_render(&mut self) {
+        self.manual_viewport_scroll = false;
+    }
+
+    fn reveal_cursor_after_key_input(&mut self) {
+        let should_suppress_scroll = self.manual_viewport_scroll
+            || self
+                .suppress_scroll_until
+                .is_some_and(|until| Instant::now() < until);
+        self.reveal_cursor_on_next_render();
+        if should_suppress_scroll {
+            self.suppress_scroll_until = Some(Instant::now() + POST_KEY_SCROLL_SUPPRESSION);
+        }
+    }
+
+    fn should_suppress_scroll(&mut self) -> bool {
+        let Some(until) = self.suppress_scroll_until else {
+            return false;
+        };
+
+        let now = Instant::now();
+        if now < until {
+            self.suppress_scroll_until = Some(now + POST_KEY_SCROLL_SUPPRESSION);
+            true
+        } else {
+            self.suppress_scroll_until = None;
+            false
+        }
     }
 
     pub fn with_autocomplete(mut self, autocomplete: AutoComplete) -> Self {
@@ -442,6 +482,7 @@ impl Input {
 
         // Check for Shift+Enter (works in most terminals)
         if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::SHIFT) {
+            self.reveal_cursor_after_key_input();
             self.textarea.insert_newline();
             self.sync_image_placeholders();
             self.sync_pending_pastes();
@@ -450,6 +491,7 @@ impl Input {
 
         // Fallback: Alt+Enter for terminals where Shift+Enter doesn't work
         if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::ALT) {
+            self.reveal_cursor_after_key_input();
             self.textarea.insert_newline();
             self.sync_image_placeholders();
             self.sync_pending_pastes();
@@ -465,6 +507,7 @@ impl Input {
         // Handle Up arrow for prompt history navigation
         // Trigger when cursor is on first line
         if event.code == KeyCode::Up && event.modifiers == KeyModifiers::NONE {
+            self.reveal_cursor_after_key_input();
             if self.move_cursor_visual(-1, false) {
                 return true;
             }
@@ -486,6 +529,7 @@ impl Input {
 
         // Handle Down arrow for prompt history navigation
         if event.code == KeyCode::Down && event.modifiers == KeyModifiers::NONE {
+            self.reveal_cursor_after_key_input();
             if self.move_cursor_visual(1, false) {
                 return true;
             }
@@ -531,6 +575,7 @@ impl Input {
 
         match event.code {
             KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => {
+                self.reveal_cursor_after_key_input();
                 self.preferred_visual_col = None;
                 self.textarea.insert_newline();
                 self.sync_image_placeholders();
@@ -571,6 +616,7 @@ impl Input {
             }
             KeyCode::Delete if self.remove_placeholder_at_cursor(true) => true,
             KeyCode::Backspace if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.reveal_cursor_after_key_input();
                 self.preferred_visual_col = None;
                 // Handle Alt+Backspace (word-delete) ourselves to avoid
                 // tui-textarea's buggy word boundary with multi-byte emoji
@@ -580,6 +626,7 @@ impl Input {
                 true
             }
             _ => {
+                self.reveal_cursor_after_key_input();
                 self.preferred_visual_col = None;
                 self.textarea.input(input);
                 self.sync_image_placeholders();
@@ -635,11 +682,17 @@ impl Input {
                 previous_hover != self.hovered_image_placeholder
             }
             MouseEventKind::ScrollDown => {
-                self.move_cursor_visual(1, false);
+                if self.should_suppress_scroll() {
+                    return true;
+                }
+                self.scroll_viewport_visual(1);
                 true
             }
             MouseEventKind::ScrollUp => {
-                self.move_cursor_visual(-1, false);
+                if self.should_suppress_scroll() {
+                    return true;
+                }
+                self.scroll_viewport_visual(-1);
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -667,6 +720,7 @@ impl Input {
                         return true;
                     }
                     // Position cursor; actual selection starts only if a drag follows.
+                    self.reveal_cursor_on_next_render();
                     self.textarea
                         .move_cursor(CursorMove::Jump(target_row as u16, target_col as u16));
                     self.selection_drag_active = true;
@@ -675,6 +729,7 @@ impl Input {
                     let lines = self.textarea.lines();
                     let last_row = lines.len().saturating_sub(1);
                     let last_col = lines[last_row].chars().count();
+                    self.reveal_cursor_on_next_render();
                     self.textarea
                         .move_cursor(CursorMove::Jump(last_row as u16, last_col as u16));
                     self.selection_drag_active = true;
@@ -686,6 +741,7 @@ impl Input {
                 if !self.selection_drag_active {
                     return false;
                 }
+                self.reveal_cursor_on_next_render();
                 self.preferred_visual_col = None;
                 self.start_selection_drag_if_needed();
                 // Since selection is active, move_cursor extends it.
@@ -960,6 +1016,7 @@ impl Input {
         self.textarea
             .move_cursor(CursorMove::Jump(row as u16, col as u16));
         self.viewport_top = 0;
+        self.manual_viewport_scroll = false;
         self.preferred_visual_col = None;
         self.hovered_image_placeholder = None;
     }
@@ -976,6 +1033,7 @@ impl Input {
         self.reset_textarea();
         self.textarea.insert_str(&draft.text);
         self.viewport_top = 0;
+        self.manual_viewport_scroll = false;
         self.preferred_visual_col = None;
         self.local_images = draft.local_images;
         self.pending_pastes = draft.pending_pastes;
@@ -1142,7 +1200,35 @@ impl Input {
             target.source_row as u16,
             target_col as u16,
         ));
+        self.reveal_cursor_on_next_render();
         self.preferred_visual_col = Some(preferred_col);
+        true
+    }
+
+    fn scroll_viewport_visual(&mut self, direction: isize) -> bool {
+        let Some(area) = self.textarea_area else {
+            return false;
+        };
+        if area.width == 0 || area.height == 0 {
+            return false;
+        }
+
+        let visual_lines = self.visual_lines(area.width as usize);
+        let max_viewport_top = visual_lines.len().saturating_sub(area.height as usize);
+
+        self.viewport_top = self.viewport_top.min(max_viewport_top);
+
+        if max_viewport_top == 0 {
+            self.manual_viewport_scroll = false;
+            return true;
+        }
+
+        self.viewport_top = if direction < 0 {
+            self.viewport_top.saturating_sub(1)
+        } else {
+            self.viewport_top.saturating_add(1).min(max_viewport_top)
+        };
+        self.manual_viewport_scroll = true;
         true
     }
 
@@ -1299,6 +1385,9 @@ impl Input {
         let max_viewport_top = visual_lines.len().saturating_sub(visible_lines);
 
         self.viewport_top = self.viewport_top.min(max_viewport_top);
+        if self.manual_viewport_scroll {
+            return;
+        }
         self.viewport_top =
             Self::next_scroll_offset(self.viewport_top, cursor_visual_row, visible_lines)
                 .min(max_viewport_top);
@@ -1606,6 +1695,7 @@ impl Input {
 
     pub fn attach_image(&mut self, path: PathBuf) {
         let placeholder = Self::image_placeholder(self.local_images.len() + 1);
+        self.reveal_cursor_on_next_render();
         self.preferred_visual_col = None;
         self.textarea.insert_str(&placeholder);
         self.local_images
@@ -1762,6 +1852,7 @@ impl Input {
     pub fn clear(&mut self) {
         self.reset_textarea();
         self.viewport_top = 0;
+        self.manual_viewport_scroll = false;
         self.preferred_visual_col = None;
         self.draft_state = None;
         self.local_images.clear();
@@ -1793,6 +1884,7 @@ impl Input {
         self.reset_textarea();
         self.textarea.insert_str(text);
         self.viewport_top = 0;
+        self.manual_viewport_scroll = false;
         self.preferred_visual_col = None;
         self.local_images.clear();
         self.pending_pastes.clear();
@@ -1819,6 +1911,7 @@ impl Input {
         self.reset_textarea();
         self.textarea.insert_str(&text);
         self.viewport_top = 0;
+        self.manual_viewport_scroll = false;
         self.preferred_visual_col = None;
         self.local_images = local_images;
         self.pending_pastes.clear();
@@ -1827,6 +1920,7 @@ impl Input {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        self.reveal_cursor_on_next_render();
         self.preferred_visual_col = None;
         self.textarea.insert_str(c.to_string().as_str());
         self.sync_image_placeholders();
@@ -1834,6 +1928,7 @@ impl Input {
     }
 
     pub fn insert_str(&mut self, text: &str) {
+        self.reveal_cursor_on_next_render();
         self.preferred_visual_col = None;
         self.textarea.insert_str(text);
         self.sync_image_placeholders();
@@ -1847,6 +1942,7 @@ impl Input {
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             self.sync_pending_pastes();
             let placeholder = self.next_large_paste_placeholder(char_count);
+            self.reveal_cursor_on_next_render();
             self.preferred_visual_col = None;
             self.textarea.insert_str(&placeholder);
             self.pending_pastes.push(PendingPaste {
@@ -2466,17 +2562,58 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_scroll_moves_across_wrapped_visual_lines() {
+    fn test_mouse_scroll_moves_viewport_without_moving_cursor() {
         let mut input = Input::new();
-        input.insert_str("0123456789ABCDEF");
-        input.textarea_area = Some(Rect::new(0, 0, 15, 6));
-        input.textarea.move_cursor(CursorMove::Jump(0, 0));
+        input.insert_str("line0\nline1\nline2\nline3\nline4\nline5\nline6");
+        input.textarea_area = Some(Rect::new(0, 0, 10, 3));
+        input.textarea.move_cursor(CursorMove::End);
 
         assert!(input.handle_mouse_event(mouse_event(MouseEventKind::ScrollDown)));
-        assert_eq!(input.textarea.cursor(), (0, 15));
+        assert_eq!(input.textarea.cursor(), (6, 5));
+        assert_eq!(input.viewport_top, 1);
 
         assert!(input.handle_mouse_event(mouse_event(MouseEventKind::ScrollUp)));
-        assert_eq!(input.textarea.cursor(), (0, 0));
+        assert_eq!(input.textarea.cursor(), (6, 5));
+        assert_eq!(input.viewport_top, 0);
+    }
+
+    #[test]
+    fn test_typing_after_mouse_scroll_reveals_cursor() {
+        let mut input = Input::new();
+        input.insert_str("line0\nline1\nline2\nline3\nline4\nline5\nline6");
+        input.textarea_area = Some(Rect::new(0, 0, 10, 3));
+        input.textarea.move_cursor(CursorMove::End);
+
+        input.viewport_top = 4;
+        assert!(input.handle_mouse_event(mouse_event(MouseEventKind::ScrollUp)));
+        assert_eq!(input.viewport_top, 3);
+        assert_eq!(input.textarea.cursor(), (6, 5));
+
+        assert!(input.handle_event(key_event(KeyCode::Char('!'))));
+        input.update_viewport(3, 10);
+
+        assert_eq!(input.textarea.cursor(), (6, 6));
+        assert_eq!(input.viewport_top, 4);
+    }
+
+    #[test]
+    fn test_queued_scroll_after_typing_is_ignored() {
+        let mut input = Input::new();
+        input.insert_str("line0\nline1\nline2\nline3\nline4\nline5\nline6");
+        input.textarea_area = Some(Rect::new(0, 0, 10, 3));
+        input.textarea.move_cursor(CursorMove::End);
+
+        input.viewport_top = 2;
+        input.manual_viewport_scroll = true;
+        assert!(input.handle_event(key_event(KeyCode::Char('!'))));
+        input.update_viewport(3, 10);
+        assert_eq!(input.viewport_top, 4);
+
+        assert!(input.handle_mouse_event(mouse_event(MouseEventKind::ScrollDown)));
+        assert!(input.handle_mouse_event(mouse_event(MouseEventKind::ScrollDown)));
+
+        assert_eq!(input.textarea.cursor(), (6, 6));
+        assert_eq!(input.viewport_top, 4);
     }
 
     #[test]
