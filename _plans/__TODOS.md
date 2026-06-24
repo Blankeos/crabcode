@@ -365,4 +365,4 @@ I think this is how the TUI works already anyway right?
 
 - [x] We have a feature to make paths clickable... But dont't make this path clickable: `/Users/carlo/Desktop/Projects/crabenv/src`. It's a folder not a file.
 
--
+- [x] Show the "favorited" models in the beginning when searching in /models.

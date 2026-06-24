@@ -42,7 +42,9 @@ impl ModelsDialogState {
 
     pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
         Self {
-            dialog: Dialog::with_items(title, items).with_actions(base_actions()),
+            dialog: Dialog::with_items(title, items)
+                .with_search_priority_groups(vec!["Favorite".to_string()])
+                .with_actions(base_actions()),
         }
     }
 
@@ -56,7 +58,9 @@ impl ModelsDialogState {
         let search_query = self.dialog.search_textarea.lines().join("");
         let actions = self.dialog.actions.clone();
 
-        self.dialog = Dialog::with_items(title, items).with_actions(actions);
+        self.dialog = Dialog::with_items(title, items)
+            .with_search_priority_groups(vec!["Favorite".to_string()])
+            .with_actions(actions);
 
         if was_visible {
             self.dialog.show();
@@ -304,6 +308,28 @@ mod tests {
     }
 
     const CENTER_DIALOG_LIST_Y: u16 = 6;
+
+    #[test]
+    fn search_prioritizes_favorite_models() {
+        let mut favorite = model_item("gpt-5", "GPT-5", "openai");
+        favorite.group = "Favorite".to_string();
+
+        let mut state = init_models_dialog(
+            "Models",
+            vec![
+                model_item("gpt-4o", "GPT-4o", "openai"),
+                favorite,
+                model_item("claude-sonnet", "Claude Sonnet", "anthropic"),
+            ],
+        );
+
+        state.dialog.set_search_query("gpt");
+
+        assert_eq!(state.dialog.filtered_items.len(), 2);
+        assert_eq!(state.dialog.filtered_items[0].0, "Favorite");
+        assert_eq!(state.dialog.filtered_items[0].1[0].id, "gpt-5");
+        assert_eq!(state.dialog.filtered_items[1].1[0].id, "gpt-4o");
+    }
 
     #[test]
     fn mouse_click_on_item_selects_model() {

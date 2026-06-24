@@ -89,6 +89,7 @@ pub struct Dialog {
     collapsed_groups: HashSet<String>,
     focusable_group_headers: bool,
     focused_group_header: Option<String>,
+    search_priority_groups: Vec<String>,
     matcher: Matcher,
 }
 
@@ -126,6 +127,7 @@ impl Dialog {
             collapsed_groups: HashSet::new(),
             focusable_group_headers: false,
             focused_group_header: None,
+            search_priority_groups: Vec::new(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
@@ -148,6 +150,11 @@ impl Dialog {
         if !enabled {
             self.focused_group_header = None;
         }
+        self
+    }
+
+    pub fn with_search_priority_groups(mut self, groups: Vec<String>) -> Self {
+        self.search_priority_groups = groups;
         self
     }
 
@@ -377,7 +384,13 @@ impl Dialog {
                 }
             }
 
-            filtered.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.3.cmp(&b.3)));
+            let search_priority_groups = self.search_priority_groups.clone();
+            filtered.sort_by(|a, b| {
+                Self::search_group_priority(&search_priority_groups, &a.0)
+                    .cmp(&Self::search_group_priority(&search_priority_groups, &b.0))
+                    .then_with(|| b.2.cmp(&a.2))
+                    .then_with(|| a.3.cmp(&b.3))
+            });
             self.filtered_items = filtered
                 .into_iter()
                 .map(|(group, items, _, _)| (group, items))
@@ -433,6 +446,13 @@ impl Dialog {
         Self::consider_search_field(pattern, matcher, &combined, 0, &mut best_score);
 
         best_score
+    }
+
+    fn search_group_priority(priority_groups: &[String], group: &str) -> usize {
+        priority_groups
+            .iter()
+            .position(|priority_group| priority_group == group)
+            .unwrap_or(priority_groups.len())
     }
 
     fn consider_search_field(
@@ -1819,6 +1839,7 @@ impl Clone for Dialog {
             collapsed_groups: self.collapsed_groups.clone(),
             focusable_group_headers: self.focusable_group_headers,
             focused_group_header: self.focused_group_header.clone(),
+            search_priority_groups: self.search_priority_groups.clone(),
             matcher: Matcher::new(Config::DEFAULT),
         }
     }
