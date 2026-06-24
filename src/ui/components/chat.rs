@@ -712,14 +712,6 @@ fn display_path(raw: &str, basename_only: bool) -> String {
 }
 
 fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
-    if message.role != MessageRole::Tool {
-        return Vec::new();
-    }
-
-    let Some(info) = parse_tool_message(&message.content) else {
-        return Vec::new();
-    };
-
     let mut candidates = Vec::new();
     let mut push_candidate = |value: Option<&str>| {
         if let Some(path) = value.and_then(path_candidate_from_value) {
@@ -729,15 +721,35 @@ fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
         }
     };
 
-    let args_obj = info.args.as_ref().and_then(|value| value.as_object());
-    let metadata_obj = info.metadata.as_ref().and_then(|value| value.as_object());
-    for key in ["path", "file_path", "filePath"] {
-        push_candidate(arg_string(args_obj, &[key]));
-        push_candidate(arg_string(metadata_obj, &[key]));
-    }
+    let mut push_tool_info = |info: ParsedToolMessage| {
+        let args_obj = info.args.as_ref().and_then(|value| value.as_object());
+        let metadata_obj = info.metadata.as_ref().and_then(|value| value.as_object());
+        for key in ["path", "file_path", "filePath"] {
+            push_candidate(arg_string(args_obj, &[key]));
+            push_candidate(arg_string(metadata_obj, &[key]));
+        }
 
-    if let Some(title) = info.title.as_deref() {
-        push_candidate(title.split_once(':').map(|(_, path)| path.trim()));
+        if let Some(title) = info.title.as_deref() {
+            push_candidate(title.split_once(':').map(|(_, path)| path.trim()));
+        }
+    };
+
+    if message.role == MessageRole::Tool {
+        if let Some(info) = parse_tool_message(&message.content) {
+            push_tool_info(info);
+        }
+    } else if message.role == MessageRole::Assistant {
+        let result_ids = assistant_tool_result_ids(message);
+        for part in &message.parts {
+            if !matches!(part.part_type.as_str(), "tool_call" | "tool_result") {
+                continue;
+            }
+            if let Some(content) = assistant_tool_part_content(message, part, &result_ids) {
+                if let Some(info) = parse_tool_message(&content) {
+                    push_tool_info(info);
+                }
+            }
+        }
     }
 
     candidates
@@ -6076,6 +6088,79 @@ mod tests {
 
         match target {
             crate::ui::hyperlink::HyperlinkTarget::File(path) => assert_eq!(path, full_path),
+            crate::ui::hyperlink::HyperlinkTarget::Url(url) => {
+                panic!("expected file target, got {url}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_hyperlink_hit_test_uses_assistant_tool_part_metadata_for_compact_read_group() {
+        let mut message = Message::assistant("");
+        message.parts = vec![
+            crate::session::types::MessagePart::tool_call(
+                "call_1",
+                "read",
+                serde_json::json!({ "file_path": "src/command/handlers.rs" }),
+            ),
+            crate::session::types::MessagePart::tool_result(serde_json::json!({
+                "id": "call_1",
+                "name": "read",
+                "status": "ok",
+                "title": "Read: src/command/handlers.rs",
+            })),
+            crate::session::types::MessagePart::tool_call(
+                "call_2",
+                "read",
+                serde_json::json!({ "file_path": "src/ui/components/dialog.rs" }),
+            ),
+            crate::session::types::MessagePart::tool_result(serde_json::json!({
+                "id": "call_2",
+                "name": "read",
+                "status": "ok",
+                "title": "Read: src/ui/components/dialog.rs",
+            })),
+        ];
+
+        let mut chat = Chat::with_messages(vec![message]);
+        let colors = test_colors();
+        let area = Rect::new(0, 0, 80, 10);
+        let content_width = area.width.saturating_sub(2) as usize;
+        let (lines, positions) =
+            chat.build_all_lines_with_positions(content_width, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_positions = positions.clone();
+        chat.message_line_positions = positions;
+        chat.content_height = chat.cached_lines.len();
+        chat.viewport_height = area.height as usize;
+        chat.scroll_offset = 0;
+
+        let (line_idx, col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find("dialog.rs").map(|col| (line_idx, col as u16))
+            })
+            .expect("short read path position");
+
+        let target = chat
+            .hyperlink_at_position(
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    col,
+                    line_idx as u16,
+                    KeyModifiers::empty(),
+                ),
+                area,
+            )
+            .expect("hyperlink target");
+
+        match target {
+            crate::ui::hyperlink::HyperlinkTarget::File(path) => {
+                assert!(path.ends_with("src/ui/components/dialog.rs"));
+            }
             crate::ui::hyperlink::HyperlinkTarget::Url(url) => {
                 panic!("expected file target, got {url}");
             }
