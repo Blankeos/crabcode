@@ -251,7 +251,17 @@ fn is_absolute_path_like(path_text: &str) -> bool {
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
 
-    segments.len() >= 2 || std::path::Path::new(path_text).exists()
+    if segments.len() < 2 && !std::path::Path::new(path_text).exists() {
+        return false;
+    }
+
+    // Don't mark directories as clickable
+    let path = std::path::Path::new(path_text);
+    if path.exists() {
+        return path.is_file();
+    }
+
+    true
 }
 
 fn is_relative_slash_path(path_text: &str) -> bool {
@@ -281,7 +291,7 @@ fn is_relative_slash_path(path_text: &str) -> bool {
         return true;
     }
 
-    expand_local_path(path_text).is_some_and(|path| path.exists())
+    expand_local_path(path_text).is_some_and(|path| path.is_file())
 }
 
 fn is_path_segment_char(ch: char) -> bool {
