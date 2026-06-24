@@ -1090,18 +1090,30 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
             Some(Ok(ChunkType::Reasoning(delta.to_string())))
         }
         "response.completed" => {
-            let resp = &value["response"];
-            if let Some(error) = resp.get("error") {
-                if let Some(code) = error.get("code") {
-                    return Some(Ok(ChunkType::Failed(code.to_string())));
-                }
+            if value
+                .get("response")
+                .and_then(|resp| resp.get("error"))
+                .is_some_and(|error| !error.is_null())
+            {
+                return Some(Ok(ChunkType::Failed(responses_provider_error_message(
+                    &value,
+                    "Response completed with error",
+                ))));
             }
+            let resp = &value["response"];
             Some(Ok(ChunkType::ResponseCompleted {
                 end_turn: resp.get("end_turn").and_then(|value| value.as_bool()),
             }))
         }
         "response.incomplete" => Some(Ok(ChunkType::Incomplete("Response incomplete".to_string()))),
-        "response.failed" => Some(Ok(ChunkType::Failed("Response failed".to_string()))),
+        "response.failed" => Some(Ok(ChunkType::Failed(responses_provider_error_message(
+            &value,
+            "Response failed",
+        )))),
+        "error" => Some(Ok(ChunkType::Failed(responses_provider_error_message(
+            &value,
+            "OpenAI Responses stream error",
+        )))),
         _ => {
             if let Some(message_phase) = responses_assistant_message_phase_chunk(&value) {
                 Some(Ok(message_phase))
@@ -1114,6 +1126,31 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
             }
         }
     }
+}
+
+fn responses_provider_error_message(value: &serde_json::Value, fallback: &str) -> String {
+    let code = response_error_field(value, "code");
+    let message = response_error_field(value, "message");
+
+    match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (None, Some(message)) => message.to_string(),
+        (Some(code), None) => code.to_string(),
+        (None, None) => fallback.to_string(),
+    }
+}
+
+fn response_error_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)
+        .and_then(|field_value| field_value.as_str())
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(|error| error.get(field))
+                .and_then(|field_value| field_value.as_str())
+        })
 }
 
 fn responses_assistant_message_phase_chunk(value: &serde_json::Value) -> Option<ChunkType> {
@@ -1406,6 +1443,47 @@ mod tests {
             Ok(ChunkType::ResponseCompleted {
                 end_turn: Some(false)
             })
+        ));
+    }
+
+    #[test]
+    fn response_failed_includes_nested_provider_error() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.failed","response":{"error":{"code":"invalid_token","message":"OAuth token expired"}}}"#,
+        )
+        .expect("expected failure chunk");
+
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::Failed(message))
+                if message == "invalid_token: OAuth token expired"
+        ));
+    }
+
+    #[test]
+    fn response_error_event_includes_top_level_provider_error() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"error","code":"forbidden","message":"Codex access denied"}"#,
+        )
+        .expect("expected failure chunk");
+
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::Failed(message))
+                if message == "forbidden: Codex access denied"
+        ));
+    }
+
+    #[test]
+    fn response_completed_error_uses_readable_error_code() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.completed","response":{"error":{"code":"rate_limit_exceeded"}}}"#,
+        )
+        .expect("expected failure chunk");
+
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::Failed(message)) if message == "rate_limit_exceeded"
         ));
     }
 

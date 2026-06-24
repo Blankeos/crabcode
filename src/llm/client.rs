@@ -712,7 +712,7 @@ async fn prepare_request_config(
         &mut request_config,
         sender,
     )
-    .await;
+    .await?;
     maybe_apply_xai_oauth_overrides(
         provider_name,
         &auth_dao,
@@ -889,9 +889,9 @@ async fn maybe_apply_openai_oauth_overrides(
     auth_config: Option<&crate::persistence::AuthConfig>,
     request_config: &mut ProviderRequestConfig,
     sender: &crate::llm::ChunkSender,
-) {
+) -> Result<(), DynError> {
     if request_config.kind != ProviderKind::OpenAI || provider_name != "openai" {
-        return;
+        return Ok(());
     }
 
     let Some(crate::persistence::AuthConfig::OAuth {
@@ -902,7 +902,7 @@ async fn maybe_apply_openai_oauth_overrides(
         enterprise_url,
     }) = auth_config.cloned()
     else {
-        return;
+        return Ok(());
     };
 
     let mut oauth_refresh = refresh;
@@ -911,7 +911,9 @@ async fn maybe_apply_openai_oauth_overrides(
     let mut oauth_account_id = account_id;
     let mut oauth_enterprise_url = enterprise_url;
 
-    if oauth_expires <= crate::auth::openai_oauth::now_unix_ms() + 60_000 {
+    let now = crate::auth::openai_oauth::now_unix_ms();
+    let refresh_required = oauth_expires <= now;
+    if oauth_expires <= now + 60_000 {
         match crate::auth::openai_oauth::refresh_access_token(&oauth_refresh).await {
             Ok(refreshed) => {
                 oauth_refresh = refreshed.refresh;
@@ -937,6 +939,13 @@ async fn maybe_apply_openai_oauth_overrides(
                 );
             }
             Err(err) => {
+                if refresh_required {
+                    return Err(anyhow::anyhow!(
+                        "OpenAI OAuth token refresh failed: {}. Please reconnect OpenAI OAuth.",
+                        err
+                    )
+                    .into());
+                }
                 send_warning(
                     sender,
                     format!("Failed to refresh OpenAI OAuth token: {}", err),
@@ -984,6 +993,8 @@ async fn maybe_apply_openai_oauth_overrides(
         );
         request_config.model_name = fallback_model;
     }
+
+    Ok(())
 }
 
 async fn maybe_apply_xai_oauth_overrides(
