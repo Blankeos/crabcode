@@ -361,4 +361,6 @@ I think this is how the TUI works already anyway right?
   - Current: When I scroll with my mouse, the cursor also changes along with the scroll view.
   - Expected: When I scroll with my mouse, the cursor stays in place, does not change, even when out of bounds. Then when I type, even when out of bounds, the scroll goes back to where my cursor is.
 
-- [ ] When I do /timeline or 'esc esc'... If the message is still streaming... or I just submitted just now.. Meaning in the current structure of the messages array.. The latest message is mine.. Then Don't show any "Agent: " in the list. Number 1, I don't wanna see it. Number 2, it doesn't exist. The message is not there.
+- [x] When I do /timeline or 'esc esc'... If the message is still streaming... or I just submitted just now.. Meaning in the current structure of the messages array.. The latest message is mine.. Then Don't show any "Agent: " in the list. Number 1, I don't wanna see it. Number 2, it doesn't exist. The message is not there.
+
+- [ ] We have a feature to make paths clickable... But dont't make this path clickable: `/Users/carlo/Desktop/Projects/crabenv/src`. It's a folder not a file.

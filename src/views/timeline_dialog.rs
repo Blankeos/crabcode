@@ -36,7 +36,6 @@ impl TimelineDialogState {
     pub fn refresh_messages(&mut self, messages: &[Message]) {
         let mut items: Vec<DialogItem> = Vec::new();
         let mut last_timeline_role: Option<TimelineRole> = None;
-        let mut last_assistant_preview_empty = false;
 
         for (idx, message) in messages.iter().enumerate() {
             let timeline_role = match message.role {
@@ -48,14 +47,14 @@ impl TimelineDialogState {
             let preview = message_preview(message);
 
             if timeline_role == TimelineRole::Assistant
+                && (!message.is_complete || preview == "(empty)")
+            {
+                continue;
+            }
+
+            if timeline_role == TimelineRole::Assistant
                 && last_timeline_role == Some(TimelineRole::Assistant)
             {
-                if last_assistant_preview_empty && preview != "(empty)" {
-                    if let Some(item) = items.last_mut() {
-                        item.name = format!("Agent: {}", preview);
-                        last_assistant_preview_empty = false;
-                    }
-                }
                 continue;
             }
 
@@ -89,8 +88,6 @@ impl TimelineDialogState {
                 active: false,
             });
             last_timeline_role = Some(timeline_role);
-            last_assistant_preview_empty =
-                timeline_role == TimelineRole::Assistant && preview == "(empty)";
         }
 
         // Chronological order: oldest first, newest at bottom
@@ -295,11 +292,11 @@ mod tests {
                 "Agent: Next response",
             ]
         );
-        assert_eq!(item_ids(&state), vec!["0", "1", "6", "7"]);
+        assert_eq!(item_ids(&state), vec!["0", "5", "6", "7"]);
     }
 
     #[test]
-    fn assistant_segments_without_visible_text_still_collapse() {
+    fn assistant_segments_without_visible_text_are_hidden() {
         let messages = vec![
             Message::user("Run tools"),
             Message::assistant(""),
@@ -309,8 +306,64 @@ mod tests {
 
         let state = TimelineDialogState::build_from_messages(&messages);
 
-        assert_eq!(item_names(&state), vec!["You: Run tools", "Agent: (empty)"]);
-        assert_eq!(item_ids(&state), vec!["0", "1"]);
+        assert_eq!(item_names(&state), vec!["You: Run tools"]);
+        assert_eq!(item_ids(&state), vec!["0"]);
+    }
+
+    #[test]
+    fn timeline_does_not_show_agent_when_latest_message_is_user() {
+        let messages = vec![
+            Message::user("Earlier prompt"),
+            Message::assistant("Earlier answer"),
+            Message::user("Fresh prompt"),
+        ];
+
+        let state = TimelineDialogState::build_from_messages(&messages);
+
+        assert_eq!(
+            item_names(&state),
+            vec![
+                "You: Earlier prompt",
+                "Agent: Earlier answer",
+                "You: Fresh prompt",
+            ]
+        );
+        assert_eq!(item_ids(&state), vec!["0", "1", "2"]);
+    }
+
+    #[test]
+    fn timeline_hides_trailing_empty_incomplete_assistant_placeholder() {
+        let messages = vec![
+            Message::user("Earlier prompt"),
+            Message::assistant("Earlier answer"),
+            Message::user("Fresh prompt"),
+            Message::incomplete(""),
+        ];
+
+        let state = TimelineDialogState::build_from_messages(&messages);
+
+        assert_eq!(
+            item_names(&state),
+            vec![
+                "You: Earlier prompt",
+                "Agent: Earlier answer",
+                "You: Fresh prompt",
+            ]
+        );
+        assert_eq!(item_ids(&state), vec!["0", "1", "2"]);
+    }
+
+    #[test]
+    fn timeline_hides_incomplete_assistant_while_streaming() {
+        let messages = vec![
+            Message::user("Fresh prompt"),
+            Message::incomplete("partial"),
+        ];
+
+        let state = TimelineDialogState::build_from_messages(&messages);
+
+        assert_eq!(item_names(&state), vec!["You: Fresh prompt"]);
+        assert_eq!(item_ids(&state), vec!["0"]);
     }
 
     #[test]
