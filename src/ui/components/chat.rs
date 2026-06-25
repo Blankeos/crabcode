@@ -4382,6 +4382,128 @@ impl Chat {
                     .add_modifier(Modifier::DIM);
                 push_preview_lines(&mut out, preview_text, max_width, result_style);
             }
+        } else if name == "write_files" && status != "error" {
+            let files = args_obj
+                .and_then(|obj| obj.get("files"))
+                .and_then(|value| value.as_array());
+            let mut file_diffs = Vec::new();
+            let mut total_added = 0usize;
+            let mut total_removed = 0usize;
+
+            if let Some(files) = files {
+                for file in files {
+                    let Some(obj) = file.as_object() else {
+                        continue;
+                    };
+                    let path = obj
+                        .get("file_path")
+                        .or_else(|| obj.get("filePath"))
+                        .and_then(|value| value.as_str())
+                        .map(|path| display_path(path, false))
+                        .unwrap_or_else(|| "file".to_string());
+                    let content = obj
+                        .get("content")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let stats = crate::ui::diff::compute_diff_stats("", content);
+                    total_added += stats.added;
+                    total_removed += stats.removed;
+                    file_diffs.push((path, content, stats.added, stats.removed));
+                }
+            }
+
+            let active = matches!(status.as_str(), "running" | "pending");
+            let marker = self.tool_marker(active);
+            let marker_style = Style::default()
+                .fg(if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
+            let title_style = Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD);
+            let target_style = Style::default().fg(colors.text);
+            let add_style = Style::default()
+                .fg(colors.diff_add)
+                .add_modifier(Modifier::BOLD);
+            let remove_style = Style::default()
+                .fg(colors.diff_remove)
+                .add_modifier(Modifier::BOLD);
+            let verb = if active { "Writing" } else { "Wrote" };
+            let description = if file_diffs.is_empty() {
+                metadata_usize(metadata.as_ref(), &["file_count"])
+                    .map(|count| {
+                        if count == 1 {
+                            "1 file".to_string()
+                        } else {
+                            format!("{} files", count)
+                        }
+                    })
+                    .unwrap_or_else(|| "files".to_string())
+            } else if file_diffs.len() == 1 {
+                file_diffs[0].0.clone()
+            } else {
+                let mut description = file_diffs
+                    .iter()
+                    .take(3)
+                    .map(|(path, _, _, _)| path.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if file_diffs.len() > 3 {
+                    description.push_str(&format!(" +{} more", file_diffs.len().saturating_sub(3)));
+                }
+                description
+            };
+
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled(marker.to_string(), marker_style),
+                    Span::raw(" "),
+                    Span::styled(verb.to_string(), title_style),
+                    Span::raw(" "),
+                    Span::styled(description, target_style),
+                    Span::raw(" ("),
+                    Span::styled(format!("+{}", total_added), add_style),
+                    Span::raw(" "),
+                    Span::styled(format!("-{}", total_removed), remove_style),
+                    Span::raw(")"),
+                ]),
+                max_width,
+                Line::from(Span::styled("  ", marker_style)),
+            );
+
+            if file_diffs.is_empty() {
+                if let Some(ref preview) = output_preview {
+                    let result_style = Style::default()
+                        .fg(colors.text_weak)
+                        .add_modifier(Modifier::DIM);
+                    push_preview_lines(&mut out, preview, max_width, result_style);
+                }
+            } else {
+                for (index, (path, content, _, _)) in file_diffs.iter().enumerate() {
+                    if file_diffs.len() > 1 || index > 0 {
+                        let header_style = Style::default()
+                            .fg(colors.warning)
+                            .add_modifier(Modifier::BOLD);
+                        let rule_width = max_width.saturating_sub(path.chars().count() + 8);
+                        out.push(Line::from(vec![
+                            Span::styled("    ── ", header_style),
+                            Span::styled(path.clone(), header_style),
+                            Span::raw(" "),
+                            Span::styled("─".repeat(rule_width), header_style),
+                        ]));
+                    }
+                    if !content.is_empty() {
+                        let diff_lines = crate::ui::diff::format_edit_diff_for_path_with_start(
+                            "", content, 1, max_width, colors, "    ", path,
+                        );
+                        out.extend(diff_lines);
+                    }
+                }
+            }
         } else if matches!(name.as_str(), "edit" | "write") && status != "error" {
             let file_path = args_obj
                 .and_then(|o| o.get("file_path").or_else(|| o.get("filePath")))
@@ -5793,6 +5915,42 @@ mod tests {
             rendered,
             vec!["⬢ Added src/new.rs (+1 -0)", "    1 +fn main() {}"]
         );
+    }
+
+    #[test]
+    fn test_write_files_tool_renders_multifile_diff_summary() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "write_files",
+            "status": "ok",
+            "args": {
+                "files": [
+                    { "file_path": "src/a.ts", "content": "export const a = 1;\n" },
+                    { "file_path": "src/b.ts", "content": "export const b = 2;\nexport const c = 3;\n" }
+                ]
+            },
+            "metadata": { "file_count": 2 },
+            "output_preview": "src/a.ts: created 20 bytes\nsrc/b.ts: created 40 bytes",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 100, &colors, false);
+        let rendered = lines.iter().map(trimmed_line_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered[0], "⬢ Wrote src/a.ts, src/b.ts (+3 -0)");
+        assert!(rendered.iter().any(|line| line.contains("── src/a.ts")));
+        assert!(rendered.iter().any(|line| line.contains("── src/b.ts")));
+        assert!(rendered
+            .iter()
+            .any(|line| line == "    1 +export const a = 1;"));
+        assert!(rendered
+            .iter()
+            .any(|line| line == "    1 +export const b = 2;"));
+        assert!(rendered
+            .iter()
+            .any(|line| line == "    2 +export const c = 3;"));
     }
 
     #[test]

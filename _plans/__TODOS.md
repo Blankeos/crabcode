@@ -377,7 +377,7 @@ I think this is how the TUI works already anyway right?
 
 - [x] Show the "favorited" models in the beginning when searching in /models.
 
-- [ ] write_files tool doesn't have a diff.. but apply_patch, write_file, etc. do. currently what I see:
+- [x] write_files tool doesn't have a diff.. but apply_patch, write_file, etc. do. currently what I see:
 
   ```
   ⬢ write_files files=[{"file_path":"packages/…
