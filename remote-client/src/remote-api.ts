@@ -5,6 +5,7 @@ export type RemoteStatus = {
   provider: string
   model: string
   agent: string
+  primary_agents: string[]
   reasoning_effort: string | null
   reasoning_efforts: string[]
   browser_url: string

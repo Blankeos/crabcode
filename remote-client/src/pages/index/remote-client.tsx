@@ -17,7 +17,7 @@ import {
 import "../../styles/app.css"
 import { MASCOT_FRAMES } from "./ascii-art"
 import { RemoteClientPage } from "./page-layout"
-import { AGENT_MODES, MAX_COMPOSER_ATTACHMENT_BYTES, MAX_COMPOSER_ATTACHMENTS, MAX_PROMPT_HISTORY } from "./page-constants"
+import { FALLBACK_AGENT_MODES, MAX_COMPOSER_ATTACHMENT_BYTES, MAX_COMPOSER_ATTACHMENTS, MAX_PROMPT_HISTORY } from "./page-constants"
 import type { CompletionTrigger, ComposerAttachment, ImagePreviewTarget, ProjectPathFormController, RemoteClientUi, RemotePermissionResponse, SavedServer, ServerPanelController, ServerPanelTab } from "./page-types"
 import {
   detectCompletionTrigger,
@@ -440,14 +440,15 @@ export default function RemoteClient() {
   const promptHistoryEntries = createMemo(() =>
     mergePromptHistoryEntries(browserPromptHistory(), messagePromptHistoryEntries(visibleMessages()))
   )
+  const currentSessionId = createMemo(() => state()?.current_session_id ?? null)
   const currentSession = createMemo(() =>
-    (state()?.sessions ?? []).find((session) => session.id === state()?.current_session_id)
+    (state()?.sessions ?? []).find((session) => session.id === currentSessionId())
   )
   const threadItems = createMemo(() => buildThreadItems(visibleMessages(), projectPath()))
   const isEmptyChat = createMemo(() => threadItems().length === 0 && !state()?.is_streaming)
 
   createEffect(() => {
-    state()?.current_session_id
+    currentSessionId()
     resetMobileViewportScroll()
     queueMicrotask(() => {
       resetMobileViewportScroll()
@@ -1112,7 +1113,7 @@ export default function RemoteClient() {
   const handleAgentOpenChange = (open: boolean) => {
     setAgentOpen(open)
     if (open) {
-      setAgentActiveIndex(Math.max(AGENT_MODES.findIndex((agent) => sameToken(agent, state()?.status.agent || "Build")), 0))
+      setAgentActiveIndex(Math.max(agentModes().findIndex((agent) => sameToken(agent, state()?.status.agent || "Build")), 0))
       setComposerSuggestions([])
       setCompletionTrigger(null)
     }
@@ -1168,7 +1169,7 @@ export default function RemoteClient() {
       event,
       agentOpen(),
       setAgentOpen,
-      AGENT_MODES,
+      agentModes(),
       agentActiveIndex(),
       setAgentActiveIndex,
       selectAgentMode,
@@ -1382,6 +1383,11 @@ export default function RemoteClient() {
     return `${status.provider}/${status.model}`
   })
 
+  const agentModes = createMemo(() => {
+    const agents = state()?.status.primary_agents?.filter((agent) => agent.trim().length > 0) ?? []
+    return agents.length > 0 ? agents : FALLBACK_AGENT_MODES
+  })
+
   const themeStyle = createMemo(
     () =>
       ({
@@ -1508,6 +1514,7 @@ export default function RemoteClient() {
       isAtTop: threadScroll.isAtTop,
       isAtBottom: threadScroll.isAtBottom,
       isEmptyChat,
+      streaming: () => Boolean(state()?.is_streaming),
       visibleMessages,
       threadItems,
       projectName,
@@ -1573,6 +1580,7 @@ export default function RemoteClient() {
       agentOpen,
       onAgentOpenChange: handleAgentOpenChange,
       onAgentKeyDown: handleAgentMenuKeyDown,
+      agentModes,
       agentActiveIndex,
       setAgentActiveIndex,
       onSelectAgentMode: selectAgentMode,

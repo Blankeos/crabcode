@@ -24,7 +24,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "../../components/ui/pop
 import { IconArrowUp, IconCaretDown, IconCheck, IconFolder, IconPaperclip, IconTerminal } from "../../icons"
 import { cx } from "../../lib/cx"
 import type { RemoteModel, RemoteSuggestion } from "../../remote-api"
-import { AGENT_MODES, COMPOSER_TEXT_CLASS, ICON_BUTTON, IMAGE_FILE_TYPES, MENU_ROW, MENU_ROW_ACTIVE, PANEL_BASE, POPOVER_ANIMATION } from "./page-constants"
+import { COMPOSER_TEXT_CLASS, ICON_BUTTON, IMAGE_FILE_TYPES, MENU_ROW, MENU_ROW_ACTIVE, PANEL_BASE, POPOVER_ANIMATION } from "./page-constants"
 import type { ComposerController } from "./page-types"
 import { handleImagePreviewKeyDown, promptTextPartClass, promptTextParts, promptTextPartStyle } from "./prompt-utils"
 import { QuestionRequestPanel, PermissionRequestPanel } from "./request-panels"
@@ -342,7 +342,7 @@ function AgentSelector(props: { composer: ComposerController }) {
         onEscapeKeyDown={composer.onControlEscape}
         onKeyDown={composer.onAgentKeyDown}
       >
-        <For each={AGENT_MODES}>
+        <For each={composer.agentModes()}>
           {(agent, index) => (
             <button
               class={cx(

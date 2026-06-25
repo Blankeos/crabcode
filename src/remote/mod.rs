@@ -59,6 +59,24 @@ fn drain_pending_terminal_events(idle_timeout: Duration) {
         }
     }
 }
+
+fn titlecase_remote_agent_name(agent: &str) -> String {
+    let agent = agent.trim();
+    if agent.is_empty() {
+        return "Build".to_string();
+    }
+
+    let mut chars = agent.chars();
+    let Some(first) = chars.next() else {
+        return "Build".to_string();
+    };
+
+    format!(
+        "{}{}",
+        first.to_uppercase().collect::<String>(),
+        chars.as_str()
+    )
+}
 const MAX_REMOTE_PROMPT_IMAGES: usize = 8;
 const MAX_REMOTE_SESSIONS_PER_WORKSPACE: usize = 24;
 const HOSTS_FILE: &str = "remote-hosts.json";
@@ -178,6 +196,7 @@ struct RemoteStatus {
     provider: String,
     model: String,
     agent: String,
+    primary_agents: Vec<String>,
     reasoning_effort: Option<String>,
     reasoning_efforts: Vec<String>,
     browser_url: String,
@@ -2270,6 +2289,12 @@ fn remote_status(app: &App, host_state: &HostState) -> RemoteStatus {
         provider: app.provider_name.clone(),
         model: app.model.clone(),
         agent: app.agent.clone(),
+        primary_agents: app
+            .agent_registry
+            .visible_primary_agent_names()
+            .into_iter()
+            .map(|agent| titlecase_remote_agent_name(&agent))
+            .collect(),
         reasoning_effort: app.remote_reasoning_effort_label(),
         reasoning_efforts: app.remote_reasoning_effort_options(),
         browser_url: host_state.browser_url.clone(),
@@ -3714,6 +3739,37 @@ mod tests {
             .as_deref()
             .is_some_and(|code| !code.is_empty()));
         assert!(!host.accepts_token(""));
+    }
+
+    #[test]
+    fn remote_status_exposes_visible_primary_agents() {
+        let mut app = App::new_with_model_override(None).unwrap();
+        let mut warnings = Vec::new();
+        let defs = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "designer": {
+                    "description": "Design UI",
+                    "mode": "all"
+                },
+                "scout-only": {
+                    "description": "Read-only scout",
+                    "mode": "subagent"
+                }
+            })),
+            &mut warnings,
+        );
+        app.agent_registry = crate::agent::definition::AgentRegistry::with_definitions(None, defs);
+        let host = HostState::new(
+            "http://127.0.0.1:8421".to_string(),
+            "crabcode".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let status = remote_status(&app, &host);
+
+        assert!(warnings.is_empty());
+        assert_eq!(status.primary_agents, vec!["Build", "Designer", "Plan"]);
     }
 
     #[test]

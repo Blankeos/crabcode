@@ -1,4 +1,4 @@
-export const AGENT_MODES = ["Build", "Plan"]
+export const FALLBACK_AGENT_MODES = ["Build", "Plan"]
 export const MAX_COMPOSER_ATTACHMENTS = 8
 export const MAX_COMPOSER_ATTACHMENT_BYTES = 16 * 1024 * 1024
 export const IMAGE_FILE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"]

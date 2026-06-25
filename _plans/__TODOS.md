@@ -30,6 +30,16 @@
 
 - [ ] Minor, `chat_only` flag is codesmell... We better come up with strings for deciding "Only show this slash command in this context", just like how we do with 'Shortcuts' (in case shortcuts follow this codesmell as well, come up with a better approach)
 
+- [ ] Bug: If a non-Build primary agent calls a subagent, returning from the subagent resets the primary agent back to Build. Preserve the previously selected primary agent across subagent calls.
+
+- [ ] Remote UI: Persist the selected primary agent per existing session. For `/new`, default to the last-used primary agent instead of always Build.
+
+- [ ] Remote UI: In the Open Project searchable popover, selecting a project with an active streaming session should auto-open that streaming session instead of creating/navigating to that project's `/new` page.
+
+- [x] Remote UI: Fix thread scroll getting forced back to bottom by streaming updates from other windows/sessions.
+
+- [x] Remote UI: While streaming in the current session, only auto-scroll if the thread was already at the bottom; allow scrolling up without being yanked down.
+
 - [x] Chore: Create a /checkparity-opencode (the most important thing is only the agent-loop, nothing else. We do differ a bit in terms of UX anyway, but the agent-loop, tool calling, etc has to be very very close so that the performance is mostly the same) and /checkparity-codex (au) command
 
 - [x] Feature: Subagents just like opencode.
@@ -366,3 +376,12 @@ I think this is how the TUI works already anyway right?
 - [x] We have a feature to make paths clickable... But dont't make this path clickable: `/Users/carlo/Desktop/Projects/crabenv/src`. It's a folder not a file.
 
 - [x] Show the "favorited" models in the beginning when searching in /models.
+
+- [ ] write_files tool doesn't have a diff.. but apply_patch, write_file, etc. do. currently what I see:
+
+  ```
+  ⬢ write_files files=[{"file_path":"packages/…
+    └ packages/_project_/src/adapters/java/params.ts: created 2236 bytes
+      packages/_project_/src/adapters/csharp/params.ts: created 2525 bytes
+      packages/_project_/src/adapters/php/params.ts: created 2513 bytes
+  ```

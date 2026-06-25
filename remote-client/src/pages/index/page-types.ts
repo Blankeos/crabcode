@@ -246,6 +246,7 @@ export type ThreadController = {
   isAtTop: Accessor<boolean>
   isAtBottom: Accessor<boolean>
   isEmptyChat: Accessor<boolean>
+  streaming: Accessor<boolean>
   visibleMessages: Accessor<RemoteMessage[]>
   threadItems: Accessor<ThreadItem[]>
   projectName: Accessor<string>
@@ -302,6 +303,7 @@ export type ComposerController = {
   agentOpen: Accessor<boolean>
   onAgentOpenChange: (open: boolean) => void
   onAgentKeyDown: (event: KeyboardEvent) => void
+  agentModes: Accessor<string[]>
   agentActiveIndex: Accessor<number>
   setAgentActiveIndex: Setter<number>
   onSelectAgentMode: (agent: string) => MaybePromise

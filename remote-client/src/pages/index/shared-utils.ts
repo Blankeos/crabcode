@@ -97,12 +97,15 @@ export function useStickToBottom(
   const [isAtBottom, setIsAtBottom] = createSignal(true)
   const bottomThreshold = 32
   const topThreshold = 8
+  let shouldStickToBottom = true
 
   const measure = () => {
     const el = scrollEl()
     if (!el) return
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-    setIsAtBottom(distance <= bottomThreshold)
+    const nextIsAtBottom = distance <= bottomThreshold
+    setIsAtBottom(nextIsAtBottom)
+    shouldStickToBottom = nextIsAtBottom
     setIsAtTop(el.scrollTop <= topThreshold)
   }
 
@@ -125,7 +128,7 @@ export function useStickToBottom(
     el.addEventListener("scroll", measure, { passive: true })
 
     const resizeObserver = new ResizeObserver(() => {
-      if (isAtBottom()) scrollToBottom(false)
+      if (shouldStickToBottom) scrollToBottom(false)
       else measure()
     })
     resizeObserver.observe(content ?? el)

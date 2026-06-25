@@ -80,6 +80,19 @@ export function ThreadItemView(props: {
   )
 }
 
+export function ThreadWorkingIndicator() {
+  return (
+    <div class="grid grid-cols-[2rem_minmax(0,1fr)] gap-3 py-3" aria-live="polite" aria-label="Assistant is working">
+      <div class="w-7" />
+      <div class="w-[min(100%,44rem)] min-w-0 border-t border-[var(--line)] pt-3">
+        <Shimmer class="text-[0.92rem] font-medium leading-relaxed text-[#d7d5d0]" duration={1.6}>
+          Working...
+        </Shimmer>
+      </div>
+    </div>
+  )
+}
+
 function ToolActivityGroup(props: { tools: Accessor<ToolMessage[]> }) {
   const steps = createMemo(() => buildActivitySteps(props.tools()))
   const state = createMemo<ToolVisualState>(() => {
