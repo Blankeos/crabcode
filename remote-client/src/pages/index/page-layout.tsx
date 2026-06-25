@@ -20,7 +20,7 @@ import type { CommandPaletteController, GitViewerController, HeaderController, P
 import { ComposerDock } from "./composer-dock"
 import { EmptyThread } from "./empty-thread"
 import { QuestionRequestPanel, PermissionRequestPanel } from "./request-panels"
-import { ImagePreviewDialog, ThreadItemView, ThreadWorkingIndicator } from "./thread-view"
+import { ImagePreviewDialog, ThreadItemView } from "./thread-view"
 import { isActiveServer } from "./server-utils"
 import { relativeTime } from "./shared-utils"
 
@@ -906,14 +906,12 @@ function ThreadViewport(props: { thread: ThreadController }) {
                 <ThreadItemView
                   item={item}
                   status={thread.status}
+                  streaming={thread.streaming}
                   token={thread.token}
                   onPreviewImage={thread.onPreviewImage}
                 />
               )}
             </Index>
-            <Show when={thread.streaming()}>
-              <ThreadWorkingIndicator />
-            </Show>
           </Show>
         </div>
       </div>

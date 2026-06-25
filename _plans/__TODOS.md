@@ -30,8 +30,6 @@
 
 - [ ] Minor, `chat_only` flag is codesmell... We better come up with strings for deciding "Only show this slash command in this context", just like how we do with 'Shortcuts' (in case shortcuts follow this codesmell as well, come up with a better approach)
 
-- [ ] Bug: If a non-Build primary agent calls a subagent, returning from the subagent resets the primary agent back to Build. Preserve the previously selected primary agent across subagent calls.
-
 - [ ] Remote UI: Persist the selected primary agent per existing session. For `/new`, default to the last-used primary agent instead of always Build.
 
 - [ ] Remote UI: In the Open Project searchable popover, selecting a project with an active streaming session should auto-open that streaming session instead of creating/navigating to that project's `/new` page.

@@ -41,6 +41,7 @@ import { agentAccentClass, displayAgentMode, fallbackCopyText } from "./shared-u
 export function ThreadItemView(props: {
   item: Accessor<ThreadItem>
   status: Accessor<RemoteStatus | null>
+  streaming: Accessor<boolean>
   token: Accessor<string>
   onPreviewImage: (attachment: AttachmentData) => void
 }) {
@@ -69,6 +70,7 @@ export function ThreadItemView(props: {
             message={current}
             activityTools={messageActivityTools}
             status={props.status}
+            streaming={props.streaming}
             token={props.token}
             onPreviewImage={props.onPreviewImage}
           />
@@ -77,19 +79,6 @@ export function ThreadItemView(props: {
       <Show when={activity()}>{(tools) => <ToolActivityGroup tools={tools} />}</Show>
       <Show when={action()}>{(tool) => <ToolActionMessage tool={tool} />}</Show>
     </>
-  )
-}
-
-export function ThreadWorkingIndicator() {
-  return (
-    <div class="grid grid-cols-[2rem_minmax(0,1fr)] gap-3 py-3" aria-live="polite" aria-label="Assistant is working">
-      <div class="w-7" />
-      <div class="w-[min(100%,44rem)] min-w-0 border-t border-[var(--line)] pt-3">
-        <Shimmer class="text-[0.92rem] font-medium leading-relaxed text-[#d7d5d0]" duration={1.6}>
-          Working...
-        </Shimmer>
-      </div>
-    </div>
   )
 }
 
@@ -416,6 +405,7 @@ function MessageView(props: {
   message: Accessor<RemoteMessage>
   activityTools: Accessor<ToolMessage[]>
   status: Accessor<RemoteStatus | null>
+  streaming: Accessor<boolean>
   token: Accessor<string>
   onPreviewImage: (attachment: AttachmentData) => void
 }) {
@@ -432,6 +422,11 @@ function MessageView(props: {
     !props.message().is_complete &&
     !visibleAssistantContent().trim() &&
     props.activityTools().length === 0
+  const showStreamingMetadataIndicator = () =>
+    !isUser() &&
+    props.streaming() &&
+    !props.message().is_complete &&
+    visibleAssistantContent().trim().length > 0
   const copyContent = () => (isUser() ? props.message().content : visibleAssistantContent()) || ""
   return (
     <Message from={props.message().role} class={cx(!isUser() && "w-full items-stretch")}>
@@ -453,13 +448,20 @@ function MessageView(props: {
                     when={showStreamingPlaceholder()}
                     fallback={<MessageResponse content={visibleAssistantContent()} />}
                   >
-                    <Shimmer class="text-[0.95rem] leading-relaxed" duration={1.6}>
+                    <Shimmer class="text-[0.76rem] font-medium leading-snug" duration={1.6}>
                       Working...
                     </Shimmer>
                   </Show>
                 </div>
               </Show>
               <Show when={showAssistantBubble()}>
+                <Show when={showStreamingMetadataIndicator()}>
+                  <div class="mt-2 pl-2" aria-live="polite" aria-label="Assistant is working">
+                    <Shimmer class="text-[0.76rem] font-medium leading-snug text-[#a4a8cc]" duration={1.6}>
+                      Working...
+                    </Shimmer>
+                  </div>
+                </Show>
                 <MessageToolbar class="mt-2 w-full justify-start pl-2">
                   <AssistantMetadata message={props.message} status={props.status} />
                 </MessageToolbar>
