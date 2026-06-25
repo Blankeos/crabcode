@@ -182,6 +182,7 @@ export type ProjectPickerController = {
   token: Accessor<string>
   form: ProjectPathFormController
   onSelectWorkspace: (path: string) => MaybePromise
+  onResumeProject: (path: string) => MaybePromise
 }
 
 export type ServerPanelController = {

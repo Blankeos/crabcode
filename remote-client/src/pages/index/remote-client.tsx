@@ -40,7 +40,12 @@ import {
   renumberImagePlaceholdersAfterRemoval,
   savePromptHistory,
 } from "./prompt-utils"
-import { projectsForPicker, projectsFromState } from "./projects"
+import {
+  mostRecentSession,
+  projectsForPicker,
+  projectsFromState,
+  sidebarProjectKeyForActivePath,
+} from "./projects"
 import { browserOrigin, isActiveServer, loadSavedServers, normalizeServerAddress, saveSavedServers } from "./server-utils"
 import { basename, errorToastMessage, fallbackCopyText, handleChoiceMenuKeyDown, sameToken, showErrorToast, useStickToBottom, cuid } from "./shared-utils"
 import { buildThreadItems, sessionTranscript } from "./thread-model"
@@ -478,6 +483,9 @@ export default function RemoteClient() {
     try {
       const next = await api().newSession(workspacePath)
       applyRemoteState(next)
+      const cwd = next.status.cwd?.trim()
+      if (cwd) ensureProjectExpanded(cwd)
+      else if (workspacePath?.trim()) ensureProjectExpanded(workspacePath.trim())
       setSidebarOpen(false)
       promptRef?.focus()
     } catch (error) {
@@ -493,6 +501,7 @@ export default function RemoteClient() {
     try {
       const next = await api().selectWorkspace(nextPath)
       applyRemoteState(next)
+      ensureProjectExpanded(nextPath)
       setProjectPickerOpen(false)
       setNewProjectOpen(false)
       setSidebarOpen(false)
@@ -514,11 +523,23 @@ export default function RemoteClient() {
     try {
       const next = await api().switchSession(id)
       applyRemoteState(next)
+      const cwd = next.status.cwd?.trim()
+      if (cwd) ensureProjectExpanded(cwd)
       setSidebarOpen(false)
       promptRef?.focus()
     } catch (error) {
       showErrorToast(error, "Could not switch chat.")
     }
+  }
+
+  const resumeMostRecentProjectSession = async (path: string) => {
+    const project = pickerProjects().find((item) => item.path === path)
+    const session = mostRecentSession(project?.sessions ?? [])
+    if (!session) return
+
+    setProjectPickerOpen(false)
+    setProjectPickerAddOpen(false)
+    await switchSession(session.id)
   }
 
   const archiveSession = async (id: string) => {
@@ -1273,6 +1294,26 @@ export default function RemoteClient() {
     window.location.href = address
   }
 
+  const ensureProjectExpanded = (path: string) => {
+    const key = sidebarProjectKeyForActivePath(path, projects()) ?? path.trim()
+    if (!key) return
+    setProjectOpenKeys((current) => {
+      if (current.includes(key)) return current
+      return [...current, key]
+    })
+  }
+
+  createEffect(() => {
+    const cwd = projectPath().trim()
+    if (!cwd) return
+    const key = sidebarProjectKeyForActivePath(cwd, projects())
+    if (!key) return
+    setProjectOpenKeys((current) => {
+      if (current.includes(key)) return current
+      return [...current, key]
+    })
+  })
+
   const toggleProject = (key: string) => {
     setProjectOpenKeys((current) => {
       const next = new Set(current)
@@ -1490,6 +1531,7 @@ export default function RemoteClient() {
         token,
         form: projectPathForm,
         onSelectWorkspace: selectWorkspace,
+        onResumeProject: resumeMostRecentProjectSession,
       },
       isEmptyChat,
       onNewSession: startNewSession,

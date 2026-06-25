@@ -32,7 +32,7 @@
 
 - [ ] Remote UI: Persist the selected primary agent per existing session. For `/new`, default to the last-used primary agent instead of always Build.
 
-- [ ] Remote UI: In the Open Project searchable popover, selecting a project with an active streaming session should auto-open that streaming session instead of creating/navigating to that project's `/new` page.
+- [x] Remote UI: In the Open Project searchable popover, selecting a project with an active streaming session should auto-open that streaming session instead of creating/navigating to that project's `/new` page. (I made a recent icon instead.)
 
 - [x] Remote UI: Fix thread scroll getting forced back to bottom by streaming updates from other windows/sessions.
 

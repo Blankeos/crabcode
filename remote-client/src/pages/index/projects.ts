@@ -1,5 +1,5 @@
 import type { ProjectGroup } from "../../components/remote/project-list"
-import type { RemoteState } from "../../remote-api"
+import type { RemoteSession, RemoteState } from "../../remote-api"
 import { basename } from "./shared-utils"
 
 export type ProjectListEntry = ProjectGroup & {
@@ -24,6 +24,34 @@ export function projectsForPicker(state: RemoteState | null | undefined): Projec
     return a.name.localeCompare(b.name) || a.path.localeCompare(b.path)
   })
   return list.map(stripProjectMeta)
+}
+
+export function mostRecentSession(sessions: readonly RemoteSession[]): RemoteSession | undefined {
+  return sessions.reduce<RemoteSession | undefined>((latest, session) => {
+    if (!latest || session.updated_at > latest.updated_at) return session
+    return latest
+  }, undefined)
+}
+
+/** Sidebar accordion key — must match `project.path || project.name` in ProjectList. */
+export function sidebarProjectKey(project: Pick<ProjectGroup, "path" | "name">): string {
+  return project.path || project.name
+}
+
+export function sidebarProjectKeyForActivePath(
+  activePath: string,
+  projects: readonly ProjectGroup[]
+): string | undefined {
+  const active = activePath.trim()
+  if (!active) return undefined
+  const exact = projects.find((p) => p.path.trim() === active)
+  if (exact) return sidebarProjectKey(exact)
+  const suffix = projects.find((p) => {
+    const path = p.path.trim()
+    return path && (active === path || active.endsWith(`/${path}`) || active.endsWith(path))
+  })
+  if (suffix) return sidebarProjectKey(suffix)
+  return active
 }
 
 function projectsWithMetaFromState(state: RemoteState | null | undefined): ProjectListEntry[] {

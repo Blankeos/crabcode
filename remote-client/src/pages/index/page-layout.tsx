@@ -7,13 +7,14 @@ import {
   CommandItem,
   CommandList,
 } from "cmdk-solid"
-import { IconBrainGlyph, IconF7ChevronDownSquare } from "../../assets/icons"
+import { IconBrainGlyph, IconClockCounterClockwise, IconF7ChevronDownSquare } from "../../assets/icons"
 import { FadedEdgeEffect } from "../../components/remote/faded-edge-effect"
 import { ProjectFavicon } from "../../components/remote/project-favicon"
 import { ProjectList } from "../../components/remote/project-list"
 import { Popover, PopoverContent, PopoverTrigger } from "../../components/ui/popover"
 import { Resizable, ResizableHandle, ResizablePanel } from "../../components/ui/resizable"
 import { IconArrowLeft, IconCaretDown, IconCheck, IconDots, IconFolder, IconGitBranch, IconPlus, IconSearch, IconServers, IconSidebar, IconX } from "../../icons"
+import { mostRecentSession } from "./projects"
 import { cx } from "../../lib/cx"
 import { ICON_BUTTON, INPUT_BASE, PANEL_BASE, POPOVER_ANIMATION } from "./page-constants"
 import type { CommandPaletteController, GitViewerController, HeaderController, PairPanelController, ProjectPathFormController, ProjectPickerController, RemoteClientUi, ServerPanelController, SidebarController, ThreadController } from "./page-types"
@@ -715,31 +716,61 @@ function ProjectPicker(props: { picker: ProjectPickerController }) {
         </Show>
         <div class="min-h-0 flex-1 overflow-y-auto p-2">
           <For each={picker.projects()}>
-            {(project) => (
-              <button
-                class={cx(
-                  "grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-lg p-2 text-left text-[var(--text)] hover:bg-white/[0.055]",
-                  project.path === picker.projectPath() && "bg-white/[0.055]"
-                )}
-                type="button"
-                onClick={() => picker.onSelectWorkspace(project.path)}
-              >
-                <ProjectFavicon
-                  cwd={project.path}
-                  label={project.name}
-                  token={picker.token()}
-                  class="h-[1.35rem] w-[1.35rem]"
-                />
-                <span class="flex min-w-0 flex-col gap-0.5">
-                  <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[0.86rem] font-semibold">
-                    {project.name}
-                  </span>
-                  <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.68rem] text-[var(--faint)]">
-                    {project.path}
-                  </span>
-                </span>
-              </button>
-            )}
+            {(project) => {
+              const latest = () => mostRecentSession(project.sessions)
+              const hasResume = () => project.sessions.length > 0
+              return (
+                <div
+                  class={cx(
+                    "group relative min-w-0 rounded-lg text-[var(--text)] transition hover:bg-white/[0.055]",
+                    project.path === picker.projectPath()
+                      && "bg-white/[0.055] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.035)]"
+                  )}
+                >
+                  <button
+                    class={cx(
+                      "grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-lg px-2 py-2 text-left",
+                      hasResume() && "pr-[2.65rem]"
+                    )}
+                    type="button"
+                    onClick={() => picker.onSelectWorkspace(project.path)}
+                  >
+                    <ProjectFavicon
+                      cwd={project.path}
+                      label={project.name}
+                      token={picker.token()}
+                      class="h-[1.35rem] w-[1.35rem]"
+                    />
+                    <span class="flex min-w-0 flex-col gap-0.5">
+                      <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[0.86rem] font-semibold">
+                        {project.name}
+                      </span>
+                      <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.68rem] text-[var(--faint)]">
+                        {project.path}
+                      </span>
+                    </span>
+                  </button>
+                  <Show when={hasResume()}>
+                    <button
+                      class="absolute top-1/2 right-1.5 z-10 grid h-[1.85rem] w-[1.85rem] -translate-y-1/2 place-items-center rounded-md text-[var(--faint)] opacity-75 transition hover:bg-[#2d2d2d] hover:text-[var(--text)] hover:opacity-100 focus-visible:bg-[#2d2d2d] focus-visible:text-[var(--text)] focus-visible:opacity-100 group-hover:opacity-100"
+                      type="button"
+                      title={
+                        latest()
+                          ? `Resume “${latest()!.title}” (${relativeTime(latest()!.updated_at)})`
+                          : `Resume latest chat in ${project.name}`
+                      }
+                      aria-label={`Resume latest chat in ${project.name}`}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void picker.onResumeProject(project.path)
+                      }}
+                    >
+                      <IconClockCounterClockwise class="h-[1.05rem] w-[1.05rem]" />
+                    </button>
+                  </Show>
+                </div>
+              )
+            }}
           </For>
         </div>
         <Show when={picker.form.error()}>

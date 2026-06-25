@@ -36,16 +36,22 @@ type ProjectListProps = {
 export function ProjectList(props: ProjectListProps) {
   const [scrollEl, setScrollEl] = createSignal<HTMLDivElement>()
   const edges = useScrollEdges(scrollEl)
+  let lastScrolledPath = ""
 
   createEffect(() => {
     if (props.sidebarOpen && !props.sidebarOpen()) return
     const path = props.activeProjectPath()?.trim()
-    if (!path) return
+    const projectCount = props.projects().length
+    if (!path || projectCount === 0 || path === lastScrolledPath) return
+    lastScrolledPath = path
     queueMicrotask(() => {
-      const root = scrollEl()
-      if (!root) return
-      const row = root.querySelector<HTMLElement>(`[data-project-path="${cssEscapeAttr(path)}"]`)
-      row?.scrollIntoView({ block: "nearest", behavior: "smooth" })
+      window.requestAnimationFrame(() => {
+        const root = scrollEl()
+        if (!root) return
+        const row = root.querySelector<HTMLElement>("[data-active-project='true']")
+          ?? root.querySelector<HTMLElement>(`[data-project-path="${cssEscapeAttr(path)}"]`)
+        row?.scrollIntoView({ block: "start", behavior: "smooth" })
+      })
     })
   })
 
@@ -53,7 +59,7 @@ export function ProjectList(props: ProjectListProps) {
     <div class="relative min-h-0 flex-1">
       <div
         ref={setScrollEl}
-        class="h-full min-h-0 overflow-y-auto overflow-x-hidden px-3 pb-4"
+        class="h-full min-h-0 overflow-y-auto overflow-x-hidden px-3 pb-[65vh]"
       >
         <Index each={props.projects()}>
           {(project) => {
@@ -61,7 +67,11 @@ export function ProjectList(props: ProjectListProps) {
             const open = () => props.openProjects().has(key())
             const active = () => isActiveProject(project().path, props.activeProjectPath())
             return (
-              <section class="min-w-0" data-project-path={project().path || project().name}>
+              <section
+                class="min-w-0 scroll-mt-1"
+                data-active-project={active() ? "true" : undefined}
+                data-project-path={project().path || project().name}
+              >
                 <div class="sticky top-0 z-20 -mx-3 bg-[var(--panel)] px-3 py-0.5">
                   <ContextMenu>
                     <ContextMenuTrigger as="div">
