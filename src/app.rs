@@ -1241,23 +1241,23 @@ impl App {
             .is_some_and(|id| self.session_manager.parent_id_of(id).is_some())
     }
 
-    fn switch_to_first_child_session(&mut self) -> bool {
+    fn switch_to_latest_child_session(&mut self) -> bool {
         let Some(current_id) = self.session_manager.get_current_session_id().cloned() else {
             return false;
         };
         let Some(root_id) = self.session_manager.root_session_id_for(&current_id) else {
             return false;
         };
-        let Some(first_child) = self
+        let Some(latest_child) = self
             .session_manager
             .child_sessions(&root_id)
-            .first()
+            .last()
             .cloned()
         else {
             return false;
         };
 
-        self.switch_to_session(&first_child.id)
+        self.switch_to_session(&latest_child.id)
     }
 
     fn switch_to_parent_session(&mut self) -> bool {
@@ -3079,7 +3079,7 @@ impl App {
                     }
                     crate::views::which_key::WhichKeyAction::GoChild => {
                         self.overlay_focus = OverlayFocus::None;
-                        let _ = self.switch_to_first_child_session();
+                        let _ = self.switch_to_latest_child_session();
                     }
                     crate::views::which_key::WhichKeyAction::GoParent => {
                         self.overlay_focus = OverlayFocus::None;
@@ -11250,15 +11250,7 @@ mod tests {
             app.session_manager.get_current_session_id(),
             Some(&parent_id)
         );
-        assert!(app.switch_to_first_child_session());
-        assert_eq!(
-            app.session_manager
-                .get_current_session_id()
-                .map(String::as_str),
-            Some("child-a")
-        );
-
-        assert!(app.handle_base_keys(KeyEvent::new(KeyCode::Right, event::KeyModifiers::NONE,)));
+        assert!(app.switch_to_latest_child_session());
         assert_eq!(
             app.session_manager
                 .get_current_session_id()
@@ -11266,12 +11258,20 @@ mod tests {
             Some("child-b")
         );
 
-        assert!(app.handle_base_keys(KeyEvent::new(KeyCode::Left, event::KeyModifiers::NONE,)));
+        assert!(app.handle_base_keys(KeyEvent::new(KeyCode::Right, event::KeyModifiers::NONE,)));
         assert_eq!(
             app.session_manager
                 .get_current_session_id()
                 .map(String::as_str),
             Some("child-a")
+        );
+
+        assert!(app.handle_base_keys(KeyEvent::new(KeyCode::Left, event::KeyModifiers::NONE,)));
+        assert_eq!(
+            app.session_manager
+                .get_current_session_id()
+                .map(String::as_str),
+            Some("child-b")
         );
 
         assert!(app.handle_base_keys(KeyEvent::new(KeyCode::Up, event::KeyModifiers::NONE,)));
@@ -11298,7 +11298,7 @@ mod tests {
             "Check implementation".to_string(),
         );
 
-        assert!(app.switch_to_first_child_session());
+        assert!(app.switch_to_latest_child_session());
         app.handle_keys(KeyEvent::new(KeyCode::Char('h'), event::KeyModifiers::NONE));
         app.handle_paste(" pasted".to_string());
 
@@ -11403,7 +11403,7 @@ mod tests {
             "Check implementation".to_string(),
         );
 
-        assert!(app.switch_to_first_child_session());
+        assert!(app.switch_to_latest_child_session());
         app.input.insert_str("draft prompt");
         app.input
             .handle_event(KeyEvent::new(KeyCode::Left, event::KeyModifiers::NONE));
@@ -11467,7 +11467,7 @@ mod tests {
             "Check implementation".to_string(),
         );
 
-        assert!(app.switch_to_first_child_session());
+        assert!(app.switch_to_latest_child_session());
         app.input.insert_str("draft prompt");
         app.handle_keys(KeyEvent::new(
             KeyCode::Char('u'),

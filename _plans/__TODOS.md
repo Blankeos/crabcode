@@ -385,3 +385,7 @@ I think this is how the TUI works already anyway right?
   ```
 
 - [x] When a parent agent calls a subagent, then I interrupt the parent agent. The subagent has a "loading" state forever. Like it has 'esc to stop' when I visit it forever (only until I close, and reopen the session at least)
+
+- [x] ctrl+x down goes to latest subagent, not 1.
+
+- [ ] Improve the subagent footer, I wanna be able to see "tabs" for each subagent. Essentally a minor 1-height block representing the color of the agent. Just place it above
