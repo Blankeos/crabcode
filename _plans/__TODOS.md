@@ -383,3 +383,5 @@ I think this is how the TUI works already anyway right?
       packages/_project_/src/adapters/csharp/params.ts: created 2525 bytes
       packages/_project_/src/adapters/php/params.ts: created 2513 bytes
   ```
+
+- [x] When a parent agent calls a subagent, then I interrupt the parent agent. The subagent has a "loading" state forever. Like it has 'esc to stop' when I visit it forever (only until I close, and reopen the session at least)

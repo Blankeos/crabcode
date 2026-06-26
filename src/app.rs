@@ -6992,6 +6992,18 @@ impl App {
     fn cancel_streaming_for_session(&mut self, session_id: &str) {
         if let Some(stream) = self.stream_for_session_mut(&session_id) {
             stream.cancel_token.cancel();
+        } else if self
+            .session_view_states
+            .get(session_id)
+            .is_some_and(|state| state.external_stream.is_some())
+        {
+            if let Some(parent_id) = self
+                .session_manager
+                .parent_id_of(session_id)
+                .map(str::to_string)
+            {
+                self.cancel_streaming_for_session(&parent_id);
+            }
         }
     }
 
@@ -7212,6 +7224,13 @@ impl App {
                 true
             }
             crate::llm::ChunkMessage::SubagentChunk { session_id, chunk } => {
+                if !self.session_has_active_stream(&session_id) {
+                    crate::emit_log!(
+                        "[SUBAGENT] ignoring_late_chunk session_id={} reason=no_active_child_stream",
+                        session_id
+                    );
+                    return true;
+                }
                 if self.process_streaming_chunk_for_session(&session_id, *chunk) {
                     self.maybe_persist_streaming_snapshot_for_session(&session_id, false);
                 }
@@ -7540,11 +7559,55 @@ impl App {
     }
 
     fn cancelled_streaming_session(&mut self, session_id: &str) {
+        self.interrupt_child_streams_for_parent(
+            session_id,
+            "Stopped because parent agent was interrupted",
+        );
+        self.interrupt_streaming_session_with_reason(
+            session_id,
+            "Streaming cancelled by user",
+            true,
+        );
+    }
+
+    fn interrupt_child_streams_for_parent(&mut self, parent_session_id: &str, reason: &str) {
+        let child_session_ids: Vec<String> = self
+            .session_manager
+            .child_sessions(parent_session_id)
+            .into_iter()
+            .map(|session| session.id)
+            .collect();
+
+        for child_session_id in child_session_ids {
+            self.interrupt_child_streams_for_parent(&child_session_id, reason);
+
+            if self.session_has_active_stream(&child_session_id) {
+                self.interrupt_streaming_session_with_reason(&child_session_id, reason, false);
+            } else if self
+                .session_manager
+                .get_session_ref(&child_session_id)
+                .is_some_and(|session| session.status.is_active())
+            {
+                let _ = self.session_manager.set_session_status(
+                    &child_session_id,
+                    crate::session::types::SessionStatus::Interrupted,
+                    None,
+                );
+            }
+        }
+    }
+
+    fn interrupt_streaming_session_with_reason(
+        &mut self,
+        session_id: &str,
+        reason: &str,
+        show_toast: bool,
+    ) {
         self.mark_streamed_assistant_interrupted(session_id);
         self.maybe_persist_streaming_snapshot_for_session(session_id, true);
 
         if self
-            .finalize_and_persist_streamed_messages(session_id, Some("Streaming cancelled by user"))
+            .finalize_and_persist_streamed_messages(session_id, Some(reason))
             .is_none()
         {
             return;
@@ -7556,7 +7619,9 @@ impl App {
             None,
         );
 
-        push_toast(Toast::new("Streaming cancelled", ToastLevel::Info, None));
+        if show_toast {
+            push_toast(Toast::new("Streaming cancelled", ToastLevel::Info, None));
+        }
         self.cleanup_streaming_for_session(session_id);
         self.submit_queued_messages_for_session(session_id);
     }
@@ -11238,6 +11303,87 @@ mod tests {
         app.handle_paste(" pasted".to_string());
 
         assert_eq!(app.input.get_text(), "");
+    }
+
+    #[test]
+    fn parent_cancellation_interrupts_active_subagent_sessions() {
+        let mut app = test_app();
+        let parent_id = app.create_new_session(Some("Parent".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Parent partial"));
+        app.chat_state.chat.begin_streaming_turn();
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&parent_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("parent-model".to_string()),
+                Some("parent-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+
+        app.start_subagent_session(
+            parent_id.clone(),
+            "child-a".to_string(),
+            "General task (@general subagent)".to_string(),
+            "general".to_string(),
+            Some("sub-model".to_string()),
+            Some("sub-provider".to_string()),
+            "General task".to_string(),
+            "Check implementation".to_string(),
+        );
+
+        assert!(app.session_has_active_stream("child-a"));
+
+        app.cancelled_streaming_session(&parent_id);
+
+        assert!(!app.session_has_active_stream("child-a"));
+        let child_session = app.session_manager.get_session_ref("child-a").unwrap();
+        assert_eq!(
+            child_session.status,
+            crate::session::types::SessionStatus::Interrupted
+        );
+        assert_eq!(child_session.messages.len(), 2);
+        assert!(child_session.messages[1].is_complete);
+        assert!(child_session.messages[1].was_interrupted);
+    }
+
+    #[test]
+    fn cancelling_from_subagent_session_cancels_parent_stream_token() {
+        let mut app = test_app();
+        let parent_id = app.create_new_session(Some("Parent".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let observed_cancel_token = cancel_token.clone();
+        app.session_view_states.get_mut(&parent_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                cancel_token,
+                Some("parent-model".to_string()),
+                Some("parent-provider".to_string()),
+                0,
+            ));
+
+        app.start_subagent_session(
+            parent_id.clone(),
+            "child-a".to_string(),
+            "General task (@general subagent)".to_string(),
+            "general".to_string(),
+            Some("sub-model".to_string()),
+            Some("sub-provider".to_string()),
+            "General task".to_string(),
+            "Check implementation".to_string(),
+        );
+
+        app.cancel_streaming_for_session("child-a");
+
+        assert!(observed_cancel_token.is_cancelled());
     }
 
     #[test]
