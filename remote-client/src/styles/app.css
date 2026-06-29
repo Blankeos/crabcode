@@ -139,7 +139,7 @@
     -webkit-font-smoothing: antialiased;
   }
   button, input, textarea { font: inherit; }
-  button { border: 0; color: inherit; background: transparent; cursor: pointer; }
+  button { border: 0; color: inherit; background: transparent; cursor: pointer; touch-action: manipulation; }
   button:disabled { cursor: not-allowed; opacity: 0.5; }
   svg { display: block; }
 }
