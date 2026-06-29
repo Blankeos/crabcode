@@ -11,6 +11,7 @@ import type {
   RemoteState,
   RemoteStatus,
   RemoteSuggestion,
+  RemoteThreadTabs,
 } from "../../remote-api"
 
 export type SavedServer = {
@@ -86,7 +87,7 @@ export type ImagePlaceholderRange = {
 }
 
 export type ToolVisualState = "active" | "complete" | "error"
-export type ToolIconKind = "brain" | "check" | "file" | "globe" | "pencil" | "search" | "terminal" | "warning"
+export type ToolIconKind = "agent" | "brain" | "check" | "file" | "globe" | "pencil" | "search" | "terminal" | "warning"
 
 export type ToolStepDetail = {
   label: string
@@ -100,8 +101,21 @@ export type ToolActivityStep = {
   icon: ToolIconKind
   state: ToolVisualState
   details: ToolStepDetail[]
+  subagents?: SubagentActivityItem[]
   preview?: string
   defaultOpen?: boolean
+}
+
+export type SubagentActivityItem = {
+  id: string
+  agent: string
+  description: string
+  title?: string
+  sessionId?: string
+  durationMs?: number
+  toolCallCount?: number
+  state: ToolVisualState
+  preview?: string
 }
 
 export type DiffLine = {
@@ -241,6 +255,13 @@ export type HeaderController = {
   gitViewer: GitViewerController
 }
 
+export type ThreadTabsController = {
+  tabs: Accessor<RemoteThreadTabs | null>
+  switching: Accessor<boolean>
+  onSelectTab: (sessionId: string) => MaybePromise
+  onOpenSubagentSession: (sessionId: string) => MaybePromise
+}
+
 export type ThreadController = {
   setScrollRef: RefSetter<HTMLDivElement>
   setContentRef: RefSetter<HTMLDivElement>
@@ -255,6 +276,8 @@ export type ThreadController = {
   status: Accessor<RemoteStatus | null>
   token: Accessor<string>
   onPreviewImage: (attachment: AttachmentData) => void
+  tabs: ThreadTabsController
+  isSubagentView: Accessor<boolean>
 }
 
 export type ComposerController = {
@@ -347,8 +370,15 @@ export type RemoteClientUi = {
   header: HeaderController
   thread: ThreadController
   composer: ComposerController
+  subagentFooter: SubagentFooterController
   commandPalette: CommandPaletteController
   servers: ServerPanelController
   imagePreview: Accessor<ImagePreviewTarget | null>
   onCloseImagePreview: () => void
+}
+
+export type SubagentFooterController = {
+  tabs: Accessor<RemoteThreadTabs | null>
+  streaming: Accessor<boolean>
+  onBackToParent: () => MaybePromise
 }

@@ -30,6 +30,7 @@ pub struct ChatState {
 
 #[derive(Debug, Clone)]
 pub struct SubagentTab {
+    pub session_id: String,
     pub label: String,
     pub agent: String,
     pub model: String,
@@ -40,6 +41,7 @@ pub struct SubagentTab {
 
 #[derive(Debug, Clone)]
 pub struct SubagentTabs {
+    pub root_session_id: String,
     pub is_child_session: bool,
     pub tabs: Vec<SubagentTab>,
 }

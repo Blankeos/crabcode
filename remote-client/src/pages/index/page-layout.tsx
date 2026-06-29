@@ -21,7 +21,9 @@ import type { CommandPaletteController, GitViewerController, HeaderController, P
 import { ComposerDock } from "./composer-dock"
 import { EmptyThread } from "./empty-thread"
 import { QuestionRequestPanel, PermissionRequestPanel } from "./request-panels"
+import { SubagentSessionFooter } from "./subagent-footer"
 import { ImagePreviewDialog, ThreadItemView } from "./thread-view"
+import { ThreadTabsBar } from "./thread-tabs"
 import { isActiveServer } from "./server-utils"
 import { relativeTime } from "./shared-utils"
 
@@ -32,8 +34,11 @@ export function RemoteClientPage(props: { ui: RemoteClientUi }) {
   const mainColumn = () => (
     <main class="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[#171717]">
       <MainHeader header={ui.header} />
+      <ThreadTabsBar tabs={ui.thread.tabs} />
       <ThreadViewport thread={ui.thread} />
-      <ComposerDock composer={ui.composer} />
+      <Show when={!ui.thread.isSubagentView()} fallback={<SubagentSessionFooter footer={ui.subagentFooter} />}>
+        <ComposerDock composer={ui.composer} />
+      </Show>
     </main>
   )
 
@@ -919,7 +924,9 @@ function ThreadViewport(props: { thread: ThreadController }) {
           "remote-thread-scroll h-full min-h-0 overflow-y-auto overflow-x-hidden px-4 pt-5 overscroll-contain",
           thread.isEmptyChat()
             ? "overflow-hidden pb-[clamp(8rem,22vh,12rem)] max-[900px]:pb-4"
-            : "pb-52 max-[900px]:pb-4 max-[900px]:pt-2"
+            : thread.isSubagentView()
+              ? "pb-8 max-[900px]:pb-4 max-[900px]:pt-2"
+              : "pb-52 max-[900px]:pb-4 max-[900px]:pt-2"
         )}
       >
         <div ref={thread.setContentRef} class={cx("mx-auto w-[min(100%,64rem)]", thread.isEmptyChat() && "grid h-full")}>
@@ -940,6 +947,7 @@ function ThreadViewport(props: { thread: ThreadController }) {
                   streaming={thread.streaming}
                   token={thread.token}
                   onPreviewImage={thread.onPreviewImage}
+                  onOpenSubagentSession={thread.tabs.onOpenSubagentSession}
                 />
               )}
             </Index>

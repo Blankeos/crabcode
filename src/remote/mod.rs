@@ -343,6 +343,25 @@ struct RemoteQuestionOption {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+struct RemoteThreadTab {
+    session_id: String,
+    label: String,
+    agent: String,
+    model: String,
+    active: bool,
+    running: bool,
+    kind: String,
+    accent: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct RemoteThreadTabs {
+    root_session_id: String,
+    is_child_session: bool,
+    tabs: Vec<RemoteThreadTab>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct RemoteState {
     status: RemoteStatus,
     projects: Vec<RemoteWorkspace>,
@@ -353,6 +372,7 @@ struct RemoteState {
     queued_messages: Vec<String>,
     pending_permission: Option<RemotePermissionPrompt>,
     pending_question: Option<RemoteQuestionPrompt>,
+    thread_tabs: Option<RemoteThreadTabs>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2279,7 +2299,35 @@ fn remote_state(app: &App, host_state: &HostState) -> RemoteState {
         queued_messages: app.remote_queued_message_previews(),
         pending_permission: remote_permission_prompt(app),
         pending_question: remote_question_prompt(app),
+        thread_tabs: remote_thread_tabs(app),
     }
+}
+
+fn remote_thread_tabs(app: &App) -> Option<RemoteThreadTabs> {
+    let tabs = app.subagent_tabs_for_current_session()?;
+    Some(RemoteThreadTabs {
+        root_session_id: tabs.root_session_id,
+        is_child_session: tabs.is_child_session,
+        tabs: tabs
+            .tabs
+            .into_iter()
+            .enumerate()
+            .map(|(idx, tab)| RemoteThreadTab {
+                session_id: tab.session_id,
+                label: tab.label,
+                agent: tab.agent,
+                model: tab.model,
+                active: tab.active,
+                running: tab.running,
+                kind: if idx == 0 {
+                    "main".to_string()
+                } else {
+                    "subagent".to_string()
+                },
+                accent: color_to_css(tab.color, "#6c8ed8"),
+            })
+            .collect(),
+    })
 }
 
 fn remote_status(app: &App, host_state: &HostState) -> RemoteStatus {

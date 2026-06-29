@@ -147,6 +147,9 @@ export default function RemoteClient() {
   let focusPromptAfterControlPopoverClose = false
   let closeStateEvents: (() => void) | undefined
   let commandCloseTimer: number | undefined
+  let parentScrollRestore: { rootId: string; top: number } | null = null
+  let skipNextThreadScrollToBottom = false
+  const [threadSwitching, setThreadSwitching] = createSignal(false)
 
   const openCommandPalette = () => {
     if (commandCloseTimer !== undefined) {
@@ -446,6 +449,8 @@ export default function RemoteClient() {
     mergePromptHistoryEntries(browserPromptHistory(), messagePromptHistoryEntries(visibleMessages()))
   )
   const currentSessionId = createMemo(() => state()?.current_session_id ?? null)
+  const threadTabs = createMemo(() => state()?.thread_tabs ?? null)
+  const isSubagentView = createMemo(() => Boolean(threadTabs()?.is_child_session))
   const currentSession = createMemo(() =>
     (state()?.sessions ?? []).find((session) => session.id === currentSessionId())
   )
@@ -457,6 +462,13 @@ export default function RemoteClient() {
     resetMobileViewportScroll()
     queueMicrotask(() => {
       resetMobileViewportScroll()
+      if (skipNextThreadScrollToBottom && parentScrollRestore) {
+        const restore = parentScrollRestore
+        parentScrollRestore = null
+        skipNextThreadScrollToBottom = false
+        threadScroll.scrollTo(restore.top, false)
+        return
+      }
       threadScroll.scrollToBottom(false)
     })
   })
@@ -518,7 +530,7 @@ export default function RemoteClient() {
     await selectWorkspace(projectPathInput())
   }
 
-  const switchSession = async (id: string) => {
+  const switchSession = async (id: string, options?: { focusComposer?: boolean }) => {
     closeCommandPalette()
     try {
       const next = await api().switchSession(id)
@@ -526,10 +538,54 @@ export default function RemoteClient() {
       const cwd = next.status.cwd?.trim()
       if (cwd) ensureProjectExpanded(cwd)
       setSidebarOpen(false)
-      promptRef?.focus()
+      if (options?.focusComposer !== false && !next.thread_tabs?.is_child_session) {
+        promptRef?.focus()
+      }
     } catch (error) {
       showErrorToast(error, "Could not switch chat.")
     }
+  }
+
+  const selectThreadTab = async (sessionId: string) => {
+    if (threadSwitching()) return
+    const current = state()?.current_session_id
+    if (!sessionId || current === sessionId) return
+
+    const bundle = state()?.thread_tabs
+    const rootId = bundle?.root_session_id ?? current
+    const goingToParent = Boolean(rootId && sessionId === rootId)
+    const onParentNow = Boolean(rootId && current === rootId)
+
+    if (onParentNow && !goingToParent && rootId) {
+      parentScrollRestore = { rootId, top: threadScroll.getScrollTop() }
+    }
+    if (goingToParent && parentScrollRestore?.rootId === rootId) {
+      skipNextThreadScrollToBottom = true
+    }
+
+    setThreadSwitching(true)
+    try {
+      await switchSession(sessionId, { focusComposer: goingToParent })
+    } finally {
+      setThreadSwitching(false)
+    }
+  }
+
+  const openSubagentSession = async (sessionId: string) => {
+    if (!sessionId.trim()) return
+    const bundle = state()?.thread_tabs
+    const rootId = bundle?.root_session_id ?? state()?.current_session_id
+    if (rootId && state()?.current_session_id === rootId) {
+      parentScrollRestore = { rootId, top: threadScroll.getScrollTop() }
+    }
+    await selectThreadTab(sessionId)
+  }
+
+  const backToParentSession = async () => {
+    const rootId = state()?.thread_tabs?.root_session_id
+    if (!rootId) return
+    skipNextThreadScrollToBottom = true
+    await switchSession(rootId, { focusComposer: true })
   }
 
   const resumeMostRecentProjectSession = async (path: string) => {
@@ -1564,6 +1620,18 @@ export default function RemoteClient() {
       status: () => state()?.status ?? null,
       token,
       onPreviewImage: openImagePreview,
+      isSubagentView,
+      tabs: {
+        tabs: threadTabs,
+        switching: threadSwitching,
+        onSelectTab: selectThreadTab,
+        onOpenSubagentSession: openSubagentSession,
+      },
+    },
+    subagentFooter: {
+      tabs: threadTabs,
+      streaming: () => Boolean(state()?.is_streaming),
+      onBackToParent: backToParentSession,
     },
     composer: {
       pendingPermission,

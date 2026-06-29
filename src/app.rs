@@ -1252,7 +1252,7 @@ impl App {
         };
         let Some(latest_child) = self
             .session_manager
-            .child_sessions(&root_id)
+            .descendant_sessions(&root_id)
             .last()
             .cloned()
         else {
@@ -1266,13 +1266,12 @@ impl App {
         let Some(current_id) = self.session_manager.get_current_session_id().cloned() else {
             return false;
         };
-        let Some(parent_id) = self
-            .session_manager
-            .parent_id_of(&current_id)
-            .map(str::to_string)
-        else {
+        let Some(parent_id) = self.session_manager.root_session_id_for(&current_id) else {
             return false;
         };
+        if parent_id == current_id {
+            return false;
+        }
 
         self.switch_to_session(&parent_id)
     }
@@ -1285,7 +1284,7 @@ impl App {
             return false;
         };
 
-        let children = self.session_manager.child_sessions(&root_id);
+        let children = self.session_manager.descendant_sessions(&root_id);
         if children.len() <= 1 {
             return false;
         }
@@ -1299,11 +1298,11 @@ impl App {
         self.switch_to_session(&children[next_idx].id)
     }
 
-    fn subagent_tabs_for_current_session(&self) -> Option<SubagentTabs> {
+    pub fn subagent_tabs_for_current_session(&self) -> Option<SubagentTabs> {
         let current_id = self.session_manager.get_current_session_id()?.clone();
         let root_id = self.session_manager.root_session_id_for(&current_id)?;
         let root = self.session_manager.get_session_ref(&root_id)?;
-        let children = self.session_manager.child_sessions(&root_id);
+        let children = self.session_manager.descendant_sessions(&root_id);
         if children.is_empty() {
             return None;
         }
@@ -1314,6 +1313,7 @@ impl App {
             .session_active_stream_model(&root_id)
             .unwrap_or_else(|| self.model.clone());
         tabs.push(SubagentTab {
+            session_id: root_id.clone(),
             label: "main".to_string(),
             agent: root_agent,
             model: root_model,
@@ -1337,6 +1337,7 @@ impl App {
                     .get(&child.id)
                     .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some());
             tabs.push(SubagentTab {
+                session_id: child.id.clone(),
                 label,
                 agent,
                 model,
@@ -1347,6 +1348,7 @@ impl App {
         }
 
         Some(SubagentTabs {
+            root_session_id: root_id.clone(),
             is_child_session: current_id != root_id,
             tabs,
         })

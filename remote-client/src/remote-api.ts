@@ -142,6 +142,23 @@ export type RemoteQuestionOption = {
   description: string
 }
 
+export type RemoteThreadTab = {
+  session_id: string
+  label: string
+  agent: string
+  model: string
+  active: boolean
+  running: boolean
+  kind: "main" | "subagent" | string
+  accent: string
+}
+
+export type RemoteThreadTabs = {
+  root_session_id: string
+  is_child_session: boolean
+  tabs: RemoteThreadTab[]
+}
+
 export type RemoteState = {
   status: RemoteStatus
   projects: RemoteWorkspace[]
@@ -152,6 +169,7 @@ export type RemoteState = {
   queued_messages: string[]
   pending_permission: RemotePendingPermission | null
   pending_question: RemotePendingQuestion | null
+  thread_tabs: RemoteThreadTabs | null
 }
 
 export type RemoteModel = {

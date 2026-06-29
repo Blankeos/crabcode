@@ -18,7 +18,7 @@ import {
 } from "../../components/ai-elements/message"
 import { Shimmer } from "../../components/ai-elements/shimmer"
 import { CollapsiblePanel } from "../../components/remote/collapsible-panel"
-import { IconBrainGlyph } from "../../assets/icons"
+import { IconBrainGlyph, IconSubagentHierarchy } from "../../assets/icons"
 import {
   IconCaretDown,
   IconCheck,
@@ -33,7 +33,7 @@ import {
 } from "../../icons"
 import { cx } from "../../lib/cx"
 import type { RemoteMessage, RemoteStatus } from "../../remote-api"
-import type { DiffLine, DiffSection, ImagePreviewTarget, ThreadItem, ToolActivityStep, ToolIconKind, ToolMessage, ToolStepDetail, ToolVisualState } from "./page-types"
+import type { DiffLine, DiffSection, ImagePreviewTarget, SubagentActivityItem, ThreadItem, ToolActivityStep, ToolIconKind, ToolMessage, ToolStepDetail, ToolVisualState } from "./page-types"
 import { handleImagePreviewKeyDown, messageImageAttachmentData, promptTextPartClass, promptTextParts, promptTextPartStyle } from "./prompt-utils"
 import { actionDescriptor, assistantMetrics, buildActivitySteps, messageModelLabel, trimPreview } from "./thread-model"
 import { agentAccentClass, displayAgentMode, fallbackCopyText } from "./shared-utils"
@@ -44,6 +44,7 @@ export function ThreadItemView(props: {
   streaming: Accessor<boolean>
   token: Accessor<string>
   onPreviewImage: (attachment: AttachmentData) => void
+  onOpenSubagentSession?: (sessionId: string) => void | Promise<void>
 }) {
   const message = createMemo(() => {
     const item = props.item()
@@ -73,16 +74,122 @@ export function ThreadItemView(props: {
             streaming={props.streaming}
             token={props.token}
             onPreviewImage={props.onPreviewImage}
+            onOpenSubagentSession={props.onOpenSubagentSession}
           />
         )}
       </Show>
-      <Show when={activity()}>{(tools) => <ToolActivityGroup tools={tools} />}</Show>
+      <Show when={activity()}>{(tools) => <ToolActivityGroup tools={tools} onOpenSubagentSession={props.onOpenSubagentSession} />}</Show>
       <Show when={action()}>{(tool) => <ToolActionMessage tool={tool} />}</Show>
     </>
   )
 }
 
-function ToolActivityGroup(props: { tools: Accessor<ToolMessage[]> }) {
+function SubagentActivityDetails(props: {
+  items: SubagentActivityItem[]
+  preview?: string
+  onOpenSession?: (sessionId: string) => void | Promise<void>
+}) {
+  return (
+    <div class="flex min-w-0 flex-col gap-2 pt-2 pb-1">
+      <div class="grid min-w-0 gap-2">
+        <For each={props.items}>
+          {(item, index) => {
+            const openable = () => Boolean(item.sessionId && props.onOpenSession)
+            const open = () => {
+              if (!item.sessionId || !props.onOpenSession) return
+              void props.onOpenSession(item.sessionId)
+            }
+            return (
+            <div
+              role={openable() ? "button" : undefined}
+              tabIndex={openable() ? 0 : undefined}
+              class={cx(
+                "min-w-0 rounded-lg border border-[var(--line)] bg-white/[0.026] px-2.5 py-2 transition",
+                item.state === "active" && "border-[rgba(108,142,216,0.26)] bg-[rgba(108,142,216,0.052)]",
+                item.state === "error" && "border-[rgba(200,108,116,0.3)] bg-[rgba(200,108,116,0.065)]",
+                openable() && "cursor-pointer hover:border-[rgba(108,142,216,0.38)] hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-primary)]"
+              )}
+              onClick={() => open()}
+              onKeyDown={(event) => {
+                if (!openable()) return
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault()
+                  open()
+                }
+              }}
+            >
+              <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
+                <span class={cx("mt-0.5 grid h-5 w-5 place-items-center border text-[0.64rem] font-bold leading-none", agentAccentClass(item.agent))}>
+                  {index() + 1}
+                </span>
+                <span class="flex min-w-0 flex-col gap-1">
+                  <span class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                    <strong class={cx("font-mono text-[0.72rem] font-bold leading-none", agentAccentClass(item.agent))}>
+                      @{item.agent}
+                    </strong>
+                    <span class="min-w-0 text-[0.8rem] font-medium leading-snug text-[#ddd9d0] [overflow-wrap:anywhere]">
+                      {item.description}
+                    </span>
+                  </span>
+                  <span class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[0.68rem] leading-snug text-[var(--faint)]">
+                    <SubagentStatus state={item.state} />
+                    <Show when={item.durationMs !== undefined}>
+                      <span>{formatDuration(item.durationMs!)} </span>
+                    </Show>
+                    <Show when={item.toolCallCount !== undefined}>
+                      <span>{item.toolCallCount} tool{item.toolCallCount === 1 ? "" : "s"}</span>
+                    </Show>
+                    <Show when={item.sessionId}>
+                      {(sessionId) => <span title={sessionId()}>session {sessionId().slice(0, 7)}</span>}
+                    </Show>
+                  </span>
+                </span>
+                <span
+                  class={cx(
+                    "mt-1 h-2 w-2 rounded-full border border-[var(--line-strong)] bg-white/10",
+                    item.state === "active" && "border-[rgba(108,142,216,0.65)] bg-[var(--brand-primary)] animate-toolPulse",
+                    item.state === "error" && "border-[rgba(200,108,116,0.65)] bg-[var(--red)]",
+                    item.state === "complete" && "border-[rgba(92,168,134,0.5)] bg-[var(--green)]"
+                  )}
+                  aria-hidden="true"
+                />
+              </div>
+            </div>
+            )
+          }}
+        </For>
+      </div>
+      <Show when={props.items.some((item) => item.sessionId)}>
+        <p class="m-0 pl-1 font-mono text-[0.68rem] leading-snug text-[var(--faint)]">
+          {props.onOpenSession ? "Open a subagent card to view its full transcript." : "Subagent transcript opens when session browsing is available."}
+        </p>
+      </Show>
+      <Show when={props.preview}>
+        {(preview) => (
+          <pre class="m-0 max-w-full overflow-x-auto whitespace-pre rounded-[7px] border border-[var(--line)] bg-black/20 p-3 font-mono text-[0.73rem] leading-normal text-[#bebbb4]">
+            {trimPreview(preview())}
+          </pre>
+        )}
+      </Show>
+    </div>
+  )
+}
+
+function SubagentStatus(props: { state: ToolVisualState }) {
+  if (props.state === "active") return <span class="text-[#9db1ef]">running</span>
+  if (props.state === "error") return <span class="text-[var(--red)]">failed</span>
+  return <span class="text-[var(--green)]">complete</span>
+}
+
+function formatDuration(ms: number) {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+function ToolActivityGroup(props: {
+  tools: Accessor<ToolMessage[]>
+  onOpenSubagentSession?: (sessionId: string) => void | Promise<void>
+}) {
   const steps = createMemo(() => buildActivitySteps(props.tools()))
   const state = createMemo<ToolVisualState>(() => {
     if (steps().some((step) => step.state === "error")) return "error"
@@ -94,7 +201,7 @@ function ToolActivityGroup(props: { tools: Accessor<ToolMessage[]> }) {
     <article class="grid grid-cols-[2rem_minmax(0,1fr)] gap-3 py-1">
       <div class="w-7" />
       <div class="w-[min(100%,44rem)] min-w-0">
-        <ToolActivityTimeline steps={steps} state={state} />
+        <ToolActivityTimeline steps={steps} state={state} onOpenSubagentSession={props.onOpenSubagentSession} />
       </div>
     </article>
   )
@@ -104,10 +211,11 @@ function ToolActivityTimeline(props: {
   steps: Accessor<ToolActivityStep[]>
   state: Accessor<ToolVisualState>
   steady?: Accessor<boolean>
+  onOpenSubagentSession?: (sessionId: string) => void | Promise<void>
 }) {
   return (
     <section class="flex w-[min(100%,30rem)] flex-col text-[#d8d6d1]" aria-label="Tool activity">
-      <Index each={props.steps()}>{(step) => <ToolTimelineStep step={step} steady={props.steady} />}</Index>
+      <Index each={props.steps()}>{(step) => <ToolTimelineStep step={step} steady={props.steady} onOpenSubagentSession={props.onOpenSubagentSession} />}</Index>
       <Show when={props.state() === "complete"}>
         <ToolTimelineStep
           steady={props.steady}
@@ -124,10 +232,15 @@ function ToolActivityTimeline(props: {
   )
 }
 
-function ToolTimelineStep(props: { step: Accessor<ToolActivityStep>; steady?: Accessor<boolean> }) {
+function ToolTimelineStep(props: {
+  step: Accessor<ToolActivityStep>
+  steady?: Accessor<boolean>
+  onOpenSubagentSession?: (sessionId: string) => void | Promise<void>
+}) {
   const [open, setOpen] = createSignal(props.step().defaultOpen ?? false)
   const [userToggled, setUserToggled] = createSignal(false)
-  const hasDetails = () => props.step().details.length > 0 || Boolean(props.step().preview)
+  const hasSubagents = () => Boolean(props.step().subagents?.length)
+  const hasDetails = () => props.step().details.length > 0 || hasSubagents() || Boolean(props.step().preview)
 
   createEffect(() => {
     if (!userToggled() && props.step().defaultOpen) setOpen(true)
@@ -160,7 +273,16 @@ function ToolTimelineStep(props: { step: Accessor<ToolActivityStep>; steady?: Ac
         </button>
         <Show when={hasDetails()}>
           <CollapsiblePanel open={open()} steady={props.steady?.()} class="w-full">
-            <ToolDetails details={props.step().details} preview={props.step().preview} compact />
+            <Show when={hasSubagents()}>
+              <SubagentActivityDetails
+                items={props.step().subagents || []}
+                preview={props.step().preview}
+                onOpenSession={props.onOpenSubagentSession}
+              />
+            </Show>
+            <Show when={!hasSubagents()}>
+              <ToolDetails details={props.step().details} preview={props.step().preview} compact />
+            </Show>
           </CollapsiblePanel>
         </Show>
       </div>
@@ -385,6 +507,7 @@ function syntaxTokenClass(kind: SyntaxToken["kind"]) {
 }
 
 function ToolIcon(props: { kind: ToolIconKind; class?: string }) {
+  if (props.kind === "agent") return <IconSubagentHierarchy class={props.class} />
   if (props.kind === "check") return <IconCheck class={props.class} />
   if (props.kind === "file") return <IconFileText class={props.class} />
   if (props.kind === "globe") return <IconGlobe class={props.class} />
@@ -408,6 +531,7 @@ function MessageView(props: {
   streaming: Accessor<boolean>
   token: Accessor<string>
   onPreviewImage: (attachment: AttachmentData) => void
+  onOpenSubagentSession?: (sessionId: string) => void | Promise<void>
 }) {
   const isUser = () => props.message().role === "user"
   const userAttachments = createMemo(() => messageImageAttachmentData(props.message(), props.token()))
@@ -436,6 +560,7 @@ function MessageView(props: {
             text={props.message().reasoning || ""}
             activityTools={props.activityTools}
             streaming={!props.message().is_complete}
+            onOpenSubagentSession={props.onOpenSubagentSession}
           />
         </Show>
         <Show
@@ -650,6 +775,7 @@ function ThinkingAccordion(props: {
   text: string
   activityTools: Accessor<ToolMessage[]>
   streaming: boolean
+  onOpenSubagentSession?: (sessionId: string) => void | Promise<void>
 }) {
   const steps = createMemo(() => buildActivitySteps(props.activityTools()))
   const state = createMemo<ToolVisualState>(() => {
@@ -697,7 +823,12 @@ function ThinkingAccordion(props: {
           </Show>
           <Show when={hasActivity()}>
             <div class="mt-1 [&_.tool-activity]:w-[min(100%,34rem)]">
-              <ToolActivityTimeline steps={steps} state={state} steady={steadyActivity} />
+              <ToolActivityTimeline
+                steps={steps}
+                state={state}
+                steady={steadyActivity}
+                onOpenSubagentSession={props.onOpenSubagentSession}
+              />
             </div>
           </Show>
         </div>

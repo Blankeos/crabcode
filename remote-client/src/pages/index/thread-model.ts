@@ -7,6 +7,7 @@ import type {
   JsonObject,
   JsonValue,
   ParsedToolMessage,
+  SubagentActivityItem,
   ThreadItem,
   ToolActivityStep,
   ToolMessage,
@@ -396,6 +397,7 @@ export function isActivityTool(tool: ToolMessage) {
 export function buildActivitySteps(tools: ToolMessage[]): ToolActivityStep[] {
   const steps: ToolActivityStep[] = []
   let exploration: ToolMessage[] = []
+  let subagents: ToolMessage[] = []
 
   const flushExploration = () => {
     if (exploration.length === 0) return
@@ -403,16 +405,28 @@ export function buildActivitySteps(tools: ToolMessage[]): ToolActivityStep[] {
     exploration = []
   }
 
+  const flushSubagents = () => {
+    if (subagents.length === 0) return
+    steps.push(subagentActivityStep(subagents, steps.length))
+    subagents = []
+  }
+
   for (const tool of tools) {
     if (EXPLORATION_TOOL_NAMES.has(tool.parsed.name)) {
+      flushSubagents()
       exploration.push(tool)
+    } else if (tool.parsed.name === "task") {
+      flushExploration()
+      subagents.push(tool)
     } else {
       flushExploration()
+      flushSubagents()
       steps.push(activityStepFromTool(tool, steps.length))
     }
   }
 
   flushExploration()
+  flushSubagents()
   return steps
 }
 
@@ -482,6 +496,59 @@ export function explorationDetail(tool: ToolMessage): ToolStepDetail {
   }
 }
 
+export function subagentActivityStep(tools: ToolMessage[], index: number): ToolActivityStep {
+  const state = combinedToolState(tools)
+  const items = tools.map(subagentActivityItem)
+  const count = Math.max(1, items.length)
+  const label =
+    state === "active"
+      ? count === 1
+        ? `Running ${formatToolName(items[0]?.agent || "subagent")}`
+        : `Running ${formatCount(count, "subagent")}`
+      : state === "error"
+        ? count === 1
+          ? `${formatToolName(items[0]?.agent || "subagent")} failed`
+          : "Subagent work failed"
+        : count === 1
+          ? `Ran ${formatToolName(items[0]?.agent || "subagent")}`
+          : `Ran ${formatCount(count, "subagent")}`
+
+  return {
+    key: `subagents-${index}-${tools.map((tool) => tool.parsed.id).join("-")}`,
+    label,
+    icon: "agent",
+    state,
+    details: [],
+    subagents: items,
+    preview: state === "error" ? tools.map((tool) => tool.parsed.outputPreview).filter(Boolean).join("\n\n") || undefined : undefined,
+    defaultOpen: state !== "complete" || items.length > 1,
+  }
+}
+
+export function subagentActivityItem(tool: ToolMessage): SubagentActivityItem {
+  const args = asObject(tool.parsed.args)
+  const metadata = asObject(tool.parsed.metadata)
+  const agent = argString(metadata, ["subagent_type"]) || argString(args, ["subagent_type"]) || "subagent"
+  const description =
+    argString(args, ["description"]) ||
+    argString(metadata, ["description"]) ||
+    stripSubagentSuffix(argString(metadata, ["child_session_title"])) ||
+    firstPreviewLine(tool.parsed.outputPreview) ||
+    "Delegated task"
+
+  return {
+    id: tool.parsed.id,
+    agent,
+    description,
+    title: argString(metadata, ["child_session_title"]),
+    sessionId: argString(metadata, ["child_session_id"]),
+    durationMs: numberValue(metadata?.duration_ms),
+    toolCallCount: numberValue(metadata?.child_tool_call_count),
+    state: toolState(tool),
+    preview: tool.parsed.outputPreview,
+  }
+}
+
 export function activityStepFromTool(tool: ToolMessage, index: number): ToolActivityStep {
   const args = asObject(tool.parsed.args)
   const metadata = asObject(tool.parsed.metadata)
@@ -537,7 +604,7 @@ export function activityStepFromTool(tool: ToolMessage, index: number): ToolActi
           : state === "error"
             ? "Skill load failed"
             : `Loaded skill${name ? ` ${name}` : ""}`,
-      icon: "brain",
+      icon: "agent",
       state,
       details: resources.length > 0 ? [{ label: formatCount(resources.length, "resource"), status: state }] : [],
       preview: state === "error" ? tool.parsed.outputPreview : undefined,
@@ -819,6 +886,10 @@ export function argString(obj: JsonObject | undefined, keys: string[]) {
 export function stripToolTitle(title: string | undefined, label: string) {
   const prefix = `${label}:`
   return title?.startsWith(prefix) ? title.slice(prefix.length).trim() || undefined : undefined
+}
+
+export function stripSubagentSuffix(title: string | undefined) {
+  return title?.replace(/\s*\(@[^)]+\s+subagent\)\s*$/i, "").trim() || undefined
 }
 
 export function displayPath(raw: string, cwd: string, basenameOnly: boolean) {

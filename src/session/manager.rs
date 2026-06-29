@@ -342,8 +342,37 @@ impl SessionManager {
     }
 
     pub fn root_session_id_for(&self, id: &str) -> Option<String> {
-        let session = self.sessions.get(id)?;
-        Some(session.parent_id.clone().unwrap_or_else(|| id.to_string()))
+        let mut current_id = id;
+        loop {
+            let session = self.sessions.get(current_id)?;
+            let Some(parent_id) = session.parent_id.as_deref() else {
+                return Some(current_id.to_string());
+            };
+            current_id = parent_id;
+        }
+    }
+
+    pub fn descendant_sessions(&self, parent_id: &str) -> Vec<SessionInfo> {
+        let mut descendants = Vec::new();
+        self.collect_descendant_sessions(parent_id, &mut descendants);
+        descendants
+    }
+
+    fn collect_descendant_sessions(&self, parent_id: &str, descendants: &mut Vec<SessionInfo>) {
+        let Some(children) = self.children_by_parent.get(parent_id) else {
+            return;
+        };
+
+        for child_id in children {
+            if let Some(session) = self.sessions.get(child_id) {
+                descendants.push(Self::session_info_from_session(
+                    child_id,
+                    session,
+                    self.workspace_sort_order(session.workspace_id),
+                ));
+                self.collect_descendant_sessions(child_id, descendants);
+            }
+        }
     }
 
     pub fn child_sessions(&self, parent_id: &str) -> Vec<SessionInfo> {

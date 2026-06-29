@@ -116,6 +116,15 @@ export function useStickToBottom(
     measure()
   }
 
+  const scrollTo = (top: number, smooth = false) => {
+    const el = scrollEl()
+    if (!el) return
+    el.scrollTo({ top: Math.max(0, top), behavior: smooth ? "smooth" : "auto" })
+    measure()
+  }
+
+  const getScrollTop = () => scrollEl()?.scrollTop ?? 0
+
   onMount(() => {
     queueMicrotask(() => scrollToBottom(false))
   })
@@ -139,7 +148,7 @@ export function useStickToBottom(
     })
   })
 
-  return { isAtTop, isAtBottom, scrollToBottom, measure }
+  return { isAtTop, isAtBottom, scrollToBottom, scrollTo, getScrollTop, measure }
 }
 
 export function cuid() {
@@ -163,6 +172,10 @@ export function displayAgentMode(agent: string) {
 }
 
 export function agentAccentClass(agent: string) {
+  if (sameToken(agent, "explore")) return "border-[#83c5be] text-[#83c5be]"
+  if (sameToken(agent, "frontend-agent") || sameToken(agent, "frontend")) return "border-[#f2b5d4] text-[#f2b5d4]"
+  if (sameToken(agent, "general")) return "border-[#f2cc8f] text-[#f2cc8f]"
+  if (sameToken(agent, "vlm-agent") || sameToken(agent, "vlm")) return "border-[#90dbf4] text-[#90dbf4]"
   if (sameToken(agent, "Plan")) return "border-[#8fcfb1] text-[#8fcfb1]"
   return "border-[#bda0ff] text-[#bda0ff]"
 }
