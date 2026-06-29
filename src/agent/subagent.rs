@@ -345,6 +345,25 @@ async fn start_subagent_stream(
             if let Some(effort) = session.reasoning_effort {
                 builder = builder.reasoning_effort(effort.as_str());
             }
+            if let Some(responses_path) = &session.openai_options.response_path {
+                builder = builder.responses_path(responses_path);
+            }
+            if session.openai_options.force_store_false {
+                builder = builder.store_override(false);
+            }
+            if let Some(instructions) = session.openai_options.default_instructions.as_deref() {
+                builder = builder.default_instructions(instructions);
+            }
+            if session.openai_options.disallow_system_messages {
+                builder = builder.strip_system_and_developer_messages(true);
+                builder = builder.responses_websocket(true);
+            }
+            if session.openai_options.force_tool_strict_false {
+                builder = builder.tool_strict_override(false);
+            }
+            if !session.openai_options.additional_headers.is_empty() {
+                builder = builder.headers(session.openai_options.additional_headers.clone());
+            }
             let provider = builder
                 .build()
                 .map_err(|e| format!("Failed to build OpenAI provider: {}", e))?;
@@ -510,6 +529,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inherited_parent_session_preserves_openai_request_options() {
+        let mut warnings = Vec::new();
+        let agent = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "explore": {
+                    "mode": "subagent"
+                }
+            })),
+            &mut warnings,
+        )
+        .pop()
+        .expect("agent definition");
+        let mut parent = test_session(None);
+        parent.provider_kind = crate::agent::config::ProviderKind::OpenAI;
+        parent.openai_options.response_path = Some("/backend-api/codex/responses".to_string());
+        parent.openai_options.disallow_system_messages = true;
+        parent.openai_options.force_store_false = true;
+        parent.openai_options.force_tool_strict_false = true;
+        parent.openai_options.default_instructions = Some("Codex".to_string());
+        parent
+            .openai_options
+            .additional_headers
+            .insert("originator".to_string(), "crabcode".to_string());
+
+        let session = tokio_test::block_on(resolve_subagent_session(&agent, parent, None))
+            .expect("resolved session");
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            session.openai_options.response_path.as_deref(),
+            Some("/backend-api/codex/responses")
+        );
+        assert!(session.openai_options.disallow_system_messages);
+        assert!(session.openai_options.force_store_false);
+        assert!(session.openai_options.force_tool_strict_false);
+        assert_eq!(
+            session.openai_options.default_instructions.as_deref(),
+            Some("Codex")
+        );
+        assert_eq!(
+            session.openai_options.additional_headers.get("originator"),
+            Some(&"crabcode".to_string())
+        );
+    }
+
     fn test_session(
         reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     ) -> crate::agent::config::LlmSessionConfig {
@@ -521,6 +586,7 @@ mod tests {
             base_url: "https://example.test".to_string(),
             reasoning_effort,
             supports_image_input: false,
+            openai_options: crate::agent::config::OpenAIRequestOptions::default(),
         }
     }
 }

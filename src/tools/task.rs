@@ -66,6 +66,7 @@ mod tests {
             base_url: "https://example.test".to_string(),
             reasoning_effort: None,
             supports_image_input: false,
+            openai_options: crate::agent::config::OpenAIRequestOptions::default(),
         });
 
         let mut warnings = Vec::new();

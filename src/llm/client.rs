@@ -1,3 +1,4 @@
+use crate::agent::config::OpenAIRequestOptions;
 use crate::aisdk::core::{
     chunk::{ChunkType, MessagePhase},
     response::{stream_with_tools, LanguageModelStream, StreamTextResponse},
@@ -32,16 +33,6 @@ Any attempt to use tools is a critical violation. Respond with text ONLY."#;
 const TOOL_HISTORY_ARGUMENTS_MAX_CHARS: usize = 60_000;
 
 type DynError = Box<dyn std::error::Error>;
-
-#[derive(Clone, Debug, Default)]
-struct OpenAIRequestOptions {
-    response_path: Option<String>,
-    additional_headers: HashMap<String, String>,
-    force_store_false: bool,
-    default_instructions: Option<String>,
-    disallow_system_messages: bool,
-    force_tool_strict_false: bool,
-}
 
 #[derive(Clone, Debug)]
 struct ProviderRequestConfig {
@@ -405,6 +396,7 @@ pub async fn stream_llm_with_cancellation(
         base_url: request_config.base_url.clone(),
         reasoning_effort: request_config.reasoning_effort,
         supports_image_input: request_config.supports_image_input,
+        openai_options: request_config.openai_options.clone(),
     });
 
     let show_vlm_agent_hint = !request_config.supports_image_input
@@ -616,6 +608,7 @@ pub async fn build_subagent_llm_session(
         base_url: request_config.base_url,
         reasoning_effort: request_config.reasoning_effort,
         supports_image_input: request_config.supports_image_input,
+        openai_options: request_config.openai_options,
     })
 }
 
