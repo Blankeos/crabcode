@@ -26,6 +26,7 @@ pub struct Tool {
     pub id: ToolId,
     pub description: String,
     pub parameters: Vec<ParameterSchema>,
+    pub input_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +58,17 @@ pub enum ToolError {
 
 impl Tool {
     pub fn to_openai_schema(&self) -> serde_json::Value {
+        if let Some(input_schema) = &self.input_schema {
+            return serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": self.id,
+                    "description": self.description,
+                    "parameters": input_schema
+                }
+            });
+        }
+
         let mut properties = serde_json::Map::new();
         let mut required = Vec::new();
 

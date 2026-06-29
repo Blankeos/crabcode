@@ -609,6 +609,23 @@ pub fn handle_skills<'a>(
     })
 }
 
+pub fn handle_mcp<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error(
+                "This command only opens the MCP dialog. Usage: /mcp".to_string(),
+            );
+        }
+
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_skill_command<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
@@ -883,6 +900,14 @@ pub fn register_all_commands(registry: &mut Registry) {
         name: "skills".to_string(),
         description: "List available skills".to_string(),
         handler: handle_skills,
+        hidden_tokens: vec![],
+        chat_only: false,
+    });
+
+    registry.register(Command {
+        name: "mcp".to_string(),
+        description: "List MCP servers".to_string(),
+        handler: handle_mcp,
         hidden_tokens: vec![],
         chat_only: false,
     });

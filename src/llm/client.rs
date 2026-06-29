@@ -359,6 +359,8 @@ pub async fn stream_llm_with_cancellation(
     agent_registry: crate::agent::definition::AgentRegistry,
     tool_permissions: crate::tools::ToolPermissions,
     websearch_config: crate::config::configuration::WebsearchConfig,
+    mcp_config: crate::config::configuration::McpConfig,
+    workspace: String,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
 ) -> Result<(), DynError> {
@@ -381,6 +383,8 @@ pub async fn stream_llm_with_cancellation(
         cancel_token.clone(),
         Some(&request_config.provider_name),
         &websearch_config,
+        &mcp_config,
+        &workspace,
     )
     .await;
     // Set LLM session config for subagent use

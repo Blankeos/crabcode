@@ -82,6 +82,7 @@ mod tests {
                     required: false,
                     param_type: ParameterType::String,
                 }],
+                input_schema: None,
             }
         }
 

@@ -48,6 +48,7 @@ impl ToolHandler for WriteTool {
                     param_type: ParameterType::String,
                 },
             ],
+            input_schema: None,
         }
     }
 
@@ -91,6 +92,7 @@ impl ToolHandler for WriteFilesTool {
                 required: true,
                 param_type: ParameterType::Array(Box::new(ParameterType::Object(file_props))),
             }],
+            input_schema: None,
         }
     }
 

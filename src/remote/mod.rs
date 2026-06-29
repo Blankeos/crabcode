@@ -402,6 +402,19 @@ struct RemoteSkill {
     location: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct RemoteMcpServer {
+    name: String,
+    enabled: bool,
+    status: String,
+    kind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct McpToggleRequest {
+    name: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SwitchSessionRequest {
     id: String,
@@ -1451,6 +1464,32 @@ async fn handle_connection(
                 remote_skills(&app)
             };
             write_json_response(socket, 200, &skills).await
+        }
+        ("GET", "/api/mcp") => {
+            if !authorized(&request, host_state.as_ref()) {
+                return write_error_response(socket, 401, "pairing required").await;
+            }
+            let servers = {
+                let app = app.lock().await;
+                remote_mcp_list(&app)
+            };
+            write_json_response(socket, 200, &servers).await
+        }
+        ("POST", "/api/mcp/toggle") => {
+            if !authorized(&request, host_state.as_ref()) {
+                return write_error_response(socket, 401, "pairing required").await;
+            }
+            let payload: McpToggleRequest = parse_json_body(&request)?;
+            let servers = {
+                let mut app = app.lock().await;
+                match app.remote_toggle_mcp_server(payload.name.trim()) {
+                    Ok(list) => list,
+                    Err(err) => {
+                        return write_error_response(socket, 400, &err.to_string()).await;
+                    }
+                }
+            };
+            write_json_response(socket, 200, &servers).await
         }
         ("POST", "/api/autocomplete") => {
             if !authorized(&request, host_state.as_ref()) {
@@ -2951,6 +2990,18 @@ fn remote_skills(app: &App) -> Vec<RemoteSkill> {
             name: skill.name,
             description: skill.description.unwrap_or_default(),
             location: skill.location.to_string_lossy().to_string(),
+        })
+        .collect()
+}
+
+fn remote_mcp_list(app: &App) -> Vec<RemoteMcpServer> {
+    app.remote_mcp_servers()
+        .into_iter()
+        .map(|server| RemoteMcpServer {
+            name: server.name,
+            enabled: server.enabled,
+            status: server.status,
+            kind: server.kind,
         })
         .collect()
 }

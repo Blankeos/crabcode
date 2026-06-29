@@ -100,6 +100,7 @@ impl ToolHandler for ListTool {
                     param_type: ParameterType::Integer,
                 },
             ],
+            input_schema: None,
         }
     }
 

@@ -113,6 +113,7 @@ impl ToolHandler for WebsearchTool {
                     param_type: ParameterType::Integer,
                 },
             ],
+            input_schema: None,
         }
     }
 

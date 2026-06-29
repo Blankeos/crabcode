@@ -10,6 +10,8 @@ pub async fn initialize_tool_registry() -> ToolRegistry {
     initialize_tool_registry_with_config(
         None,
         &crate::config::configuration::WebsearchConfig::default(),
+        &crate::config::configuration::McpConfig::default(),
+        ".",
     )
     .await
 }
@@ -17,6 +19,8 @@ pub async fn initialize_tool_registry() -> ToolRegistry {
 pub async fn initialize_tool_registry_with_config(
     provider_name: Option<&str>,
     websearch_config: &crate::config::configuration::WebsearchConfig,
+    mcp_config: &crate::config::configuration::McpConfig,
+    workspace: impl Into<std::path::PathBuf>,
 ) -> ToolRegistry {
     let registry = ToolRegistry::new();
 
@@ -37,9 +41,30 @@ pub async fn initialize_tool_registry_with_config(
             .register(Arc::new(WebsearchTool::new(websearch_config.clone())))
             .await;
     }
+    register_mcp_tools(&registry, mcp_config.clone(), workspace.into()).await;
     registry.register(Arc::new(UpdatePlanTool::new())).await;
 
     registry
+}
+
+async fn register_mcp_tools(
+    registry: &ToolRegistry,
+    mcp_config: crate::config::configuration::McpConfig,
+    workspace: std::path::PathBuf,
+) {
+    if mcp_config.is_empty() || !mcp_config.values().any(|server| server.enabled()) {
+        return;
+    }
+    let manager = crate::mcp::McpManager::connect(mcp_config, workspace).await;
+    let tools = manager.lock().await.tools();
+    for spec in tools {
+        registry
+            .register(Arc::new(crate::mcp::McpToolHandler::new(
+                manager.clone(),
+                spec,
+            )))
+            .await;
+    }
 }
 
 pub async fn register_dynamic_tools(
@@ -82,8 +107,16 @@ pub async fn initialize_tool_registry_with_dynamic_config(
     cancel_token: CancellationToken,
     provider_name: Option<&str>,
     websearch_config: &crate::config::configuration::WebsearchConfig,
+    mcp_config: &crate::config::configuration::McpConfig,
+    workspace: impl Into<std::path::PathBuf>,
 ) -> ToolRegistry {
-    let registry = initialize_tool_registry_with_config(provider_name, websearch_config).await;
+    let registry = initialize_tool_registry_with_config(
+        provider_name,
+        websearch_config,
+        mcp_config,
+        workspace,
+    )
+    .await;
     register_dynamic_tools(&registry, sender, permissions, agent_registry, cancel_token).await;
     registry
 }

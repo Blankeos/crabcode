@@ -38,6 +38,7 @@ impl ToolHandler for ViewImageTool {
                     param_type: ParameterType::String,
                 },
             ],
+            input_schema: None,
         }
     }
 

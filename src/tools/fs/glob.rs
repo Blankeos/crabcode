@@ -45,6 +45,7 @@ impl ToolHandler for GlobTool {
                     param_type: ParameterType::String,
                 },
             ],
+            input_schema: None,
         }
     }
 

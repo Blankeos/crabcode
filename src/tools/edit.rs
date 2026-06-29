@@ -65,6 +65,7 @@ impl ToolHandler for EditTool {
                     param_type: ParameterType::Boolean,
                 },
             ],
+            input_schema: None,
         }
     }
 

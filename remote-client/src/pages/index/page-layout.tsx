@@ -832,12 +832,14 @@ function ServerPopover(props: { servers: ServerPanelController }) {
             Skills <CountBadge count={servers.skills().length} />
           </button>
           <button
-            class={cx("py-1 text-[0.9rem] text-[var(--muted)]", servers.tab() === "mcp" && "text-[var(--text)]")}
+            class={cx(
+              "inline-flex items-center gap-1.5 py-1 text-[0.9rem] text-[var(--muted)]",
+              servers.tab() === "mcp" && "border-b-2 border-[var(--text)] text-[var(--text)]"
+            )}
             type="button"
             onClick={() => servers.onSelectTab("mcp")}
-            disabled
           >
-            MCP
+            MCP <CountBadge count={servers.mcpServers().length} />
           </button>
           <button
             class={cx("py-1 text-[0.9rem] text-[var(--muted)]", servers.tab() === "lsp" && "text-[var(--text)]")}
@@ -859,33 +861,72 @@ function ServerPopover(props: { servers: ServerPanelController }) {
         <Show
           when={servers.tab() === "skills"}
           fallback={
-            <>
-              <div class="grid gap-1 py-3">
-                <For each={servers.servers().slice(0, 3)}>
-                  {(server) => (
-                    <button
-                      class="grid min-h-10 min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2 rounded-lg px-2 text-left text-[var(--muted)] hover:bg-white/[0.04] hover:text-[var(--text)]"
-                      type="button"
-                      onClick={() => servers.onOpenServer(server)}
-                    >
-                      <span class="h-2 w-2 rounded-full bg-[#53b842]" />
-                      <span>{server.name}</span>
-                      <span class="text-[0.78rem] text-[var(--faint)]">v{servers.status()?.version}</span>
-                      <Show when={isActiveServer(server.address, servers.activeServerUrl())}>
-                        <IconCheck class="h-4 w-4 text-[var(--muted)]" />
-                      </Show>
-                    </button>
-                  )}
-                </For>
+            <Show
+              when={servers.tab() === "mcp"}
+              fallback={
+                <>
+                  <div class="grid gap-1 py-3">
+                    <For each={servers.servers().slice(0, 3)}>
+                      {(server) => (
+                        <button
+                          class="grid min-h-10 min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2 rounded-lg px-2 text-left text-[var(--muted)] hover:bg-white/[0.04] hover:text-[var(--text)]"
+                          type="button"
+                          onClick={() => servers.onOpenServer(server)}
+                        >
+                          <span class="h-2 w-2 rounded-full bg-[#53b842]" />
+                          <span>{server.name}</span>
+                          <span class="text-[0.78rem] text-[var(--faint)]">v{servers.status()?.version}</span>
+                          <Show when={isActiveServer(server.address, servers.activeServerUrl())}>
+                            <IconCheck class="h-4 w-4 text-[var(--muted)]" />
+                          </Show>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <button
+                    class="inline-flex h-9 items-center justify-center rounded-lg border border-[var(--line-strong)] px-3 text-[0.84rem] font-medium text-[var(--text)] hover:bg-white/[0.045]"
+                    type="button"
+                    onClick={servers.onOpenManager}
+                  >
+                    Manage servers
+                  </button>
+                </>
+              }
+            >
+              <div class="grid max-h-76 gap-0.5 overflow-auto py-3 pb-1">
+                <Show
+                  when={servers.mcpServers().length > 0}
+                  fallback={
+                    <div class="overflow-hidden text-ellipsis whitespace-nowrap px-2 text-[0.78rem] text-[var(--muted)]">
+                      No MCP servers configured.
+                    </div>
+                  }
+                >
+                  <For each={servers.mcpServers()}>
+                    {(server) => (
+                      <button
+                        class="grid min-h-10 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-[9px] px-2 py-2 text-left text-[var(--text)] hover:bg-white/[0.045] disabled:opacity-60"
+                        type="button"
+                        disabled={servers.mcpToggling() === server.name}
+                        onClick={() => servers.onToggleMcpServer(server.name)}
+                      >
+                        <span class="overflow-hidden text-ellipsis whitespace-nowrap text-[0.9rem] font-medium">
+                          {server.name}
+                        </span>
+                        <span
+                          class={cx(
+                            "shrink-0 text-[0.78rem] font-medium tabular-nums",
+                            server.enabled ? "text-[#53b842]" : "text-[var(--faint)]"
+                          )}
+                        >
+                          {server.enabled ? "Enabled" : "Disabled"}
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </Show>
               </div>
-              <button
-                class="inline-flex h-9 items-center justify-center rounded-lg border border-[var(--line-strong)] px-3 text-[0.84rem] font-medium text-[var(--text)] hover:bg-white/[0.045]"
-                type="button"
-                onClick={servers.onOpenManager}
-              >
-                Manage servers
-              </button>
-            </>
+            </Show>
           }
         >
           <div class="grid max-h-76 gap-1 overflow-auto py-3 pb-1">

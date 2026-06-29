@@ -4,7 +4,7 @@ use crate::tools::{
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -297,6 +297,58 @@ impl Default for WebsearchConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpLocalConfig {
+    pub command: Vec<String>,
+    pub cwd: Option<String>,
+    pub environment: HashMap<String, String>,
+    pub enabled: bool,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpRemoteConfig {
+    pub url: String,
+    pub headers: HashMap<String, String>,
+    pub enabled: bool,
+    pub timeout_ms: Option<u64>,
+    pub oauth_enabled: bool,
+    pub oauth_client_id: Option<String>,
+    pub oauth_client_secret: Option<String>,
+    pub oauth_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerConfig {
+    Local(McpLocalConfig),
+    Remote(McpRemoteConfig),
+}
+
+impl McpServerConfig {
+    pub fn enabled(&self) -> bool {
+        match self {
+            Self::Local(config) => config.enabled,
+            Self::Remote(config) => config.enabled,
+        }
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        match self {
+            Self::Local(config) => config.enabled = enabled,
+            Self::Remote(config) => config.enabled = enabled,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Local(_) => "local",
+            Self::Remote(_) => "remote",
+        }
+    }
+}
+
+pub type McpConfig = BTreeMap<String, McpServerConfig>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderTimeout {
     Millis(u64),
@@ -318,6 +370,7 @@ pub struct MergedConfig {
     pub notifications: NotificationsConfig,
     pub images: ImagesConfig,
     pub websearch: WebsearchConfig,
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -1090,8 +1143,219 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     out.notifications = notifications;
     out.images = parse_images(obj.get("images"), diagnostics);
     out.websearch = parse_websearch(obj.get("websearch"), diagnostics);
+    out.mcp = parse_mcp(obj.get("mcp"), diagnostics);
 
     out
+}
+
+fn parse_mcp(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> McpConfig {
+    let mut out = McpConfig::new();
+    let Some(value) = value else {
+        return out;
+    };
+    let Some(map) = value.as_object() else {
+        diagnostics
+            .warnings
+            .push("mcp must be an object".to_string());
+        return out;
+    };
+
+    for (name, entry) in map {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            diagnostics
+                .warnings
+                .push("mcp server names must not be empty".to_string());
+            continue;
+        }
+        match parse_mcp_server(trimmed_name, entry, diagnostics) {
+            Some(server) => {
+                out.insert(trimmed_name.to_string(), server);
+            }
+            None => continue,
+        }
+    }
+    out
+}
+
+fn parse_mcp_server(
+    name: &str,
+    entry: &Value,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Option<McpServerConfig> {
+    let Some(map) = entry.as_object() else {
+        diagnostics
+            .warnings
+            .push(format!("mcp.{name} must be an object"));
+        return None;
+    };
+    let enabled = map.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let timeout_ms = parse_optional_u64(
+        map.get("timeout"),
+        &format!("mcp.{name}.timeout"),
+        diagnostics,
+    );
+    let kind = map.get("type").and_then(Value::as_str).unwrap_or_else(|| {
+        if map.contains_key("url") {
+            "remote"
+        } else {
+            "local"
+        }
+    });
+
+    match kind {
+        "local" => {
+            let command = match map.get("command") {
+                Some(Value::Array(values)) => values
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>(),
+                Some(Value::String(raw)) => shlex::split(raw).unwrap_or_else(|| vec![raw.clone()]),
+                _ => Vec::new(),
+            };
+            if command.is_empty() {
+                diagnostics.warnings.push(format!(
+                    "mcp.{name}.command must be a non-empty string array"
+                ));
+                return None;
+            }
+            Some(McpServerConfig::Local(McpLocalConfig {
+                command,
+                cwd: map
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned),
+                environment: parse_string_map(
+                    map.get("environment").or_else(|| map.get("env")),
+                    &format!("mcp.{name}.environment"),
+                    diagnostics,
+                ),
+                enabled,
+                timeout_ms,
+            }))
+        }
+        "remote" => {
+            let Some(url) = map
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                diagnostics
+                    .warnings
+                    .push(format!("mcp.{name}.url must be a non-empty string"));
+                return None;
+            };
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                diagnostics
+                    .warnings
+                    .push(format!("mcp.{name}.url must be an http(s) URL"));
+                return None;
+            }
+            let (oauth_enabled, oauth_client_id, oauth_client_secret, oauth_scope) =
+                parse_mcp_oauth(name, map.get("oauth"), diagnostics);
+            Some(McpServerConfig::Remote(McpRemoteConfig {
+                url: url.to_string(),
+                headers: parse_string_map(
+                    map.get("headers"),
+                    &format!("mcp.{name}.headers"),
+                    diagnostics,
+                ),
+                enabled,
+                timeout_ms,
+                oauth_enabled,
+                oauth_client_id,
+                oauth_client_secret,
+                oauth_scope,
+            }))
+        }
+        other => {
+            diagnostics.warnings.push(format!(
+                "mcp.{name}.type must be local or remote; got {other}"
+            ));
+            None
+        }
+    }
+}
+
+fn parse_mcp_oauth(
+    name: &str,
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+) -> (bool, Option<String>, Option<String>, Option<String>) {
+    let Some(value) = value else {
+        return (true, None, None, None);
+    };
+    if value.as_bool() == Some(false) {
+        return (false, None, None, None);
+    }
+    let Some(map) = value.as_object() else {
+        diagnostics
+            .warnings
+            .push(format!("mcp.{name}.oauth must be an object or false"));
+        return (true, None, None, None);
+    };
+    (
+        true,
+        optional_string(map.get("clientId")),
+        optional_string(map.get("clientSecret")),
+        optional_string(map.get("scope")),
+    )
+}
+
+fn optional_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn parse_string_map(
+    value: Option<&Value>,
+    label: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Some(value) = value else {
+        return out;
+    };
+    let Some(map) = value.as_object() else {
+        diagnostics
+            .warnings
+            .push(format!("{label} must be an object"));
+        return out;
+    };
+    for (key, value) in map {
+        if let Some(raw) = value.as_str() {
+            out.insert(key.clone(), raw.to_string());
+        } else {
+            diagnostics
+                .warnings
+                .push(format!("{label}.{key} must be a string"));
+        }
+    }
+    out
+}
+
+fn parse_optional_u64(
+    value: Option<&Value>,
+    label: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Option<u64> {
+    match value {
+        None => None,
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(_) => {
+            diagnostics
+                .warnings
+                .push(format!("{label} must be a number"));
+            None
+        }
+    }
 }
 
 fn parse_websearch(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> WebsearchConfig {

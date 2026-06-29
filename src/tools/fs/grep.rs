@@ -58,6 +58,7 @@ impl ToolHandler for GrepTool {
                     param_type: ParameterType::String,
                 },
             ],
+            input_schema: None,
         }
     }
 

@@ -203,6 +203,18 @@ impl PrefsDAO {
         self.set_pref(ACTIVE_THEME_KEY, theme_id.trim())
     }
 
+    pub fn get_json_pref(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        match self.get_pref(key)? {
+            Some(json_str) => Ok(Some(serde_json::from_str(&json_str)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_json_pref(&self, key: &str, value: &serde_json::Value) -> Result<()> {
+        let json_str = serde_json::to_string(value)?;
+        self.set_pref(key, &json_str)
+    }
+
     pub fn toggle_favorite(&self, provider_id: String, model_id: String) -> Result<bool> {
         let mut prefs = self.get_model_preferences()?;
         let was_favorite = prefs.is_favorite(&provider_id, &model_id);

@@ -24,6 +24,7 @@ pub enum CommandPaletteAppAction {
     CycleReasoningEffort,
     OpenStorage,
     OpenSkillsDialog,
+    OpenMcpDialog,
 }
 
 #[derive(Debug)]
@@ -198,6 +199,9 @@ fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
             }
             "open-skills-dialog" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenSkillsDialog)
+            }
+            "open-mcp-dialog" => {
+                CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenMcpDialog)
             }
             _ => CommandPaletteAction::None,
         };
@@ -402,6 +406,21 @@ fn core_palette_items(
             "Switch reasoning effort for the active model",
             Some("ctrl+t"),
             &[],
+        ),
+    );
+
+    items.insert(
+        items
+            .iter()
+            .position(|item| item.group == "Application")
+            .unwrap_or(items.len()),
+        app_action_item(
+            "open-mcp-dialog",
+            "MCP Servers",
+            "Application",
+            "View and toggle configured MCP servers",
+            None,
+            &["mcp", "model context protocol", "servers"],
         ),
     );
 
@@ -705,6 +724,28 @@ mod tests {
         assert_eq!(
             action_for_item(&item),
             CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenFind)
+        );
+    }
+
+    #[test]
+    fn palette_includes_mcp_dialog_action() {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+        let mut state = init_command_palette();
+
+        state.refresh_items(&registry, false, true);
+
+        let item = state
+            .dialog
+            .items
+            .iter()
+            .find(|item| item.id == "open-mcp-dialog")
+            .expect("MCP dialog should be listed");
+        assert_eq!(item.name, "MCP Servers");
+        assert_eq!(item.group, "Application");
+        assert_eq!(
+            action_for_item(item),
+            CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenMcpDialog)
         );
     }
 

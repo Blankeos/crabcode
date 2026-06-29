@@ -53,6 +53,7 @@ impl ToolHandler for BashTool {
                     param_type: ParameterType::String,
                 },
             ],
+            input_schema: None,
         }
     }
 

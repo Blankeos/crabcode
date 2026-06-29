@@ -196,6 +196,13 @@ export type RemoteSkill = {
   location: string
 }
 
+export type RemoteMcpServer = {
+  name: string
+  enabled: boolean
+  status: string
+  kind: string
+}
+
 export type RemotePromptImage = {
   name: string
   media_type: string
@@ -318,6 +325,9 @@ export function createRemoteApi(getToken: () => string) {
       request<RemoteState>("/api/question/cancel", { method: "POST", json: {} }),
     models: () => request<RemoteModel[]>("/api/models"),
     skills: () => request<RemoteSkill[]>("/api/skills"),
+    mcp: () => request<RemoteMcpServer[]>("/api/mcp"),
+    mcpToggle: (name: string) =>
+      request<RemoteMcpServer[]>("/api/mcp/toggle", { method: "POST", json: { name } }),
     selectModel: (provider_id: string, model_id: string) =>
       request<RemoteStatus>("/api/model", {
         method: "POST",

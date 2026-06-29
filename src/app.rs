@@ -43,6 +43,10 @@ use crate::views::connect_dialog::{
     init_connect_dialog, render_connect_dialog,
 };
 use crate::views::home::{init_home, render_home};
+use crate::views::mcp_dialog::{
+    handle_mcp_dialog_key_event, handle_mcp_dialog_mouse_event, init_mcp_dialog, render_mcp_dialog,
+    McpDialogAction,
+};
 use crate::views::models_dialog::{
     handle_models_dialog_key_event, handle_models_dialog_mouse_event, init_models_dialog,
     render_models_dialog,
@@ -89,7 +93,7 @@ use crate::views::themes_dialog::{
     render_themes_dialog,
 };
 use crate::views::{
-    AgentsDialogState, ChatState, ConnectDialogState, HomeState, ModelsDialogState,
+    AgentsDialogState, ChatState, ConnectDialogState, HomeState, McpDialogState, ModelsDialogState,
     MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState, QuestionDialogState,
     RemoteDialogState, SessionRenameDialogState, SessionsDialogState, StorageDialogState,
     SuggestionsPopupState, ThemesDialogState,
@@ -172,6 +176,7 @@ pub enum OverlayFocus {
     QuestionDialog,
     RemoteDialog,
     SkillsDialog,
+    McpDialog,
     TimelineDialog,
     CopyActions,
     MessageActions,
@@ -555,6 +560,7 @@ pub struct App {
     pub question_dialog_state: QuestionDialogState,
     pub remote_dialog_state: RemoteDialogState,
     pub skills_dialog_state: crate::views::SkillsDialogState,
+    pub mcp_dialog_state: McpDialogState,
     pub command_palette_state: crate::views::command_palette::CommandPaletteState,
     pub find_bar: FindBar,
     pub storage_dialog_state: StorageDialogState,
@@ -596,6 +602,8 @@ pub struct App {
     pub notifications: crate::config::NotificationsConfig,
     pub images: crate::config::ImagesConfig,
     pub websearch: crate::config::configuration::WebsearchConfig,
+    pub mcp: crate::config::configuration::McpConfig,
+    pub config_raw_merged: serde_json::Value,
     terminal_focused: bool,
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
@@ -653,6 +661,7 @@ impl App {
         let question_dialog_state = init_question_dialog();
         let remote_dialog_state = init_remote_dialog();
         let skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
+        let mcp_dialog_state = init_mcp_dialog("MCP", vec![]);
         let which_key_state = crate::views::which_key::init_which_key();
         let timeline_dialog_state = crate::views::timeline_dialog::init_timeline_dialog();
         let command_palette_state = init_command_palette();
@@ -673,6 +682,8 @@ impl App {
         };
 
         let loaded_config = crate::config::ConfigLoader::load()?;
+        let mut mcp_config = loaded_config.merged_config.mcp.clone();
+        crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
         input.set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
@@ -835,6 +846,7 @@ impl App {
             question_dialog_state,
             remote_dialog_state,
             skills_dialog_state,
+            mcp_dialog_state,
             command_palette_state,
             find_bar,
             storage_dialog_state,
@@ -874,6 +886,8 @@ impl App {
             notifications: loaded_config.merged_config.notifications,
             images: loaded_config.merged_config.images,
             websearch: loaded_config.merged_config.websearch,
+            mcp: mcp_config,
+            config_raw_merged: loaded_config.raw_merged,
             terminal_focused: true,
             tool_permissions,
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
@@ -2961,6 +2975,14 @@ impl App {
                     }
                 }
             }
+            OverlayFocus::McpDialog => {
+                let action = handle_mcp_dialog_key_event(&mut self.mcp_dialog_state, key);
+                self.handle_mcp_dialog_action(action);
+                if !self.mcp_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
             OverlayFocus::TimelineDialog => {
                 let action = crate::views::timeline_dialog::handle_timeline_dialog_key_event(
                     &mut self.timeline_dialog_state,
@@ -3885,6 +3907,12 @@ impl App {
             if !self.skills_dialog_state.dialog.is_visible() {
                 self.overlay_focus = OverlayFocus::None;
             }
+        } else if self.overlay_focus == OverlayFocus::McpDialog {
+            let action = handle_mcp_dialog_mouse_event(&mut self.mcp_dialog_state, mouse);
+            self.handle_mcp_dialog_action(action);
+            if !self.mcp_dialog_state.dialog.is_visible() {
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::TimelineDialog {
             let action = crate::views::timeline_dialog::handle_timeline_dialog_mouse_event(
                 &mut self.timeline_dialog_state,
@@ -4626,6 +4654,7 @@ impl App {
                     }
                     CommandPaletteAppAction::OpenStorage => self.open_storage_dialog(),
                     CommandPaletteAppAction::OpenSkillsDialog => self.show_skills_dialog(),
+                    CommandPaletteAppAction::OpenMcpDialog => self.show_mcp_dialog(),
                 }
                 self.clear_suggestions_and_blur();
             }
@@ -5051,6 +5080,10 @@ impl App {
                     self.show_skills_dialog();
                     return;
                 }
+                if parsed.name == "mcp" {
+                    self.show_mcp_dialog();
+                    return;
+                }
                 if parsed.name == "remote" {
                     self.handle_remote_command_args(&parsed.args);
                     return;
@@ -5270,6 +5303,10 @@ impl App {
         }
         if parsed.name == "skills" {
             self.show_skills_dialog();
+            return;
+        }
+        if parsed.name == "mcp" {
+            self.show_mcp_dialog();
             return;
         }
         if parsed.name == "remote" {
@@ -6333,6 +6370,73 @@ impl App {
         self.skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", items);
         self.skills_dialog_state.dialog.show();
         self.overlay_focus = OverlayFocus::SkillsDialog;
+    }
+
+    fn show_mcp_dialog(&mut self) {
+        let selected = self
+            .mcp_dialog_state
+            .dialog
+            .get_selected()
+            .map(|item| item.id.clone());
+        self.refresh_mcp_dialog_items();
+        if let Some(selected) = selected {
+            self.mcp_dialog_state
+                .dialog
+                .select_item_by_key(&selected, "");
+        }
+        self.mcp_dialog_state.dialog.show();
+        self.overlay_focus = OverlayFocus::McpDialog;
+    }
+
+    fn refresh_mcp_dialog_items(&mut self) {
+        use crate::ui::components::dialog::DialogItem;
+
+        let mut items = self
+            .remote_mcp_servers()
+            .into_iter()
+            .map(|server| DialogItem {
+                id: server.name.clone(),
+                name: server.name,
+                group: "MCP".to_string(),
+                description: String::new(),
+                tip: Some(
+                    if server.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                    .to_string(),
+                ),
+                provider_id: String::new(),
+                active: server.enabled,
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| a.id.cmp(&b.id));
+        self.mcp_dialog_state = init_mcp_dialog("MCP", items);
+    }
+
+    fn handle_mcp_dialog_action(&mut self, action: McpDialogAction) {
+        let McpDialogAction::Toggle { server_id } = action else {
+            return;
+        };
+        let selected = server_id.clone();
+        match self.remote_toggle_mcp_server(&server_id) {
+            Ok(_) => {
+                self.refresh_mcp_dialog_items();
+                self.mcp_dialog_state
+                    .dialog
+                    .select_item_by_key(&selected, "");
+                self.mcp_dialog_state.dialog.show();
+            }
+            Err(err) => {
+                self.play_sound_event(crate::sound::SoundEvent::Error);
+                push_toast(Toast::new(
+                    format!("Failed to toggle MCP server: {err}"),
+                    ToastLevel::Error,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+            }
+        }
     }
 
     fn show_openai_connect_methods(&mut self) {
@@ -7860,6 +7964,7 @@ impl App {
         let tool_permissions = self.tool_permissions.clone();
         let agent_registry = self.agent_registry.clone();
         let websearch_config = self.websearch.clone();
+        let mcp_config = self.mcp.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -7881,6 +7986,8 @@ impl App {
                         cancel_token.clone(),
                         Some(&provider_name),
                         &websearch_config,
+                        &mcp_config,
+                        &cwd,
                     )
                     .await;
                     crate::tools::scope_tool_registry_for_agent(
@@ -7921,6 +8028,8 @@ impl App {
                 agent_registry,
                 tool_permissions,
                 websearch_config,
+                mcp_config,
+                cwd,
                 messages,
                 sender_clone.clone(),
             );
@@ -8160,6 +8269,21 @@ impl App {
         crate::skill::get_skill_store()
             .map(|store| store.all().into_iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    pub fn remote_mcp_servers(&self) -> Vec<crate::remote_mcp::RemoteMcpServer> {
+        crate::remote_mcp::remote_mcp_servers(&self.mcp)
+    }
+
+    pub fn remote_toggle_mcp_server(
+        &mut self,
+        name: &str,
+    ) -> Result<Vec<crate::remote_mcp::RemoteMcpServer>> {
+        let prefs = self
+            .prefs_dao
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("preferences unavailable"))?;
+        crate::remote_mcp::remote_toggle_mcp_server(prefs, &mut self.mcp, name)
     }
 
     pub fn remote_queued_message_previews(&self) -> Vec<String> {
@@ -8814,6 +8938,12 @@ impl App {
             );
         }
 
+        if self.overlay_focus == OverlayFocus::McpDialog
+            && self.mcp_dialog_state.dialog.is_visible()
+        {
+            render_mcp_dialog(f, &mut self.mcp_dialog_state, size, colors);
+        }
+
         if self.overlay_focus == OverlayFocus::TimelineDialog
             && self.timeline_dialog_state.dialog.is_visible()
         {
@@ -9060,7 +9190,15 @@ fn message_block_clipboard_text(
 fn is_remote_browser_unsupported_command(name: &str) -> bool {
     matches!(
         name,
-        "connect" | "exit" | "home" | "remote" | "sessions" | "skills" | "themes" | "timeline"
+        "connect"
+            | "exit"
+            | "home"
+            | "remote"
+            | "sessions"
+            | "skills"
+            | "mcp"
+            | "themes"
+            | "timeline"
     )
 }
 
@@ -9237,6 +9375,7 @@ mod tests {
             question_dialog_state: init_question_dialog(),
             remote_dialog_state: init_remote_dialog(),
             skills_dialog_state: crate::views::skills_dialog::init_skills_dialog("Skills", vec![]),
+            mcp_dialog_state: init_mcp_dialog("MCP", vec![]),
             command_palette_state: init_command_palette(),
             find_bar: FindBar::new(),
             storage_dialog_state: init_storage_dialog(),
@@ -9276,6 +9415,8 @@ mod tests {
             notifications: crate::config::NotificationsConfig::default(),
             images: crate::config::ImagesConfig::default(),
             websearch: crate::config::configuration::WebsearchConfig::default(),
+            mcp: crate::config::configuration::McpConfig::default(),
+            config_raw_merged: serde_json::json!({}),
             terminal_focused: true,
             tool_permissions: crate::tools::ToolPermissions::new(".".to_string()),
             skills_dirs: Vec::new(),

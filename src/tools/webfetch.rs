@@ -51,6 +51,7 @@ impl ToolHandler for WebfetchTool {
                     param_type: ParameterType::Integer,
                 },
             ],
+            input_schema: None,
         }
     }
 

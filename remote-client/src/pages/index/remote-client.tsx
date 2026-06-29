@@ -11,6 +11,7 @@ import {
   type RemoteModel,
   type RemotePromptImage,
   type RemoteSkill,
+  type RemoteMcpServer,
   type RemoteState,
   type RemoteSuggestion,
 } from "../../remote-api"
@@ -107,6 +108,8 @@ export default function RemoteClient() {
   const [modelOpen, setModelOpen] = createSignal(false)
   const [models, setModels] = createSignal<RemoteModel[]>([])
   const [skills, setSkills] = createSignal<RemoteSkill[]>([])
+  const [mcpServers, setMcpServers] = createSignal<RemoteMcpServer[]>([])
+  const [mcpToggling, setMcpToggling] = createSignal<string | null>(null)
   const [modelQuery, setModelQuery] = createSignal("")
   const [modelActiveIndex, setModelActiveIndex] = createSignal(0)
   const [agentActiveIndex, setAgentActiveIndex] = createSignal(0)
@@ -1116,6 +1119,27 @@ export default function RemoteClient() {
     }
   }
 
+  const loadMcpServers = async (force = false) => {
+    if (!force && mcpServers().length > 0) return
+    try {
+      setMcpServers(await api().mcp())
+    } catch (error) {
+      showErrorToast(error, "Could not load MCP servers.")
+    }
+  }
+
+  const toggleMcpServer = async (name: string) => {
+    if (mcpToggling()) return
+    setMcpToggling(name)
+    try {
+      setMcpServers(await api().mcpToggle(name))
+    } catch (error) {
+      showErrorToast(error, "Could not update MCP server.")
+    } finally {
+      setMcpToggling(null)
+    }
+  }
+
   const focusModelSearch = () => {
     window.setTimeout(() => modelSearchRef?.focus(), 0)
   }
@@ -1279,6 +1303,7 @@ export default function RemoteClient() {
     if (open) {
       setServerPanelTab("servers")
       void loadSkills()
+      void loadMcpServers()
     }
   }
 
@@ -1310,6 +1335,7 @@ export default function RemoteClient() {
   const selectServerPanelTab = (tab: ServerPanelTab) => {
     setServerPanelTab(tab)
     if (tab === "skills") void loadSkills()
+    if (tab === "mcp") void loadMcpServers()
   }
 
   const showAddServer = () => {
@@ -1537,6 +1563,9 @@ export default function RemoteClient() {
     servers,
     filteredServers,
     skills,
+    mcpServers,
+    mcpToggling,
+    onToggleMcpServer: toggleMcpServer,
     activeServerUrl,
     status: () => state()?.status ?? null,
     onOpenManager: openServerManager,

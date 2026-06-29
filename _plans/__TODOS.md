@@ -393,3 +393,7 @@ I think this is how the TUI works already anyway right?
 - [x] When I paste a specific session id, get that session in /sessions. i.e. I paste jupoh3w7qcqcylbzluxsazpz (basically after I did /copy on the session id)
 
 - [x] tps/duration counter still goes during non-llm waits i.e. questions, permission asks. Can we make sure to ignore them so they dont affect tps?
+
+- [x] Get mcps to work?
+  - [x] In the tui: `/mcp` and cmd palette
+  - [x] In the remote browser ui: I wanna see it in those dialog abs next to servers, skills, mcp.

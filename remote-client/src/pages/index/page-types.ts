@@ -8,6 +8,7 @@ import type {
   RemotePendingPermission,
   RemotePendingQuestion,
   RemoteSkill,
+  RemoteMcpServer,
   RemoteState,
   RemoteStatus,
   RemoteSuggestion,
@@ -222,6 +223,9 @@ export type ServerPanelController = {
   servers: Accessor<SavedServer[]>
   filteredServers: Accessor<SavedServer[]>
   skills: Accessor<RemoteSkill[]>
+  mcpServers: Accessor<RemoteMcpServer[]>
+  mcpToggling: Accessor<string | null>
+  onToggleMcpServer: (name: string) => MaybePromise
   activeServerUrl: Accessor<string>
   status: Accessor<RemoteStatus | null>
   onOpenManager: () => void

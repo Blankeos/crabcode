@@ -358,6 +358,7 @@ impl ToolHandler for QuestionTool {
                 required: true,
                 param_type: ParameterType::Array(Box::new(ParameterType::Object(question_props))),
             }],
+            input_schema: None,
         }
     }
 

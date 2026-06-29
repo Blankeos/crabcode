@@ -63,6 +63,7 @@ impl ToolHandler for ApplyPatchTool {
                 required: true,
                 param_type: ParameterType::String,
             }],
+            input_schema: None,
         }
     }
 

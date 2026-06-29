@@ -9,11 +9,13 @@ mod command;
 mod config;
 mod llm;
 mod logging;
+mod mcp;
 mod model;
 mod notify;
 mod persistence;
 mod prompt;
 mod remote;
+mod remote_mcp;
 mod session;
 mod skill;
 mod sound;
@@ -348,6 +350,7 @@ async fn run_print_mode(
 
     let agent_registry = loaded_config.merged_config.agent_registry.clone();
     let websearch_config = loaded_config.merged_config.websearch.clone();
+    let mcp_config = loaded_config.merged_config.mcp.clone();
     let mut agent_policies = crate::tools::AgentToolPolicies::default();
     for (mode, tools) in agent_registry.tool_policy_map() {
         agent_policies = agent_policies.with_custom_tools(mode, tools);
@@ -371,6 +374,8 @@ async fn run_print_mode(
         cancel_token.clone(),
         Some(&provider_name),
         &websearch_config,
+        &mcp_config,
+        &cwd,
     )
     .await;
     let prompt_registry = crate::tools::scope_tool_registry_for_agent(
@@ -410,6 +415,8 @@ async fn run_print_mode(
             agent_registry,
             tool_permissions,
             websearch_config,
+            mcp_config,
+            cwd,
             messages,
             sender,
         )

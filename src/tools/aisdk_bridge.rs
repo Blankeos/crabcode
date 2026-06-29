@@ -259,22 +259,23 @@ pub async fn convert_to_aisdk_tools(
             }
         });
 
-        // Build the tool schema from parameters
-        let mut properties = serde_json::Map::new();
-        let mut required = Vec::new();
+        let input_schema_json = tool_def.input_schema.clone().unwrap_or_else(|| {
+            let mut properties = serde_json::Map::new();
+            let mut required = Vec::new();
 
-        for param in &tool_def.parameters {
-            let schema = param_to_json_schema(&param.param_type);
-            properties.insert(param.name.clone(), schema);
-            if param.required {
-                required.push(param.name.clone());
+            for param in &tool_def.parameters {
+                let schema = param_to_json_schema(&param.param_type);
+                properties.insert(param.name.clone(), schema);
+                if param.required {
+                    required.push(param.name.clone());
+                }
             }
-        }
 
-        let input_schema_json = serde_json::json!({
-            "type": "object",
-            "properties": properties,
-            "required": required
+            serde_json::json!({
+                "type": "object",
+                "properties": properties,
+                "required": required
+            })
         });
 
         let schema: Schema = match serde_json::from_value(input_schema_json) {

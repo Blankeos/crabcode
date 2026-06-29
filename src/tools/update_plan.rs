@@ -274,6 +274,7 @@ impl ToolHandler for UpdatePlanTool {
                     param_type: ParameterType::Array(Box::new(plan_item_param_type())),
                 },
             ],
+            input_schema: None,
         }
     }
 
