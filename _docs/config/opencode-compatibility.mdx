@@ -38,7 +38,7 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 | `provider.<id>.options.timeout` | ✅ | partial | Integer milliseconds or `false` to disable timeout. |
 | `theme` | ✅ | ✅ | In crabcode config files only. OpenCode config `theme` is ignored by crabcode. |
 | `notifications` |  | ✅ | crabcode-specific sounds, desktop notifications, and terminal alert signals such as Zed tab dots. |
-| `mcp` | ✅ |  | Accepted at the top level for forward compatibility, not wired to tools yet. |
+| `mcp` | ✅ | ✅ | Uses the OpenCode MCP config shape. Enabled servers are connected at runtime and their tools are exposed as crabcode tools. |
 | `permission` | ✅ | ✅ | Global tool permission rules are enforced during AI SDK tool execution. |
 | `instructions` | ✅ |  | Accepted at the top level, but config-driven instruction files are not loaded yet. |
 | `tools` | ✅ |  | Accepted at the top level, not used as global tool config yet. |
@@ -53,6 +53,12 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 | `server` | ✅ | ❌ | Ignored. |
 | `plugin` | ✅ | ❌ | Ignored. |
 | custom tools (`tool`, `custom_tools`, `customTools`) | ✅ | ❌ | Ignored. |
+
+## MCP notes
+
+Use the OpenCode MCP docs for the config shape. crabcode reads the same top-level `mcp` map from OpenCode and crabcode config files, supports local stdio servers and remote HTTP servers, and registers discovered MCP tools into the normal tool list.
+
+MCP server `enabled` flags are respected. The remote UI can toggle configured servers, and those overrides are persisted in crabcode preferences. MCP resources are not exposed as separate resource-list/read tools yet; tool calls are supported.
 
 ## Use the OpenCode docs
 
