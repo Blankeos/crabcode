@@ -3534,6 +3534,7 @@ impl App {
                     match input_type {
                         crate::command::parser::InputType::Command(parsed) => {
                             // Don't save commands to prompt history
+                            self.input.clear();
                             tokio::task::block_in_place(|| {
                                 let rt = tokio::runtime::Handle::current();
                                 rt.block_on(self.process_command_input(parsed));
@@ -3573,8 +3574,9 @@ impl App {
                             }
                         }
                     }
-
-                    self.input.clear();
+                    if !self.input.is_empty() {
+                        self.input.clear();
+                    }
                     self.clear_suggestions_and_blur();
                 }
             }
@@ -4558,12 +4560,7 @@ impl App {
                 crate::autocomplete::SuggestionKind::Command => {
                     let command = format!("/{}", selected.name);
 
-                    tokio::task::block_in_place(|| {
-                        let rt = tokio::runtime::Handle::current();
-                        rt.block_on(self.process_input(&command));
-                    });
-
-                    self.input.clear();
+                    self.process_command_from_input(&command);
                 }
                 crate::autocomplete::SuggestionKind::Agent => {
                     self.input.apply_suggestion(&selected);
@@ -4576,6 +4573,14 @@ impl App {
             }
         }
         self.clear_suggestions_and_blur();
+    }
+
+    fn process_command_from_input(&mut self, command: &str) {
+        self.input.clear();
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(self.process_input(command));
+        });
     }
 
     fn open_command_palette(&mut self) {
@@ -4749,13 +4754,7 @@ impl App {
             CommandPaletteAction::RunCommand(command) => {
                 self.overlay_focus = OverlayFocus::None;
                 let command = format!("/{}", command);
-
-                tokio::task::block_in_place(|| {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(self.process_input(&command));
-                });
-
-                self.input.clear();
+                self.process_command_from_input(&command);
                 self.clear_suggestions_and_blur();
             }
             CommandPaletteAction::RunAppAction(action) => {
@@ -10365,6 +10364,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Prompt", "Answer"]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fork_command_submitted_from_input_does_not_restore_as_original_session_draft() {
+        let mut app = test_app();
+        let original_id = app.create_new_session(Some("Original".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        add_current_session_message(&mut app, crate::session::types::Message::user("Prompt"));
+        app.input.set_text("/fork");
+
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let forked_id = app
+            .session_manager
+            .get_current_session_id()
+            .cloned()
+            .expect("forked session should be active");
+        assert_ne!(forked_id, original_id);
+
+        assert!(app.switch_to_session(&original_id));
+        assert!(app.input.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

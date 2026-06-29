@@ -401,3 +401,5 @@ I think this is how the TUI works already anyway right?
   - [x] In the remote browser ui: I wanna see it in those dialog abs next to servers, skills, mcp.
 
 - [x] Faster startup
+
+- [x] Minor bug, when I write `/fork` on an old session, I go to a new session (good), but when I go back to that old session that I forked, I see `/fork` on the input.
