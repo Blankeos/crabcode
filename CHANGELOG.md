@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.5] - 2026-06-29
+
+### Bug Fixes
+
+- Clear command input before processing command submissions by @Blankeos
+- Derive fork titles from session name by @Blankeos
+- Exclude non-decode waits from streaming TPS and duration metrics by @Blankeos
+- Jump to latest child session for subagent navigation by @Blankeos
+- Propagate cancellation between parent and subagent sessions by @Blankeos
+- Inline streaming assistant indicator into message view by @Blankeos
+- Use assistant tool parts to resolve file path hyperlinks by @Blankeos
+- Avoid marking directories as clickable hyperlinks by @Blankeos
+- Hide placeholder assistant entries from timeline list by @Blankeos
+- Improve SSE error parsing and OAuth refresh error handling by @Blankeos
+- Keep chat input cursor fixed during mouse scrolling by @Blankeos
+- Fix Alt+Backspace word deletion for UTF-8 and boundary cases by @Blankeos
+- Improve subagent footer layout at narrow widths by @Blankeos
+- Restore input navigation in running subagent sessions by @Blankeos
+- Add command/option shortcuts for custom text editing by @Blankeos
+
+### Features
+
+- Add configurable small model for automatic session titles by @Blankeos
+- Lazily hydrate sessions and cache message counts by @Blankeos
+- Add MCP server configuration, management, and tool execution by @Blankeos
+- Add hierarchical subagent thread tabs and parent/child session navigation by @Blankeos
+- Remote client ui add touch manipulation by @Blankeos
+- Remember permission grants by pattern scope by @Blankeos
+- Propagate OpenAI request options into subagent sessions by @Blankeos
+- Include dialog item IDs in search matching by @Blankeos
+- Add resume-session shortcut and active-project sidebar sync by @Blankeos
+- Render write_files tool output with per-file diffs by @Blankeos
+- Surface status-driven primary agents and improve streaming thread UX by @Blankeos
+- Prioritize favorite models during search by @Blankeos
+- Add primary-agent picker dialog and command-driven switching by @Blankeos
+- Add interactive /move command to relocate current session by @Blankeos
+- Format assistant reasoning and add thinking toggle controls by @Blankeos
+- Add cancellable streaming retries with backoff and status UI by @Blankeos
+
+### Doc
+
+- Mcp docs up-to-date by @Blankeos
+
 ## [0.0.4] - 2026-06-14
 
 ### Bug Fixes
