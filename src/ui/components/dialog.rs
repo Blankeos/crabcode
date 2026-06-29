@@ -419,6 +419,13 @@ impl Dialog {
         Self::consider_search_field(
             pattern,
             matcher,
+            &item.id,
+            Self::provider_match_boost(query, &item.id),
+            &mut best_score,
+        );
+        Self::consider_search_field(
+            pattern,
+            matcher,
             &item.provider_id,
             Self::provider_match_boost(query, &item.provider_id),
             &mut best_score,
@@ -435,12 +442,12 @@ impl Dialog {
         let active_token = if item.active { " Active" } else { "" };
         let combined = match &item.tip {
             Some(tip) => format!(
-                "{} {} {} {} {}{}",
-                group, item.provider_id, item.name, item.description, tip, active_token
+                "{} {} {} {} {} {}{}",
+                group, item.id, item.provider_id, item.name, item.description, tip, active_token
             ),
             None => format!(
-                "{} {} {} {}{}",
-                group, item.provider_id, item.name, item.description, active_token
+                "{} {} {} {} {}{}",
+                group, item.id, item.provider_id, item.name, item.description, active_token
             ),
         };
         Self::consider_search_field(pattern, matcher, &combined, 0, &mut best_score);
@@ -2121,6 +2128,42 @@ mod tests {
         dialog.set_search_query("model a");
         assert_eq!(dialog.filtered_items.len(), 1);
         assert_eq!(dialog.filtered_items[0].1[0].name, "Model A");
+    }
+
+    #[test]
+    fn test_dialog_search_matches_item_id() {
+        let session_id = "jupoh3w7qcqcylbzluxsazpz";
+        let mut dialog = Dialog::with_items(
+            "Sessions",
+            vec![
+                DialogItem {
+                    id: "other-session".to_string(),
+                    name: "Different session".to_string(),
+                    group: "Workspace".to_string(),
+                    description: String::new(),
+                    tip: None,
+                    provider_id: "Different session".to_string(),
+                    active: false,
+                },
+                DialogItem {
+                    id: session_id.to_string(),
+                    name: "Copied session".to_string(),
+                    group: "Workspace".to_string(),
+                    description: String::new(),
+                    tip: None,
+                    provider_id: "Copied session".to_string(),
+                    active: false,
+                },
+            ],
+        );
+
+        dialog.set_search_query(session_id);
+
+        let selected = dialog
+            .get_selected()
+            .expect("pasted id should select session");
+        assert_eq!(selected.id, session_id);
+        assert_eq!(dialog.get_flat_items().len(), 1);
     }
 
     #[test]

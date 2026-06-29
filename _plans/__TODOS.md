@@ -154,7 +154,7 @@ Replaced at line 239
   - Collapse
   - Uncollapse
 
-- [x] ~The footer note for the current cwd/workspace. It trims out the very start. i.e. `...ects/_gamedev/my-game:main`. Instead of this, please show the "between" truncation ??~ Just maybe, but maybe not.
+- [x] ~~The footer note for the current cwd/workspace. It trims out the very start. i.e. `...ects/_gamedev/my-game:main`. Instead of this, please show the "between" truncation ??~~ Just maybe, but maybe not.
 
 - [x] Make tool calls be AS PERMISSIVE, as codex. Meaning won't have to ask me to "read" sometimes.
 
@@ -242,7 +242,7 @@ I want - [x] To do this But I dont want to do this
 
 In fact I also want the same aesthetic for "Active" themes in /themes.
 
-For the /connect dialog it's a little unique. Let's keep it. Before this, I wanted this but nevermind: ~Right now for connect, we use "🟢 Connected". But let's just use a ✔︎ on the left side. And since there's a lot of "Connected" items, no need to change the text color, we just want the ✔︎ as a green thing on the left side. Still searchable via "Connected"~
+For the /connect dialog it's a little unique. Let's keep it. Before this, I wanted this but nevermind: ~~Right now for connect, we use "🟢 Connected". But let's just use a ✔︎ on the left side. And since there's a lot of "Connected" items, no need to change the text color, we just want the ✔︎ as a green thing on the left side. Still searchable via "Connected"~~
 
 - [x] On Wezterm, I did `config.enable_kitty_keyboard = true`, now cmd+left or cmd+right doesn't work anymore (for skipping to the first/last character on the current line). Idk if this is a wezterm problem I need to patch or just on the wezterm lua side. Currently still works on the Zed Terminal btw. Where I observed: In chat inputs, any input fields.
 
@@ -264,7 +264,7 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
 - [x] In the desktop notifications, we say Response complete, can we also mention the name of the workspace.
 
-- [x] ~Generate images with a codex exec call. No oauth spoofing needed. Just needs codex to be there.~ (For now, no... lol)
+- [x] ~~Generate images with a codex exec call. No oauth spoofing needed. Just needs codex to be there.~~ (For now, no... lol)
 
 - [x] Scroll is not intuitive for interruptions. I'm using Logitech MX Master 3s, if I scroll the mouse SUPER down like at super speed. The scroll seems to just get stuck even if I scroll the other direction or just stop.
   - [x] Also slightly unperformant. I can definitely notice the animations slowing down when I scroll
@@ -294,7 +294,7 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 
   - Not bug but improvGement: I want table wrapping by default. Currently it's truncated by default, but wrapping might look a lot better too.
 
-- [x] ~Switching models mid-stream causes issues. Make sure what the stream uses, uses the same model / thinking effort, and it only changes after the next prompt or interruption. Cuz with openai, it fails when I change the thinking effort midway from when I started (i think, because of websockets).~ (noticed, it's a non-issue)
+- [x] ~~Switching models mid-stream causes issues. Make sure what the stream uses, uses the same model / thinking effort, and it only changes after the next prompt or interruption. Cuz with openai, it fails when I change the thinking effort midway from when I started (i think, because of websockets).~~ (noticed, it's a non-issue)
 
 - [x] Bug in chat input. I click a character or anywhere in the input once... Then press up or down (not left or right, no bugs here). It kinda looks like I'm selecting the text where my cursor goes using up and down.
 
@@ -389,3 +389,5 @@ I think this is how the TUI works already anyway right?
 - [x] ctrl+x down goes to latest subagent, not 1.
 
 - [ ] Improve the subagent footer, I wanna be able to see "tabs" for each subagent. Essentally a minor 1-height block representing the color of the agent. Just place it above
+
+- [x] When I paste a specific session id, get that session in /sessions. i.e. I paste jupoh3w7qcqcylbzluxsazpz (basically after I did /copy on the session id)
