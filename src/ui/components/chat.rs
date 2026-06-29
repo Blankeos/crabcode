@@ -44,6 +44,7 @@ pub struct Chat {
     pub streaming_token_count: usize,
     streaming_pause_started_at: Option<std::time::Instant>,
     streaming_paused_duration: std::time::Duration,
+    streaming_decode_paused_duration: std::time::Duration,
     streaming_token_counter: Option<StreamingTokenCounter>,
     /// Whether to autoscroll to bottom when new content arrives
     /// Only autoscrolls if user is already near the bottom
@@ -1177,6 +1178,7 @@ impl Chat {
             streaming_token_count: 0,
             streaming_pause_started_at: None,
             streaming_paused_duration: std::time::Duration::default(),
+            streaming_decode_paused_duration: std::time::Duration::default(),
             streaming_token_counter: None,
             autoscroll_enabled: true,
             user_scrolled_up: false,
@@ -1230,6 +1232,7 @@ impl Chat {
             streaming_token_count: 0,
             streaming_pause_started_at: None,
             streaming_paused_duration: std::time::Duration::default(),
+            streaming_decode_paused_duration: std::time::Duration::default(),
             streaming_token_counter: None,
             autoscroll_enabled: true,
             user_scrolled_up: false,
@@ -1433,6 +1436,7 @@ impl Chat {
         self.streaming_token_count = 0;
         self.streaming_pause_started_at = None;
         self.streaming_paused_duration = std::time::Duration::default();
+        self.streaming_decode_paused_duration = std::time::Duration::default();
         self.streaming_token_counter = None;
         self.selection.reset();
         self.pending_click_anchor = None;
@@ -1524,6 +1528,7 @@ impl Chat {
         self.streaming_token_count = 0;
         self.streaming_pause_started_at = None;
         self.streaming_paused_duration = std::time::Duration::default();
+        self.streaming_decode_paused_duration = std::time::Duration::default();
         self.cached_tokens_per_sec = None;
         self.last_tps_calculated = None;
 
@@ -1562,7 +1567,19 @@ impl Chat {
 
     pub fn resume_streaming_tps_timer(&mut self) {
         if let Some(started) = self.streaming_pause_started_at.take() {
-            self.streaming_paused_duration += started.elapsed();
+            let ended = std::time::Instant::now();
+            self.streaming_paused_duration += ended.duration_since(started);
+            if let Some(first_token_time) = self.streaming_first_token_time {
+                if ended > first_token_time {
+                    let decode_pause_started = if started > first_token_time {
+                        started
+                    } else {
+                        first_token_time
+                    };
+                    self.streaming_decode_paused_duration +=
+                        ended.duration_since(decode_pause_started);
+                }
+            }
             self.last_tps_calculated = None;
         }
     }
@@ -1571,6 +1588,25 @@ impl Chat {
         let mut paused = self.streaming_paused_duration;
         if let Some(started) = self.streaming_pause_started_at {
             paused += started.elapsed();
+        }
+        paused
+    }
+
+    fn total_decode_paused_duration(&self) -> std::time::Duration {
+        let mut paused = self.streaming_decode_paused_duration;
+        if let (Some(started), Some(first_token_time)) = (
+            self.streaming_pause_started_at,
+            self.streaming_first_token_time,
+        ) {
+            let now = std::time::Instant::now();
+            if now > first_token_time {
+                let decode_pause_started = if started > first_token_time {
+                    started
+                } else {
+                    first_token_time
+                };
+                paused += now.duration_since(decode_pause_started);
+            }
         }
         paused
     }
@@ -1597,7 +1633,7 @@ impl Chat {
             Some(now_epoch_ms())
         });
 
-        let paused_ms = self.total_paused_duration().as_millis();
+        let paused_ms = self.total_decode_paused_duration().as_millis();
 
         let decode_duration_ms = if let (Some(t1), Some(tn)) =
             (self.streaming_first_token_time, self.streaming_end_time)
@@ -1634,6 +1670,7 @@ impl Chat {
         self.streaming_token_count = 0;
         self.streaming_pause_started_at = None;
         self.streaming_paused_duration = std::time::Duration::default();
+        self.streaming_decode_paused_duration = std::time::Duration::default();
         self.streaming_renderer = None;
         self.streaming_message_idx = None;
         self.streaming_token_counter = None;
@@ -1706,7 +1743,7 @@ impl Chat {
         self.last_tps_calculated = Some(now);
 
         let result = if let Some(first_token_time) = self.streaming_first_token_time {
-            let paused_ms = self.total_paused_duration().as_millis();
+            let paused_ms = self.total_decode_paused_duration().as_millis();
             let elapsed_ms = first_token_time
                 .elapsed()
                 .as_millis()
@@ -4719,9 +4756,9 @@ impl Chat {
             if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
                 let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
 
-                let total_ms = tn.saturating_sub(t0);
                 let ttft_ms = t1.saturating_sub(t0);
-                let decode_ms = tn.saturating_sub(t1);
+                let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
+                let total_ms = ttft_ms.saturating_add(decode_ms);
 
                 let total_sec = total_ms as f64 / 1000.0;
                 let ttft_sec = ttft_ms as f64 / 1000.0;
@@ -7088,6 +7125,36 @@ codex exec --skip-git-repo-check \
     }
 
     #[test]
+    fn test_metadata_tps_uses_pause_adjusted_decode_duration() {
+        let mut chat = Chat::new();
+        chat.add_assistant_message("hello");
+        if let Some(message) = chat.messages.last_mut() {
+            message.is_complete = true;
+            message.t0_ms = Some(1_000);
+            message.t1_ms = Some(2_000);
+            message.tn_ms = Some(12_000);
+            message.output_tokens = Some(100);
+            message.token_count = Some(100);
+            message.duration_ms = Some(1_000);
+        }
+
+        let colors = test_colors();
+        let lines = chat.build_all_lines(100, "model", &colors);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(
+            rendered.contains("100t/s"),
+            "metadata did not use adjusted decode duration:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("2.0s"),
+            "total duration should be ttft + adjusted decode duration:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
     fn test_streaming_elapsed_timer_freezes_while_paused() {
         use std::time::Duration;
 
@@ -7121,6 +7188,45 @@ codex exec --skip-git-repo-check \
             "timer did not resume (during={:.3}s, after={:.3}s)",
             during_pause,
             after_resume
+        );
+    }
+
+    #[test]
+    fn test_pre_token_pause_does_not_reduce_decode_duration() {
+        use std::time::Duration;
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+        chat.pause_streaming_tps_timer();
+        std::thread::sleep(Duration::from_millis(120));
+        chat.resume_streaming_tps_timer();
+        chat.append_to_last_assistant("hello");
+        std::thread::sleep(Duration::from_millis(80));
+        chat.mark_streaming_end();
+        chat.finalize_streaming_metrics();
+
+        let duration_ms = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .and_then(|m| m.duration_ms)
+            .unwrap_or(0);
+
+        assert!(
+            duration_ms >= 40,
+            "pre-token pause should not be subtracted from decode duration: {}ms",
+            duration_ms
+        );
+        assert!(
+            duration_ms < 180,
+            "decode duration unexpectedly included pre-token pause: {}ms",
+            duration_ms
         );
     }
 

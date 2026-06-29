@@ -1053,8 +1053,9 @@ impl App {
 
         if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
             let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
-            let total_ms = tn.saturating_sub(t0);
-            let decode_ms = tn.saturating_sub(t1);
+            let ttft_ms = t1.saturating_sub(t0);
+            let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
+            let total_ms = ttft_ms.saturating_add(decode_ms);
 
             let total_sec = total_ms as f64 / 1000.0;
             let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
@@ -1087,8 +1088,9 @@ impl App {
 
         if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
             let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
-            let total_ms = tn.saturating_sub(t0);
-            let decode_ms = tn.saturating_sub(t1);
+            let ttft_ms = t1.saturating_sub(t0);
+            let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
+            let total_ms = ttft_ms.saturating_add(decode_ms);
 
             let total_sec = total_ms as f64 / 1000.0;
             let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
