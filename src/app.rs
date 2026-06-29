@@ -5790,7 +5790,11 @@ impl App {
             return false;
         }
 
-        let fork_title = fork_title_from_messages(&messages_to_fork);
+        let fork_title = self
+            .session_manager
+            .get_current_session()
+            .map(|session| fork_title_from_session_title(&session.title))
+            .unwrap_or_else(|| fork_title_from_session_title("fork"));
 
         let _ = self.create_new_session(Some(fork_title));
         for msg in &messages_to_fork {
@@ -9422,23 +9426,33 @@ fn message_clipboard_sections(message: &crate::session::types::Message) -> Vec<S
     sections
 }
 
-fn fork_title_from_messages(messages: &[crate::session::types::Message]) -> String {
-    messages
-        .last()
-        .map(|msg| {
-            let preview = msg
-                .content
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("fork");
-            let truncated: String = preview.chars().take(40).collect();
-            if truncated.len() < preview.len() {
-                format!("{}...", truncated)
-            } else {
-                truncated
-            }
-        })
-        .unwrap_or_default()
+fn fork_title_from_session_title(title: &str) -> String {
+    let title = title.trim();
+    let Some(after_marker) = title.strip_prefix("[fork") else {
+        return format!("[fork1] {}", non_empty_fork_base_title(title));
+    };
+
+    let Some((number, rest)) = after_marker.split_once(']') else {
+        return format!("[fork1] {}", non_empty_fork_base_title(title));
+    };
+
+    let Ok(number) = number.parse::<usize>() else {
+        return format!("[fork1] {}", non_empty_fork_base_title(title));
+    };
+
+    format!(
+        "[fork{}] {}",
+        number.saturating_add(1),
+        non_empty_fork_base_title(rest.trim_start())
+    )
+}
+
+fn non_empty_fork_base_title(title: &str) -> &str {
+    if title.is_empty() {
+        "fork"
+    } else {
+        title
+    }
 }
 
 fn append_usage_suffix(mut text: String, suffix: String) -> String {
@@ -10338,6 +10352,13 @@ mod tests {
             app.session_manager
                 .get_session_ref(&forked_id)
                 .unwrap()
+                .title,
+            "[fork1] Original"
+        );
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&forked_id)
+                .unwrap()
                 .messages
                 .iter()
                 .map(|message| message.content.as_str())
@@ -10365,11 +10386,42 @@ mod tests {
             app.session_manager
                 .get_session_ref(&forked_id)
                 .unwrap()
+                .title,
+            "[fork1] Original"
+        );
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&forked_id)
+                .unwrap()
                 .messages
                 .iter()
                 .map(|message| message.content.as_str())
                 .collect::<Vec<_>>(),
             vec!["Prompt"]
+        );
+    }
+
+    #[test]
+    fn fork_title_prefixes_current_session_title() {
+        assert_eq!(
+            fork_title_from_session_title("Original"),
+            "[fork1] Original"
+        );
+        assert_eq!(
+            fork_title_from_session_title("  Renamed fork  "),
+            "[fork1] Renamed fork"
+        );
+    }
+
+    #[test]
+    fn fork_title_increments_existing_left_fork_prefix() {
+        assert_eq!(
+            fork_title_from_session_title("[fork1] Original"),
+            "[fork2] Original"
+        );
+        assert_eq!(
+            fork_title_from_session_title("[fork12] Original"),
+            "[fork13] Original"
         );
     }
 

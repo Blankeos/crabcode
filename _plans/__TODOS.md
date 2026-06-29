@@ -361,7 +361,7 @@ I think this is how the TUI works already anyway right?
 
 - [x] low prio: title generation? maybe, maybenot, just a waste of tokens honestly.
       The small_model option configures a separate model for lightweight tasks like title generation. By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model.
-- [ ] Fork title fixes, by default, always use the current chat title then add a left prefix with `[fork1]` or `[fork2]` (notice that since rename can pretty much get rid of `[fork1]`, etc. Only increment if u actually find a specific name like `[fork1]`).
+- [x] Fork title fixes, by default, always use the current chat title then add a left prefix with `[fork1]` or `[fork2]` (notice that since rename can pretty much get rid of `[fork1]`, etc. Only increment if u actually find a specific name like `[fork1]`).
 
 - [x] better permission asking. Like if it's going to ask for reading a directory, just ask multiple anyway so it doesnt need to ask so much?
 
