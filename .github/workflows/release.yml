@@ -293,6 +293,7 @@ jobs:
           ## Install
 
           ```sh
+          brew install blankeos/tap/crabcode # Homebrew (macOS/Linux)
           npm install -g crabcode  # npm
           bun install -g crabcode  # or bun
           cargo binstall crabcode  # or cargo-binstall (prebuilt binary, faster)
