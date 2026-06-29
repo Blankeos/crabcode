@@ -34,6 +34,8 @@ pub struct Session {
     pub status: String,
     pub pinned_at: Option<i64>,
     pub archived_at: Option<i64>,
+    #[serde(default)]
+    pub message_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,13 +267,14 @@ impl HistoryDAO {
                     s.name, s.created_at, s.updated_at,
                     s.total_tokens, s.total_cost, s.total_time_sec, s.avg_tokens_per_sec,
                     COALESCE(s.workspace_id, ?1) AS workspace_id,
-                    COALESCE(w.root_path, ?2) AS workspace_path,
-                    COALESCE(w.display_name, ?3) AS workspace_name,
-                    COALESCE(w.sort_order, COALESCE(s.workspace_id, ?1)) AS workspace_sort_order,
-                    COALESCE(s.status, 'idle') AS status,
-                    s.pinned_at,
-                    s.archived_at
-             FROM sessions s
+                     COALESCE(w.root_path, ?2) AS workspace_path,
+                     COALESCE(w.display_name, ?3) AS workspace_name,
+                     COALESCE(w.sort_order, COALESCE(s.workspace_id, ?1)) AS workspace_sort_order,
+                     COALESCE(s.status, 'idle') AS status,
+                     s.pinned_at,
+                     s.archived_at,
+                     (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
+              FROM sessions s
              LEFT JOIN workspaces w ON w.id = s.workspace_id
              ORDER BY s.updated_at DESC",
         )?;
@@ -301,6 +304,7 @@ impl HistoryDAO {
                     status: row.get(14)?,
                     pinned_at: row.get(15)?,
                     archived_at: row.get(16)?,
+                    message_count: row.get::<_, i64>(17)?.max(0) as usize,
                 })
             },
         )?;
@@ -315,13 +319,14 @@ impl HistoryDAO {
                     s.name, s.created_at, s.updated_at,
                     s.total_tokens, s.total_cost, s.total_time_sec, s.avg_tokens_per_sec,
                     COALESCE(s.workspace_id, ?2) AS workspace_id,
-                    COALESCE(w.root_path, ?3) AS workspace_path,
-                    COALESCE(w.display_name, ?4) AS workspace_name,
-                    COALESCE(w.sort_order, COALESCE(s.workspace_id, ?2)) AS workspace_sort_order,
-                    COALESCE(s.status, 'idle') AS status,
-                    s.pinned_at,
-                    s.archived_at
-             FROM sessions s
+                     COALESCE(w.root_path, ?3) AS workspace_path,
+                     COALESCE(w.display_name, ?4) AS workspace_name,
+                     COALESCE(w.sort_order, COALESCE(s.workspace_id, ?2)) AS workspace_sort_order,
+                     COALESCE(s.status, 'idle') AS status,
+                     s.pinned_at,
+                     s.archived_at,
+                     (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
+              FROM sessions s
              LEFT JOIN workspaces w ON w.id = s.workspace_id
              WHERE s.id = ?1",
         )?;
@@ -351,6 +356,7 @@ impl HistoryDAO {
                 status: row.get(14)?,
                 pinned_at: row.get(15)?,
                 archived_at: row.get(16)?,
+                message_count: row.get::<_, i64>(17)?.max(0) as usize,
             }))
         } else {
             Ok(None)

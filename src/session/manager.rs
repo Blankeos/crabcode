@@ -1,6 +1,6 @@
 use crate::persistence::HistoryDAO;
 use crate::session::types::{MessageRole, Session, SessionStatus};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
 #[derive(Debug)]
@@ -49,6 +49,8 @@ pub struct SessionManager {
     history_dao: Option<HistoryDAO>,
     id_mapping: HashMap<String, i64>,
     db_id_to_id: HashMap<i64, String>,
+    hydrated_sessions: HashSet<String>,
+    message_counts: HashMap<String, usize>,
     workspace_sort_orders: HashMap<i64, i64>,
     current_workspace_id: i64,
     current_workspace_path: String,
@@ -70,6 +72,8 @@ impl SessionManager {
             history_dao: None,
             id_mapping: HashMap::new(),
             db_id_to_id: HashMap::new(),
+            hydrated_sessions: HashSet::new(),
+            message_counts: HashMap::new(),
             workspace_sort_orders: HashMap::new(),
             current_workspace_id: 0,
             current_workspace_path,
@@ -106,17 +110,7 @@ impl SessionManager {
             .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
 
         for db_session in db_sessions {
-            let messages = dao
-                .get_messages(db_session.id)
-                .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
-
-            let mut session = if messages.is_empty() {
-                Session::with_title(db_session.name.clone())
-            } else {
-                crate::persistence::persistence_to_session(db_session.clone(), messages)
-                    .map_err(|e| SessionError::PersistenceError(e.to_string()))?
-            };
-
+            let mut session = Session::with_title(db_session.name.clone());
             session.id = db_session.session_identifier.clone();
             session.parent_id = db_session.parent_session_identifier.clone();
             session.title = db_session.name;
@@ -131,30 +125,7 @@ impl SessionManager {
             session.status = SessionStatus::from_str(&db_session.status);
             if session.status.is_active() {
                 session.status = SessionStatus::Interrupted;
-                if let Some(message) = session
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find(|message| message.role == MessageRole::Assistant)
-                {
-                    message.mark_complete();
-                    message.mark_interrupted();
-                    message.mark_running_tool_parts_failed(
-                        "Session interrupted before the tool returned a result",
-                    );
-                }
                 let _ = dao.set_session_status(db_session.id, session.status.as_str(), None);
-                let persistence_messages: Vec<crate::persistence::Message> = session
-                    .messages
-                    .clone()
-                    .into_iter()
-                    .map(|message| {
-                        let mut db_message: crate::persistence::Message = message.into();
-                        db_message.session_id = db_session.id;
-                        db_message
-                    })
-                    .collect();
-                let _ = dao.replace_messages(db_session.id, &persistence_messages);
             }
             session.pinned_at = db_session
                 .pinned_at
@@ -170,13 +141,93 @@ impl SessionManager {
                 self.index_child_session(&parent_id, &session_id);
             }
             self.id_mapping.insert(session_id.clone(), db_session.id);
-            self.db_id_to_id.insert(db_session.id, session_id);
+            self.db_id_to_id.insert(db_session.id, session_id.clone());
+            self.message_counts
+                .insert(session_id, db_session.message_count);
 
             self.session_counter += 1;
         }
 
         self.sort_child_session_indexes();
 
+        Ok(())
+    }
+
+    fn hydrate_session(&mut self, id: &str) -> Result<(), SessionError> {
+        if self.hydrated_sessions.contains(id) {
+            return Ok(());
+        }
+
+        let Some(dao) = self.history_dao.as_ref() else {
+            self.hydrated_sessions.insert(id.to_string());
+            return Ok(());
+        };
+        let Some(db_id) = self.id_mapping.get(id).copied() else {
+            self.hydrated_sessions.insert(id.to_string());
+            return Ok(());
+        };
+
+        let db_session = dao
+            .get_session(db_id)
+            .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+        let messages = dao
+            .get_messages(db_id)
+            .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+
+        if let (Some(db_session), Some(existing)) = (db_session, self.sessions.get_mut(id)) {
+            let mut hydrated = if messages.is_empty() {
+                Session::with_title(db_session.name.clone())
+            } else {
+                crate::persistence::persistence_to_session(db_session, messages)
+                    .map_err(|e| SessionError::PersistenceError(e.to_string()))?
+            };
+
+            hydrated.id = existing.id.clone();
+            hydrated.parent_id = existing.parent_id.clone();
+            hydrated.title = existing.title.clone();
+            hydrated.created_at = existing.created_at;
+            hydrated.updated_at = existing.updated_at;
+            hydrated.workspace_id = existing.workspace_id;
+            hydrated.workspace_path = existing.workspace_path.clone();
+            hydrated.workspace_name = existing.workspace_name.clone();
+            hydrated.workspace_sort_order = existing.workspace_sort_order;
+            hydrated.status = existing.status;
+            hydrated.pinned_at = existing.pinned_at;
+            hydrated.archived_at = existing.archived_at;
+
+            if existing.status == SessionStatus::Interrupted {
+                if let Some(message) = hydrated
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|message| message.role == MessageRole::Assistant)
+                {
+                    message.mark_complete();
+                    message.mark_interrupted();
+                    message.mark_running_tool_parts_failed(
+                        "Session interrupted before the tool returned a result",
+                    );
+                }
+
+                let persistence_messages: Vec<crate::persistence::Message> = hydrated
+                    .messages
+                    .clone()
+                    .into_iter()
+                    .map(|message| {
+                        let mut db_message: crate::persistence::Message = message.into();
+                        db_message.session_id = db_id;
+                        db_message
+                    })
+                    .collect();
+                let _ = dao.replace_messages(db_id, &persistence_messages);
+            }
+
+            *existing = hydrated;
+            self.message_counts
+                .insert(id.to_string(), existing.messages.len());
+        }
+
+        self.hydrated_sessions.insert(id.to_string());
         Ok(())
     }
 
@@ -304,6 +355,8 @@ impl SessionManager {
             self.id_mapping.insert(session_id.clone(), db_id);
             self.db_id_to_id.insert(db_id, session_id.clone());
         }
+        self.hydrated_sessions.insert(session_id.clone());
+        self.message_counts.insert(session_id.clone(), 0);
 
         session_id
     }
@@ -312,25 +365,41 @@ impl SessionManager {
         self.sessions
             .iter()
             .map(|(id, session)| {
-                Self::session_info_from_session(
+                let mut info = Self::session_info_from_session(
                     id,
                     session,
                     self.workspace_sort_order(session.workspace_id),
-                )
+                );
+                if !self.hydrated_sessions.contains(id) {
+                    if let Some(count) = self.message_counts.get(id).copied() {
+                        info.message_count = count;
+                    }
+                }
+                info
             })
             .collect()
     }
 
     pub fn get_current_session(&mut self) -> Option<&mut Session> {
-        if let Some(id) = &self.current_session_id {
-            self.sessions.get_mut(id)
+        if let Some(id) = self.current_session_id.clone() {
+            let _ = self.hydrate_session(&id);
+            self.sessions.get_mut(&id)
         } else {
             None
         }
     }
 
     pub fn get_session(&mut self, id: &str) -> Option<&mut Session> {
+        let _ = self.hydrate_session(id);
         self.sessions.get_mut(id)
+    }
+
+    pub fn ensure_session_loaded(&mut self, id: &str) -> bool {
+        if !self.sessions.contains_key(id) {
+            return false;
+        }
+        let _ = self.hydrate_session(id);
+        true
     }
 
     pub fn get_session_ref(&self, id: &str) -> Option<&Session> {
@@ -394,6 +463,7 @@ impl SessionManager {
 
     pub fn switch_session(&mut self, id: &str) -> bool {
         if self.sessions.contains_key(id) {
+            let _ = self.hydrate_session(id);
             self.current_session_id = Some(id.to_string());
             true
         } else {
@@ -599,6 +669,8 @@ impl SessionManager {
     ) -> Result<(), SessionError> {
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.add_message(message.clone());
+            self.message_counts
+                .insert(session_id.to_string(), session.messages.len());
         } else {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
@@ -623,6 +695,8 @@ impl SessionManager {
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.messages = messages.clone();
             session.updated_at = SystemTime::now();
+            self.message_counts
+                .insert(session_id.to_string(), session.messages.len());
         } else {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
@@ -822,6 +896,8 @@ impl SessionManager {
             if let Some(db_id) = self.id_mapping.remove(id) {
                 self.db_id_to_id.remove(&db_id);
             }
+            self.hydrated_sessions.remove(id);
+            self.message_counts.remove(id);
             if self.current_session_id.as_ref() == Some(&id.to_string()) {
                 self.current_session_id = None;
             }
@@ -850,6 +926,12 @@ impl Default for SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_session_manager_new() {
@@ -965,5 +1047,37 @@ mod tests {
         manager.switch_session(&id1);
         assert!(manager.delete_session(&id1));
         assert!(manager.current_session_id.is_none());
+    }
+
+    #[test]
+    fn with_history_loads_session_metadata_before_messages() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", temp.path());
+
+        {
+            let mut manager = SessionManager::new().with_history().unwrap();
+            let id = manager.create_session(Some("Persisted".to_string()));
+            manager
+                .add_message_to_session(&id, &crate::session::types::Message::user("hello"))
+                .unwrap();
+        }
+
+        let mut manager = SessionManager::new().with_history().unwrap();
+        let info = manager
+            .list_sessions()
+            .into_iter()
+            .find(|session| session.title == "Persisted")
+            .unwrap();
+        assert_eq!(info.message_count, 1);
+        assert!(manager
+            .get_session_ref(&info.id)
+            .unwrap()
+            .messages
+            .is_empty());
+
+        assert_eq!(manager.get_session(&info.id).unwrap().messages.len(), 1);
+
+        std::env::remove_var("XDG_STATE_HOME");
     }
 }

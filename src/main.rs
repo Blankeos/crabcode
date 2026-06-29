@@ -741,12 +741,14 @@ async fn main() -> Result<()> {
     let mut app = App::new_with_model_override(args.model.as_deref())?;
 
     if let Some(ref session_id) = args.session {
-        app.session_manager.switch_session(session_id);
-        if let Some(session) = app.session_manager.get_session(session_id) {
-            app.chat_state.chat.clear();
-            let messages = session.messages.clone();
-            for message in messages {
-                app.chat_state.chat.add_message(message);
+        if app.session_manager.ensure_session_loaded(session_id) {
+            app.session_manager.switch_session(session_id);
+            if let Some(session) = app.session_manager.get_session(session_id) {
+                app.chat_state.chat.clear();
+                let messages = session.messages.clone();
+                for message in messages {
+                    app.chat_state.chat.add_message(message);
+                }
             }
         }
         app.base_focus = app::BaseFocus::Chat;

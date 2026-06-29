@@ -819,7 +819,6 @@ impl App {
             .with_agent_permission_rules(agent_registry.permission_rules_map());
 
         let discovery = crate::model::discovery::Discovery::new().ok();
-        let cached_git_branch = git::get_branch_for_path(&cwd);
         let now = std::time::Instant::now();
 
         Ok(Self {
@@ -899,8 +898,8 @@ impl App {
             last_frame_size: ratatui::layout::Rect::default(),
             last_animation_update: now,
             last_session_spinner_update: now,
-            cached_git_branch,
-            cached_git_branch_path: cwd.clone(),
+            cached_git_branch: None,
+            cached_git_branch_path: String::new(),
             last_git_branch_check: now,
             discovery,
             cached_usage_text: String::new(),
@@ -1197,7 +1196,7 @@ impl App {
     }
 
     fn switch_to_session(&mut self, session_id: &str) -> bool {
-        if self.session_manager.get_session_ref(session_id).is_none() {
+        if !self.session_manager.ensure_session_loaded(session_id) {
             return false;
         }
         self.save_active_session_view_state();

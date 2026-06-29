@@ -397,3 +397,5 @@ I think this is how the TUI works already anyway right?
 - [x] Get mcps to work?
   - [x] In the tui: `/mcp` and cmd palette
   - [x] In the remote browser ui: I wanna see it in those dialog abs next to servers, skills, mcp.
+
+- [x] Faster startup
