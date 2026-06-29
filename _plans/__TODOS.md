@@ -388,7 +388,7 @@ I think this is how the TUI works already anyway right?
 
 - [x] ctrl+x down goes to latest subagent, not 1.
 
-- [ ] Improve the subagent footer, I wanna be able to see "tabs" for each subagent. Essentally a minor 1-height block representing the color of the agent. Just place it above
+- [x] Improve the subagent footer, I wanna be able to see "tabs" for each subagent. Essentally a minor 1-height block representing the color of the agent. Just place it above
 
 - [x] When I paste a specific session id, get that session in /sessions. i.e. I paste jupoh3w7qcqcylbzluxsazpz (basically after I did /copy on the session id)
 

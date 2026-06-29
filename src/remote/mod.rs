@@ -312,6 +312,8 @@ struct RemoteMessage {
 struct RemotePermissionPrompt {
     tool_id: String,
     action: String,
+    permission: String,
+    patterns: Vec<String>,
     target: Option<String>,
     command: Option<String>,
     workdir: Option<String>,
@@ -3051,6 +3053,8 @@ fn remote_permission_prompt(app: &App) -> Option<RemotePermissionPrompt> {
         .map(|prompt| RemotePermissionPrompt {
             tool_id: prompt.tool_id,
             action: prompt.action,
+            permission: prompt.permission,
+            patterns: prompt.patterns,
             target: prompt.target,
             command: prompt.command,
             workdir: prompt.workdir,

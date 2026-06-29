@@ -1,5 +1,5 @@
 use crate::theme::{contrast_text, ThemeColors};
-use crate::tools::{PermissionAction, PermissionPrompt, PermissionResponse};
+use crate::tools::{PermissionAction, PermissionGrant, PermissionPrompt, PermissionResponse};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -9,6 +9,10 @@ use ratatui::{
     Frame,
 };
 use std::collections::VecDeque;
+
+const PERMISSION_DIALOG_MIN_HEIGHT: u16 = 11;
+const PERMISSION_DIALOG_MAX_HEIGHT: u16 = 18;
+const PERMISSION_DIALOG_CHROME_HEIGHT: u16 = 8;
 
 #[derive(Default)]
 pub struct PermissionDialogState {
@@ -21,6 +25,8 @@ pub struct PermissionDialogState {
 pub struct PermissionPromptSnapshot {
     pub tool_id: String,
     pub action: String,
+    pub permission: String,
+    pub patterns: Vec<String>,
     pub target: Option<String>,
     pub command: Option<String>,
     pub workdir: Option<String>,
@@ -55,6 +61,8 @@ impl PermissionDialogState {
         Some(PermissionPromptSnapshot {
             tool_id: prompt.tool_id.clone(),
             action: permission_action_label(prompt.action).to_string(),
+            permission: prompt.permission.clone(),
+            patterns: prompt.patterns.clone(),
             target: prompt.target.clone(),
             command: prompt.command.clone(),
             workdir: prompt.workdir.clone(),
@@ -85,6 +93,25 @@ impl PermissionDialogState {
 
     pub fn respond_current(&mut self, response: PermissionResponse) {
         if let Some(prompt) = self.current.take() {
+            if response == PermissionResponse::AllowAlways {
+                let grant = PermissionGrant {
+                    permission: prompt.permission.clone(),
+                    patterns: prompt.patterns.clone(),
+                };
+                let mut remaining = VecDeque::new();
+                while let Some(queued) = self.queue.pop_front() {
+                    let queued_grant = PermissionGrant {
+                        permission: queued.permission.clone(),
+                        patterns: queued.patterns.clone(),
+                    };
+                    if grant.matches(&queued_grant) {
+                        let _ = queued.response_tx.send(PermissionResponse::AllowAlways);
+                    } else {
+                        remaining.push_back(queued);
+                    }
+                }
+                self.queue = remaining;
+            }
             let _ = prompt.response_tx.send(response);
         }
 
@@ -211,29 +238,39 @@ fn permission_detail_lines(prompt: &PermissionPrompt, colors: ThemeColors) -> Ve
             ]));
         }
     } else {
-        let target = prompt
-            .target
-            .as_deref()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "(none)".to_string());
+        let target = permission_display_target(prompt).unwrap_or_else(|| "(none)".to_string());
         details.push(Line::from(vec![
             Span::styled("Target ", label_style),
             Span::styled(target, value_style),
         ]));
     }
 
+    if !prompt.patterns.is_empty() {
+        details.push(Line::from(vec![
+            Span::styled("Patterns ", label_style),
+            Span::styled(prompt.patterns.join(", "), value_style),
+        ]));
+    }
+
     details
+}
+
+fn permission_display_target(prompt: &PermissionPrompt) -> Option<String> {
+    if prompt.permission == "external_directory" {
+        prompt
+            .patterns
+            .first()
+            .cloned()
+            .or_else(|| prompt.target.clone())
+    } else {
+        prompt.target.clone()
+    }
 }
 
 fn permission_action_lines(colors: ThemeColors, selected_action: usize) -> Vec<Line<'static>> {
     let actions = [
         (1usize, "Allow once", "Approve this single request", "1"),
-        (
-            2usize,
-            "Allow always",
-            "Remember this exact permission",
-            "2",
-        ),
+        (2usize, "Allow always", "Remember matching requests", "2"),
         (0usize, "Reject", "Deny and return to the agent", "3"),
     ];
     let selected_style = Style::default()
@@ -269,6 +306,33 @@ fn permission_action_lines(colors: ThemeColors, selected_action: usize) -> Vec<L
         .collect()
 }
 
+fn permission_dialog_body_width(area_width: u16) -> u16 {
+    // The dialog has a left border plus left/right padding before the body.
+    area_width.saturating_sub(3).max(1)
+}
+
+fn wrapped_lines_height(lines: &[Line<'_>], width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+
+    lines
+        .iter()
+        .map(|line| {
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            if text.is_empty() {
+                1
+            } else {
+                text.lines()
+                    .map(|part| textwrap::wrap(part, width).len().max(1) as u16)
+                    .sum()
+            }
+        })
+        .sum()
+}
+
 pub fn render_permission_dialog(
     f: &mut Frame,
     state: &mut PermissionDialogState,
@@ -280,8 +344,11 @@ pub fn render_permission_dialog(
     };
 
     let details = permission_detail_lines(prompt, colors);
-    let detail_line_count = details.len() as u16;
-    let desired_height = (detail_line_count + 8).clamp(11, 14);
+    let detail_line_count =
+        wrapped_lines_height(&details, permission_dialog_body_width(area.width));
+    let desired_height = detail_line_count
+        .saturating_add(PERMISSION_DIALOG_CHROME_HEIGHT)
+        .clamp(PERMISSION_DIALOG_MIN_HEIGHT, PERMISSION_DIALOG_MAX_HEIGHT);
     let panel_height = area.height.min(desired_height);
     let dialog_area = Rect {
         x: area.x,
@@ -309,12 +376,17 @@ pub fn render_permission_dialog(
         return;
     }
 
+    let fixed_content_height = 1 + 1 + 1 + 3 + 1;
+    let detail_height = detail_line_count
+        .min(content_area.height.saturating_sub(fixed_content_height))
+        .max(1);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Min(detail_line_count),
+            Constraint::Length(detail_height),
             Constraint::Length(1),
             Constraint::Length(3),
             Constraint::Length(1),
@@ -371,8 +443,7 @@ pub fn render_permission_dialog(
 
     let actions_block = Paragraph::new(action_lines)
         .style(Style::default().bg(colors.dialog_background))
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: true });
+        .alignment(Alignment::Left);
     let help_width = help.width() as u16;
     f.render_widget(actions_block, chunks[4]);
 
@@ -413,6 +484,8 @@ mod tests {
         let prompt = PermissionPrompt {
             tool_id: "bash".to_string(),
             action: PermissionAction::Bash,
+            permission: "bash".to_string(),
+            patterns: vec!["cargo test".to_string()],
             target: Some("cargo test".to_string()),
             command: Some("cargo test".to_string()),
             workdir: Some("/tmp/workspace".to_string()),
@@ -431,10 +504,35 @@ mod tests {
             vec![
                 "Tool bash • Bash command execution requires permission",
                 "Command cargo test",
-                "Workdir /tmp/workspace"
+                "Workdir /tmp/workspace",
+                "Patterns cargo test"
             ]
         );
         assert!(!rendered.iter().any(|line| line.contains("Target")));
+    }
+
+    #[test]
+    fn external_directory_detail_target_shows_wildcard_scope() {
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let prompt = PermissionPrompt {
+            tool_id: "read".to_string(),
+            action: PermissionAction::Read,
+            permission: "external_directory".to_string(),
+            patterns: vec!["/Users/carlo/Desktop/Projects/sheetpilot/*".to_string()],
+            target: Some("/Users/carlo/Desktop/Projects/sheetpilot".to_string()),
+            command: None,
+            workdir: None,
+            reason: "Tool 'read' wants to access path outside working directory".to_string(),
+            response_tx,
+        };
+        let colors = Theme::load_builtin_default().get_colors(true);
+
+        let rendered = permission_detail_lines(&prompt, colors)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.contains(&"Target /Users/carlo/Desktop/Projects/sheetpilot/*".to_string()));
     }
 
     #[test]
@@ -444,6 +542,8 @@ mod tests {
         state.enqueue(PermissionPrompt {
             tool_id: "bash".to_string(),
             action: PermissionAction::Bash,
+            permission: "bash".to_string(),
+            patterns: vec!["cargo test".to_string()],
             target: Some("cargo test".to_string()),
             command: Some("cargo test".to_string()),
             workdir: Some("/tmp/workspace".to_string()),
@@ -454,6 +554,8 @@ mod tests {
         let snapshot = state.current_snapshot().unwrap();
         assert_eq!(snapshot.tool_id, "bash");
         assert_eq!(snapshot.action, "bash");
+        assert_eq!(snapshot.permission, "bash");
+        assert_eq!(snapshot.patterns, vec!["cargo test"]);
         assert_eq!(snapshot.command.as_deref(), Some("cargo test"));
         assert_eq!(snapshot.queued_count, 0);
     }
@@ -471,7 +573,7 @@ mod tests {
             rendered,
             vec![
                 "( ) Allow once (1) - Approve this single request",
-                "( ) Allow always (2) - Remember this exact permission",
+                "( ) Allow always (2) - Remember matching requests",
                 "( ) Reject (3) - Deny and return to the agent"
             ]
         );
@@ -484,6 +586,8 @@ mod tests {
         state.enqueue(PermissionPrompt {
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
+            permission: "read".to_string(),
+            patterns: vec!["/tmp/file".to_string()],
             target: Some("/tmp/file".to_string()),
             command: None,
             workdir: None,
@@ -502,5 +606,45 @@ mod tests {
             KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
         );
         assert_eq!(state.selected_action, 1);
+    }
+
+    #[test]
+    fn render_expands_for_wrapped_details_so_reject_stays_visible() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let mut state = PermissionDialogState::new();
+        state.enqueue(PermissionPrompt {
+            tool_id: "read".to_string(),
+            action: PermissionAction::Read,
+            permission: "external_directory".to_string(),
+            patterns: vec!["/Users/carlo/Desktop/Projects/sheetpilot/*".to_string()],
+            target: Some("/Users/carlo/Desktop/Projects/sheetpilot/README.md".to_string()),
+            command: None,
+            workdir: None,
+            reason: "Tool 'read' wants to access path outside working directory: /Users/carlo/Desktop/Projects/sheetpilot/README.md".to_string(),
+            response_tx,
+        });
+        let colors = Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(64, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_permission_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Allow once"));
+        assert!(rendered.contains("Allow always"));
+        assert!(rendered.contains("Reject"));
     }
 }

@@ -75,11 +75,35 @@ pub type PermissionRules = Vec<PermissionRule>;
 pub struct PermissionPrompt {
     pub tool_id: String,
     pub action: PermissionAction,
+    pub permission: String,
+    pub patterns: Vec<String>,
     pub target: Option<String>,
     pub command: Option<String>,
     pub workdir: Option<String>,
     pub reason: String,
     pub response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PermissionGrant {
+    pub permission: String,
+    pub patterns: Vec<String>,
+}
+
+impl PermissionGrant {
+    pub fn matches(&self, other: &Self) -> bool {
+        if !wildcard_match(&other.permission, &self.permission)
+            && !wildcard_match(&self.permission, &other.permission)
+        {
+            return false;
+        }
+
+        other.patterns.iter().any(|candidate| {
+            self.patterns
+                .iter()
+                .any(|grant| wildcard_match(candidate, grant))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -172,6 +196,7 @@ impl Default for AgentToolPolicies {
 pub struct ToolPermissions {
     workdir: PathBuf,
     always_grants: Arc<RwLock<HashSet<PermissionFingerprint>>>,
+    runtime_grants: Arc<RwLock<HashSet<PermissionGrant>>>,
     call_counts: Arc<RwLock<HashMap<ToolCallFingerprint, usize>>>,
     agent_policies: Arc<AgentToolPolicies>,
     permission_rules: Arc<PermissionRules>,
@@ -184,6 +209,7 @@ impl ToolPermissions {
         Self {
             workdir: normalize_path(&workdir.into()),
             always_grants: Arc::new(RwLock::new(HashSet::new())),
+            runtime_grants: Arc::new(RwLock::new(HashSet::new())),
             call_counts: Arc::new(RwLock::new(HashMap::new())),
             agent_policies: Arc::new(AgentToolPolicies::default()),
             permission_rules: Arc::new(Vec::new()),
@@ -384,11 +410,6 @@ impl ToolPermissions {
         let target = path
             .map(|p| p.display().to_string())
             .or_else(|| command.clone());
-        let prompt_target = if action == PermissionAction::Bash {
-            command.clone().or_else(|| target.clone())
-        } else {
-            target.clone()
-        };
         let workdir = if action == PermissionAction::Bash {
             path.map(|p| p.display().to_string())
         } else {
@@ -403,7 +424,32 @@ impl ToolPermissions {
             reason: reason_kind,
         };
 
+        let grant = permission_grant_for_prompt(
+            reason_kind,
+            tool_id,
+            action,
+            path,
+            command.as_deref(),
+            &self.workdir,
+        );
+
+        let prompt_target = if action == PermissionAction::Bash {
+            command.clone().or_else(|| target.clone())
+        } else {
+            target.clone()
+        };
+
         if self.always_grants.read().await.contains(&fingerprint) {
+            return Ok(());
+        }
+
+        if self
+            .runtime_grants
+            .read()
+            .await
+            .iter()
+            .any(|remembered| remembered.matches(&grant))
+        {
             return Ok(());
         }
 
@@ -417,6 +463,8 @@ impl ToolPermissions {
         let prompt = PermissionPrompt {
             tool_id: tool_id.to_string(),
             action,
+            permission: grant.permission.clone(),
+            patterns: grant.patterns.clone(),
             target: prompt_target,
             command,
             workdir,
@@ -438,6 +486,9 @@ impl ToolPermissions {
             PermissionResponse::AllowOnce => Ok(()),
             PermissionResponse::AllowAlways => {
                 self.always_grants.write().await.insert(fingerprint);
+                if reason_kind != PermissionReasonKind::DoomLoop {
+                    self.runtime_grants.write().await.insert(grant);
+                }
                 Ok(())
             }
         }
@@ -476,7 +527,7 @@ impl ToolPermissions {
         let (permission_key, patterns) = match reason {
             PermissionReasonKind::ExternalPath => (
                 "external_directory".to_string(),
-                path.map(|path| path_patterns(path, &self.workdir))
+                path.map(external_directory_patterns)
                     .filter(|patterns| !patterns.is_empty())
                     .unwrap_or_else(|| fallback_patterns.to_vec()),
             ),
@@ -782,6 +833,70 @@ fn path_patterns(path: &Path, workdir: &Path) -> Vec<String> {
     }
 
     out
+}
+
+fn external_directory_patterns(path: &Path) -> Vec<String> {
+    let absolute = normalize_path(path);
+    let directory = if std::fs::metadata(&absolute)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+    {
+        absolute
+    } else {
+        absolute
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| absolute.clone())
+    };
+    let directory = normalize_pattern_path(&directory);
+    if directory.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        vec![format!("{}/*", directory.trim_end_matches('/'))]
+    }
+}
+
+fn permission_grant_for_prompt(
+    reason: PermissionReasonKind,
+    tool_id: &str,
+    action: PermissionAction,
+    path: Option<&Path>,
+    command: Option<&str>,
+    workdir: &Path,
+) -> PermissionGrant {
+    let permission = match reason {
+        PermissionReasonKind::ExternalPath => "external_directory".to_string(),
+        PermissionReasonKind::DoomLoop => "doom_loop".to_string(),
+        PermissionReasonKind::SensitivePath | PermissionReasonKind::ConfiguredAsk => {
+            permission_key_for_tool_id(tool_id)
+        }
+    };
+
+    let mut patterns = match reason {
+        PermissionReasonKind::ExternalPath => {
+            path.map(external_directory_patterns).unwrap_or_default()
+        }
+        PermissionReasonKind::DoomLoop => vec![tool_id.to_string()],
+        PermissionReasonKind::SensitivePath | PermissionReasonKind::ConfiguredAsk => {
+            if action == PermissionAction::Bash {
+                command
+                    .map(|command| vec![command.to_string()])
+                    .unwrap_or_default()
+            } else {
+                path.map(|path| path_patterns(path, workdir))
+                    .unwrap_or_default()
+            }
+        }
+    };
+
+    if patterns.is_empty() {
+        patterns.push("*".to_string());
+    }
+
+    PermissionGrant {
+        permission,
+        patterns,
+    }
 }
 
 fn normalize_pattern_path(path: &Path) -> String {
@@ -1138,6 +1253,54 @@ mod tests {
 
         let second = perms.preflight("build", "read", &params, Some(&tx)).await;
         assert!(second.is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn allow_always_external_directory_covers_nested_reads() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workdir = temp.path().join("workspace");
+        let external = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&workdir).expect("workspace");
+        std::fs::create_dir_all(&external).expect("external");
+        std::fs::write(external.join("README.md"), "hello").expect("readme");
+
+        let perms = ToolPermissions::new(&workdir);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let dir_params = serde_json::json!({ "file_path": external.to_string_lossy() });
+
+        let pending = tokio::spawn({
+            let perms = perms.clone();
+            let params = dir_params.clone();
+            let tx = tx.clone();
+            async move { perms.preflight("build", "read", &params, Some(&tx)).await }
+        });
+
+        let prompt = match rx.recv().await {
+            Some(ChunkMessage::PermissionRequest(prompt)) => prompt,
+            _ => panic!("Expected permission prompt"),
+        };
+
+        let expected_scope = format!("{}/*", external.to_string_lossy());
+        assert_eq!(prompt.permission, "external_directory");
+        assert_eq!(prompt.patterns, vec![expected_scope.clone()]);
+        assert_eq!(
+            prompt.target.as_deref(),
+            Some(external.to_string_lossy().as_ref())
+        );
+        let _ = prompt.response_tx.send(PermissionResponse::AllowAlways);
+        assert!(pending
+            .await
+            .expect("preflight task should complete")
+            .is_ok());
+
+        let file_params =
+            serde_json::json!({ "file_path": external.join("README.md").to_string_lossy() });
+        let result = perms
+            .preflight("build", "read", &file_params, Some(&tx))
+            .await;
+
+        assert!(result.is_ok());
         assert!(rx.try_recv().is_err());
     }
 

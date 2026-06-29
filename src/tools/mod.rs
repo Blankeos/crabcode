@@ -28,8 +28,9 @@ pub use init::{
 };
 pub use patch::ApplyPatchTool;
 pub use permission::{
-    expand_permission_pattern, AgentToolPolicies, PermissionAction, PermissionPolicyAction,
-    PermissionPrompt, PermissionResponse, PermissionRule, PermissionRules, ToolPermissions,
+    expand_permission_pattern, AgentToolPolicies, PermissionAction, PermissionGrant,
+    PermissionPolicyAction, PermissionPrompt, PermissionResponse, PermissionRule, PermissionRules,
+    ToolPermissions,
 };
 pub use question::QuestionTool;
 pub use registry::ToolRegistry;
