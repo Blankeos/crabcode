@@ -660,6 +660,74 @@ pub async fn summarize_for_compaction(
     Ok(summary)
 }
 
+pub async fn generate_session_title(
+    provider_name: String,
+    model: String,
+    user_message: String,
+) -> Result<String, DynError> {
+    let (warning_sender, _warning_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let request_config =
+        prepare_request_config(&provider_name, model, None, &warning_sender).await?;
+    let prompt = format!(
+        "Generate a concise chat title for this user request.\n\nRules:\n- Return only the title, no quotes or punctuation wrapper.\n- 3 to 7 words.\n- Use title case only when natural.\n- Do not end with a period.\n\nUser request:\n{}",
+        user_message.trim()
+    );
+    let messages = vec![AisdkMessage::user(prompt)];
+    let mut response =
+        stream_provider_request(&request_config, messages, Vec::new(), None, None).await?;
+
+    let mut title = String::new();
+    while let Some(chunk) = response.stream.next().await {
+        match chunk {
+            ChunkType::Text(text) => title.push_str(&text),
+            ChunkType::Failed(err) => {
+                return Err(anyhow::anyhow!("Title generation failed: {}", err).into());
+            }
+            ChunkType::NotSupported(msg) => {
+                return Err(anyhow::anyhow!("Title generation unsupported: {}", msg).into());
+            }
+            ChunkType::Reasoning(_)
+            | ChunkType::ToolCall(_)
+            | ChunkType::End { .. }
+            | ChunkType::AssistantMessagePhase { .. }
+            | ChunkType::ResponseCompleted { .. }
+            | ChunkType::Retry(_)
+            | ChunkType::RetryableFailure(_)
+            | ChunkType::Metadata(_)
+            | ChunkType::Start
+            | ChunkType::Incomplete(_) => {}
+        }
+    }
+
+    let title = sanitize_generated_title(&title);
+    if title.is_empty() {
+        return Err(anyhow::anyhow!("Title generation returned an empty title").into());
+    }
+    Ok(title)
+}
+
+fn sanitize_generated_title(raw: &str) -> String {
+    let mut title = raw
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*' | '#' | ':' | '-' | '–' | '—'))
+        .trim()
+        .to_string();
+    title = title.lines().next().unwrap_or("").trim().to_string();
+    while title.ends_with('.') {
+        title.pop();
+        title = title.trim_end().to_string();
+    }
+    if title.chars().count() > 80 {
+        title = title
+            .chars()
+            .take(80)
+            .collect::<String>()
+            .trim()
+            .to_string();
+    }
+    title
+}
+
 async fn prepare_request_config(
     provider_name: &str,
     model: String,

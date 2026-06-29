@@ -359,9 +359,11 @@ I think this is how the TUI works already anyway right?
 
 - [x] Noticed cmd-right for the chat input stops working when im already in a running session. cmd-right as in when I try to move my input cursor to the very right. It just doesnt work.
 
-- [ ] low prio: title generation? maybe, maybenot, just a waste of tokens honestly.
+- [x] low prio: title generation? maybe, maybenot, just a waste of tokens honestly.
+      The small_model option configures a separate model for lightweight tasks like title generation. By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model.
+- [ ] Fork title fixes, by default, always use the current chat title then add a left prefix with `[fork1]` or `[fork2]` (notice that since rename can pretty much get rid of `[fork1]`, etc. Only increment if u actually find a specific name like `[fork1]`).
 
-- [ ] better permission asking. Like if it's going to ask for reading a directory, just ask multiple anyway so it doesnt need to ask so much?
+- [x] better permission asking. Like if it's going to ask for reading a directory, just ask multiple anyway so it doesnt need to ask so much?
 
 - [x] More than build | plan agents. /agents command (like opencode, opens a select agent cmdk dialog basically). and inferring what's in the "agents" config. command palette as well.
 

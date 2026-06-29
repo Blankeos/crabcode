@@ -359,6 +359,7 @@ pub enum ProviderTimeout {
 pub struct MergedConfig {
     pub theme: Option<String>,
     pub model: Option<String>,
+    pub small_model: Option<String>,
     pub default_agent: Option<String>,
     pub agent_registry: crate::agent::definition::AgentRegistry,
     pub commands: Vec<crate::command::custom::CustomCommand>,
@@ -863,6 +864,8 @@ fn opencode_allowed_keys() -> BTreeSet<&'static str> {
         "tools",
         "mcp",
         "model",
+        "small_model",
+        "smallModel",
         "provider",
         "command",
         "permission",
@@ -1117,6 +1120,12 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     if let Some(Value::String(model)) = obj.get("model") {
         if !model.trim().is_empty() {
             out.model = Some(model.trim().to_string());
+        }
+    }
+
+    if let Some(Value::String(model)) = obj.get("small_model").or_else(|| obj.get("smallModel")) {
+        if !model.trim().is_empty() {
+            out.small_model = Some(model.trim().to_string());
         }
     }
 
@@ -2151,6 +2160,8 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
     let implemented: BTreeSet<&'static str> = [
         "theme",
         "model",
+        "small_model",
+        "smallModel",
         "default_agent",
         "command",
         "agent",
@@ -2180,6 +2191,50 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parses_small_model_aliases() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({ "small_model": "openai/gpt-4.1-mini" }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.small_model.as_deref(), Some("openai/gpt-4.1-mini"));
+        assert!(diagnostics.warnings.is_empty());
+
+        let config = parse_merged_config(
+            &json!({ "smallModel": "anthropic/claude-haiku" }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.small_model.as_deref(),
+            Some("anthropic/claude-haiku")
+        );
+    }
+
+    #[test]
+    fn opencode_filter_keeps_small_model() {
+        let filtered = filter_top_level(
+            json!({
+                "small_model": "openai/gpt-4.1-mini",
+                "smallModel": "anthropic/claude-haiku",
+                "theme": "ignored"
+            }),
+            SourceKind::OpenCode,
+        );
+
+        assert_eq!(
+            filtered.get("small_model").and_then(Value::as_str),
+            Some("openai/gpt-4.1-mini")
+        );
+        assert_eq!(
+            filtered.get("smallModel").and_then(Value::as_str),
+            Some("anthropic/claude-haiku")
+        );
+        assert!(filtered.get("theme").is_none());
+    }
 
     #[test]
     fn parses_event_notifications() {

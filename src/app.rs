@@ -118,6 +118,35 @@ pub fn parse_model_ref(model: &str) -> (String, String) {
     ("opencode".to_string(), model.to_string())
 }
 
+fn is_default_session_title(title: &str) -> bool {
+    title
+        .trim()
+        .strip_prefix("session-")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_auto_session_title_for_prompt(title: &str, prompt: &str) -> bool {
+    let title = title.trim();
+    is_default_session_title(title) || title == App::generate_title_from_message(prompt)
+}
+
+fn first_user_prompt(chat: &Chat) -> Option<String> {
+    chat.messages
+        .iter()
+        .find(|message| message.role == crate::session::types::MessageRole::User)
+        .map(|message| message.content.trim().to_string())
+        .filter(|content| !content.is_empty())
+}
+
+fn has_single_user_message(chat: &Chat) -> bool {
+    chat.messages
+        .iter()
+        .filter(|message| message.role == crate::session::types::MessageRole::User)
+        .take(2)
+        .count()
+        == 1
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamingRetryStatus {
     pub attempt: usize,
@@ -261,6 +290,17 @@ enum CompactionTaskMessage {
 #[derive(Debug)]
 enum StorageTaskMessage {
     Loaded(crate::utils::storage::StorageReport),
+}
+
+#[derive(Debug)]
+enum TitleGenerationTaskMessage {
+    Generated { session_id: String, title: String },
+}
+
+#[derive(Debug, Clone)]
+struct SmallModelConfig {
+    provider: String,
+    model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -579,6 +619,8 @@ pub struct App {
     compaction_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<CompactionTaskMessage>>,
     compaction_pending: Option<CompactionPending>,
     storage_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<StorageTaskMessage>>,
+    title_generation_receiver:
+        Option<tokio::sync::mpsc::UnboundedReceiver<TitleGenerationTaskMessage>>,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
     pub agent_registry: crate::agent::definition::AgentRegistry,
@@ -586,6 +628,7 @@ pub struct App {
     pub provider_timeouts: std::collections::HashMap<String, crate::config::ProviderTimeout>,
     pub model: String,
     pub provider_name: String,
+    small_model: Option<SmallModelConfig>,
     // Reasoning/thinking effort is loaded from persisted preferences once, then kept process-local.
     // Changes are persisted for future starts but are not re-read into other running terminals.
     reasoning_efforts: ReasoningEffortOverrides,
@@ -775,6 +818,12 @@ impl App {
             } else {
                 ("big-pickle".to_string(), "opencode".to_string())
             };
+        let small_model = loaded_config
+            .merged_config
+            .small_model
+            .as_deref()
+            .map(parse_model_ref)
+            .map(|(provider, model)| SmallModelConfig { provider, model });
 
         let reasoning_efforts = prefs_dao
             .as_ref()
@@ -864,6 +913,7 @@ impl App {
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,
+            title_generation_receiver: None,
             prefs_dao,
             agent,
             agent_registry,
@@ -871,6 +921,7 @@ impl App {
             provider_timeouts,
             model: active_model,
             provider_name: active_provider_name,
+            small_model,
             reasoning_efforts,
             cwd: cwd.clone(),
             base_focus: BaseFocus::Home,
@@ -1887,6 +1938,74 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn start_session_title_generation(&mut self, session_id: &str, user_message: &str) {
+        if self.small_model.is_none() || self.title_generation_receiver.is_some() {
+            return;
+        }
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.title_generation_receiver = Some(receiver);
+        self.maybe_spawn_session_title_generation(session_id, user_message, sender);
+    }
+
+    fn maybe_spawn_session_title_generation(
+        &self,
+        session_id: &str,
+        user_message: &str,
+        sender: tokio::sync::mpsc::UnboundedSender<TitleGenerationTaskMessage>,
+    ) {
+        let Some(small_model) = self.small_model.clone() else {
+            return;
+        };
+        let user_message = user_message.trim();
+        if user_message.is_empty()
+            || !self.session_prompt_is_first_user_message(session_id, user_message)
+            || !self.session_has_auto_title_for_prompt(session_id, user_message)
+        {
+            return;
+        }
+
+        let session_id = session_id.to_string();
+        let user_message = user_message.to_string();
+        tokio::spawn(async move {
+            match crate::llm::client::generate_session_title(
+                small_model.provider,
+                small_model.model,
+                user_message,
+            )
+            .await
+            {
+                Ok(title) => {
+                    let _ =
+                        sender.send(TitleGenerationTaskMessage::Generated { session_id, title });
+                }
+                Err(err) => {
+                    crate::emit_log!("Title generation skipped: {}", err);
+                }
+            }
+        });
+    }
+
+    fn session_has_auto_title_for_prompt(&self, session_id: &str, prompt: &str) -> bool {
+        self.session_manager
+            .get_session_ref(session_id)
+            .is_some_and(|session| is_auto_session_title_for_prompt(&session.title, prompt))
+    }
+
+    fn session_prompt_is_first_user_message(&self, session_id: &str, prompt: &str) -> bool {
+        let Some(chat) = self.chat_for_session(session_id) else {
+            return false;
+        };
+        let mut user_messages = chat
+            .messages
+            .iter()
+            .filter(|message| message.role == crate::session::types::MessageRole::User);
+        let Some(first) = user_messages.next() else {
+            return false;
+        };
+
+        first.content.trim() == prompt.trim() && user_messages.next().is_none()
     }
 
     fn resolved_reasoning_effort_for_model(
@@ -6299,6 +6418,32 @@ impl App {
         }
     }
 
+    fn apply_generated_session_title(&mut self, session_id: &str, title: String) {
+        let title = title.trim();
+        let current_title = self
+            .session_manager
+            .get_session_ref(session_id)
+            .map(|session| session.title.clone());
+        let chat = self.chat_for_session(session_id);
+        let first_prompt = chat.and_then(first_user_prompt);
+        let has_only_first_user_message = chat.is_some_and(has_single_user_message);
+        let can_replace = current_title.as_deref().is_some_and(|current| {
+            has_only_first_user_message
+                && (is_default_session_title(current)
+                    || first_prompt
+                        .as_deref()
+                        .is_some_and(|prompt| is_auto_session_title_for_prompt(current, prompt)))
+        });
+
+        if title.is_empty() || !can_replace {
+            return;
+        }
+        let _ = self
+            .session_manager
+            .rename_session(session_id, title.to_string());
+        self.refresh_sessions_dialog();
+    }
+
     fn show_themes_dialog(&mut self) {
         use crate::ui::components::dialog::DialogItem;
 
@@ -7057,6 +7202,36 @@ impl App {
         }
     }
 
+    fn process_title_generation_events(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+
+        if let Some(receiver) = &mut self.title_generation_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected {
+            self.title_generation_receiver = None;
+        }
+
+        for event in events {
+            match event {
+                TitleGenerationTaskMessage::Generated { session_id, title } => {
+                    self.apply_generated_session_title(&session_id, title);
+                }
+            }
+        }
+    }
+
     fn cleanup_streaming(&mut self) {
         if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
             self.cleanup_streaming_for_session(&session_id);
@@ -7167,6 +7342,7 @@ impl App {
             || self.has_active_retry_status()
             || self.compaction_receiver.is_some()
             || self.storage_receiver.is_some()
+            || self.title_generation_receiver.is_some()
             || self
                 .session_view_states
                 .values()
@@ -7190,6 +7366,7 @@ impl App {
         self.process_provider_oauth_events();
         self.process_compaction_events();
         self.process_storage_events();
+        self.process_title_generation_events();
 
         let streaming_ids: Vec<String> = self
             .session_view_states
@@ -7966,6 +8143,8 @@ impl App {
         let mcp_config = self.mcp.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
+
+        self.start_session_title_generation(&session_id, _user_message);
 
         // Build messages with system prompt
         let mut messages = self.chat_state.chat.messages.clone();
@@ -9393,6 +9572,7 @@ mod tests {
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,
+            title_generation_receiver: None,
             prefs_dao: None,
             agent: "Build".to_string(),
             agent_registry: crate::agent::definition::AgentRegistry::default(),
@@ -9400,6 +9580,7 @@ mod tests {
             provider_timeouts: std::collections::HashMap::new(),
             model: "test-model".to_string(),
             provider_name: "test-provider".to_string(),
+            small_model: None,
             reasoning_efforts: ReasoningEffortOverrides::new(),
             cwd: ".".to_string(),
             base_focus: BaseFocus::Home,
@@ -11121,6 +11302,70 @@ mod tests {
 
         assert!(app.session_manager.list_sessions().is_empty());
         assert_eq!(app.pending_session_title.as_deref(), Some("Named draft"));
+    }
+
+    #[test]
+    fn auto_session_title_matches_first_prompt_heuristic() {
+        assert!(is_auto_session_title_for_prompt(
+            "You are so cool",
+            "You are so cool"
+        ));
+        assert!(is_auto_session_title_for_prompt(
+            "You the coolest!",
+            "You the coolest!"
+        ));
+        assert!(is_auto_session_title_for_prompt("session-12", "anything"));
+        assert!(!is_auto_session_title_for_prompt(
+            "Manual title",
+            "You are so cool"
+        ));
+    }
+
+    #[test]
+    fn generated_title_replaces_auto_title_but_not_manual_title() {
+        let mut app = test_app();
+        let prompt = "You are so cool";
+        let auto_id = app.create_new_session(Some(App::generate_title_from_message(prompt)));
+        app.chat_state.chat.add_user_message(prompt);
+        app.apply_generated_session_title(&auto_id, "Friendly greeting".to_string());
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&auto_id)
+                .map(|session| session.title.as_str()),
+            Some("Friendly greeting")
+        );
+
+        let manual_id = app.create_new_session(Some("Manual title".to_string()));
+        app.chat_state.chat.add_user_message(prompt);
+        app.apply_generated_session_title(&manual_id, "Should not apply".to_string());
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&manual_id)
+                .map(|session| session.title.as_str()),
+            Some("Manual title")
+        );
+    }
+
+    #[test]
+    fn title_generation_only_applies_to_first_user_message() {
+        let mut app = test_app();
+        let first_prompt = "First prompt";
+        let session_id =
+            app.create_new_session(Some(App::generate_title_from_message(first_prompt)));
+        app.chat_state.chat.add_user_message(first_prompt);
+        assert!(app.session_prompt_is_first_user_message(&session_id, first_prompt));
+
+        app.chat_state.chat.add_assistant_message("response");
+        app.chat_state.chat.add_user_message("Second prompt");
+        assert!(!app.session_prompt_is_first_user_message(&session_id, "Second prompt"));
+
+        app.apply_generated_session_title(&session_id, "Late title".to_string());
+        assert_eq!(
+            app.session_manager
+                .get_session_ref(&session_id)
+                .map(|session| session.title.as_str()),
+            Some("First prompt")
+        );
     }
 
     #[test]

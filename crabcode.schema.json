@@ -330,6 +330,20 @@
         "null"
       ]
     },
+    "small_model": {
+      "description": "Optional lightweight model used for background tasks like session title generation. Title generation is disabled unless this is configured.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "smallModel": {
+      "description": "Alias for small_model.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "notifications": {
       "anyOf": [
         {
