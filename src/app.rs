@@ -224,6 +224,7 @@ pub enum OverlayFocus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectDialogMode {
     ProviderSelection,
+    AnthropicMethodSelection,
     OpenAIMethodSelection,
     XAIMethodSelection,
 }
@@ -7184,6 +7185,38 @@ impl App {
         self.overlay_focus = OverlayFocus::ConnectDialog;
     }
 
+    fn show_anthropic_connect_methods(&mut self) {
+        use crate::ui::components::dialog::DialogItem;
+
+        let items = vec![
+            DialogItem {
+                id: "anthropic-claude-code".to_string(),
+                name: "Claude Pro/Max".to_string(),
+                group: "Anthropic".to_string(),
+                description: "Claude Code OAuth via Meridian".to_string(),
+                tip: None,
+                provider_id: "anthropic".to_string(),
+                active: false,
+            },
+            DialogItem {
+                id: "anthropic-api-key".to_string(),
+                name: "Manually enter API key".to_string(),
+                group: "Anthropic".to_string(),
+                description: "Direct Anthropic API billing".to_string(),
+                tip: None,
+                provider_id: "anthropic".to_string(),
+                active: false,
+            },
+        ];
+
+        self.connect_dialog_state = crate::views::ConnectDialogState::new(
+            crate::ui::components::dialog::Dialog::with_items("Connect Anthropic", items),
+        );
+        self.connect_dialog_state.dialog.show();
+        self.connect_dialog_mode = ConnectDialogMode::AnthropicMethodSelection;
+        self.overlay_focus = OverlayFocus::ConnectDialog;
+    }
+
     fn show_xai_connect_methods(&mut self) {
         use crate::ui::components::dialog::DialogItem;
 
@@ -7329,6 +7362,11 @@ impl App {
                     return;
                 }
 
+                if selected_item.id == "anthropic" {
+                    self.show_anthropic_connect_methods();
+                    return;
+                }
+
                 if selected_item.id == "xai" {
                     self.show_xai_connect_methods();
                     return;
@@ -7353,6 +7391,19 @@ impl App {
                     self.overlay_focus = OverlayFocus::None;
                 }
             },
+            ConnectDialogMode::AnthropicMethodSelection => match selected_item.id.as_str() {
+                "anthropic-claude-code" => {
+                    self.connect_anthropic_via_meridian();
+                }
+                "anthropic-api-key" => {
+                    self.api_key_input.show("anthropic");
+                    self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+                    self.overlay_focus = OverlayFocus::ApiKeyInput;
+                }
+                _ => {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+            },
             ConnectDialogMode::XAIMethodSelection => match selected_item.id.as_str() {
                 "xai-oauth-browser" => {
                     self.begin_provider_oauth_browser(OAuthProvider::XAI);
@@ -7370,6 +7421,76 @@ impl App {
                 }
             },
         }
+    }
+
+    fn connect_anthropic_via_meridian(&mut self) {
+        push_toast(Toast::new(
+            "Starting Meridian in passthrough mode…",
+            ToastLevel::Info,
+            Some(std::time::Duration::from_secs(3)),
+        ));
+
+        let health = tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(crate::meridian::ensure_running())
+        });
+
+        let health = match health {
+            Ok(health) => health,
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Failed to connect Claude Pro/Max via Meridian: {}", err),
+                    ToastLevel::Error,
+                    None,
+                ));
+                self.overlay_focus = OverlayFocus::None;
+                self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+                self.connect_dialog_state = init_connect_dialog();
+                return;
+            }
+        };
+
+        match crate::persistence::AuthDAO::new().and_then(|dao| {
+            dao.set_provider(
+                "anthropic".to_string(),
+                crate::persistence::AuthConfig::Local,
+            )
+        }) {
+            Ok(()) => {
+                const DEFAULT_MODEL: &str = "claude-sonnet-4-5";
+                if let Some(prefs_dao) = self.prefs_dao.as_ref() {
+                    let _ = prefs_dao
+                        .set_active_model("anthropic".to_string(), DEFAULT_MODEL.to_string());
+                }
+                self.provider_name = "anthropic".to_string();
+                self.model = DEFAULT_MODEL.to_string();
+
+                let account = health
+                    .auth
+                    .as_ref()
+                    .and_then(|auth| auth.email.as_deref())
+                    .filter(|email| !email.trim().is_empty())
+                    .map(|email| format!(" ({email})"))
+                    .unwrap_or_default();
+
+                push_toast(Toast::new(
+                    format!("Connected Claude Pro/Max via Meridian{account}"),
+                    ToastLevel::Success,
+                    None,
+                ));
+                self.connect_dialog_state = init_connect_dialog();
+                self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+            }
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Failed to save Anthropic connection: {}", err),
+                    ToastLevel::Error,
+                    None,
+                ));
+            }
+        }
+
+        self.overlay_focus = OverlayFocus::None;
     }
 
     fn connect_local_provider(&mut self, provider_id: &str) {

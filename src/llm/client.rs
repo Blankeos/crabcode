@@ -782,6 +782,13 @@ async fn prepare_request_config(
         supports_image_input,
     );
 
+    maybe_apply_anthropic_meridian_overrides(
+        provider_name,
+        auth_config.as_ref(),
+        &mut request_config,
+        sender,
+    )
+    .await?;
     maybe_apply_openai_oauth_overrides(
         provider_name,
         &auth_dao,
@@ -806,6 +813,10 @@ async fn prepare_request_config(
     );
 
     if request_config.api_key.is_none()
+        && !matches!(
+            auth_config.as_ref(),
+            Some(crate::persistence::AuthConfig::Local)
+        )
         && !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_name)
     {
         send_warning(
@@ -958,6 +969,48 @@ fn configured_api_key(auth_config: Option<&crate::persistence::AuthConfig>) -> O
         crate::persistence::AuthConfig::Local => None,
         crate::persistence::AuthConfig::OAuth { access, .. } => Some(access.clone()),
     })
+}
+
+async fn maybe_apply_anthropic_meridian_overrides(
+    provider_name: &str,
+    auth_config: Option<&crate::persistence::AuthConfig>,
+    request_config: &mut ProviderRequestConfig,
+    sender: &crate::llm::ChunkSender,
+) -> Result<(), DynError> {
+    if provider_name != "anthropic"
+        || !matches!(auth_config, Some(crate::persistence::AuthConfig::Local))
+    {
+        return Ok(());
+    }
+
+    request_config.kind = ProviderKind::Anthropic;
+    request_config.base_url = crate::meridian::BASE_URL.to_string();
+    request_config.api_key = None;
+
+    match crate::meridian::ensure_running().await {
+        Ok(health) => {
+            let version = health
+                .version
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!(" v{value}"))
+                .unwrap_or_default();
+            send_warning(
+                sender,
+                format!("Using Claude Pro/Max via Meridian{version} in passthrough mode."),
+            );
+            crate::emit_log!(
+                "Configured Anthropic Claude Pro/Max via Meridian at {}",
+                request_config.base_url
+            );
+            Ok(())
+        }
+        Err(err) => Err(anyhow::anyhow!(
+            "Failed to connect Anthropic via Claude Pro/Max/Meridian: {}",
+            err
+        )
+        .into()),
+    }
 }
 
 async fn maybe_apply_openai_oauth_overrides(

@@ -10,6 +10,7 @@ mod config;
 mod llm;
 mod logging;
 mod mcp;
+mod meridian;
 mod model;
 mod notify;
 mod persistence;
