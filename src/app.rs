@@ -4754,7 +4754,12 @@ impl App {
             CommandPaletteAction::RunCommand(command) => {
                 self.overlay_focus = OverlayFocus::None;
                 let command = format!("/{}", command);
-                self.process_command_from_input(&command);
+                if let InputType::Command(parsed) = crate::command::parser::parse_input(&command) {
+                    tokio::task::block_in_place(|| {
+                        let rt = tokio::runtime::Handle::current();
+                        rt.block_on(self.process_command_input(parsed));
+                    });
+                }
                 self.clear_suggestions_and_blur();
             }
             CommandPaletteAction::RunAppAction(action) => {
@@ -9745,6 +9750,18 @@ mod tests {
             .items
             .iter()
             .any(|item| item.id == "general"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_palette_commands_preserve_chat_input_draft() {
+        let mut app = test_app();
+        app.input.insert_str("draft prompt");
+
+        app.handle_command_palette_action(CommandPaletteAction::RunCommand("agents".to_string()));
+
+        assert_eq!(app.input.get_text(), "draft prompt");
+        assert_eq!(app.overlay_focus, OverlayFocus::AgentsDialog);
+        assert!(app.agents_dialog_state.dialog.is_visible());
     }
 
     #[test]
