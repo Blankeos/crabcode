@@ -93,8 +93,14 @@ impl FindBar {
         match event.code {
             KeyCode::Esc => return FindBarAction::Close,
             KeyCode::Enter if event.modifiers == KeyModifiers::NONE => {
-                self.commit_current_query();
-                return FindBarAction::CommitSearch;
+                if self.editing {
+                    self.commit_current_query();
+                    return FindBarAction::CommitSearch;
+                }
+                return FindBarAction::Next;
+            }
+            KeyCode::Enter if !self.editing && event.modifiers == KeyModifiers::SHIFT => {
+                return FindBarAction::Previous;
             }
             KeyCode::Char('n') if !self.editing && event.modifiers == KeyModifiers::NONE => {
                 return FindBarAction::Next;
@@ -341,5 +347,31 @@ mod tests {
             FindBarAction::None
         );
         assert_eq!(find.query(), "nonen");
+    }
+
+    #[test]
+    fn enter_repeats_next_match_after_search_is_committed() {
+        let mut find = FindBar::new();
+        find.show();
+
+        for ch in ['f', 'i', 'n', 'd'] {
+            assert_eq!(
+                find.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                FindBarAction::None
+            );
+        }
+
+        assert_eq!(
+            find.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            FindBarAction::CommitSearch
+        );
+        assert_eq!(
+            find.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            FindBarAction::Next
+        );
+        assert_eq!(
+            find.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+            FindBarAction::Previous
+        );
     }
 }

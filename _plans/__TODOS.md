@@ -403,3 +403,7 @@ I think this is how the TUI works already anyway right?
 - [x] Faster startup
 
 - [x] Minor bug, when I write `/fork` on an old session, I go to a new session (good), but when I go back to that old session that I forked, I see `/fork` on the input.
+
+- [x] During "find" (ctrl-f), let me press "enter" after pressing enter to essentially do what `n` does.
+
+- [ ] Weird bug, when I use the command palette, and press enter. Anything I typed in the chat input disappears. For instance, when I open "Change model"
