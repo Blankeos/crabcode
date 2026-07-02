@@ -1,4 +1,4 @@
-import { type Accessor, createEffect, createSignal, For, Index, onCleanup, onMount } from "solid-js"
+import { type Accessor, createEffect, createMemo, createSignal, For, Index, onCleanup, onMount } from "solid-js"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -36,22 +36,42 @@ type ProjectListProps = {
 export function ProjectList(props: ProjectListProps) {
   const [scrollEl, setScrollEl] = createSignal<HTMLDivElement>()
   const edges = useScrollEdges(scrollEl)
+  const activeProjectKey = createMemo(() => projectKeyForActivePath(props.activeProjectPath(), props.projects()))
   let lastScrolledPath = ""
+  let scrollAttemptTimers: number[] = []
+
+  const clearScrollAttempts = () => {
+    for (const timer of scrollAttemptTimers) window.clearTimeout(timer)
+    scrollAttemptTimers = []
+  }
+
+  const scrollActiveProjectIntoView = (path: string, key: string | undefined) => {
+    window.requestAnimationFrame(() => {
+      const root = scrollEl()
+      if (!root) return
+      const row = root.querySelector<HTMLElement>("[data-active-project='true']")
+        ?? (key ? root.querySelector<HTMLElement>(`[data-project-key="${cssEscapeAttr(key)}"]`) : null)
+        ?? root.querySelector<HTMLElement>(`[data-project-path="${cssEscapeAttr(path)}"]`)
+      row?.scrollIntoView({ block: "start", behavior: "smooth" })
+    })
+  }
+
+  onCleanup(clearScrollAttempts)
 
   createEffect(() => {
     if (props.sidebarOpen && !props.sidebarOpen()) return
     const path = props.activeProjectPath()?.trim()
+    const key = activeProjectKey()
     const projectCount = props.projects().length
-    if (!path || projectCount === 0 || path === lastScrolledPath) return
-    lastScrolledPath = path
+    const target = key ?? path
+    if (!path || !target || projectCount === 0 || target === lastScrolledPath) return
+    lastScrolledPath = target
+    clearScrollAttempts()
     queueMicrotask(() => {
-      window.requestAnimationFrame(() => {
-        const root = scrollEl()
-        if (!root) return
-        const row = root.querySelector<HTMLElement>("[data-active-project='true']")
-          ?? root.querySelector<HTMLElement>(`[data-project-path="${cssEscapeAttr(path)}"]`)
-        row?.scrollIntoView({ block: "start", behavior: "smooth" })
-      })
+      scrollActiveProjectIntoView(path, key)
+      scrollAttemptTimers = [80, 240].map((delay) =>
+        window.setTimeout(() => scrollActiveProjectIntoView(path, key), delay)
+      )
     })
   })
 
@@ -65,11 +85,12 @@ export function ProjectList(props: ProjectListProps) {
           {(project) => {
             const key = () => project().path || project().name
             const open = () => props.openProjects().has(key())
-            const active = () => isActiveProject(project().path, props.activeProjectPath())
+            const active = () => key() === activeProjectKey()
             return (
               <section
                 class="min-w-0 scroll-mt-1"
                 data-active-project={active() ? "true" : undefined}
+                data-project-key={key()}
                 data-project-path={project().path || project().name}
               >
                 <div class="sticky top-0 z-20 -mx-3 bg-[var(--panel)] px-3 py-0.5">
@@ -158,10 +179,20 @@ export function ProjectList(props: ProjectListProps) {
   )
 }
 
-function isActiveProject(projectPath: string, activeProjectPath: string | null | undefined): boolean {
-  const project = projectPath.trim()
+function projectKeyForActivePath(
+  activeProjectPath: string | null | undefined,
+  projects: readonly ProjectGroup[]
+): string | undefined {
   const active = activeProjectPath?.trim()
-  return Boolean(project && active && project === active)
+  if (!active) return undefined
+  const exact = projects.find((project) => project.path.trim() === active)
+  if (exact) return exact.path || exact.name
+  const suffix = projects.find((project) => {
+    const path = project.path.trim()
+    return path && (active === path || active.endsWith(`/${path}`) || active.endsWith(path))
+  })
+  if (suffix) return suffix.path || suffix.name
+  return undefined
 }
 
 function cssEscapeAttr(value: string) {
