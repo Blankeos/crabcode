@@ -257,6 +257,15 @@ mod tests {
     }
 
     #[test]
+    fn test_hidden_token_uses_command_replacement() {
+        let registry = setup_registry();
+        let auto = CommandAuto::new(&registry);
+        let suggestions = auto.get_suggestions("res", true);
+        assert_eq!(suggestions[0].name, "sessions");
+        assert_eq!(suggestions[0].replacement, "sessions");
+    }
+
+    #[test]
     fn test_get_suggestions_no_match() {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);

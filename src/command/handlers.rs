@@ -804,7 +804,7 @@ pub fn register_all_commands(registry: &mut Registry) {
         name: "connect".to_string(),
         description: "Connect to a model provider".to_string(),
         handler: handle_connect,
-        hidden_tokens: vec![],
+        hidden_tokens: vec!["provider".to_string()],
         chat_only: false,
     });
 
@@ -1259,7 +1259,7 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 16);
+        assert_eq!(names.len(), 18);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
@@ -1276,11 +1276,13 @@ mod tests {
         assert!(names.contains(&"fork".to_string()));
         assert!(names.contains(&"move".to_string()));
         assert!(names.contains(&"skills".to_string()));
+        assert!(names.contains(&"mcp".to_string()));
         assert!(registry.is_chat_only("compact"));
         assert!(registry.is_chat_only("fork"));
         assert!(registry.is_chat_only("move"));
         assert!(registry.is_chat_only("branch"));
         assert_eq!(registry.get("branch").unwrap().name, "fork");
+        assert_eq!(registry.get("provider").unwrap().name, "connect");
     }
 
     #[tokio::test]

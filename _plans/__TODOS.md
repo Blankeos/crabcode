@@ -406,4 +406,6 @@ I think this is how the TUI works already anyway right?
 
 - [x] During "find" (ctrl-f), let me press "enter" after pressing enter to essentially do what `n` does.
 
-- [ ] Weird bug, when I use the command palette, and press enter. Anything I typed in the chat input disappears. For instance, when I open "Change model"
+- [x] Weird bug, when I use the command palette, and press enter. Anything I typed in the chat input disappears. For instance, when I open "Change model"
+
+- [x] Currently /connect can't be found w/ `/provider`, but usually it should because it kinda responds to that, even tho `/connect` is still the command. Think of it like a fuzzysearch possible keyword.
