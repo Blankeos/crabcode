@@ -37,13 +37,17 @@ impl crate::model::extensions::PersistentProviderCatalogExtension for Extension 
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CommandCodeModel {
     pub id: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub context_length: Option<u32>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub modalities: Option<crate::model::discovery::Modalities>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,8 +119,14 @@ pub fn provider_from_models(models: Vec<CommandCodeModel>) -> crate::model::disc
             .filter(|model| !model.id.trim().is_empty())
             .map(|model| {
                 let id = model.id.trim().to_string();
-                let model = discovery_model(&id, model.name, model.context_length);
-                (id, model)
+                let discovery_model = discovery_model(
+                    &id,
+                    model.name,
+                    model.context_length,
+                    model.capabilities,
+                    model.modalities,
+                );
+                (id, discovery_model)
             })
             .collect(),
     }
@@ -126,10 +136,13 @@ fn discovery_model(
     id: &str,
     name: String,
     context_length: Option<u32>,
+    capabilities: Vec<String>,
+    modalities: Option<crate::model::discovery::Modalities>,
 ) -> crate::model::discovery::Model {
     let family = model_family(id);
     let is_anthropic = is_anthropic_model(id);
     let reasoning = supports_reasoning_effort(id, &name);
+    let supports_image_input = supports_image_input(id, &capabilities, modalities.as_ref());
 
     crate::model::discovery::Model {
         id: id.to_string(),
@@ -139,7 +152,7 @@ fn discovery_model(
             name
         },
         family,
-        attachment: true,
+        attachment: supports_image_input,
         reasoning,
         tool_call: true,
         structured_output: false,
@@ -149,7 +162,11 @@ fn discovery_model(
         last_updated: String::new(),
         status: None,
         modalities: Some(crate::model::discovery::Modalities {
-            input: vec!["text".to_string(), "image".to_string()],
+            input: if supports_image_input {
+                vec!["text".to_string(), "image".to_string()]
+            } else {
+                vec!["text".to_string()]
+            },
             output: vec!["text".to_string()],
         }),
         open_weights: false,
@@ -167,6 +184,57 @@ fn discovery_model(
             None
         },
     }
+}
+
+fn supports_image_input(
+    model_id: &str,
+    capabilities: &[String],
+    modalities: Option<&crate::model::discovery::Modalities>,
+) -> bool {
+    if modalities.is_some_and(|modalities| modalities.input.iter().any(|input| input == "image")) {
+        return true;
+    }
+
+    if capabilities
+        .iter()
+        .any(|capability| matches!(capability.to_ascii_lowercase().as_str(), "image" | "vision"))
+    {
+        return true;
+    }
+
+    known_vision_model(model_id)
+}
+
+fn known_vision_model(model_id: &str) -> bool {
+    let normalized = model_id.trim().to_ascii_lowercase();
+
+    // This is hand-maintained based on https://commandcode.ai/models
+    [
+        "moonshotai/kimi-k2.7-code",
+        "moonshotai/kimi-k2.7-code-highspeed",
+        "moonshotai/kimi-k2.6",
+        "moonshotai/kimi-k2.5",
+        "minimaxai/minimax-m3",
+        "xiaomi/mimo-v2.5",
+        "qwen/qwen3.6-plus",
+        "qwen/qwen3.7-plus",
+        "stepfun/step-3.7-flash",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-fable-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5.4-mini",
+        "google/gemini-3.5-flash",
+        "google/gemini-3.1-flash-lite",
+        "sakana/fugu-ultra",
+    ]
+    .contains(&normalized.as_str())
 }
 
 fn model_family(model_id: &str) -> String {
@@ -230,12 +298,21 @@ fn supports_reasoning_effort(model_id: &str, model_name: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn commandcode_model(id: &str, name: &str) -> CommandCodeModel {
+        CommandCodeModel {
+            id: id.to_string(),
+            name: name.to_string(),
+            context_length: None,
+            capabilities: Vec::new(),
+            modalities: None,
+        }
+    }
+
     #[test]
     fn provider_from_models_maps_openai_compatible_models() {
         let provider = provider_from_models(vec![CommandCodeModel {
-            id: "deepseek/deepseek-v4-flash".to_string(),
-            name: "DeepSeek V4 Flash".to_string(),
             context_length: Some(1_000_000),
+            ..commandcode_model("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash")
         }]);
 
         assert_eq!(provider.id, PROVIDER_ID);
@@ -245,7 +322,7 @@ mod tests {
         assert_eq!(model.name, "DeepSeek V4 Flash");
         assert!(model.reasoning);
         assert!(model.tool_call);
-        assert!(model.attachment);
+        assert!(!model.attachment);
         assert_eq!(
             model.limit.as_ref().map(|limit| limit.context),
             Some(1_000_000)
@@ -256,9 +333,8 @@ mod tests {
     #[test]
     fn provider_from_models_routes_claude_to_anthropic_transport() {
         let provider = provider_from_models(vec![CommandCodeModel {
-            id: "claude-sonnet-4-6".to_string(),
-            name: "Claude Sonnet 4.6".to_string(),
             context_length: Some(1_000_000),
+            ..commandcode_model("claude-sonnet-4-6", "Claude Sonnet 4.6")
         }]);
 
         let model = provider.models.get("claude-sonnet-4-6").unwrap();
@@ -266,27 +342,45 @@ mod tests {
         assert_eq!(route.npm.as_deref(), Some(ANTHROPIC_NPM_PACKAGE));
         assert_eq!(route.api.as_deref(), Some(BASE_URL));
         assert!(model.reasoning);
+        assert!(model.attachment);
     }
 
     #[test]
     fn provider_from_models_keeps_unknown_reasoning_conservative() {
-        let provider = provider_from_models(vec![CommandCodeModel {
-            id: "openai/gpt-4o".to_string(),
-            name: "GPT-4o".to_string(),
-            context_length: None,
-        }]);
+        let provider = provider_from_models(vec![commandcode_model("openai/gpt-4o", "GPT-4o")]);
 
         let model = provider.models.get("openai/gpt-4o").unwrap();
         assert!(!model.reasoning);
+        assert!(!model.attachment);
+    }
+
+    #[test]
+    fn provider_from_models_marks_glm_5_2_as_text_only() {
+        let provider = provider_from_models(vec![commandcode_model("zai-org/GLM-5.2", "GLM-5.2")]);
+
+        let model = provider.models.get("zai-org/GLM-5.2").unwrap();
+        assert!(!model.attachment);
+        assert_eq!(model.modalities.as_ref().unwrap().input, vec!["text"]);
+    }
+
+    #[test]
+    fn provider_from_models_uses_explicit_future_image_capabilities() {
+        let provider = provider_from_models(vec![CommandCodeModel {
+            capabilities: vec!["vision".to_string()],
+            ..commandcode_model("future/vision-model", "Vision Model")
+        }]);
+
+        let model = provider.models.get("future/vision-model").unwrap();
+        assert!(model.attachment);
+        assert_eq!(
+            model.modalities.as_ref().unwrap().input,
+            vec!["text", "image"]
+        );
     }
 
     #[test]
     fn provider_from_models_drops_empty_model_ids() {
-        let provider = provider_from_models(vec![CommandCodeModel {
-            id: " ".to_string(),
-            name: "Empty".to_string(),
-            context_length: None,
-        }]);
+        let provider = provider_from_models(vec![commandcode_model(" ", "Empty")]);
 
         assert!(provider.models.is_empty());
     }

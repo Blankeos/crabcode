@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
-const CACHE_SCHEMA_VERSION: u32 = 3;
+const CACHE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
