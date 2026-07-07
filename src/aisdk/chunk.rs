@@ -7,6 +7,7 @@ pub enum ChunkType {
     AssistantMessagePhase { phase: Option<MessagePhase> },
     ResponseCompleted { end_turn: Option<bool> },
     Retry(crate::retry::RetryStatus),
+    Warning(String),
     Metadata(String),
     End { reason: Option<FinishReason> },
     RetryableFailure(crate::retry::RetryError),

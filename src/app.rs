@@ -402,6 +402,32 @@ const TERMINAL_TITLE_SPINNER_INTERVAL_MS: u128 = 100;
 const STREAM_CHUNK_DRAIN_LIMIT: usize = 256;
 const STREAM_MESSAGE_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
+fn disconnected_stream_warning_message(error: &str) -> Option<String> {
+    let trimmed = error.trim();
+    let normalized = trimmed
+        .strip_prefix("Streaming failed:")
+        .unwrap_or(trimmed)
+        .trim();
+    let lower = normalized.to_ascii_lowercase();
+
+    if lower.starts_with("stream disconnected before completion") {
+        let suffix = normalized["stream disconnected before completion".len()..]
+            .trim_start_matches(':')
+            .trim();
+        return Some(if suffix.is_empty() {
+            "Stream disconnected before completion".to_string()
+        } else {
+            format!("Stream disconnected before completion: {suffix}")
+        });
+    }
+
+    let disconnected = lower.contains("before response.completed")
+        || lower.contains("ended without a terminal completion event")
+        || lower.contains("ended before sending a completion event");
+
+    disconnected.then(|| format!("Stream disconnected before completion: {normalized}"))
+}
+
 fn coalesce_streaming_chunks(
     chunks: Vec<crate::llm::ChunkMessage>,
 ) -> Vec<crate::llm::ChunkMessage> {
@@ -7427,7 +7453,8 @@ impl App {
                 );
                 self.fail_streaming_session(
                     &session_id,
-                    "Stream task ended before sending a completion event".to_string(),
+                    "stream disconnected before completion: stream task ended before sending a completion event"
+                        .to_string(),
                 );
             }
         }
@@ -7841,11 +7868,15 @@ impl App {
 
         self.play_sound_event(crate::sound::SoundEvent::Error);
         self.notify_terminal_event(crate::sound::SoundEvent::Error);
-        push_toast(Toast::new(
-            format!("LLM error: {}", error),
-            ToastLevel::Error,
-            None,
-        ));
+        if let Some(warning) = disconnected_stream_warning_message(&error) {
+            push_toast(Toast::new(warning, ToastLevel::Warning, None));
+        } else {
+            push_toast(Toast::new(
+                format!("LLM error: {}", error),
+                ToastLevel::Error,
+                None,
+            ));
+        }
         self.cleanup_streaming_for_session(session_id);
         self.submit_queued_messages_for_session(session_id);
     }
@@ -10557,6 +10588,33 @@ mod tests {
     }
 
     #[test]
+    fn disconnected_stream_errors_show_warning_text() {
+        assert_eq!(
+            disconnected_stream_warning_message(
+                "Streaming failed: stream disconnected before completion: websocket closed by server before response.completed",
+            )
+            .as_deref(),
+            Some(
+                "Stream disconnected before completion: websocket closed by server before response.completed"
+            )
+        );
+        assert_eq!(
+            disconnected_stream_warning_message(
+                "Provider stream ended without a terminal completion event",
+            )
+            .as_deref(),
+            Some(
+                "Stream disconnected before completion: Provider stream ended without a terminal completion event"
+            )
+        );
+    }
+
+    #[test]
+    fn non_disconnected_stream_errors_keep_error_toast() {
+        assert!(disconnected_stream_warning_message("OpenAI API error: status=401").is_none());
+    }
+
+    #[test]
     fn streaming_text_persistence_is_throttled_until_terminal_chunk() {
         let mut app = test_app();
         let session_id = app.create_new_session(Some("Streaming throttle".to_string()));
@@ -11160,7 +11218,7 @@ mod tests {
         assert_eq!(tool_payload["status"], "error");
         assert_eq!(
             tool_payload["output_preview"],
-            "Stream task ended before sending a completion event"
+            "stream disconnected before completion: stream task ended before sending a completion event"
         );
     }
 

@@ -169,6 +169,11 @@ pub async fn run_subagent(
                     let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
                 }
             }
+            ChunkType::Warning(message) => {
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send(crate::llm::ChunkMessage::Warning(message));
+                }
+            }
             ChunkType::RetryableFailure(err) => {
                 if let Some(sender) = sender.as_ref() {
                     let _ = sender.send(crate::llm::ChunkMessage::Failed(err.message.clone()));
@@ -246,6 +251,11 @@ pub async fn run_subagent(
                 ChunkType::Retry(status) => {
                     if let Some(sender) = sender.as_ref() {
                         let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
+                    }
+                }
+                ChunkType::Warning(message) => {
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender.send(crate::llm::ChunkMessage::Warning(message));
                     }
                 }
                 ChunkType::RetryableFailure(err) => {

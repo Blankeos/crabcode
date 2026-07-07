@@ -646,6 +646,7 @@ pub async fn summarize_for_compaction(
             | ChunkType::ResponseCompleted { .. }
             | ChunkType::Retry(_)
             | ChunkType::RetryableFailure(_)
+            | ChunkType::Warning(_)
             | ChunkType::Metadata(_)
             | ChunkType::Start
             | ChunkType::Incomplete(_) => {}
@@ -693,6 +694,7 @@ pub async fn generate_session_title(
             | ChunkType::ResponseCompleted { .. }
             | ChunkType::Retry(_)
             | ChunkType::RetryableFailure(_)
+            | ChunkType::Warning(_)
             | ChunkType::Metadata(_)
             | ChunkType::Start
             | ChunkType::Incomplete(_) => {}
@@ -1480,6 +1482,12 @@ async fn relay_stream_to_sender(
                     status.message,
                 );
                 let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
+            }
+            ChunkType::Warning(message) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("Warning", elapsed_ms);
+                crate::emit_log!("[RELAY] Warning {}", message);
+                let _ = sender.send(crate::llm::ChunkMessage::Warning(message));
             }
             ChunkType::Start => {
                 let elapsed_ms = start_time.elapsed().as_millis();

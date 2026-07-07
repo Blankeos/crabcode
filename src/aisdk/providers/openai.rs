@@ -189,6 +189,14 @@ impl OpenAIWebsocketState {
         self.connection = None;
         self.last_used_at = None;
     }
+
+    fn disable(&mut self) {
+        self.disabled = true;
+        self.connection = None;
+        self.last_used_at = None;
+        self.last_request = None;
+        self.last_response = None;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +295,7 @@ impl Provider for OpenAI {
         let input = build_openai_messages(messages, self.strip_system_and_developer_messages);
         let body = self.build_responses_body(input.clone(), tools);
 
+        let mut fallback_warning = None;
         if self.responses_websocket {
             match self
                 .stream_text_websocket(body.clone(), &request_headers)
@@ -294,11 +303,12 @@ impl Provider for OpenAI {
             {
                 Ok(stream) => return Ok(stream),
                 Err(err) => {
-                    let mut state = self.websocket_state.lock().await;
-                    state.disabled = true;
-                    state.last_request = None;
-                    state.last_response = None;
-                    drop(state);
+                    if !is_websocket_transport_disabled(&err) {
+                        let mut state = self.websocket_state.lock().await;
+                        state.disable();
+                        drop(state);
+                        fallback_warning = Some(websocket_fallback_warning(&err));
+                    }
                     eprintln!(
                         "[AISDK_OPENAI] websocket transport failed; falling back to HTTP Responses: {}",
                         err
@@ -370,7 +380,37 @@ impl Provider for OpenAI {
             })
             .boxed();
 
+        if let Some(warning) = fallback_warning {
+            let stream =
+                futures::stream::once(futures::future::ready(Ok(ChunkType::Warning(warning))))
+                    .chain(stream)
+                    .boxed();
+            return Ok(stream);
+        }
+
         Ok(stream)
+    }
+}
+
+fn is_websocket_transport_disabled(err: &Error) -> bool {
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains("websocket transport disabled")
+}
+
+fn websocket_fallback_warning(err: &Error) -> String {
+    format!("Falling back from WebSockets to HTTPS transport. {err}")
+}
+
+fn stream_disconnected_before_completion(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason
+        .to_ascii_lowercase()
+        .contains("stream disconnected before completion")
+    {
+        reason.to_string()
+    } else {
+        format!("stream disconnected before completion: {reason}")
     }
 }
 
@@ -568,18 +608,32 @@ impl OpenAI {
                     {
                         Ok(ws) => ws,
                         Err(err) => {
-                            let _ = tx.send(Ok(ChunkType::Failed(format!(
+                            websocket_state.lock().await.disable();
+                            let disconnected = stream_disconnected_before_completion(&format!(
                                 "{}; websocket retry connect failed: {}",
                                 failure, err
+                            ));
+                            let _ = tx.send(Ok(ChunkType::Warning(format!(
+                                "Falling back from WebSockets to HTTPS transport. {disconnected}"
                             ))));
+                            let _ = tx.send(Ok(ChunkType::RetryableFailure(
+                                RetryError::from_message(disconnected),
+                            )));
                             return;
                         }
                     };
 
                     if let Err(err) = fresh_ws.send(WsMessage::Text(request_text.clone())).await {
-                        let _ = tx.send(Ok(ChunkType::Failed(format!(
+                        websocket_state.lock().await.disable();
+                        let disconnected = stream_disconnected_before_completion(&format!(
                             "{}; websocket retry send failed: {}",
                             failure, err
+                        ));
+                        let _ = tx.send(Ok(ChunkType::Warning(format!(
+                            "Falling back from WebSockets to HTTPS transport. {disconnected}"
+                        ))));
+                        let _ = tx.send(Ok(ChunkType::RetryableFailure(RetryError::from_message(
+                            disconnected,
                         ))));
                         return;
                     }
@@ -588,7 +642,21 @@ impl OpenAI {
                     continue;
                 }
 
-                let _ = tx.send(Ok(ChunkType::Failed(failure)));
+                if progress.can_retry_without_duplicate_output() {
+                    websocket_state.lock().await.disable();
+                    let disconnected = stream_disconnected_before_completion(&failure);
+                    let _ = tx.send(Ok(ChunkType::Warning(format!(
+                        "Falling back from WebSockets to HTTPS transport. {disconnected}"
+                    ))));
+                    let _ = tx.send(Ok(ChunkType::RetryableFailure(RetryError::from_message(
+                        disconnected,
+                    ))));
+                    return;
+                }
+
+                let _ = tx.send(Ok(ChunkType::Failed(
+                    stream_disconnected_before_completion(&failure),
+                )));
                 return;
             }
         });

@@ -219,6 +219,9 @@ pub async fn stream_with_tools<P: Provider>(
                     Ok(ChunkType::Metadata(msg)) => {
                         let _ = tx_loop.send(ChunkType::Metadata(msg));
                     }
+                    Ok(ChunkType::Warning(msg)) => {
+                        let _ = tx_loop.send(ChunkType::Warning(msg));
+                    }
                     Ok(ChunkType::Retry(status)) => {
                         let _ = tx_loop.send(ChunkType::Retry(status));
                     }
