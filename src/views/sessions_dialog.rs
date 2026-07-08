@@ -83,7 +83,7 @@ impl SessionsDialogState {
             .with_focusable_group_headers(true);
         self.dialog.set_collapsed_groups(collapsed_groups);
         self.dialog = with_sessions_actions(self.dialog.clone(), filter, false);
-        self.dialog.set_search_query(search_query);
+        self.dialog.restore_search_query(search_query);
 
         if was_visible {
             self.dialog.show();

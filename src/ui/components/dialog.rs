@@ -25,6 +25,13 @@ const SEARCH_AREA_HEIGHT: u16 = 2;
 const PROVIDER_EXACT_MATCH_BOOST: u32 = 1_000_000;
 const PROVIDER_PREFIX_MATCH_BOOST: u32 = 900_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterSelectionMode {
+    Preserve,
+    Reset,
+    PreserveIfNearTop,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DialogPosition {
     Left,
@@ -176,7 +183,7 @@ impl Dialog {
     pub fn set_items(&mut self, items: Vec<DialogItem>) {
         self.items = items;
         self.group_items();
-        self.apply_filter();
+        self.apply_filter(FilterSelectionMode::Reset);
         self.selected_index = 0;
         self.scroll_offset = 0;
         self.update_scrollbar();
@@ -227,7 +234,7 @@ impl Dialog {
 
     pub fn show(&mut self) {
         self.visible = true;
-        self.apply_filter();
+        self.apply_filter(FilterSelectionMode::Preserve);
     }
 
     pub fn hide(&mut self) {
@@ -248,20 +255,36 @@ impl Dialog {
     }
 
     pub fn set_search_query(&mut self, query: impl Into<String>) {
+        self.set_search_query_with_reset(query, true);
+    }
+
+    pub fn restore_search_query(&mut self, query: impl Into<String>) {
+        self.set_search_query_with_reset(query, false);
+    }
+
+    fn set_search_query_with_reset(&mut self, query: impl Into<String>, reset_selection: bool) {
+        let previous_query = self.search_query.clone();
         self.search_query = query.into();
         self.search_textarea = TextArea::default();
         self.search_textarea.set_placeholder_text("Search");
         if !self.search_query.is_empty() {
             self.search_textarea.insert_str(&self.search_query);
         }
-        self.apply_filter();
+        let selection_mode = if !reset_selection {
+            FilterSelectionMode::Preserve
+        } else if self.search_query == previous_query {
+            FilterSelectionMode::Preserve
+        } else {
+            FilterSelectionMode::PreserveIfNearTop
+        };
+        self.apply_filter(selection_mode);
     }
 
     pub fn clear_search(&mut self) {
         self.search_query.clear();
         self.search_textarea = TextArea::default();
         self.search_textarea.set_placeholder_text("Search");
-        self.apply_filter();
+        self.apply_filter(FilterSelectionMode::Reset);
     }
 
     pub fn is_group_collapsed(&self, group: &str) -> bool {
@@ -279,7 +302,7 @@ impl Dialog {
             self.collapsed_groups.insert(group.to_string());
         }
 
-        self.reconcile_selection_after_filter(None);
+        self.reconcile_selection_after_filter(None, FilterSelectionMode::Preserve);
         self.update_scrollbar();
     }
 
@@ -319,7 +342,7 @@ impl Dialog {
         let valid_groups: HashSet<String> = self.groups.iter().cloned().collect();
         self.collapsed_groups
             .retain(|group| valid_groups.contains(group));
-        self.reconcile_selection_after_filter(None);
+        self.reconcile_selection_after_filter(None, FilterSelectionMode::Preserve);
         self.update_scrollbar();
     }
 
@@ -328,10 +351,13 @@ impl Dialog {
         self.scrollbar_drag_offset = previous.scrollbar_drag_offset;
     }
 
-    fn apply_filter(&mut self) {
-        let preferred_selected = self
-            .get_selected()
-            .map(|item| (item.id.clone(), item.provider_id.clone()));
+    fn apply_filter(&mut self, selection_mode: FilterSelectionMode) {
+        let preferred_selected = (selection_mode != FilterSelectionMode::Reset)
+            .then(|| {
+                self.get_selected()
+                    .map(|item| (item.id.clone(), item.provider_id.clone()))
+            })
+            .flatten();
 
         if self.search_query.is_empty() {
             self.filtered_items = self
@@ -397,7 +423,7 @@ impl Dialog {
                 .collect();
         }
 
-        self.reconcile_selection_after_filter(preferred_selected);
+        self.reconcile_selection_after_filter(preferred_selected, selection_mode);
     }
 
     fn search_item_score(
@@ -515,7 +541,11 @@ impl Dialog {
             .any(|token| !token.is_empty() && token.starts_with(query))
     }
 
-    fn reconcile_selection_after_filter(&mut self, preferred_selected: Option<(String, String)>) {
+    fn reconcile_selection_after_filter(
+        &mut self,
+        preferred_selected: Option<(String, String)>,
+        selection_mode: FilterSelectionMode,
+    ) {
         let flat_len = self.get_flat_items().len();
         if flat_len == 0 {
             if let Some(group) = self.focused_group_header.clone() {
@@ -527,6 +557,14 @@ impl Dialog {
             self.selected_index = 0;
             self.scroll_offset = 0;
             self.update_scrollbar();
+            return;
+        }
+
+        if selection_mode == FilterSelectionMode::Reset {
+            self.focused_group_header = None;
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            self.adjust_scroll();
             return;
         }
 
@@ -547,6 +585,16 @@ impl Dialog {
             };
 
             if let Some(pos) = selected_pos {
+                if selection_mode == FilterSelectionMode::PreserveIfNearTop
+                    && self.get_line_index_of_item(pos) >= self.get_visible_row_count().max(1)
+                {
+                    self.selected_index = 0;
+                    self.focused_group_header = None;
+                    self.scroll_offset = 0;
+                    self.adjust_scroll();
+                    return;
+                }
+
                 self.selected_index = pos;
                 self.focused_group_header = None;
                 self.adjust_scroll();
@@ -1200,9 +1248,15 @@ impl Dialog {
             KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => true,
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
             _ => {
+                let previous_query = self.search_query.clone();
                 input_textarea(&mut self.search_textarea, event);
                 self.search_query = self.search_textarea.lines().join("");
-                self.apply_filter();
+                let selection_mode = if self.search_query == previous_query {
+                    FilterSelectionMode::Preserve
+                } else {
+                    FilterSelectionMode::PreserveIfNearTop
+                };
+                self.apply_filter(selection_mode);
                 true
             }
         }
@@ -2260,13 +2314,44 @@ mod tests {
     }
 
     #[test]
-    fn test_dialog_search_preserves_selected_item_if_still_present() {
+    fn test_dialog_search_preserves_near_top_selection_when_query_changes() {
         let mut dialog = Dialog::with_items("Providers", create_fuzzy_test_items());
 
         dialog.selected_index = 1;
         assert_eq!(dialog.get_selected().unwrap().name, "github");
 
         dialog.set_search_query("gu");
+        assert_eq!(dialog.get_selected().unwrap().name, "github");
+    }
+
+    #[test]
+    fn test_dialog_search_resets_selection_when_match_is_below_first_viewport() {
+        let mut items = create_many_test_items(40);
+        for item in &mut items {
+            item.id = format!("gpt-5.5-{}", item.id);
+            item.name = format!("GPT-5.5 {}", item.name);
+            item.description = "NanoGPT".to_string();
+        }
+        let mut dialog = Dialog::with_items("Models", items);
+        dialog.visible_row_count = 10;
+        dialog.selected_index = 25;
+        dialog.scroll_offset = 17;
+
+        dialog.set_search_query("gpt-5.5");
+
+        assert_eq!(dialog.selected_index, 0);
+        assert_eq!(dialog.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_dialog_filter_preserves_selected_item_when_query_is_reapplied() {
+        let mut dialog = Dialog::with_items("Providers", create_fuzzy_test_items());
+
+        dialog.set_search_query("g");
+        dialog.selected_index = 1;
+        assert_eq!(dialog.get_selected().unwrap().name, "github");
+
+        dialog.apply_filter(FilterSelectionMode::Preserve);
         assert_eq!(dialog.get_selected().unwrap().name, "github");
     }
 

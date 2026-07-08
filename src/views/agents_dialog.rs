@@ -37,10 +37,7 @@ impl AgentsDialogState {
             self.dialog.show();
         }
 
-        if !search_query.is_empty() {
-            self.dialog.search_textarea.insert_str(&search_query);
-            self.dialog.set_search_query(search_query);
-        }
+        self.dialog.restore_search_query(search_query);
 
         if let Some((id, provider_id)) = selected_item {
             let _ = self.dialog.select_item_by_key(&id, &provider_id);

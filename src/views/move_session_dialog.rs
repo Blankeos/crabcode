@@ -49,7 +49,7 @@ impl MoveSessionDialogState {
             .collect();
 
         self.dialog = dialog_with_actions(Dialog::with_items("Move session", items));
-        self.dialog.set_search_query(search_query);
+        self.dialog.restore_search_query(search_query);
         if was_visible {
             self.dialog.show();
         }

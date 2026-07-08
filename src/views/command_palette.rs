@@ -66,7 +66,7 @@ impl CommandPaletteState {
         items.extend(custom_command_items(registry, is_chat));
 
         self.dialog = Dialog::with_items("Command Palette", items).with_actions(base_actions());
-        self.dialog.set_search_query(search_query);
+        self.dialog.restore_search_query(search_query);
 
         if was_visible {
             self.dialog.show();
