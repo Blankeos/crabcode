@@ -25,6 +25,29 @@ pub struct ChatSearchMatch {
     pub end: usize,
 }
 
+fn path_mention_score(path: &std::path::Path, text: &str) -> Option<usize> {
+    let path_text = path.to_string_lossy();
+    let candidates = [
+        path_text.into_owned(),
+        display_path(&path.to_string_lossy(), false),
+        display_path(&path.to_string_lossy(), true),
+    ];
+
+    candidates
+        .iter()
+        .filter(|candidate| !candidate.is_empty() && text.contains(candidate.as_str()))
+        .map(|candidate| candidate.len())
+        .max()
+}
+
+fn mentioned_path(candidates: &[std::path::PathBuf], text: &str) -> Option<std::path::PathBuf> {
+    candidates
+        .iter()
+        .filter_map(|path| path_mention_score(path, text).map(|score| (path, score)))
+        .max_by_key(|(_, score)| *score)
+        .map(|(path, _)| path.clone())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Chat {
     pub messages: Vec<Message>,
@@ -84,6 +107,7 @@ pub struct Chat {
     render_dirty_from: usize,
     /// Render cache keyed by revision, width, and theme to skip expensive re-formatting.
     cached_lines: Vec<Line<'static>>,
+    cached_editor_locations: Vec<Option<EditorLocation>>,
     cached_positions: Vec<usize>,
     cached_revision: u64,
     cached_width: usize,
@@ -114,6 +138,22 @@ pub struct ChatImageTarget {
 pub struct ChatHyperlinkHover {
     content_line: usize,
     range: crate::ui::hyperlink::HyperlinkRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorLocation {
+    pub path: std::path::PathBuf,
+    pub line: usize,
+    pub column: usize,
+    pub rendered_content_start_col: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedDiffLocationState {
+    path: std::path::PathBuf,
+    line: usize,
+    content_start_col: usize,
+    next_content_col: usize,
 }
 
 // Minimum elapsed time before showing tokens/s (250ms)
@@ -730,6 +770,30 @@ fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
             push_candidate(arg_string(metadata_obj, &[key]));
         }
 
+        if info.name == "apply_patch" {
+            if let Some(patch) = arg_string(args_obj, &["patch"]) {
+                for path in crate::tools::patch::extract_patch_paths(patch) {
+                    push_candidate(Some(&path));
+                }
+            }
+        }
+
+        if info.name == "write_files" {
+            if let Some(files) = args_obj
+                .and_then(|obj| obj.get("files"))
+                .and_then(|value| value.as_array())
+            {
+                for file in files {
+                    let path = file.as_object().and_then(|obj| {
+                        obj.get("file_path")
+                            .or_else(|| obj.get("filePath"))
+                            .and_then(|value| value.as_str())
+                    });
+                    push_candidate(path);
+                }
+            }
+        }
+
         if let Some(title) = info.title.as_deref() {
             push_candidate(title.split_once(':').map(|(_, path)| path.trim()));
         }
@@ -1201,6 +1265,7 @@ impl Chat {
             render_revision: 1,
             render_dirty_from: 0,
             cached_lines: Vec::new(),
+            cached_editor_locations: Vec::new(),
             cached_positions: Vec::new(),
             cached_revision: 0,
             cached_width: 0,
@@ -1255,6 +1320,7 @@ impl Chat {
             render_revision: 1,
             render_dirty_from: 0,
             cached_lines: Vec::new(),
+            cached_editor_locations: Vec::new(),
             cached_positions: Vec::new(),
             cached_revision: 0,
             cached_width: 0,
@@ -1445,6 +1511,7 @@ impl Chat {
         self.highlighted_message_index = None;
         self.clear_search();
         self.cached_lines.clear();
+        self.cached_editor_locations.clear();
         self.cached_positions.clear();
         self.cached_revision = 0;
         self.cached_width = 0;
@@ -2068,9 +2135,9 @@ impl Chat {
         content_line: usize,
         range: &crate::ui::hyperlink::HyperlinkRange,
     ) -> Option<crate::ui::hyperlink::HyperlinkTarget> {
-        if !matches!(range.target, crate::ui::hyperlink::HyperlinkTarget::File(_)) {
+        let crate::ui::hyperlink::HyperlinkTarget::File(file_target) = &range.target else {
             return None;
-        }
+        };
 
         let display = range.text.trim();
         let message_index = self
@@ -2081,13 +2148,27 @@ impl Chat {
             .and_then(|idx| self.messages.get(idx))
             .and_then(|message| matching_tool_path(message, display))
         {
-            return Some(crate::ui::hyperlink::HyperlinkTarget::File(target));
+            return Some(crate::ui::hyperlink::HyperlinkTarget::File(
+                crate::ui::hyperlink::FileHyperlinkTarget {
+                    path: target,
+                    line: file_target.line,
+                    column: file_target.column,
+                },
+            ));
         }
 
         self.messages
             .iter()
             .find_map(|message| matching_tool_path(message, display))
-            .map(crate::ui::hyperlink::HyperlinkTarget::File)
+            .map(|path| {
+                crate::ui::hyperlink::HyperlinkTarget::File(
+                    crate::ui::hyperlink::FileHyperlinkTarget {
+                        path,
+                        line: file_target.line,
+                        column: file_target.column,
+                    },
+                )
+            })
     }
 
     fn raw_message_index_at_content_line(
@@ -2361,6 +2442,37 @@ impl Chat {
         crate::ui::selection::extract_selected_text(&lines, &self.selection)
     }
 
+    pub fn editor_location_for_selection(&self) -> Option<EditorLocation> {
+        if !self.selection.active {
+            return None;
+        }
+
+        let ((start_line, start_col), (end_line, _)) = self.selection.range();
+        for line_idx in start_line..=end_line {
+            let Some(Some(location)) = self.cached_editor_locations.get(line_idx) else {
+                continue;
+            };
+
+            let selected_col = if line_idx == start_line {
+                start_col
+            } else {
+                location.rendered_content_start_col
+            };
+            let column = location
+                .column
+                .saturating_add(selected_col.saturating_sub(location.rendered_content_start_col));
+
+            return Some(EditorLocation {
+                path: location.path.clone(),
+                line: location.line,
+                column: column.max(1),
+                rendered_content_start_col: location.rendered_content_start_col,
+            });
+        }
+
+        None
+    }
+
     /// Like render_visible_messages but without applying selection styling
     /// (used internally by get_selected_text to get clean text)
     fn render_visible_messages_without_selection_styling<'a>(
@@ -2591,26 +2703,30 @@ impl Chat {
             let dirty_from = self.render_dirty_from;
             let prefix_line_count = self.cached_positions[dirty_from];
             let mut message_positions = self.cached_positions[..dirty_from].to_vec();
-            let (tail_lines, tail_positions) = self.build_lines_with_positions_from(
-                dirty_from,
-                prefix_line_count,
-                max_width,
-                model,
-                colors,
-            );
+            let (tail_lines, tail_locations, tail_positions) = self
+                .build_lines_with_locations_and_positions_from(
+                    dirty_from,
+                    prefix_line_count,
+                    max_width,
+                    model,
+                    colors,
+                );
             let tail_lines = tail_lines
                 .into_iter()
                 .map(line_to_static)
                 .collect::<Vec<_>>();
             self.cached_lines.truncate(prefix_line_count);
+            self.cached_editor_locations.truncate(prefix_line_count);
             self.cached_lines.extend(tail_lines);
+            self.cached_editor_locations.extend(tail_locations);
             message_positions.extend(tail_positions);
             self.message_line_positions = message_positions.clone();
             self.cached_positions = message_positions;
         } else {
-            let (message_lines, message_positions) =
-                self.build_all_lines_with_positions(max_width, model, colors);
+            let (message_lines, message_locations, message_positions) =
+                self.build_all_lines_with_locations_and_positions(max_width, model, colors);
             self.cached_lines = message_lines.into_iter().map(line_to_static).collect();
+            self.cached_editor_locations = message_locations;
             self.message_line_positions = message_positions.clone();
             self.cached_positions = message_positions;
         }
@@ -2875,18 +2991,30 @@ impl Chat {
         model: &'a str,
         colors: &'a ThemeColors,
     ) -> (Vec<Line<'a>>, Vec<usize>) {
-        self.build_lines_with_positions_from(0, 0, max_width, model, colors)
+        let (lines, _, positions) =
+            self.build_lines_with_locations_and_positions_from(0, 0, max_width, model, colors);
+        (lines, positions)
     }
 
-    fn build_lines_with_positions_from<'a>(
+    fn build_all_lines_with_locations_and_positions<'a>(
+        &'a self,
+        max_width: usize,
+        model: &'a str,
+        colors: &'a ThemeColors,
+    ) -> (Vec<Line<'a>>, Vec<Option<EditorLocation>>, Vec<usize>) {
+        self.build_lines_with_locations_and_positions_from(0, 0, max_width, model, colors)
+    }
+
+    fn build_lines_with_locations_and_positions_from<'a>(
         &'a self,
         start_idx: usize,
         start_line: usize,
         max_width: usize,
         model: &'a str,
         colors: &'a ThemeColors,
-    ) -> (Vec<Line<'a>>, Vec<usize>) {
+    ) -> (Vec<Line<'a>>, Vec<Option<EditorLocation>>, Vec<usize>) {
         let mut all_lines: Vec<Line<'a>> = Vec::new();
+        let mut editor_locations: Vec<Option<EditorLocation>> = Vec::new();
         let message_count = self.messages.len();
         let streaming_idx = self.streaming_assistant_idx();
         let streaming_lines = self
@@ -2901,8 +3029,16 @@ impl Chat {
             if let Some(items) = self.task_group_at(idx) {
                 let group_start = start_line + all_lines.len();
                 let group_len = items.len();
-                all_lines.extend(self.format_task_group(&items, max_width, colors));
-                all_lines.push(Line::from(""));
+                push_plain_lines_with_no_locations(
+                    &mut all_lines,
+                    &mut editor_locations,
+                    self.format_task_group(&items, max_width, colors),
+                );
+                push_plain_line_with_no_location(
+                    &mut all_lines,
+                    &mut editor_locations,
+                    Line::from(""),
+                );
                 positions.extend(std::iter::repeat(group_start).take(group_len.saturating_sub(1)));
                 idx += group_len;
                 continue;
@@ -2911,8 +3047,16 @@ impl Chat {
             if let Some(items) = self.exploration_group_at(idx) {
                 let group_start = start_line + all_lines.len();
                 let group_len = items.len();
-                all_lines.extend(self.format_exploration_group(&items, max_width, colors));
-                all_lines.push(Line::from(""));
+                push_plain_lines_with_no_locations(
+                    &mut all_lines,
+                    &mut editor_locations,
+                    self.format_exploration_group(&items, max_width, colors),
+                );
+                push_plain_line_with_no_location(
+                    &mut all_lines,
+                    &mut editor_locations,
+                    Line::from(""),
+                );
                 positions.extend(std::iter::repeat(group_start).take(group_len.saturating_sub(1)));
                 idx += group_len;
                 continue;
@@ -2923,12 +3067,16 @@ impl Chat {
                 || (crate::session::compaction::is_compaction_summary(message)
                     && message.compaction_stats.is_some())
             {
-                all_lines.extend(format_compaction_marker(
-                    message.compaction_stats,
-                    max_width,
-                    colors,
-                ));
-                all_lines.push(Line::from(""));
+                push_plain_lines_with_no_locations(
+                    &mut all_lines,
+                    &mut editor_locations,
+                    format_compaction_marker(message.compaction_stats, max_width, colors),
+                );
+                push_plain_line_with_no_location(
+                    &mut all_lines,
+                    &mut editor_locations,
+                    Line::from(""),
+                );
                 idx += 1;
                 continue;
             }
@@ -2939,7 +3087,7 @@ impl Chat {
 
             let attached_to_assistant =
                 idx > 0 && self.messages[idx - 1].role == MessageRole::Assistant;
-            let message_lines = self.format_message(
+            let (message_lines, message_locations) = self.format_message_with_locations(
                 message,
                 max_width,
                 idx,
@@ -2951,10 +3099,11 @@ impl Chat {
                 attached_to_assistant,
             );
             all_lines.extend(message_lines);
+            editor_locations.extend(message_locations);
             idx += 1;
         }
 
-        (all_lines, positions)
+        (all_lines, editor_locations, positions)
     }
 
     fn exploration_group_at(&self, start: usize) -> Option<Vec<ExplorationToolItem>> {
@@ -3699,6 +3848,33 @@ impl Chat {
         }
 
         lines
+    }
+
+    fn format_message_with_locations<'a>(
+        &'a self,
+        message: &'a Message,
+        max_width: usize,
+        idx: usize,
+        message_count: usize,
+        streaming_lines: Option<&'a [Line<'static>]>,
+        streaming_idx: Option<usize>,
+        model: &'a str,
+        colors: &'a ThemeColors,
+        attached_to_assistant: bool,
+    ) -> (Vec<Line<'a>>, Vec<Option<EditorLocation>>) {
+        let lines = self.format_message(
+            message,
+            max_width,
+            idx,
+            message_count,
+            streaming_lines,
+            streaming_idx,
+            model,
+            colors,
+            attached_to_assistant,
+        );
+        let locations = infer_editor_locations_for_lines(message, &lines);
+        (lines, locations)
     }
 
     fn format_tool_row<'a>(
@@ -5100,6 +5276,247 @@ fn line_is_blank(line: &Line<'_>) -> bool {
     line.spans.iter().all(|span| span.content.trim().is_empty())
 }
 
+fn push_plain_line_with_no_location<'a>(
+    lines: &mut Vec<Line<'a>>,
+    locations: &mut Vec<Option<EditorLocation>>,
+    line: Line<'a>,
+) {
+    lines.push(line);
+    locations.push(None);
+}
+
+fn push_plain_lines_with_no_locations<'a>(
+    lines: &mut Vec<Line<'a>>,
+    locations: &mut Vec<Option<EditorLocation>>,
+    new_lines: Vec<Line<'a>>,
+) {
+    for line in new_lines {
+        push_plain_line_with_no_location(lines, locations, line);
+    }
+}
+
+fn infer_editor_locations_for_lines(
+    message: &Message,
+    lines: &[Line<'_>],
+) -> Vec<Option<EditorLocation>> {
+    let mut locations = vec![None; lines.len()];
+    let candidates = tool_path_candidates(message);
+    if candidates.is_empty() {
+        return locations;
+    }
+
+    let mut active: Option<RenderedDiffLocationState> = None;
+    for (idx, line) in lines.iter().enumerate() {
+        let text = plain_line_text(line);
+        let direct_parsed = parse_rendered_diff_line(&text);
+        if direct_parsed.is_none() {
+            if let Some(path) = mentioned_path(&candidates, &text) {
+                active = Some(RenderedDiffLocationState {
+                    path,
+                    line: 0,
+                    content_start_col: 0,
+                    next_content_col: 0,
+                });
+            }
+        }
+
+        let parsed = direct_parsed.or_else(|| {
+            if active.is_some() {
+                if let Some(sign_only) = parse_sign_only_rendered_diff_line(&text) {
+                    return Some(sign_only);
+                }
+            }
+
+            active.as_ref().and_then(|state| {
+                let trimmed_width = UnicodeWidthStr::width(text.trim_end());
+                (state.line > 0
+                    && state.next_content_col > 0
+                    && trimmed_width > state.content_start_col
+                    && starts_with_space_width(&text, state.content_start_col))
+                .then(|| ParsedRenderedDiffLine {
+                    line_number: None,
+                    sign: None,
+                    content: String::new(),
+                    content_start_col: state.content_start_col,
+                    content_width: trimmed_width.saturating_sub(state.content_start_col),
+                })
+            })
+        });
+        let Some(parsed) = parsed else {
+            if let Some(state) = active.as_mut() {
+                state.next_content_col = 0;
+            }
+            continue;
+        };
+
+        if active.is_none() {
+            if candidates.len() != 1 {
+                continue;
+            }
+            active = Some(RenderedDiffLocationState {
+                path: candidates[0].clone(),
+                line: 0,
+                content_start_col: 0,
+                next_content_col: 0,
+            });
+        }
+        let state = active.as_mut().expect("active state initialized");
+
+        let line_number = if let Some(line_number) = parsed.line_number {
+            state.line = line_number;
+            state.content_start_col = parsed.content_start_col;
+            state.next_content_col = 0;
+            line_number
+        } else if parsed.sign.is_some() {
+            let inferred = infer_rendered_diff_line_number(
+                &state.path,
+                &parsed.content,
+                state.line.saturating_add(1).max(1),
+            );
+            if let Some(line_number) = inferred.or_else(|| (state.line > 0).then_some(state.line)) {
+                state.line = line_number;
+                state.content_start_col = parsed.content_start_col;
+                state.next_content_col = 0;
+                line_number
+            } else {
+                continue;
+            }
+        } else if state.line > 0 {
+            state.line
+        } else {
+            continue;
+        };
+
+        let chunk_col_start = if parsed.line_number.is_some() || parsed.sign.is_some() {
+            0
+        } else {
+            state.next_content_col
+        };
+        let chunk_width = parsed.content_width;
+        locations[idx] = Some(EditorLocation {
+            path: state.path.clone(),
+            line: line_number,
+            column: chunk_col_start.saturating_add(1),
+            rendered_content_start_col: parsed.content_start_col,
+        });
+        state.next_content_col = chunk_col_start.saturating_add(chunk_width);
+    }
+
+    locations
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedRenderedDiffLine {
+    line_number: Option<usize>,
+    sign: Option<char>,
+    content: String,
+    content_start_col: usize,
+    content_width: usize,
+}
+
+fn parse_rendered_diff_line(text: &str) -> Option<ParsedRenderedDiffLine> {
+    let (prefix, sign, after_sign) = diff_line_prefix_sign_and_content(text)?;
+    let content = after_sign.trim_end_matches(' ');
+    if content == "⋯" || content.starts_with('⋯') {
+        return None;
+    }
+
+    let line_number = prefix.trim().parse::<usize>().ok();
+    if line_number.is_none() && !prefix.chars().all(|ch| ch == ' ') {
+        return None;
+    }
+
+    Some(ParsedRenderedDiffLine {
+        line_number,
+        sign: sign.chars().next(),
+        content: content.to_string(),
+        content_start_col: UnicodeWidthStr::width(prefix) + UnicodeWidthStr::width(sign),
+        content_width: UnicodeWidthStr::width(content),
+    })
+}
+
+fn parse_sign_only_rendered_diff_line(text: &str) -> Option<ParsedRenderedDiffLine> {
+    let (sign_start, sign) = text.char_indices().find(|(idx, ch)| {
+        matches!(ch, '+' | '-') && text[..*idx].chars().all(|prefix| prefix == ' ')
+    })?;
+    let sign_end = sign_start + sign.len_utf8();
+    let content = text[sign_end..].trim_end_matches(' ');
+    if content.trim().is_empty() || content == "⋯" || content.starts_with('⋯') {
+        return None;
+    }
+
+    Some(ParsedRenderedDiffLine {
+        line_number: None,
+        sign: Some(sign),
+        content: content.to_string(),
+        content_start_col: UnicodeWidthStr::width(&text[..sign_end]),
+        content_width: UnicodeWidthStr::width(content),
+    })
+}
+
+fn infer_rendered_diff_line_number(
+    path: &std::path::Path,
+    rendered_content: &str,
+    min_line: usize,
+) -> Option<usize> {
+    let needle = rendered_content.trim_end();
+    if needle.trim().is_empty() {
+        return None;
+    }
+
+    let file = std::fs::read_to_string(path).ok()?;
+    let needle_trimmed_start = needle.trim_start();
+    file.lines()
+        .enumerate()
+        .skip(min_line.saturating_sub(1))
+        .find_map(|(idx, line)| {
+            let exact = line == needle || line.starts_with(needle);
+            let trimmed = line.trim_start().starts_with(needle_trimmed_start);
+            (exact || trimmed).then_some(idx + 1)
+        })
+}
+
+fn diff_line_prefix_sign_and_content(text: &str) -> Option<(&str, &str, &str)> {
+    let digit_start = text
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_ascii_digit().then_some(idx))?;
+    if !text[..digit_start].chars().all(|ch| ch == ' ') {
+        return None;
+    }
+
+    let mut digit_end = digit_start;
+    for (idx, ch) in text[digit_start..].char_indices() {
+        if ch.is_ascii_digit() {
+            digit_end = digit_start + idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    text[digit_start..digit_end].parse::<usize>().ok()?;
+    let mut after_digits = text[digit_end..].char_indices();
+    let (_, spacer) = after_digits.next()?;
+    if spacer != ' ' {
+        return None;
+    }
+    let (sign_offset, sign_char) = after_digits.next()?;
+    if !matches!(sign_char, ' ' | '+' | '-') {
+        return None;
+    }
+
+    let sign_start = digit_end + sign_offset;
+    let sign_end = sign_start + sign_char.len_utf8();
+    Some((
+        &text[..sign_start],
+        &text[sign_start..sign_end],
+        &text[sign_end..],
+    ))
+}
+
+fn starts_with_space_width(text: &str, width: usize) -> bool {
+    text.chars().take(width).all(|ch| ch == ' ') && text.chars().count() >= width
+}
+
 fn render_background_run(
     f: &mut Frame,
     area: Rect,
@@ -6050,6 +6467,96 @@ mod tests {
     }
 
     #[test]
+    fn editor_location_for_selection_inside_apply_patch_diff() {
+        let mut chat = Chat::new();
+        let patch = "*** Begin Patch\n*** Update File: src/ui/components/chat.rs\n@@ -7,3 +7,3 @@\n alpha\n-beta\n+bravo\n*** End Patch\n";
+        chat.add_message(Message::tool(
+            serde_json::json!({
+                "name": "apply_patch",
+                "status": "ok",
+                "args": { "patch": patch },
+                "metadata": { "file_count": 1 },
+                "output_preview": "Applied patch: updated 1",
+            })
+            .to_string(),
+        ));
+        let colors = test_colors();
+        let (lines, locations, _) =
+            chat.build_all_lines_with_locations_and_positions(100, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_editor_locations = locations;
+
+        let added_idx = chat
+            .cached_lines
+            .iter()
+            .position(|line| trimmed_line_text(line).ends_with("8 +bravo"))
+            .expect("expected added diff line");
+        chat.selection.active = true;
+        chat.selection.start_line = added_idx;
+        chat.selection.end_line = added_idx;
+        chat.selection.start_col = 7;
+        chat.selection.end_col = 14;
+
+        let location = chat
+            .editor_location_for_selection()
+            .expect("expected editor location");
+        assert!(location.path.ends_with("src/ui/components/chat.rs"));
+        assert_eq!(location.line, 8);
+        assert_eq!(location.column, 1);
+    }
+
+    #[test]
+    fn editor_location_for_selection_inside_sign_only_apply_patch_diff() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("tag-combobox.tsx");
+        std::fs::write(
+            &path,
+            "class=\"flex h-7 w-full items-center gap-2 rounded px-2 text\"\nonClick={(e) => {\n  e.preventDefault()\n",
+        )
+        .unwrap();
+
+        let mut chat = Chat::new();
+        chat.add_message(Message::tool(
+            serde_json::json!({
+                "name": "apply_patch",
+                "status": "ok",
+                "args": {
+                    "patch": format!(
+                        "*** Begin Patch\n*** Update File: {}\n@@\n-class=\"flex h-7 w-full items-center gap-2 rounded px-2 text\"\n-onClick={{(e) => {{\n+class=\"flex h-7 w-full items-center gap-2 rounded px-2 text\"\n+onClick={{(e) => {{\n   e.preventDefault()\n*** End Patch\n",
+                        path.display()
+                    )
+                },
+                "metadata": { "file_count": 1 },
+                "output_preview": "Applied patch: updated 1",
+            })
+            .to_string(),
+        ));
+        let colors = test_colors();
+        let (lines, locations, _) =
+            chat.build_all_lines_with_locations_and_positions(120, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_editor_locations = locations;
+
+        let line_idx = chat
+            .cached_lines
+            .iter()
+            .position(|line| line_text(line).contains("w-full items-center"))
+            .expect("expected sign-only apply_patch row");
+        chat.selection.active = true;
+        chat.selection.start_line = line_idx;
+        chat.selection.end_line = line_idx;
+        chat.selection.start_col = 31;
+        chat.selection.end_col = 37;
+
+        let location = chat
+            .editor_location_for_selection()
+            .expect("expected editor location for sign-only row");
+        assert_eq!(location.path, path);
+        assert_eq!(location.line, 1);
+        assert!(location.column > 1);
+    }
+
+    #[test]
     fn test_apply_patch_tool_groups_multifile_diff_with_headers() {
         let chat = Chat::new();
         let patch = "*** Begin Patch\n*** Add File: tmp/apply-patch-smoke/a.txt\n+one\n+two\n*** Add File: tmp/apply-patch-smoke/b.txt\n+red\n+blue\n*** End Patch\n";
@@ -6079,6 +6586,45 @@ mod tests {
             .any(|line| line.contains("── tmp/apply-patch-smoke/b.txt")));
         assert!(rendered.iter().any(|line| line == "    1 +one"));
         assert!(rendered.iter().any(|line| line == "    1 +red"));
+    }
+
+    #[test]
+    fn editor_location_for_selection_uses_multifile_patch_header() {
+        let mut chat = Chat::new();
+        let patch = "*** Begin Patch\n*** Add File: tmp/apply-patch-smoke/a.txt\n+one\n+two\n*** Add File: tmp/apply-patch-smoke/b.txt\n+red\n+blue\n*** End Patch\n";
+        chat.add_message(Message::tool(
+            serde_json::json!({
+                "name": "apply_patch",
+                "status": "ok",
+                "args": { "patch": patch },
+                "metadata": { "file_count": 2 },
+                "output_preview": "Applied patch: added 2",
+            })
+            .to_string(),
+        ));
+        let colors = test_colors();
+        let (lines, locations, _) =
+            chat.build_all_lines_with_locations_and_positions(120, "model", &colors);
+        chat.cached_lines = lines.into_iter().map(line_to_static).collect();
+        chat.cached_editor_locations = locations;
+
+        let red_idx = chat
+            .cached_lines
+            .iter()
+            .position(|line| trimmed_line_text(line).ends_with("1 +red"))
+            .expect("expected second file diff line");
+        chat.selection.active = true;
+        chat.selection.start_line = red_idx;
+        chat.selection.end_line = red_idx;
+        chat.selection.start_col = 7;
+        chat.selection.end_col = 11;
+
+        let location = chat
+            .editor_location_for_selection()
+            .expect("expected editor location");
+        assert!(location.path.ends_with("tmp/apply-patch-smoke/b.txt"));
+        assert_eq!(location.line, 1);
+        assert_eq!(location.column, 1);
     }
 
     #[test]
@@ -6213,8 +6759,8 @@ mod tests {
             .expect("hyperlink target");
 
         match target {
-            crate::ui::hyperlink::HyperlinkTarget::File(path) => {
-                assert!(path.ends_with("src/ui/hyperlink.rs"));
+            crate::ui::hyperlink::HyperlinkTarget::File(target) => {
+                assert!(target.path.ends_with("src/ui/hyperlink.rs"));
             }
             crate::ui::hyperlink::HyperlinkTarget::Url(url) => {
                 panic!("expected file target, got {url}");
@@ -6282,7 +6828,9 @@ mod tests {
             .expect("hyperlink target");
 
         match target {
-            crate::ui::hyperlink::HyperlinkTarget::File(path) => assert_eq!(path, full_path),
+            crate::ui::hyperlink::HyperlinkTarget::File(target) => {
+                assert_eq!(target.path, full_path)
+            }
             crate::ui::hyperlink::HyperlinkTarget::Url(url) => {
                 panic!("expected file target, got {url}");
             }
@@ -6353,8 +6901,8 @@ mod tests {
             .expect("hyperlink target");
 
         match target {
-            crate::ui::hyperlink::HyperlinkTarget::File(path) => {
-                assert!(path.ends_with("src/ui/components/dialog.rs"));
+            crate::ui::hyperlink::HyperlinkTarget::File(target) => {
+                assert!(target.path.ends_with("src/ui/components/dialog.rs"));
             }
             crate::ui::hyperlink::HyperlinkTarget::Url(url) => {
                 panic!("expected file target, got {url}");

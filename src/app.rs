@@ -387,12 +387,14 @@ enum SelectionActionTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SelectionActionBarState {
     target: SelectionActionTarget,
+    can_open_in_editor: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionAction {
     AddToPrompt,
     Copy,
+    OpenInEditor,
     Dismiss,
 }
 
@@ -1294,6 +1296,43 @@ impl App {
             && !self.session_has_active_stream(session_id)
         {
             self.submit_queued_messages_for_session(session_id);
+        }
+        true
+    }
+
+    fn open_selection_in_editor(&mut self) -> bool {
+        let Some(location) = self.selected_chat_editor_location() else {
+            push_toast(Toast::new(
+                "Selection is not on an editable code line",
+                ToastLevel::Error,
+                None,
+            ));
+            return true;
+        };
+
+        match crate::utils::image_attachment::open_file_path_at_location(
+            &location.path,
+            location.line,
+            location.column,
+        ) {
+            Ok(()) => {
+                push_toast(Toast::new(
+                    format!(
+                        "Opened {}:{}:{}",
+                        location.path.display(),
+                        location.line,
+                        location.column
+                    ),
+                    ToastLevel::Info,
+                    None,
+                ));
+                self.dismiss_selection_actions();
+            }
+            Err(err) => push_toast(Toast::new(
+                format!("Failed to open editor: {}", err),
+                ToastLevel::Error,
+                None,
+            )),
         }
         true
     }
@@ -2256,6 +2295,7 @@ impl App {
                 self.current_chat_area(),
                 self.chat_state.chat.scroll_offset,
                 &self.chat_state.chat.selection,
+                state,
             ),
             SelectionActionTarget::Input => input_selection_action_bar_area(
                 self.last_frame_size,
@@ -2405,10 +2445,19 @@ impl App {
         }
     }
 
+    fn selected_chat_editor_location(&self) -> Option<crate::ui::components::chat::EditorLocation> {
+        self.chat_state.chat.editor_location_for_selection()
+    }
+
     fn show_selection_action_bar_for(&mut self, target: SelectionActionTarget) {
-        self.selection_action_bar = self
-            .selected_text_for_action(target)
-            .map(|_| SelectionActionBarState { target });
+        let can_open_in_editor =
+            target == SelectionActionTarget::Chat && self.selected_chat_editor_location().is_some();
+        self.selection_action_bar =
+            self.selected_text_for_action(target)
+                .map(|_| SelectionActionBarState {
+                    target,
+                    can_open_in_editor,
+                });
     }
 
     fn dismiss_selection_actions(&mut self) -> bool {
@@ -2455,6 +2504,11 @@ impl App {
                     && state.target == SelectionActionTarget::Chat =>
             {
                 self.add_selection_to_prompt(state.target)
+            }
+            KeyCode::Char('e')
+                if key.modifiers == event::KeyModifiers::NONE && state.can_open_in_editor =>
+            {
+                self.open_selection_in_editor()
             }
             KeyCode::Esc if key.modifiers == event::KeyModifiers::NONE => {
                 self.dismiss_selection_actions();
@@ -3690,12 +3744,13 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => true,
             MouseEventKind::Up(MouseButton::Left) => {
                 let rel = mouse.column.saturating_sub(area.x) as usize;
-                match selection_action_for_column(state.target, rel) {
+                match selection_action_for_column(state, rel) {
                     SelectionAction::AddToPrompt => self.add_selection_to_prompt(state.target),
                     SelectionAction::Copy => {
                         let _ = self.try_copy_selection();
                         true
                     }
+                    SelectionAction::OpenInEditor => self.open_selection_in_editor(),
                     SelectionAction::Dismiss => self.dismiss_selection_actions(),
                 }
             }
@@ -3763,10 +3818,19 @@ impl App {
 
     fn open_chat_hyperlink_target(&self, target: &HyperlinkTarget) {
         match target {
-            HyperlinkTarget::File(path) => {
-                match crate::utils::image_attachment::open_file_path(path) {
+            HyperlinkTarget::File(target) => {
+                let result = if let Some(line) = target.line {
+                    crate::utils::image_attachment::open_file_path_at_location(
+                        &target.path,
+                        line,
+                        target.column.unwrap_or(1),
+                    )
+                } else {
+                    crate::utils::image_attachment::open_file_path(&target.path)
+                };
+                match result {
                     Ok(()) => push_toast(Toast::new(
-                        format!("Opened {}", path.display()),
+                        format!("Opened {}", target.path.display()),
                         ToastLevel::Info,
                         None,
                     )),
@@ -9236,12 +9300,13 @@ impl App {
                     self.chat_area_for_size(size),
                     self.chat_state.chat.scroll_offset,
                     &self.chat_state.chat.selection,
+                    state,
                 ),
                 SelectionActionTarget::Input => {
                     input_selection_action_bar_area(size, self.suggestions_popup_anchor_area())
                 }
             };
-            render_selection_action_bar(f, area, state.target, &colors);
+            render_selection_action_bar(f, area, state, &colors);
         }
 
         toast::render_toasts(f, &get_toast_manager().lock().unwrap(), &colors);
@@ -9257,18 +9322,30 @@ fn format_selection_prompt_addition(text: &str) -> String {
     }
 }
 
-const SELECTION_ACTION_BAR_WIDTH: u16 = 28;
+const SELECTION_ACTION_BAR_WIDTH: u16 = 47;
 const CHAT_SELECTION_ACTION_ADD_TO_PROMPT_COL: usize = 8;
-const CHAT_SELECTION_ACTION_ESC_COL: usize = 24;
+const CHAT_SELECTION_ACTION_OPEN_IN_EDITOR_COL: usize = 24;
+const CHAT_SELECTION_ACTION_ESC_COL: usize = 43;
+const CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR: usize = 24;
 const INPUT_SELECTION_ACTION_ESC_COL: usize = 8;
 
-fn selection_action_for_column(target: SelectionActionTarget, column: usize) -> SelectionAction {
-    match target {
+fn selection_action_for_column(state: SelectionActionBarState, column: usize) -> SelectionAction {
+    match state.target {
         SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_ADD_TO_PROMPT_COL => {
             SelectionAction::Copy
         }
-        SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_ESC_COL => {
+        SelectionActionTarget::Chat if column < CHAT_SELECTION_ACTION_OPEN_IN_EDITOR_COL => {
             SelectionAction::AddToPrompt
+        }
+        SelectionActionTarget::Chat
+            if state.can_open_in_editor && column < CHAT_SELECTION_ACTION_ESC_COL =>
+        {
+            SelectionAction::OpenInEditor
+        }
+        SelectionActionTarget::Chat
+            if !state.can_open_in_editor && column < CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR =>
+        {
+            SelectionAction::Dismiss
         }
         SelectionActionTarget::Chat => SelectionAction::Dismiss,
         SelectionActionTarget::Input if column < INPUT_SELECTION_ACTION_ESC_COL => {
@@ -9282,6 +9359,7 @@ fn chat_selection_action_bar_area(
     chat_area: Rect,
     scroll_offset: usize,
     selection: &crate::ui::selection::Selection,
+    state: SelectionActionBarState,
 ) -> Rect {
     let content_area = Rect {
         x: chat_area.x,
@@ -9296,7 +9374,7 @@ fn chat_selection_action_bar_area(
         start_line,
         end_line,
         start_col,
-        SELECTION_ACTION_BAR_WIDTH,
+        selection_action_bar_width(state),
     )
 }
 
@@ -9307,6 +9385,14 @@ fn input_selection_action_bar_area(frame_area: Rect, input_area: Rect) -> Rect {
         frame_area,
         Rect::new(x, y, SELECTION_ACTION_BAR_WIDTH.min(frame_area.width), 1),
     )
+}
+
+fn selection_action_bar_width(state: SelectionActionBarState) -> u16 {
+    match state.target {
+        SelectionActionTarget::Chat if state.can_open_in_editor => SELECTION_ACTION_BAR_WIDTH,
+        SelectionActionTarget::Chat => CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR as u16 + 4,
+        SelectionActionTarget::Input => INPUT_SELECTION_ACTION_ESC_COL as u16 + 5,
+    }
 }
 
 fn selection_action_bar_area_for_anchor(
@@ -9355,7 +9441,7 @@ fn clamp_action_bar_area(container: Rect, mut area: Rect) -> Rect {
 fn render_selection_action_bar(
     f: &mut ratatui::Frame,
     area: Rect,
-    target: SelectionActionTarget,
+    state: SelectionActionBarState,
     colors: &theme::ThemeColors,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -9369,16 +9455,21 @@ fn render_selection_action_bar(
         .bg(bg)
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(colors.text_weak).bg(bg);
-    let line = if target == SelectionActionTarget::Chat {
-        Line::from(vec![
+    let line = if state.target == SelectionActionTarget::Chat {
+        let mut spans = vec![
             Span::raw(" "),
             Span::styled("y", key_style),
             Span::styled(" copy ", label_style),
             Span::styled("i", key_style),
             Span::styled(" add to prompt ", label_style),
-            Span::styled("esc", key_style),
-            Span::raw(" "),
-        ])
+        ];
+        if state.can_open_in_editor {
+            spans.push(Span::styled("e", key_style));
+            spans.push(Span::styled(" open in editor ", label_style));
+        }
+        spans.push(Span::styled("esc", key_style));
+        spans.push(Span::raw(" "));
+        Line::from(spans)
     } else {
         Line::from(vec![
             Span::raw(" "),
@@ -10044,24 +10135,41 @@ mod tests {
 
     #[test]
     fn selection_action_bar_column_mapping_matches_rendered_labels() {
+        let chat_without_editor = SelectionActionBarState {
+            target: SelectionActionTarget::Chat,
+            can_open_in_editor: false,
+        };
+        let chat_with_editor = SelectionActionBarState {
+            target: SelectionActionTarget::Chat,
+            can_open_in_editor: true,
+        };
+        let input = SelectionActionBarState {
+            target: SelectionActionTarget::Input,
+            can_open_in_editor: false,
+        };
         assert_eq!(
-            selection_action_for_column(SelectionActionTarget::Chat, 1),
+            selection_action_for_column(chat_without_editor, 1),
             SelectionAction::Copy
         );
         assert_eq!(
-            selection_action_for_column(SelectionActionTarget::Chat, 8),
+            selection_action_for_column(chat_without_editor, 8),
             SelectionAction::AddToPrompt
         );
         assert_eq!(
-            selection_action_for_column(SelectionActionTarget::Chat, 24),
+            selection_action_for_column(chat_without_editor, 24),
             SelectionAction::Dismiss
         );
         assert_eq!(
-            selection_action_for_column(SelectionActionTarget::Input, 1),
-            SelectionAction::Copy
+            selection_action_for_column(chat_with_editor, 24),
+            SelectionAction::OpenInEditor
         );
         assert_eq!(
-            selection_action_for_column(SelectionActionTarget::Input, 8),
+            selection_action_for_column(chat_with_editor, 43),
+            SelectionAction::Dismiss
+        );
+        assert_eq!(selection_action_for_column(input, 1), SelectionAction::Copy);
+        assert_eq!(
+            selection_action_for_column(input, 8),
             SelectionAction::Dismiss
         );
     }

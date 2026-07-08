@@ -10,7 +10,14 @@ static LOCATION_SUFFIX_RE: LazyLock<regex::Regex> =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HyperlinkTarget {
     Url(String),
-    File(PathBuf),
+    File(FileHyperlinkTarget),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileHyperlinkTarget {
+    pub path: PathBuf,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,35 +172,97 @@ fn hyperlink_target_for_token(token: &str) -> Option<HyperlinkTarget> {
     file_target_for_local_path_token(token).map(HyperlinkTarget::File)
 }
 
-fn file_target_for_file_url_token(token: &str) -> Option<PathBuf> {
+fn file_target_for_file_url_token(token: &str) -> Option<FileHyperlinkTarget> {
     let url = Url::parse(token).ok()?;
     let path = url.to_file_path().ok()?;
     let path_text = path.to_string_lossy();
-    let path_text = strip_location_suffix(&path_text);
-    Some(PathBuf::from(path_text))
+    let location = split_location_suffix(&path_text);
+    Some(FileHyperlinkTarget {
+        path: PathBuf::from(location.path),
+        line: location.line,
+        column: location.column,
+    })
 }
 
-fn file_target_for_local_path_token(token: &str) -> Option<PathBuf> {
-    let path_text = strip_location_suffix(token);
-    if !is_local_path_like(path_text) {
+fn file_target_for_local_path_token(token: &str) -> Option<FileHyperlinkTarget> {
+    let location = split_location_suffix(token);
+    if !is_local_path_like(location.path) {
         return None;
     }
 
-    expand_local_path(path_text)
+    expand_local_path(location.path).map(|path| FileHyperlinkTarget {
+        path,
+        line: location.line,
+        column: location.column,
+    })
 }
 
-fn strip_location_suffix(token: &str) -> &str {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PathLocationSuffix<'a> {
+    path: &'a str,
+    line: Option<usize>,
+    column: Option<usize>,
+}
+
+fn split_location_suffix(token: &str) -> PathLocationSuffix<'_> {
     let without_hash = token
         .rsplit_once('#')
         .filter(|(_, fragment)| is_hash_location_suffix(fragment))
-        .map(|(path, _)| path)
-        .unwrap_or(token);
+        .map(|(path, fragment)| {
+            let (line, column) = parse_hash_location_suffix(fragment);
+            (path, line, column)
+        });
 
-    LOCATION_SUFFIX_RE
-        .find(without_hash)
-        .filter(|matched| matched.end() == without_hash.len())
-        .map(|matched| &without_hash[..matched.start()])
-        .unwrap_or(without_hash)
+    if let Some((path, line, column)) = without_hash {
+        return PathLocationSuffix { path, line, column };
+    }
+
+    let Some(matched) = LOCATION_SUFFIX_RE
+        .find(token)
+        .filter(|matched| matched.end() == token.len())
+    else {
+        return PathLocationSuffix {
+            path: token,
+            line: None,
+            column: None,
+        };
+    };
+
+    let suffix = &token[matched.start() + 1..matched.end()];
+    let (line, column) = parse_colon_location_suffix(suffix);
+    PathLocationSuffix {
+        path: &token[..matched.start()],
+        line,
+        column,
+    }
+}
+
+fn parse_colon_location_suffix(suffix: &str) -> (Option<usize>, Option<usize>) {
+    let mut parts = suffix.split(':');
+    let line = parts.next().and_then(parse_location_number);
+    let column = parts.next().and_then(parse_location_number);
+    (line, column)
+}
+
+fn parse_hash_location_suffix(fragment: &str) -> (Option<usize>, Option<usize>) {
+    let Some(after_l) = fragment.strip_prefix('L') else {
+        return (None, None);
+    };
+    let (line_text, column_text) = after_l
+        .split_once("C")
+        .map(|(line, column)| (line, Some(column)))
+        .unwrap_or((after_l, None));
+    let line_text = line_text
+        .split_once('-')
+        .map(|(line, _)| line)
+        .unwrap_or(line_text);
+    let line = parse_location_number(line_text);
+    let column = column_text.and_then(parse_location_number);
+    (line, column)
+}
+
+fn parse_location_number(value: &str) -> Option<usize> {
+    value.parse::<usize>().ok().filter(|number| *number > 0)
 }
 
 fn is_hash_location_suffix(fragment: &str) -> bool {
@@ -412,14 +481,16 @@ mod tests {
     }
 
     #[test]
-    fn strips_location_suffix_from_file_url_target() {
+    fn extracts_location_suffix_from_file_target() {
         let text = "See src/main.rs:42";
         let links = detect_hyperlinks(text);
         assert_eq!(links.len(), 1);
         match &links[0].target {
-            HyperlinkTarget::File(path) => {
-                assert!(path.ends_with("src/main.rs"));
-                assert!(!path.to_string_lossy().ends_with(":42"));
+            HyperlinkTarget::File(target) => {
+                assert!(target.path.ends_with("src/main.rs"));
+                assert!(!target.path.to_string_lossy().ends_with(":42"));
+                assert_eq!(target.line, Some(42));
+                assert_eq!(target.column, None);
             }
             HyperlinkTarget::Url(url) => panic!("expected file target, got {url}"),
         }
@@ -432,8 +503,9 @@ mod tests {
             .to_string();
         let target = file_target_for_file_url_token(&format!("{file_url}:42")).unwrap();
 
-        assert!(target.ends_with("src/main.rs"));
-        assert!(!target.to_string_lossy().ends_with(":42"));
+        assert!(target.path.ends_with("src/main.rs"));
+        assert!(!target.path.to_string_lossy().ends_with(":42"));
+        assert_eq!(target.line, Some(42));
     }
 
     #[test]
@@ -468,7 +540,10 @@ mod tests {
         let target = hyperlink_at_line_col(&line, "Open src".len()).unwrap();
 
         match target {
-            HyperlinkTarget::File(path) => assert!(path.ends_with("src/ui/hyperlink.rs")),
+            HyperlinkTarget::File(target) => {
+                assert!(target.path.ends_with("src/ui/hyperlink.rs"));
+                assert_eq!(target.line, Some(12));
+            }
             HyperlinkTarget::Url(url) => panic!("expected file target, got {url}"),
         }
     }

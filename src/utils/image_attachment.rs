@@ -20,6 +20,40 @@ pub struct PromptImage {
     pub height: u32,
 }
 
+fn spawn_shell_command_at_location(
+    command: &str,
+    path: &Path,
+    line: usize,
+    column: usize,
+) -> Result<()> {
+    let path_text = format!(
+        "{}:{}:{}",
+        path.to_string_lossy(),
+        line.max(1),
+        column.max(1)
+    );
+    let quoted_path = shlex::try_quote(&path_text)
+        .map_err(|err| anyhow!("failed to quote file path {}: {}", path.display(), err))?;
+    let shell_command = format!("{} {}", command, quoted_path);
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", &shell_command])
+            .spawn()
+            .with_context(|| format!("failed to run editor command `{}`", command))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("sh")
+            .args(["-c", &shell_command])
+            .spawn()
+            .with_context(|| format!("failed to run editor command `{}`", command))?;
+        Ok(())
+    }
+}
+
 pub fn is_supported_image_path(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -276,6 +310,14 @@ pub fn open_file_path(path: &Path) -> Result<()> {
     open_editor(path).or_else(|_| open_system(path))
 }
 
+pub fn open_file_path_at_location(path: &Path, line: usize, column: usize) -> Result<()> {
+    if !path.exists() {
+        return Err(anyhow!("file no longer exists: {}", path.display()));
+    }
+
+    open_editor_at_location(path, line, column).or_else(|_| open_system(path))
+}
+
 pub fn open_url(url: &str) -> Result<()> {
     let parsed = url::Url::parse(url).with_context(|| format!("invalid url: {url}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -309,6 +351,47 @@ fn open_editor(path: &Path) -> Result<()> {
     }
 
     Err(anyhow!("no editor command detected"))
+}
+
+fn open_editor_at_location(path: &Path, line: usize, column: usize) -> Result<()> {
+    let line = line.max(1);
+    let column = column.max(1);
+    if let Some(command) = detected_editor_command() {
+        return spawn_command(
+            &command,
+            &editor_location_args(&command, path, line, column),
+        );
+    }
+
+    for var in ["VISUAL", "EDITOR"] {
+        if let Ok(value) = std::env::var(var) {
+            if !value.trim().is_empty() {
+                return spawn_shell_command_at_location(&value, path, line, column);
+            }
+        }
+    }
+
+    Err(anyhow!("no editor command detected"))
+}
+
+fn editor_location_args(command: &str, path: &Path, line: usize, column: usize) -> Vec<String> {
+    let path_text = path.to_string_lossy();
+    let command_name = std::path::Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+
+    if command_name.contains("zed") {
+        vec![format!("{}:{}:{}", path_text, line.max(1), column.max(1))]
+    } else if command_name.contains("code") || command_name.contains("cursor") {
+        vec![
+            "-g".to_string(),
+            format!("{}:{}:{}", path_text, line.max(1), column.max(1)),
+        ]
+    } else {
+        vec![path_text.into_owned()]
+    }
 }
 
 fn detected_editor_command() -> Option<String> {
@@ -565,4 +648,33 @@ fn file_url_to_path(value: &str) -> Option<PathBuf> {
     }
 
     url::Url::parse(value).ok()?.to_file_path().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_location_args_use_zed_path_line_column_syntax() {
+        let path = Path::new("/tmp/project/src/main.rs");
+
+        assert_eq!(
+            editor_location_args("zed", path, 12, 4),
+            vec!["/tmp/project/src/main.rs:12:4"]
+        );
+    }
+
+    #[test]
+    fn editor_location_args_use_goto_for_code_and_cursor() {
+        let path = Path::new("/tmp/project/src/main.rs");
+
+        assert_eq!(
+            editor_location_args("code", path, 12, 4),
+            vec!["-g", "/tmp/project/src/main.rs:12:4"]
+        );
+        assert_eq!(
+            editor_location_args("cursor", path, 12, 4),
+            vec!["-g", "/tmp/project/src/main.rs:12:4"]
+        );
+    }
 }
