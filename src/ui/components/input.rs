@@ -79,6 +79,7 @@ pub struct Input {
     pending_pastes: Vec<PendingPaste>,
     image_open_config: crate::config::ImagesConfig,
     hovered_image_placeholder: Option<String>,
+    hovered_paste_placeholder: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,6 +134,72 @@ impl Input {
             pending_pastes: Vec::new(),
             image_open_config: crate::config::ImagesConfig::default(),
             hovered_image_placeholder: None,
+            hovered_paste_placeholder: None,
+        }
+    }
+
+    fn render_paste_hover_tooltip(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        colors: &ThemeColors,
+        visual_lines: &[VisualLine],
+    ) {
+        let Some(placeholder) = self.hovered_paste_placeholder.as_deref() else {
+            return;
+        };
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let lines = self.textarea.lines();
+        let Some((screen_row, visual_line, start)) = visual_lines
+            .iter()
+            .skip(self.viewport_top)
+            .take(area.height as usize)
+            .enumerate()
+            .find_map(|(screen_row, visual_line)| {
+                let line = lines.get(visual_line.source_row)?;
+                line.match_indices(placeholder).find_map(|(start, _)| {
+                    let start_col = line[..start].chars().count();
+                    let end_col = start_col + placeholder.chars().count();
+                    (start_col < visual_line.end_col && end_col > visual_line.start_col)
+                        .then_some((screen_row, visual_line, start))
+                })
+            })
+        else {
+            return;
+        };
+
+        let Some(line) = lines.get(visual_line.source_row) else {
+            return;
+        };
+        let start_col = line[..start].chars().count();
+        let prefix = Self::line_char_slice(
+            line,
+            visual_line.start_col,
+            start_col.clamp(visual_line.start_col, visual_line.end_col),
+        );
+        let anchor_x = area.x + UnicodeWidthStr::width(prefix).min(area.width as usize - 1) as u16;
+        let anchor_y = area.y + screen_row as u16;
+        let tooltip = " expand ";
+        let width = tooltip.len().min(area.width as usize) as u16;
+        let x = anchor_x.min(area.x + area.width.saturating_sub(width));
+        let y = if anchor_y > area.y {
+            anchor_y - 1
+        } else {
+            (anchor_y + 1).min(area.y + area.height.saturating_sub(1))
+        };
+        let style = Style::default()
+            .fg(colors.background_element)
+            .bg(colors.markdown_image_text)
+            .add_modifier(Modifier::BOLD);
+
+        for (idx, ch) in tooltip.chars().take(width as usize).enumerate() {
+            if let Some(cell) = buffer.cell_mut((x + idx as u16, y)) {
+                cell.set_char(ch);
+                cell.set_style(style);
+            }
         }
     }
 
@@ -226,6 +293,7 @@ impl Input {
 
     pub fn clear_hover(&mut self) {
         self.hovered_image_placeholder = None;
+        self.hovered_paste_placeholder = None;
     }
 
     pub fn has_active_selection_edge_scroll(&self) -> bool {
@@ -667,6 +735,7 @@ impl Input {
                 }
                 MouseEventKind::Moved => {
                     self.hovered_image_placeholder = None;
+                    self.hovered_paste_placeholder = None;
                 }
                 _ => {}
             }
@@ -676,10 +745,18 @@ impl Input {
         match mouse.kind {
             MouseEventKind::Moved => {
                 let previous_hover = self.hovered_image_placeholder.clone();
+                let previous_paste_hover = self.hovered_paste_placeholder.clone();
                 self.hovered_image_placeholder = self
                     .image_at_mouse_position(textarea_area, mouse)
                     .map(|image| image.placeholder);
+                self.hovered_paste_placeholder = if self.hovered_image_placeholder.is_none() {
+                    self.paste_at_mouse_position(textarea_area, mouse)
+                        .map(|paste| paste.placeholder)
+                } else {
+                    None
+                };
                 previous_hover != self.hovered_image_placeholder
+                    || previous_paste_hover != self.hovered_paste_placeholder
             }
             MouseEventKind::ScrollDown => {
                 if self.should_suppress_scroll() {
@@ -717,6 +794,16 @@ impl Input {
                                 None,
                             )),
                         }
+                        return true;
+                    }
+                    if let Some((range, paste)) = self.paste_at_offset(offset) {
+                        let placeholder = paste.placeholder.clone();
+                        self.expand_pending_paste(range, paste);
+                        push_toast(Toast::new(
+                            format!("Expanded {placeholder}"),
+                            ToastLevel::Info,
+                            None,
+                        ));
                         return true;
                     }
                     // Position cursor; actual selection starts only if a drag follows.
@@ -1019,6 +1106,7 @@ impl Input {
         self.manual_viewport_scroll = false;
         self.preferred_visual_col = None;
         self.hovered_image_placeholder = None;
+        self.hovered_paste_placeholder = None;
     }
 
     fn current_draft_state(&self, text: String) -> DraftState {
@@ -1038,8 +1126,15 @@ impl Input {
         self.local_images = draft.local_images;
         self.pending_pastes = draft.pending_pastes;
         self.hovered_image_placeholder = None;
+        self.hovered_paste_placeholder = None;
         self.sync_image_placeholders();
         self.sync_pending_pastes();
+    }
+
+    fn expand_pending_paste(&mut self, range: Range<usize>, paste: PendingPaste) {
+        self.pending_pastes
+            .retain(|pending| pending.placeholder != paste.placeholder);
+        self.replace_range(range, &paste.content);
     }
 
     fn image_placeholder(number: usize) -> String {
@@ -1321,6 +1416,7 @@ impl Input {
 
         frame.render_widget(Paragraph::new(text).style(text_style), area);
         self.style_placeholder_ranges(frame.buffer_mut(), area, colors, &visual_lines);
+        self.render_paste_hover_tooltip(frame.buffer_mut(), area, colors, &visual_lines);
     }
 
     fn render_visual_line(
@@ -1439,7 +1535,13 @@ impl Input {
             }
 
             for paste in &self.pending_pastes {
-                let placeholder_style = Style::default().fg(colors.markdown_image);
+                let placeholder_style = if self.hovered_paste_placeholder.as_deref()
+                    == Some(paste.placeholder.as_str())
+                {
+                    Style::default().fg(colors.markdown_image_text)
+                } else {
+                    Style::default().fg(colors.markdown_image)
+                };
                 for (start, _) in line.match_indices(&paste.placeholder) {
                     Self::style_line_byte_range(
                         buffer,
@@ -1586,6 +1688,15 @@ impl Input {
             .into_iter()
             .map(|idx| self.pending_pastes[idx].clone())
             .collect();
+        if let Some(hovered) = self.hovered_paste_placeholder.as_deref() {
+            if !self
+                .pending_pastes
+                .iter()
+                .any(|paste| paste.placeholder == hovered)
+            {
+                self.hovered_paste_placeholder = None;
+            }
+        }
     }
 
     fn replace_pending_pastes(&self, text: &str) -> String {
@@ -1680,6 +1791,20 @@ impl Input {
         })
     }
 
+    fn paste_at_offset(&self, offset: usize) -> Option<(Range<usize>, PendingPaste)> {
+        let text = self.get_text();
+        self.pending_paste_indices_by_placeholder_len()
+            .into_iter()
+            .find_map(|idx| {
+                let paste = &self.pending_pastes[idx];
+                text.match_indices(&paste.placeholder)
+                    .find_map(|(start, _)| {
+                        let end = start + paste.placeholder.len();
+                        (offset >= start && offset < end).then(|| (start..end, paste.clone()))
+                    })
+            })
+    }
+
     fn image_at_mouse_position(
         &self,
         textarea_area: Rect,
@@ -1691,6 +1816,19 @@ impl Input {
             self.cursor_for_screen_position(textarea_area, relative_x, relative_y)?;
         let offset = self.flat_offset_for_position(target_row, target_col);
         self.image_at_offset(offset)
+    }
+
+    fn paste_at_mouse_position(
+        &self,
+        textarea_area: Rect,
+        mouse: MouseEvent,
+    ) -> Option<PendingPaste> {
+        let relative_x = mouse.column.saturating_sub(textarea_area.x);
+        let relative_y = mouse.row.saturating_sub(textarea_area.y);
+        let (target_row, target_col) =
+            self.cursor_for_screen_position(textarea_area, relative_x, relative_y)?;
+        let offset = self.flat_offset_for_position(target_row, target_col);
+        self.paste_at_offset(offset).map(|(_, paste)| paste)
     }
 
     pub fn attach_image(&mut self, path: PathBuf) {
@@ -1858,6 +1996,7 @@ impl Input {
         self.local_images.clear();
         self.pending_pastes.clear();
         self.hovered_image_placeholder = None;
+        self.hovered_paste_placeholder = None;
         if let Some(ref mut history) = self.prompt_history {
             history.reset_navigation();
         }
@@ -1889,6 +2028,7 @@ impl Input {
         self.local_images.clear();
         self.pending_pastes.clear();
         self.hovered_image_placeholder = None;
+        self.hovered_paste_placeholder = None;
     }
 
     pub fn set_text_with_local_images(&mut self, text: &str, image_paths: Vec<PathBuf>) {
@@ -1916,6 +2056,7 @@ impl Input {
         self.local_images = local_images;
         self.pending_pastes.clear();
         self.hovered_image_placeholder = None;
+        self.hovered_paste_placeholder = None;
         self.sync_image_placeholders();
     }
 
@@ -2256,6 +2397,143 @@ mod tests {
             format!("[Pasted Content {} chars]", LARGE_PASTE_CHAR_THRESHOLD + 1)
         );
         assert_eq!(input.submission_text(), paste);
+    }
+
+    #[test]
+    fn test_hovering_large_paste_placeholder_shows_expand_tooltip() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        let paste = "a".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+        let placeholder = format!("[Pasted Content {} chars]", LARGE_PASTE_CHAR_THRESHOLD + 1);
+        input.insert_paste(&paste);
+
+        let colors = test_colors();
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 60, 8),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let (x, y) = find_buffer_text(terminal.backend().buffer(), 60, 8, &placeholder)
+            .expect("paste placeholder rendered");
+        assert!(input.handle_mouse_event(mouse_event_at(MouseEventKind::Moved, x, y)));
+        assert_eq!(
+            input.hovered_paste_placeholder.as_deref(),
+            Some(placeholder.as_str())
+        );
+
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 60, 8),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        assert!(find_buffer_text(terminal.backend().buffer(), 60, 8, " expand ").is_some());
+    }
+
+    #[test]
+    fn test_clicking_large_paste_placeholder_expands_irreversibly() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        let paste = "abc\ndef".repeat(150);
+        input.insert_str("before ");
+        input.insert_paste(&paste);
+        input.insert_str(" after");
+
+        let placeholder = format!("[Pasted Content {} chars]", paste.chars().count());
+        let colors = test_colors();
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 80, 8),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let (x, y) = find_buffer_text(terminal.backend().buffer(), 80, 8, &placeholder)
+            .expect("paste placeholder rendered");
+        assert!(input.handle_mouse_event(mouse_event_at(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            y,
+        )));
+
+        assert_eq!(input.get_text(), format!("before {paste} after"));
+        assert!(input.pending_pastes.is_empty());
+        assert_eq!(input.submission_text(), input.get_text());
+    }
+
+    #[test]
+    fn test_clicking_duplicate_large_paste_placeholder_expands_matching_payload() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        let first = "a".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+        let second = "b".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+        input.insert_paste(&first);
+        input.insert_str(" ");
+        input.insert_paste(&second);
+
+        let second_placeholder = format!(
+            "[Pasted Content {} chars] #2",
+            LARGE_PASTE_CHAR_THRESHOLD + 1
+        );
+        let colors = test_colors();
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 80, 8),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let (x, y) = find_buffer_text(terminal.backend().buffer(), 80, 8, &second_placeholder)
+            .expect("second paste placeholder rendered");
+        assert!(input.handle_mouse_event(mouse_event_at(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            y,
+        )));
+
+        assert_eq!(input.pending_pastes.len(), 1);
+        assert_eq!(input.pending_pastes[0].content, first);
+        assert!(input.get_text().ends_with(&second));
     }
 
     #[test]
