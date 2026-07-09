@@ -5712,6 +5712,8 @@ impl App {
         let mut sessions = self.session_manager.list_sessions();
         let current_workspace_id = self.session_manager.current_workspace_id();
         let filter = self.sessions_dialog_state.filter;
+        self.sessions_dialog_state
+            .set_current_workspace_id(current_workspace_id);
 
         sessions.retain(|session| {
             if session.parent_id.is_some() {

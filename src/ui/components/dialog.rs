@@ -165,6 +165,15 @@ impl Dialog {
         self
     }
 
+    pub fn set_search_priority_groups(&mut self, groups: Vec<String>) {
+        if self.search_priority_groups == groups {
+            return;
+        }
+
+        self.search_priority_groups = groups;
+        self.apply_filter(FilterSelectionMode::Preserve);
+    }
+
     pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
         let mut dialog = Self::new(title);
         dialog.set_items(items);
@@ -585,6 +594,33 @@ impl Dialog {
             };
 
             if let Some(pos) = selected_pos {
+                if selection_mode == FilterSelectionMode::PreserveIfNearTop
+                    && !self.search_priority_groups.is_empty()
+                {
+                    let should_reset_to_priority_match = {
+                        let flat_items = self.get_flat_items();
+                        flat_items.first().is_some_and(|top_item| {
+                            flat_items.get(pos).is_some_and(|selected_item| {
+                                Self::search_group_priority(
+                                    &self.search_priority_groups,
+                                    &top_item.group,
+                                ) < Self::search_group_priority(
+                                    &self.search_priority_groups,
+                                    &selected_item.group,
+                                )
+                            })
+                        })
+                    };
+
+                    if should_reset_to_priority_match {
+                        self.selected_index = 0;
+                        self.focused_group_header = None;
+                        self.scroll_offset = 0;
+                        self.adjust_scroll();
+                        return;
+                    }
+                }
+
                 if selection_mode == FilterSelectionMode::PreserveIfNearTop
                     && self.get_line_index_of_item(pos) >= self.get_visible_row_count().max(1)
                 {
@@ -2232,6 +2268,43 @@ mod tests {
         assert_eq!(flat_items[0].name, "GPT-5");
         assert_eq!(flat_items[1].provider_id, "nanogpt");
         assert_eq!(flat_items[1].name, "OpenAI o1");
+    }
+
+    #[test]
+    fn test_dialog_search_priority_groups_rank_before_other_group_matches() {
+        let mut dialog = Dialog::with_items(
+            "Sessions",
+            vec![
+                DialogItem {
+                    id: "other".to_string(),
+                    name: "parser".to_string(),
+                    group: "other-workspace".to_string(),
+                    description: String::new(),
+                    tip: None,
+                    provider_id: "parser".to_string(),
+                    active: false,
+                },
+                DialogItem {
+                    id: "current".to_string(),
+                    name: "alpha parser".to_string(),
+                    group: "current-workspace".to_string(),
+                    description: String::new(),
+                    tip: None,
+                    provider_id: "alpha parser".to_string(),
+                    active: false,
+                },
+            ],
+        );
+
+        dialog.set_search_query("parser");
+        assert_eq!(dialog.get_flat_items()[0].id, "other");
+
+        dialog.set_search_priority_groups(vec!["current-workspace".to_string()]);
+
+        let flat_items = dialog.get_flat_items();
+        assert_eq!(flat_items.len(), 2);
+        assert_eq!(flat_items[0].id, "current");
+        assert_eq!(flat_items[1].id, "other");
     }
 
     #[test]

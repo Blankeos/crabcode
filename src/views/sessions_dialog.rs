@@ -39,6 +39,7 @@ pub struct SessionsDialogState {
     pub pending_delete: Option<String>,
     pub filter: SessionsDialogFilter,
     workspace_group_ids: HashMap<String, i64>,
+    current_workspace_id: Option<i64>,
 }
 
 impl SessionsDialogState {
@@ -48,6 +49,7 @@ impl SessionsDialogState {
             pending_delete: None,
             filter: SessionsDialogFilter::All,
             workspace_group_ids: HashMap::new(),
+            current_workspace_id: None,
         }
     }
 
@@ -61,6 +63,7 @@ impl SessionsDialogState {
             pending_delete: None,
             filter: SessionsDialogFilter::All,
             workspace_group_ids: HashMap::new(),
+            current_workspace_id: None,
         }
     }
 
@@ -68,19 +71,23 @@ impl SessionsDialogState {
         let previous_dialog = self.dialog.clone();
         let title = self.dialog.title.clone();
         let was_visible = self.dialog.is_visible();
-        let selected_index = self.dialog.selected_index;
+        let selected_item = self
+            .dialog
+            .get_selected()
+            .map(|item| (item.id.clone(), item.provider_id.clone()));
         let focused_group = self.dialog.get_focused_group_header().map(str::to_string);
         let scroll_offset = self.dialog.scroll_offset;
         let visible_row_count = self.dialog.visible_row_count;
-        let items_clone = items.clone();
         let search_query = self.dialog.search_query.clone();
         let collapsed_groups = self.dialog.collapsed_groups();
         let filter = self.filter;
+        let priority_groups = self.current_workspace_priority_groups();
 
         self.dialog = Dialog::with_items(title, items)
             .with_position(DialogPosition::Left)
             .with_collapsible_groups(true)
-            .with_focusable_group_headers(true);
+            .with_focusable_group_headers(true)
+            .with_search_priority_groups(priority_groups);
         self.dialog.set_collapsed_groups(collapsed_groups);
         self.dialog = with_sessions_actions(self.dialog.clone(), filter, false);
         self.dialog.restore_search_query(search_query);
@@ -91,8 +98,8 @@ impl SessionsDialogState {
 
         if let Some(group) = focused_group {
             let _ = self.dialog.focus_group_header(&group);
-        } else if selected_index < items_clone.len() {
-            self.dialog.selected_index = selected_index;
+        } else if let Some((id, provider_id)) = selected_item {
+            self.dialog.select_item_by_key(&id, &provider_id);
         }
         self.dialog.visible_row_count = visible_row_count;
         self.dialog.scroll_offset = scroll_offset;
@@ -102,6 +109,12 @@ impl SessionsDialogState {
 
     pub fn set_workspace_group_ids(&mut self, group_ids: HashMap<String, i64>) {
         self.workspace_group_ids = group_ids;
+        self.apply_current_workspace_search_priority();
+    }
+
+    pub fn set_current_workspace_id(&mut self, workspace_id: i64) {
+        self.current_workspace_id = Some(workspace_id);
+        self.apply_current_workspace_search_priority();
     }
 
     pub fn focus_workspace(&mut self, workspace_id: i64) -> bool {
@@ -132,6 +145,22 @@ impl SessionsDialogState {
         let group = self.dialog.get_focused_group_header()?.to_string();
         let workspace_id = self.workspace_group_ids.get(&group).copied()?;
         Some((group, workspace_id))
+    }
+
+    fn current_workspace_priority_groups(&self) -> Vec<String> {
+        let Some(current_workspace_id) = self.current_workspace_id else {
+            return Vec::new();
+        };
+
+        self.workspace_group_ids
+            .iter()
+            .filter_map(|(group, id)| (*id == current_workspace_id).then(|| group.clone()))
+            .collect()
+    }
+
+    fn apply_current_workspace_search_priority(&mut self) {
+        let priority_groups = self.current_workspace_priority_groups();
+        self.dialog.set_search_priority_groups(priority_groups);
     }
 }
 
@@ -769,6 +798,47 @@ mod tests {
         assert_eq!(state.dialog.search_query, "Second");
         assert_eq!(state.dialog.search_textarea.lines().join(""), "Second");
         assert_eq!(state.dialog.scroll_offset, 3);
+    }
+
+    #[test]
+    fn search_prioritizes_current_workspace_sessions() {
+        let mut state = init_sessions_dialog(
+            "Sessions",
+            vec![
+                session_item_in_group("other", "Fix parser bug", "other-workspace"),
+                session_item_in_group("current", "Parser cleanup", "current-workspace"),
+            ],
+        );
+        state.set_current_workspace_id(2);
+        state.set_workspace_group_ids(HashMap::from([
+            ("other-workspace".to_string(), 1),
+            ("current-workspace".to_string(), 2),
+        ]));
+
+        state.dialog.set_search_query("parser");
+
+        assert_eq!(state.dialog.get_selected().unwrap().id, "current");
+    }
+
+    #[test]
+    fn refresh_preserves_selected_session_by_id_after_reorder() {
+        let mut state = init_sessions_dialog(
+            "Sessions",
+            vec![
+                session_item("session-1", "First session"),
+                session_item("session-2", "Second session"),
+            ],
+        );
+        state.dialog.show();
+        state.dialog.selected_index = 1;
+
+        state.refresh_items(vec![
+            session_item("session-2", "Second session"),
+            session_item("session-1", "First session"),
+        ]);
+
+        assert_eq!(state.dialog.get_selected().unwrap().id, "session-2");
+        assert_eq!(state.dialog.selected_index, 0);
     }
 
     #[test]
