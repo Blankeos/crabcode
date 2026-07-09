@@ -506,8 +506,42 @@ fn infer_patch_hunk_start(
     }
 
     let byte_offset = find_hunk_text_offset(&content, &old_text)
-        .or_else(|| find_hunk_text_offset(&content, &new_text))?;
+        .or_else(|| find_hunk_text_offset(&content, &new_text))
+        .or_else(|| infer_patch_hunk_offset_from_context(&content, pending))?;
     Some(content[..byte_offset].lines().count() + 1)
+}
+
+fn infer_patch_hunk_offset_from_context(
+    content: &str,
+    pending: &[(char, String)],
+) -> Option<usize> {
+    let context_before = pending
+        .iter()
+        .take_while(|(prefix, _)| *prefix == ' ')
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !context_before.is_empty() {
+        let context_offset = find_hunk_text_offset(content, &context_before)?;
+        return Some(context_offset);
+    }
+
+    let context_after = pending
+        .iter()
+        .rev()
+        .take_while(|(prefix, _)| *prefix == ' ')
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if context_after.is_empty() {
+        return None;
+    }
+
+    let context_offset = find_hunk_text_offset(content, &context_after)?;
+    Some(context_offset)
 }
 
 fn patch_hunk_side_text(pending: &[(char, String)], excluded_prefix: char) -> String {
@@ -6535,6 +6569,44 @@ mod tests {
         assert!(rendered[0].contains("hello.txt (+1 -1)"));
         assert!(rendered.iter().any(|line| line == "    2 -beta"));
         assert!(rendered.iter().any(|line| line == "    2 +bravo"));
+    }
+
+    #[test]
+    fn test_apply_patch_tool_infers_line_numbers_for_rangeless_insertion_with_context() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("hello.rs");
+        std::fs::write(&file_path, "fn before() {}\nfn after() {}\n").unwrap();
+        let file_path = file_path.to_string_lossy().to_string();
+        let chat = Chat::new();
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: {}\n@@\n fn before() {{}}\n+#[test]\n+fn inserted() {{}}\n fn after() {{}}\n*** End Patch\n",
+            file_path
+        );
+        std::fs::write(
+            &file_path,
+            "fn before() {}\n#[test]\nfn inserted() {}\nfn after() {}\n",
+        )
+        .unwrap();
+        let content = serde_json::json!({
+            "name": "apply_patch",
+            "status": "ok",
+            "args": { "patch": patch },
+            "metadata": { "file_count": 1 },
+            "output_preview": "Applied patch: updated 1",
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let lines = chat.format_tool_row(&msg, 120, &colors, false);
+        let rendered = lines.iter().map(trimmed_line_text).collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line == "    1  fn before() {}"));
+        assert!(rendered.iter().any(|line| line == "    2 +#[test]"));
+        assert!(rendered
+            .iter()
+            .any(|line| line == "    3 +fn inserted() {}"));
+        assert!(rendered.iter().any(|line| line == "    4  fn after() {}"));
     }
 
     #[test]
