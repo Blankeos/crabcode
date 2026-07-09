@@ -2,7 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.5] - 2026-06-29
+## [0.0.6] - 2026-07-09
+
+### Bug Fixes
+
+- Make active tool marker animation stateless by @Blankeos
+- Infer apply_patch hunk line numbers from surrounding context by @Blankeos
+- Preserve selection when restoring and updating search filters by @Blankeos
+- Infer commandcode image support from capabilities by @Blankeos
+- Surface websocket fallback warnings for stream disconnects by @Blankeos
+- Add provider alias for connect autocomplete by @Blankeos
+- Preserve chat input draft when running command palette commands by @Blankeos
+
+### Features
+
+- Prioritize current workspace sessions in search by @Blankeos
+- Add expandable large paste placeholders with hover tooltip by @Blankeos
+- Prioritize reasoning effort options from discovery metadata by @Blankeos
+- Add editor-anchored opening for chat selections and file links by @Blankeos
+- Scroll into view on load by @Blankeos
+- Reuse Enter key for repeat navigation after search by @Blankeos
+
+### Performance
+
+- Optimize streaming rendering and token usage updates by @Blankeos
+
+## [0.0.5] - 2026-06-30
 
 ### Bug Fixes
 
@@ -21,6 +46,10 @@ All notable changes to this project will be documented in this file.
 - Improve subagent footer layout at narrow widths by @Blankeos
 - Restore input navigation in running subagent sessions by @Blankeos
 - Add command/option shortcuts for custom text editing by @Blankeos
+
+### Chores
+
+- Fix release yml by @Blankeos
 
 ### Features
 
