@@ -82,6 +82,13 @@ pub struct Chat {
     streaming_renderer: Option<SimpleStreamingRenderer>,
     /// Index of the message currently being rendered by streaming_renderer
     streaming_message_idx: Option<usize>,
+    /// Byte length of the streaming message already mirrored into streaming_renderer.
+    streaming_renderer_content_len: usize,
+    /// Earliest streaming assistant index with text appended since the last markdown/layout refresh.
+    pending_streaming_render_dirty_from: Option<usize>,
+    /// Whether pending streaming changes include message content that must wait for markdown refresh.
+    pending_streaming_content_dirty: bool,
+    last_streaming_cache_refresh_at: Option<std::time::Instant>,
     /// Whether assistant reasoning/thinking text is expanded in chat.
     thinking_visible: bool,
     /// Starting line positions for each message in the rendered content
@@ -161,6 +168,7 @@ const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
 const MIN_MOUSE_WHEEL_LINES: usize = 1;
 const MAX_MOUSE_WHEEL_LINES: usize = 3;
 const MOUSE_WHEEL_VIEWPORT_FRACTION: usize = 8;
+const STREAMING_RENDER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 const TOOL_RESULT_MAX_SCREEN_LINES: usize = 8;
 const PATCH_DIFF_PREVIEW_MAX_LINES: usize = 40;
 const TOOL_MARKER_ACTIVE: &str = "⬡";
@@ -1250,6 +1258,10 @@ impl Chat {
             last_tps_calculated: None,
             streaming_renderer: None,
             streaming_message_idx: None,
+            streaming_renderer_content_len: 0,
+            pending_streaming_render_dirty_from: None,
+            pending_streaming_content_dirty: false,
+            last_streaming_cache_refresh_at: None,
             thinking_visible: true,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
@@ -1305,6 +1317,10 @@ impl Chat {
             last_tps_calculated: None,
             streaming_renderer: None,
             streaming_message_idx: None,
+            streaming_renderer_content_len: 0,
+            pending_streaming_render_dirty_from: None,
+            pending_streaming_content_dirty: false,
+            last_streaming_cache_refresh_at: None,
             thinking_visible: true,
             message_line_positions: Vec::new(),
             selection: Selection::new(),
@@ -1428,7 +1444,7 @@ impl Chat {
             self.messages.push(Message::incomplete(chunk_str));
         }
 
-        self.invalidate_cache_from(appended_idx);
+        self.mark_streaming_render_pending(appended_idx, true);
 
         let now = std::time::Instant::now();
         if self.streaming_start_time.is_none() {
@@ -1468,7 +1484,7 @@ impl Chat {
             self.messages.push(msg);
         }
 
-        self.invalidate_cache_from(appended_idx);
+        self.mark_streaming_render_pending(appended_idx, false);
 
         let now = std::time::Instant::now();
         if self.streaming_start_time.is_none() {
@@ -1520,10 +1536,25 @@ impl Chat {
         self.cached_active_tools_revision.set(0);
         self.cached_has_active_tools.set(false);
         self.tool_marker_animation_phase = false;
+        self.streaming_renderer_content_len = 0;
+        self.pending_streaming_render_dirty_from = None;
+        self.pending_streaming_content_dirty = false;
+        self.last_streaming_cache_refresh_at = None;
         self.invalidate_cache();
     }
 
+    fn mark_streaming_render_pending(&mut self, message_idx: usize, content_dirty: bool) {
+        self.pending_streaming_render_dirty_from = Some(
+            self.pending_streaming_render_dirty_from
+                .map(|idx| idx.min(message_idx))
+                .unwrap_or(message_idx),
+        );
+        self.pending_streaming_content_dirty |= content_dirty;
+    }
+
     fn invalidate_cache(&mut self) {
+        self.pending_streaming_render_dirty_from = None;
+        self.pending_streaming_content_dirty = false;
         self.render_revision = self.render_revision.wrapping_add(1).max(1);
         self.render_dirty_from = 0;
         self.cached_fingerprint = 0;
@@ -1531,6 +1562,8 @@ impl Chat {
     }
 
     fn invalidate_cache_from(&mut self, message_idx: usize) {
+        self.pending_streaming_render_dirty_from = None;
+        self.pending_streaming_content_dirty = false;
         self.render_revision = self.render_revision.wrapping_add(1).max(1);
         self.render_dirty_from = if self.render_dirty_from == usize::MAX {
             message_idx
@@ -1620,6 +1653,10 @@ impl Chat {
 
     pub fn get_streaming_tokens_per_sec(&self) -> Option<f64> {
         self.cached_tokens_per_sec
+    }
+
+    pub fn streaming_token_count(&self) -> usize {
+        self.streaming_token_count
     }
 
     pub fn pause_streaming_tps_timer(&mut self) {
@@ -1740,6 +1777,7 @@ impl Chat {
         self.streaming_decode_paused_duration = std::time::Duration::default();
         self.streaming_renderer = None;
         self.streaming_message_idx = None;
+        self.streaming_renderer_content_len = 0;
         self.streaming_token_counter = None;
         self.invalidate_cache();
     }
@@ -1860,26 +1898,59 @@ impl Chat {
                 // Different message, reset renderer
                 self.streaming_renderer = Some(SimpleStreamingRenderer::new());
                 self.streaming_message_idx = Some(last_idx);
+                self.streaming_renderer_content_len = 0;
             }
         } else {
             // No renderer yet, create one
             self.streaming_renderer = Some(SimpleStreamingRenderer::new());
             self.streaming_message_idx = Some(last_idx);
+            self.streaming_renderer_content_len = 0;
         }
 
         // Update the renderer content if needed
         if let Some(ref mut renderer) = self.streaming_renderer {
             if let Some(msg) = self.messages.get(last_idx) {
-                if let Some(chunk) = msg.content.strip_prefix(renderer.content()) {
-                    renderer.append(chunk);
-                } else if renderer.content() != msg.content {
+                if msg.content.len() >= self.streaming_renderer_content_len {
+                    let chunk = &msg.content[self.streaming_renderer_content_len..];
+                    if !chunk.is_empty() {
+                        renderer.append(chunk);
+                        self.streaming_renderer_content_len = msg.content.len();
+                    }
+                } else {
                     renderer.reset();
                     renderer.append(&msg.content);
+                    self.streaming_renderer_content_len = msg.content.len();
                 }
                 if renderer.ensure_rendered(max_width, colors, false) {
-                    self.invalidate_cache_from(last_idx);
+                    let dirty_from = self
+                        .pending_streaming_render_dirty_from
+                        .take()
+                        .unwrap_or(last_idx);
+                    self.pending_streaming_content_dirty = false;
+                    self.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
+                    self.invalidate_cache_from(dirty_from);
                 }
             }
+        }
+
+        self.flush_non_content_streaming_render_pending();
+    }
+
+    fn flush_non_content_streaming_render_pending(&mut self) {
+        if self.pending_streaming_content_dirty {
+            return;
+        }
+
+        let Some(dirty_from) = self.pending_streaming_render_dirty_from else {
+            return;
+        };
+
+        let should_refresh = self
+            .last_streaming_cache_refresh_at
+            .map_or(true, |last| last.elapsed() >= STREAMING_RENDER_INTERVAL);
+        if should_refresh {
+            self.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
+            self.invalidate_cache_from(dirty_from);
         }
     }
 
@@ -7637,6 +7708,25 @@ codex exec --skip-git-repo-check \
             .iter()
             .map(line_text)
             .any(|line| line.contains("interrupted")));
+    }
+
+    #[test]
+    fn streaming_append_defers_render_revision_until_markdown_refresh() {
+        let mut chat = Chat::new();
+        let colors = test_colors();
+
+        chat.begin_streaming_turn();
+        chat.append_to_last_assistant("hello");
+
+        let before_render_revision = chat.render_revision();
+        assert_eq!(before_render_revision, 1);
+
+        chat.ensure_render_cache(80, "model", &colors);
+        let after_first_refresh = chat.render_revision();
+        assert!(after_first_refresh > before_render_revision);
+
+        chat.append_to_last_assistant(" world");
+        assert_eq!(chat.render_revision(), after_first_refresh);
     }
 
     #[test]

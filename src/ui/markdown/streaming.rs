@@ -17,7 +17,6 @@ use ratatui::{
 #[derive(Debug, Clone)]
 pub struct SimpleStreamingRenderer {
     content: String,
-    last_content_hash: u64,
     needs_render: bool,
     cached_lines: Vec<Line<'static>>,
     cached_width: usize,
@@ -25,14 +24,19 @@ pub struct SimpleStreamingRenderer {
     last_rendered_at: Option<std::time::Instant>,
 }
 
-const STREAMING_MARKDOWN_RENDER_INTERVAL: std::time::Duration =
+const SHORT_STREAM_MARKDOWN_RENDER_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(50);
+const MEDIUM_STREAM_MARKDOWN_RENDER_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+const LONG_STREAM_MARKDOWN_RENDER_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(250);
+const MEDIUM_STREAM_CONTENT_BYTES: usize = 32 * 1024;
+const LONG_STREAM_CONTENT_BYTES: usize = 128 * 1024;
 
 impl SimpleStreamingRenderer {
     pub fn new() -> Self {
         Self {
             content: String::new(),
-            last_content_hash: 0,
             needs_render: true,
             cached_lines: Vec::new(),
             cached_width: 0,
@@ -44,7 +48,6 @@ impl SimpleStreamingRenderer {
     /// Reset the renderer for a new message
     pub fn reset(&mut self) {
         self.content.clear();
-        self.last_content_hash = 0;
         self.needs_render = true;
         self.cached_lines.clear();
         self.cached_width = 0;
@@ -71,7 +74,6 @@ impl SimpleStreamingRenderer {
     /// Mark the renderer as rendered (reset the needs_render flag)
     pub fn mark_rendered(&mut self) {
         self.needs_render = false;
-        self.last_content_hash = compute_hash(&self.content);
         self.last_rendered_at = Some(std::time::Instant::now());
     }
 
@@ -99,9 +101,9 @@ impl SimpleStreamingRenderer {
             && self.needs_render
             && !render_config_changed
             && !self.cached_lines.is_empty()
-            && self
-                .last_rendered_at
-                .is_some_and(|last| last.elapsed() < STREAMING_MARKDOWN_RENDER_INTERVAL)
+            && self.last_rendered_at.map_or(false, |last| {
+                last.elapsed() < streaming_markdown_render_interval(self.content.len())
+            })
         {
             return false;
         }
@@ -114,20 +116,20 @@ impl SimpleStreamingRenderer {
     }
 }
 
+fn streaming_markdown_render_interval(content_len: usize) -> std::time::Duration {
+    if content_len >= LONG_STREAM_CONTENT_BYTES {
+        LONG_STREAM_MARKDOWN_RENDER_INTERVAL
+    } else if content_len >= MEDIUM_STREAM_CONTENT_BYTES {
+        MEDIUM_STREAM_MARKDOWN_RENDER_INTERVAL
+    } else {
+        SHORT_STREAM_MARKDOWN_RENDER_INTERVAL
+    }
+}
+
 impl Default for SimpleStreamingRenderer {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Compute a hash of the content
-fn compute_hash(content: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
 }
 
 fn theme_colors_hash(colors: &ThemeColors) -> u64 {

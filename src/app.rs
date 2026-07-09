@@ -693,7 +693,7 @@ pub struct App {
     last_git_branch_check: std::time::Instant,
     discovery: Option<crate::model::discovery::Discovery>,
     cached_usage_text: String,
-    cached_usage_check: (usize, u64),
+    cached_usage_check: (usize, u64, usize),
     terminal_title_enabled: bool,
     terminal_title_last: Option<String>,
     terminal_title_animation_origin: std::time::Instant,
@@ -986,7 +986,7 @@ impl App {
             last_git_branch_check: now,
             discovery,
             cached_usage_text: String::new(),
-            cached_usage_check: (0, 0),
+            cached_usage_check: (0, 0, 0),
             terminal_title_enabled: crate::notify::terminal_title_supported(),
             terminal_title_last: None,
             terminal_title_animation_origin: now,
@@ -1275,7 +1275,7 @@ impl App {
         }
 
         self.sync_active_streaming_flag();
-        self.cached_usage_check = (usize::MAX, u64::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
     }
 
     fn switch_to_session(&mut self, session_id: &str) -> bool {
@@ -1569,7 +1569,7 @@ impl App {
         self.input.clear();
         self.base_focus = BaseFocus::Home;
         self.sync_active_streaming_flag();
-        self.cached_usage_check = (usize::MAX, u64::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         self.refresh_sessions_dialog();
     }
 
@@ -1585,7 +1585,7 @@ impl App {
         self.input.clear();
         self.base_focus = BaseFocus::Home;
         self.sync_active_streaming_flag();
-        self.cached_usage_check = (usize::MAX, u64::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         self.refresh_sessions_dialog();
         session_id
     }
@@ -1912,7 +1912,11 @@ impl App {
 
     fn session_usage_text(&self) -> String {
         let messages = &self.chat_state.chat.messages;
-        let total_tokens = crate::session::compaction::total_context_tokens(messages);
+        let total_tokens = if self.is_streaming {
+            Self::streaming_context_tokens(messages, self.chat_state.chat.streaming_token_count())
+        } else {
+            crate::session::compaction::total_context_tokens(messages)
+        };
 
         let mut text = if total_tokens == 0 {
             String::new()
@@ -1963,6 +1967,27 @@ impl App {
         }
 
         text
+    }
+
+    fn streaming_context_tokens(
+        messages: &[crate::session::types::Message],
+        streaming_token_count: usize,
+    ) -> usize {
+        let streaming_idx = messages.iter().rposition(|message| {
+            message.role == crate::session::types::MessageRole::Assistant && !message.is_complete
+        });
+
+        messages
+            .iter()
+            .enumerate()
+            .map(|(idx, message)| {
+                if Some(idx) == streaming_idx {
+                    streaming_token_count
+                } else {
+                    crate::session::compaction::message_context_tokens(message)
+                }
+            })
+            .sum()
     }
 
     fn reasoning_capability_for_model(
@@ -2763,7 +2788,7 @@ impl App {
                         let provider_id_clone = provider_id.clone();
                         self.model = model_id_clone.clone();
                         self.provider_name = provider_id_clone.clone();
-                        self.cached_usage_check = (usize::MAX, u64::MAX);
+                        self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
 
                         if let Some(ref dao) = self.prefs_dao {
                             if let Err(e) =
@@ -2994,7 +3019,7 @@ impl App {
                             self.input.clear();
                             self.base_focus = BaseFocus::Home;
                             self.sync_active_streaming_flag();
-                            self.cached_usage_check = (usize::MAX, u64::MAX);
+                            self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
                         }
                         self.refresh_sessions_dialog();
                         let _ = self
@@ -3029,7 +3054,7 @@ impl App {
                             self.input.clear();
                             self.base_focus = BaseFocus::Home;
                             self.sync_active_streaming_flag();
-                            self.cached_usage_check = (usize::MAX, u64::MAX);
+                            self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
                         }
                         true
                     }
@@ -3937,7 +3962,7 @@ impl App {
                     let provider_id_clone = provider_id.clone();
                     self.model = model_id_clone.clone();
                     self.provider_name = provider_id_clone;
-                    self.cached_usage_check = (usize::MAX, u64::MAX);
+                    self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
 
                     if let Some(ref dao) = self.prefs_dao {
                         if let Err(e) =
@@ -5168,7 +5193,7 @@ impl App {
             before_tokens,
         });
         self.is_streaming = true;
-        self.cached_usage_check = (usize::MAX, u64::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         let _ = self.session_manager.set_session_status(
             &session_id,
             crate::session::types::SessionStatus::Waiting,
@@ -7187,7 +7212,7 @@ impl App {
         if disconnected || !events.is_empty() {
             self.compaction_receiver = None;
             self.compaction_pending = None;
-            self.cached_usage_check = (usize::MAX, u64::MAX);
+            self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         }
 
         let mut completed_compaction_sessions = Vec::new();
@@ -7228,7 +7253,7 @@ impl App {
                                 crate::session::types::SessionStatus::Idle,
                                 None,
                             );
-                            self.cached_usage_check = (usize::MAX, u64::MAX);
+                            self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
                             self.refresh_sessions_dialog();
                             push_toast(Toast::new(
                                 format!(
@@ -7469,6 +7494,18 @@ impl App {
                 .any(|state| state.stream.is_some() || state.external_stream.is_some())
             || (self.overlay_focus == OverlayFocus::SessionsDialog
                 && self.sessions_dialog_state.dialog.is_visible())
+    }
+
+    pub fn is_streaming_animation_only(&self) -> bool {
+        self.is_streaming
+            && self.base_focus != BaseFocus::Home
+            && !self.has_active_selection_edge_scroll()
+            && !self.chat_state.chat.has_active_tool_messages()
+            && !self.has_active_retry_status()
+            && self.compaction_receiver.is_none()
+            && self.storage_receiver.is_none()
+            && self.title_generation_receiver.is_none()
+            && self.overlay_focus != OverlayFocus::SessionsDialog
     }
 
     fn has_active_selection_edge_scroll(&self) -> bool {
@@ -8649,7 +8686,7 @@ impl App {
             self.input.clear();
             self.base_focus = BaseFocus::Home;
             self.sync_active_streaming_flag();
-            self.cached_usage_check = (usize::MAX, u64::MAX);
+            self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         }
         self.refresh_sessions_dialog();
         Ok(())
@@ -8674,7 +8711,7 @@ impl App {
             self.input.clear();
             self.base_focus = BaseFocus::Home;
             self.sync_active_streaming_flag();
-            self.cached_usage_check = (usize::MAX, u64::MAX);
+            self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
 
             let fallback_path = self.session_manager.current_workspace_path().to_string();
             if fallback_path != path_text && !fallback_path.trim().is_empty() {
@@ -8726,7 +8763,7 @@ impl App {
 
         self.model = model_id.clone();
         self.provider_name = provider_id.clone();
-        self.cached_usage_check = (usize::MAX, u64::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
 
         if let Some(ref dao) = self.prefs_dao {
             let _ = dao.set_active_model(provider_id, model_id);
@@ -8963,7 +9000,7 @@ impl App {
             .session_manager
             .add_message_to_current_session(&user_message);
         self.chat_state.chat.add_message(user_message);
-        self.cached_usage_check = (usize::MAX, u64::MAX);
+        self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
     }
 
     fn submit_queued_messages_for_session(&mut self, session_id: &str) -> bool {
@@ -9089,11 +9126,13 @@ impl App {
         let fingerprint = (
             self.chat_state.chat.messages.len(),
             self.chat_state.chat.render_revision(),
+            if self.is_streaming {
+                self.chat_state.chat.streaming_token_count() / 256
+            } else {
+                0
+            },
         );
-        let keep_streaming_usage_cache = self.is_streaming
-            && self.cached_usage_check.0 == fingerprint.0
-            && self.cached_usage_check.0 != usize::MAX;
-        if self.cached_usage_check != fingerprint && !keep_streaming_usage_cache {
+        if self.cached_usage_check != fingerprint {
             self.cached_usage_check = fingerprint;
             self.cached_usage_text = self.session_usage_text();
         }
@@ -9775,7 +9814,7 @@ mod tests {
             last_git_branch_check: std::time::Instant::now(),
             discovery: None,
             cached_usage_text: String::new(),
-            cached_usage_check: (0, 0),
+            cached_usage_check: (0, 0, 0),
             terminal_title_enabled: false,
             terminal_title_last: None,
             terminal_title_animation_origin: std::time::Instant::now(),

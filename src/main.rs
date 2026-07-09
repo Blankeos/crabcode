@@ -1008,7 +1008,8 @@ async fn run_event_loop(
 ) -> Result<()> {
     // Adaptive poll duration: fast when animations run (home page / streaming),
     // slow otherwise to avoid wasting CPU on unnecessary re-renders.
-    const FAST_POLL: Duration = Duration::from_millis(16); // ~60fps for animations
+    const FAST_POLL: Duration = Duration::from_millis(16); // ~60fps for interactive animations
+    const STREAMING_POLL: Duration = Duration::from_millis(50); // ~20fps for token streams
     const SLOW_POLL: Duration = Duration::from_millis(250); // ~4fps idle
 
     let mut needs_redraw = true;
@@ -1027,7 +1028,9 @@ async fn run_event_loop(
             needs_redraw = false;
         }
 
-        let poll_duration = if animation_needed {
+        let poll_duration = if animation_needed && app.is_streaming_animation_only() {
+            STREAMING_POLL
+        } else if animation_needed {
             FAST_POLL
         } else {
             SLOW_POLL
