@@ -7499,10 +7499,9 @@ impl App {
     }
 
     pub fn is_streaming_animation_only(&self) -> bool {
-        self.is_streaming
+        (self.is_streaming || self.chat_state.chat.has_active_tool_messages())
             && self.base_focus != BaseFocus::Home
             && !self.has_active_selection_edge_scroll()
-            && !self.chat_state.chat.has_active_tool_messages()
             && !self.has_active_retry_status()
             && self.compaction_receiver.is_none()
             && self.storage_receiver.is_none()

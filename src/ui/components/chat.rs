@@ -122,7 +122,6 @@ pub struct Chat {
     cached_fingerprint: u64,
     cached_active_tools_revision: std::cell::Cell<u64>,
     cached_has_active_tools: std::cell::Cell<bool>,
-    tool_marker_animation_phase: bool,
     hovered_image: Option<ChatImageTarget>,
     hovered_hyperlink: Option<ChatHyperlinkHover>,
 }
@@ -1319,7 +1318,6 @@ impl Chat {
             cached_fingerprint: 0,
             cached_active_tools_revision: std::cell::Cell::new(0),
             cached_has_active_tools: std::cell::Cell::new(false),
-            tool_marker_animation_phase: false,
             hovered_image: None,
             hovered_hyperlink: None,
         }
@@ -1378,7 +1376,6 @@ impl Chat {
             cached_fingerprint: 0,
             cached_active_tools_revision: std::cell::Cell::new(0),
             cached_has_active_tools: std::cell::Cell::new(false),
-            tool_marker_animation_phase: false,
             hovered_image: None,
             hovered_hyperlink: None,
         }
@@ -1569,7 +1566,6 @@ impl Chat {
         self.cached_fingerprint = 0;
         self.cached_active_tools_revision.set(0);
         self.cached_has_active_tools.set(false);
-        self.tool_marker_animation_phase = false;
         self.streaming_renderer_content_len = 0;
         self.pending_streaming_render_dirty_from = None;
         self.pending_streaming_content_dirty = false;
@@ -1816,15 +1812,27 @@ impl Chat {
         self.invalidate_cache();
     }
 
+    fn active_tool_marker(&self) -> &'static str {
+        TOOL_MARKER_ACTIVE
+    }
+
     fn current_tool_marker_animation_phase() -> bool {
         (now_epoch_ms() / 500) % 2 == 1
     }
 
-    fn active_tool_marker(&self) -> &'static str {
-        if self.tool_marker_animation_phase {
-            TOOL_MARKER_DONE
-        } else {
-            TOOL_MARKER_ACTIVE
+    fn apply_active_tool_marker_blink(lines: &mut [Line<'static>]) {
+        if !Self::current_tool_marker_animation_phase() {
+            return;
+        }
+
+        for line in lines {
+            let Some(first_span) = line.spans.first_mut() else {
+                continue;
+            };
+
+            if first_span.content.as_ref() == TOOL_MARKER_ACTIVE {
+                first_span.content = TOOL_MARKER_DONE.into();
+            }
         }
     }
 
@@ -2937,19 +2945,6 @@ impl Chat {
 
         let max_width = content_area.width as usize;
 
-        let has_active_tools = self.has_active_tool_messages();
-        let animation_phase = if has_active_tools {
-            Self::current_tool_marker_animation_phase()
-        } else {
-            false
-        };
-        if self.tool_marker_animation_phase != animation_phase {
-            self.tool_marker_animation_phase = animation_phase;
-            if has_active_tools {
-                self.cached_revision = 0;
-            }
-        }
-
         self.ensure_render_cache(max_width, model, colors);
         self.ensure_search_matches(max_width, colors);
 
@@ -2985,6 +2980,7 @@ impl Chat {
             .unwrap_or(colors.interactive);
 
         let mut content_lines: Vec<Line<'static>> = all_lines[visible_start..visible_end].to_vec();
+        Self::apply_active_tool_marker_blink(&mut content_lines);
         apply_timeline_highlight_to_lines(
             &mut content_lines,
             visible_highlight_range,
@@ -6186,8 +6182,8 @@ mod tests {
     }
 
     #[test]
-    fn test_active_tool_marker_uses_animation_phase() {
-        let mut chat = Chat::new();
+    fn test_active_tool_marker_stays_static() {
+        let chat = Chat::new();
         let content = serde_json::json!({
             "name": "webfetch",
             "status": "running",
@@ -6202,7 +6198,6 @@ mod tests {
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
-        chat.tool_marker_animation_phase = true;
         let second_frame = chat
             .format_tool_row(&msg, 80, &colors, false)
             .iter()
@@ -6210,7 +6205,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(first_frame[0], "⬡ Webfetch https://example.com");
-        assert_eq!(second_frame[0], "⬢ Webfetch https://example.com");
+        assert_eq!(second_frame[0], "⬡ Webfetch https://example.com");
     }
 
     #[test]
