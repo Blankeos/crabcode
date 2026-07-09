@@ -540,6 +540,8 @@ fn coalesce_streaming_chunks(
 
 type ReasoningEffortOverrides =
     std::collections::HashMap<(String, String), crate::model::reasoning::ReasoningEffort>;
+type ModelReasoningOptions =
+    std::collections::HashMap<(String, String), Vec<crate::model::reasoning::ReasoningOption>>;
 
 fn reasoning_effort_overrides_from_prefs(
     prefs: &crate::persistence::prefs::ModelPreferences,
@@ -660,6 +662,7 @@ pub struct App {
     // Reasoning/thinking effort is loaded from persisted preferences once, then kept process-local.
     // Changes are persisted for future starts but are not re-read into other running terminals.
     reasoning_efforts: ReasoningEffortOverrides,
+    model_reasoning_options: ModelReasoningOptions,
     pub cwd: String,
     pub base_focus: BaseFocus,
     pub overlay_focus: OverlayFocus,
@@ -951,6 +954,7 @@ impl App {
             provider_name: active_provider_name,
             small_model,
             reasoning_efforts,
+            model_reasoning_options: ModelReasoningOptions::new(),
             cwd: cwd.clone(),
             base_focus: BaseFocus::Home,
             overlay_focus: OverlayFocus::None,
@@ -1966,6 +1970,14 @@ impl App {
         provider_id: &str,
         model_id: &str,
     ) -> Option<crate::model::reasoning::ReasoningCapability> {
+        if let Some(capability) = self
+            .model_reasoning_options
+            .get(&(provider_id.to_string(), model_id.to_string()))
+            .and_then(|options| crate::model::reasoning::capability_from_options(options))
+        {
+            return Some(capability);
+        }
+
         self.discovery
             .as_ref()
             .and_then(|discovery| discovery.get_model_reasoning_capability(provider_id, model_id))
@@ -6153,6 +6165,16 @@ impl App {
             return;
         };
 
+        self.model_reasoning_options = models
+            .iter()
+            .map(|model| {
+                (
+                    (model.provider_id.clone(), model.id.clone()),
+                    model.reasoning_options.clone(),
+                )
+            })
+            .collect();
+
         let prefs = self
             .prefs_dao
             .as_ref()
@@ -9722,6 +9744,7 @@ mod tests {
             provider_name: "test-provider".to_string(),
             small_model: None,
             reasoning_efforts: ReasoningEffortOverrides::new(),
+            model_reasoning_options: ModelReasoningOptions::new(),
             cwd: ".".to_string(),
             base_focus: BaseFocus::Home,
             overlay_focus: OverlayFocus::None,

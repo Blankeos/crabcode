@@ -157,15 +157,13 @@ impl ModelExtensions {
     }
 
     pub fn is_unauthenticated_free_model(model: &crate::model::types::Model) -> bool {
-        Self::is_unauthenticated_free_provider(&model.provider_id)
-            && model
-                .capabilities
-                .iter()
-                .any(|capability| capability == "free")
+        Self::is_unauthenticated_free_provider(&model.provider_id) && model.free
     }
 
     pub fn is_available_without_connection(model: &crate::model::types::Model) -> bool {
-        Self::is_runtime_provider(&model.provider_id) || Self::is_unauthenticated_free_model(model)
+        model.local
+            || Self::is_runtime_provider(&model.provider_id)
+            || Self::is_unauthenticated_free_model(model)
     }
 
     pub fn model_matches_provider_filter(
@@ -381,8 +379,11 @@ mod tests {
             family: String::new(),
             provider_id: "opencode".to_string(),
             provider_name: "OpenCode Zen".to_string(),
-            capabilities: vec!["free".to_string()],
-            reasoning: false,
+            attachment: false,
+            structured_output: false,
+            free: true,
+            local: false,
+            reasoning_options: Vec::new(),
         };
         let paid_model = crate::model::types::Model {
             id: "gpt-5.3-codex".to_string(),
@@ -390,8 +391,11 @@ mod tests {
             family: String::new(),
             provider_id: "opencode".to_string(),
             provider_name: "OpenCode Zen".to_string(),
-            capabilities: Vec::new(),
-            reasoning: false,
+            attachment: false,
+            structured_output: false,
+            free: false,
+            local: false,
+            reasoning_options: Vec::new(),
         };
 
         assert!(ModelExtensions::is_available_without_connection(

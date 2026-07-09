@@ -1,6 +1,54 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::str::FromStr;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningOption {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, deserialize_with = "deserialize_string_values")]
+    pub values: Vec<String>,
+}
+
+pub fn efforts_from_options(options: &[ReasoningOption]) -> Option<Vec<ReasoningEffort>> {
+    let mut efforts = Vec::new();
+    for option in options {
+        if !option.kind.trim().eq_ignore_ascii_case("effort") {
+            continue;
+        }
+
+        for value in &option.values {
+            let Ok(effort) = value.parse() else {
+                continue;
+            };
+            if !efforts.contains(&effort) {
+                efforts.push(effort);
+            }
+        }
+    }
+
+    if efforts.is_empty() {
+        None
+    } else {
+        Some(efforts)
+    }
+}
+
+pub fn capability_from_options(options: &[ReasoningOption]) -> Option<ReasoningCapability> {
+    let efforts = efforts_from_options(options)?;
+    catalog_effort_capability(&efforts)
+}
+
+fn deserialize_string_values<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(values
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -12,6 +60,28 @@ pub enum ReasoningEffort {
     High,
     XHigh,
     Max,
+}
+
+fn catalog_effort_capability(efforts: &[ReasoningEffort]) -> Option<ReasoningCapability> {
+    let values = efforts.to_vec();
+    if values.is_empty() {
+        return None;
+    }
+
+    let default = [
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Low,
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Max,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::None,
+    ]
+    .into_iter()
+    .find(|effort| values.contains(effort))
+    .unwrap_or(values[0]);
+
+    Some(ReasoningCapability::effort(values, default))
 }
 
 impl ReasoningEffort {
@@ -213,8 +283,36 @@ pub fn capability_for_model(
     release_date: &str,
     models_dev_reasoning: bool,
 ) -> ReasoningCapability {
+    capability_for_model_with_options(
+        provider_id,
+        provider_npm,
+        model_id,
+        api_id,
+        model_name,
+        family,
+        release_date,
+        models_dev_reasoning,
+        &[],
+    )
+}
+
+pub fn capability_for_model_with_options(
+    provider_id: &str,
+    provider_npm: &str,
+    model_id: &str,
+    api_id: &str,
+    model_name: &str,
+    family: &str,
+    release_date: &str,
+    models_dev_reasoning: bool,
+    reasoning_options: &[ReasoningOption],
+) -> ReasoningCapability {
     if !models_dev_reasoning {
         return ReasoningCapability::Unsupported;
+    }
+
+    if let Some(capability) = capability_from_options(reasoning_options) {
+        return capability;
     }
 
     let provider = provider_id.to_ascii_lowercase();
@@ -800,6 +898,49 @@ mod tests {
         );
         assert_eq!(capability.values(), &[]);
         assert_eq!(capability.cycle_next(None), None);
+    }
+
+    #[test]
+    fn models_dev_effort_options_take_precedence_over_heuristics() {
+        let capability = capability_for_model_with_options(
+            "xai",
+            "@ai-sdk/xai",
+            "grok-4.5",
+            "grok-4.5",
+            "Grok 4.5",
+            "grok",
+            "",
+            true,
+            &[ReasoningOption {
+                kind: "effort".to_string(),
+                values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            }],
+        );
+        assert_eq!(
+            capability.values(),
+            &[
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ]
+        );
+        assert_eq!(capability.resolve(None), Some(ReasoningEffort::Medium));
+    }
+
+    #[test]
+    fn empty_models_dev_effort_options_fall_back_to_existing_rules() {
+        let capability = capability_for_model_with_options(
+            "xai",
+            "@ai-sdk/xai",
+            "grok-4.5",
+            "grok-4.5",
+            "Grok 4.5",
+            "grok",
+            "",
+            true,
+            &[],
+        );
+        assert_eq!(capability.values(), &[]);
     }
 
     #[test]

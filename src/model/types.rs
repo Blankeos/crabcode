@@ -7,13 +7,41 @@ pub struct Model {
     pub family: String,
     pub provider_id: String,
     pub provider_name: String,
-    pub capabilities: Vec<String>,
-    pub reasoning: bool,
+    /// Mirrors models.dev `attachment`.
+    pub attachment: bool,
+    /// Mirrors models.dev `structured_output`.
+    pub structured_output: bool,
+    /// Crabcode-local availability flag for models usable without provider auth.
+    pub free: bool,
+    /// Crabcode-local availability flag for runtime/local providers, e.g. Ollama.
+    pub local: bool,
+    /// Mirrors models.dev `reasoning_options`.
+    pub reasoning_options: Vec<crate::model::reasoning::ReasoningOption>,
 }
 
 impl Model {
     pub fn dialog_description(&self) -> String {
         self.provider_name.clone()
+    }
+
+    pub fn display_tags(&self) -> Vec<&'static str> {
+        let mut tags = Vec::new();
+        if self.attachment {
+            tags.push("attachment");
+        }
+        if self.structured_output {
+            tags.push("structured_output");
+        }
+        if !self.reasoning_options.is_empty() {
+            tags.push("reasoning_options");
+        }
+        if self.free {
+            tags.push("free");
+        }
+        if self.local {
+            tags.push("local");
+        }
+        tags
     }
 }
 
@@ -99,15 +127,21 @@ mod tests {
     }
 
     #[test]
-    fn model_dialog_description_omits_capabilities() {
+    fn model_dialog_description_omits_metadata_tags() {
         let model = Model {
             id: "gpt-5".to_string(),
             name: "GPT-5".to_string(),
             family: "gpt".to_string(),
             provider_id: "openai".to_string(),
             provider_name: "OpenAI".to_string(),
-            capabilities: vec!["attachment".to_string(), "reasoning".to_string()],
-            reasoning: true,
+            attachment: true,
+            structured_output: false,
+            free: false,
+            local: false,
+            reasoning_options: vec![crate::model::reasoning::ReasoningOption {
+                kind: "effort".to_string(),
+                values: vec!["low".to_string()],
+            }],
         };
 
         let description = model.dialog_description();

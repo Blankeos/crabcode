@@ -154,6 +154,7 @@ fn discovery_model(
         family,
         attachment: supports_image_input,
         reasoning,
+        reasoning_options: Vec::new(),
         tool_call: true,
         structured_output: false,
         temperature: true,

@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
-const CACHE_SCHEMA_VERSION: u32 = 4;
+const CACHE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
@@ -38,6 +38,8 @@ pub struct Model {
     #[serde(default)]
     pub reasoning: bool,
     #[serde(default)]
+    pub reasoning_options: Vec<crate::model::reasoning::ReasoningOption>,
+    #[serde(default)]
     pub tool_call: bool,
     #[serde(default)]
     pub structured_output: bool,
@@ -61,6 +63,12 @@ pub struct Model {
     pub limit: Option<Limit>,
     #[serde(default)]
     pub provider: Option<ModelProvider>,
+}
+
+impl Model {
+    pub fn reasoning_efforts(&self) -> Option<Vec<crate::model::reasoning::ReasoningEffort>> {
+        crate::model::reasoning::efforts_from_options(&self.reasoning_options)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,26 +336,10 @@ impl Discovery {
                     continue;
                 }
 
-                let mut capabilities = Vec::new();
-
-                if model.attachment {
-                    capabilities.push("attachment".to_string());
-                }
-
-                if model.structured_output {
-                    capabilities.push("structured_output".to_string());
-                }
-
-                if model.reasoning {
-                    capabilities.push("reasoning".to_string());
-                }
-
-                if crate::model::extensions::ModelExtensions::is_unauthenticated_free_provider(
-                    &provider_id,
-                ) && model.cost.as_ref().is_some_and(|cost| cost.input == 0.0)
-                {
-                    capabilities.push("free".to_string());
-                }
+                let free =
+                    crate::model::extensions::ModelExtensions::is_unauthenticated_free_provider(
+                        &provider_id,
+                    ) && model.cost.as_ref().is_some_and(|cost| cost.input == 0.0);
 
                 let is_text_model = model.modalities.as_ref().map_or(true, |m| {
                     m.output.contains(&"text".to_string())
@@ -361,8 +353,11 @@ impl Discovery {
                         family: model.family.clone(),
                         provider_id: provider_id.clone(),
                         provider_name: provider_name.clone(),
-                        capabilities,
-                        reasoning: model.reasoning,
+                        attachment: model.attachment,
+                        structured_output: model.structured_output,
+                        free,
+                        local: false,
+                        reasoning_options: model.reasoning_options.clone(),
                     });
                 }
             }
@@ -414,7 +409,7 @@ impl Discovery {
             .and_then(|provider| provider.npm.as_deref())
             .filter(|npm| !npm.trim().is_empty())
             .unwrap_or(provider.npm.as_str());
-        Some(crate::model::reasoning::capability_for_model(
+        Some(crate::model::reasoning::capability_for_model_with_options(
             provider_id,
             provider_npm,
             model_id,
@@ -423,6 +418,7 @@ impl Discovery {
             &model.family,
             &model.release_date,
             model.reasoning,
+            &model.reasoning_options,
         ))
     }
 
@@ -467,8 +463,9 @@ impl Discovery {
             for model in models {
                 output.push_str(&format!("    - {} ({})", model.name, model.id));
 
-                if !model.capabilities.is_empty() {
-                    output.push_str(&format!(" [{}]", model.capabilities.join(", ")));
+                let tags = model.display_tags();
+                if !tags.is_empty() {
+                    output.push_str(&format!(" [{}]", tags.join(", ")));
                 }
 
                 output.push('\n');
@@ -627,6 +624,54 @@ mod tests {
         let provider = model.provider.expect("provider override");
         assert_eq!(provider.npm.as_deref(), Some("@ai-sdk/anthropic"));
         assert_eq!(provider.api, None);
+    }
+
+    #[test]
+    fn model_reasoning_options_deserialize_effort_values() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id": "grok-4.5",
+            "name": "Grok 4.5",
+            "reasoning": true,
+            "reasoning_options": [
+                { "type": "effort", "values": ["low", "medium", "high"] },
+                { "type": "budget_tokens", "min": 1024 }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            model.reasoning_efforts().as_deref(),
+            Some(
+                &[
+                    crate::model::reasoning::ReasoningEffort::Low,
+                    crate::model::reasoning::ReasoningEffort::Medium,
+                    crate::model::reasoning::ReasoningEffort::High,
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn model_reasoning_options_ignore_non_string_values() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id": "odd-model",
+            "name": "Odd Model",
+            "reasoning": true,
+            "reasoning_options": [
+                { "type": "effort", "values": ["low", null, "default", "high"] }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            model.reasoning_efforts().as_deref(),
+            Some(
+                &[
+                    crate::model::reasoning::ReasoningEffort::Low,
+                    crate::model::reasoning::ReasoningEffort::High,
+                ][..]
+            )
+        );
     }
 
     #[tokio::test]
