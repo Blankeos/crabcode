@@ -92,11 +92,15 @@ use crate::views::themes_dialog::{
     handle_themes_dialog_key_event, handle_themes_dialog_mouse_event, init_themes_dialog,
     render_themes_dialog,
 };
+use crate::views::title_dialog::{
+    handle_title_dialog_key_event, handle_title_dialog_mouse_event, init_title_dialog,
+    render_title_dialog, TitleDialogAction,
+};
 use crate::views::{
     AgentsDialogState, ChatState, ConnectDialogState, HomeState, McpDialogState, ModelsDialogState,
     MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState, QuestionDialogState,
     RemoteDialogState, SessionRenameDialogState, SessionsDialogState, StorageDialogState,
-    SuggestionsPopupState, ThemesDialogState,
+    SuggestionsPopupState, ThemesDialogState, TitleDialogState,
 };
 
 use crate::{
@@ -213,6 +217,7 @@ pub enum OverlayFocus {
     CommandPalette,
     FindBar,
     StorageDialog,
+    TitleDialog,
     WhichKey,
 }
 
@@ -696,6 +701,7 @@ pub struct App {
     pub command_palette_state: crate::views::command_palette::CommandPaletteState,
     pub find_bar: FindBar,
     pub storage_dialog_state: StorageDialogState,
+    pub title_dialog_state: TitleDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
     esc_timeline_primed: bool,
@@ -757,6 +763,7 @@ pub struct App {
     cached_usage_text: String,
     cached_usage_check: (usize, u64, usize),
     terminal_title_enabled: bool,
+    terminal_title_items: Vec<crate::terminal_title::TerminalTitleItem>,
     terminal_title_last: Option<String>,
     terminal_title_animation_origin: std::time::Instant,
     remote_launch_request: Option<RemoteLaunchRequest>,
@@ -803,6 +810,7 @@ impl App {
         let command_palette_state = init_command_palette();
         let find_bar = FindBar::new();
         let storage_dialog_state = init_storage_dialog();
+        let title_dialog_state = init_title_dialog();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
 
         let session_manager = SessionManager::new()
@@ -881,6 +889,10 @@ impl App {
         } else {
             None
         };
+        let terminal_title_items = prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_terminal_title_items().ok().flatten())
+            .unwrap_or_else(crate::terminal_title::default_items);
 
         if model_override.is_none() && active_model_info.is_none() {
             if let (Some(ref dao), Some(model_str)) = (
@@ -991,6 +1003,7 @@ impl App {
             command_palette_state,
             find_bar,
             storage_dialog_state,
+            title_dialog_state,
             which_key_state,
             timeline_dialog_state,
             esc_timeline_primed: false,
@@ -1050,6 +1063,7 @@ impl App {
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
             terminal_title_enabled: crate::notify::terminal_title_supported(),
+            terminal_title_items,
             terminal_title_last: None,
             terminal_title_animation_origin: now,
             remote_launch_request: None,
@@ -1122,13 +1136,15 @@ impl App {
             return;
         }
 
-        let title = self.terminal_title_text();
-        if self.terminal_title_last.as_deref() == Some(title.as_str()) {
-            return;
-        }
-
-        if crate::notify::set_terminal_title(&title).is_ok() {
-            self.terminal_title_last = Some(title);
+        let items = self.terminal_title_items.clone();
+        match self.terminal_title_text_for_items(&items) {
+            Some(title) if self.terminal_title_last.as_deref() != Some(title.as_str()) => {
+                if crate::notify::set_terminal_title(&title).is_ok() {
+                    self.terminal_title_last = Some(title);
+                }
+            }
+            None => self.clear_terminal_title_signal(),
+            _ => {}
         }
     }
 
@@ -1138,18 +1154,58 @@ impl App {
         }
     }
 
-    fn terminal_title_text(&self) -> String {
-        let project = self.terminal_title_project_name();
+    fn terminal_title_text(&mut self) -> String {
+        let items = self.terminal_title_items.clone();
+        self.terminal_title_text_for_items(&items)
+            .unwrap_or_default()
+    }
 
-        if self.terminal_title_requires_action() {
-            return format!("[!] {}", project);
+    fn terminal_title_text_for_items(
+        &mut self,
+        items: &[crate::terminal_title::TerminalTitleItem],
+    ) -> Option<String> {
+        let mut title = String::new();
+        let mut previous = None;
+
+        for item in items.iter().copied() {
+            let value = match item {
+                crate::terminal_title::TerminalTitleItem::Activity => {
+                    if self.terminal_title_requires_action() {
+                        Some("[!]".to_string())
+                    } else if self.terminal_title_has_active_progress() {
+                        Some(self.terminal_title_spinner_frame().to_string())
+                    } else {
+                        None
+                    }
+                }
+                crate::terminal_title::TerminalTitleItem::ProjectName => {
+                    Some(self.terminal_title_project_name())
+                }
+                crate::terminal_title::TerminalTitleItem::RunState => {
+                    Some(self.terminal_title_run_state().to_string())
+                }
+                crate::terminal_title::TerminalTitleItem::ThreadTitle => {
+                    self.terminal_title_thread_title().map(ToOwned::to_owned)
+                }
+                crate::terminal_title::TerminalTitleItem::ThreadTitleTruncated => self
+                    .terminal_title_thread_title()
+                    .map(|value| Self::truncate_terminal_title_part(value, 48)),
+                crate::terminal_title::TerminalTitleItem::GitBranch => {
+                    let cwd = self.active_workspace_path();
+                    self.current_git_branch(&cwd)
+                        .map(|branch| Self::truncate_terminal_title_part(&branch, 32))
+                }
+            };
+
+            let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+            title.push_str(item.separator_from_previous(previous));
+            title.push_str(&value);
+            previous = Some(item);
         }
 
-        if self.terminal_title_has_active_progress() {
-            return format!("{} {}", self.terminal_title_spinner_frame(), project);
-        }
-
-        project
+        (!title.is_empty()).then_some(title)
     }
 
     fn terminal_title_project_name(&self) -> String {
@@ -1184,6 +1240,33 @@ impl App {
                 .session_view_states
                 .values()
                 .any(|state| state.stream.is_some() || state.external_stream.is_some())
+    }
+
+    fn terminal_title_run_state(&self) -> &'static str {
+        if !self.terminal_title_has_active_progress() {
+            return "Ready";
+        }
+
+        let is_thinking = self.chat_state.chat.messages.last().is_some_and(|message| {
+            !message.is_complete
+                && message
+                    .reasoning
+                    .as_deref()
+                    .is_some_and(|reasoning| !reasoning.trim().is_empty())
+                && message.content.trim().is_empty()
+        });
+        if is_thinking {
+            "Thinking"
+        } else {
+            "Working"
+        }
+    }
+
+    fn terminal_title_thread_title(&mut self) -> Option<&str> {
+        self.session_manager
+            .get_current_session()
+            .map(|session| session.title.trim())
+            .filter(|title| !title.is_empty())
     }
 
     fn terminal_title_spinner_frame(&self) -> &'static str {
@@ -3371,6 +3454,11 @@ impl App {
                 }
                 true
             }
+            OverlayFocus::TitleDialog => {
+                let action = handle_title_dialog_key_event(&mut self.title_dialog_state, key);
+                self.handle_title_dialog_action(action);
+                true
+            }
             OverlayFocus::WhichKey => {
                 let action = self.which_key_state.handle_key_event(key);
                 match action {
@@ -4348,6 +4436,9 @@ impl App {
             {
                 self.overlay_focus = OverlayFocus::None;
             }
+        } else if self.overlay_focus == OverlayFocus::TitleDialog {
+            let action = handle_title_dialog_mouse_event(&mut self.title_dialog_state, mouse);
+            self.handle_title_dialog_action(action);
         } else if self.overlay_focus == OverlayFocus::SuggestionsPopup {
             let anchor_area = self.suggestions_popup_anchor_area();
             let action = handle_suggestions_popup_mouse_event(
@@ -4791,6 +4882,57 @@ impl App {
             .refresh_items(&self.command_registry, is_chat, thinking_visible);
         self.command_palette_state.show();
         self.overlay_focus = OverlayFocus::CommandPalette;
+    }
+
+    fn open_title_dialog(&mut self) {
+        clear_suggestions(&mut self.suggestions_popup_state);
+        self.title_dialog_state.show(&self.terminal_title_items);
+        self.overlay_focus = OverlayFocus::TitleDialog;
+        self.preview_title_dialog_items();
+    }
+
+    fn preview_title_dialog_items(&mut self) {
+        if !self.terminal_title_enabled {
+            return;
+        }
+        let items = self.title_dialog_state.enabled_items();
+        match self.terminal_title_text_for_items(&items) {
+            Some(title) => {
+                if crate::notify::set_terminal_title(&title).is_ok() {
+                    self.terminal_title_last = Some(title);
+                }
+            }
+            None => self.clear_terminal_title_signal(),
+        }
+    }
+
+    fn handle_title_dialog_action(&mut self, action: TitleDialogAction) {
+        match action {
+            TitleDialogAction::Changed => self.preview_title_dialog_items(),
+            TitleDialogAction::Confirm => {
+                let items = self.title_dialog_state.enabled_items();
+                if let Some(dao) = self.prefs_dao.as_ref() {
+                    if let Err(err) = dao.set_terminal_title_items(&items) {
+                        push_toast(Toast::new(
+                            format!("Failed to save terminal title: {err}"),
+                            ToastLevel::Error,
+                            None,
+                        ));
+                        self.update_terminal_title_signal();
+                        self.overlay_focus = OverlayFocus::None;
+                        return;
+                    }
+                }
+                self.terminal_title_items = items;
+                self.overlay_focus = OverlayFocus::None;
+                self.update_terminal_title_signal();
+            }
+            TitleDialogAction::Cancel => {
+                self.overlay_focus = OverlayFocus::None;
+                self.update_terminal_title_signal();
+            }
+            TitleDialogAction::None => {}
+        }
     }
 
     fn can_open_find_bar(&self) -> bool {
@@ -5398,6 +5540,10 @@ impl App {
                     self.show_mcp_dialog();
                     return;
                 }
+                if parsed.name == "title" {
+                    self.open_title_dialog();
+                    return;
+                }
                 if parsed.name == "remote" {
                     self.handle_remote_command_args(&parsed.args);
                     return;
@@ -5621,6 +5767,10 @@ impl App {
         }
         if parsed.name == "mcp" {
             self.show_mcp_dialog();
+            return;
+        }
+        if parsed.name == "title" {
+            self.open_title_dialog();
             return;
         }
         if parsed.name == "remote" {
@@ -9351,6 +9501,10 @@ impl App {
             render_mcp_dialog(f, &mut self.mcp_dialog_state, size, colors);
         }
 
+        if self.overlay_focus == OverlayFocus::TitleDialog && self.title_dialog_state.is_visible() {
+            render_title_dialog(f, &mut self.title_dialog_state, size, colors);
+        }
+
         if self.overlay_focus == OverlayFocus::TimelineDialog
             && self.timeline_dialog_state.dialog.is_visible()
         {
@@ -9823,6 +9977,7 @@ mod tests {
             command_palette_state: init_command_palette(),
             find_bar: FindBar::new(),
             storage_dialog_state: init_storage_dialog(),
+            title_dialog_state: init_title_dialog(),
             which_key_state: crate::views::which_key::init_which_key(),
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
             esc_timeline_primed: false,
@@ -9881,6 +10036,7 @@ mod tests {
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
             terminal_title_enabled: false,
+            terminal_title_items: crate::terminal_title::default_items(),
             terminal_title_last: None,
             terminal_title_animation_origin: std::time::Instant::now(),
             remote_launch_request: None,
@@ -9970,6 +10126,20 @@ mod tests {
         app.overlay_focus = OverlayFocus::PermissionDialog;
 
         assert_eq!(app.terminal_title_text(), "[!] sheetpilot");
+    }
+
+    #[tokio::test]
+    async fn title_command_opens_terminal_title_dialog() {
+        let mut app = test_app();
+
+        app.process_input("/title").await;
+
+        assert_eq!(app.overlay_focus, OverlayFocus::TitleDialog);
+        assert!(app.title_dialog_state.is_visible());
+        assert_eq!(
+            app.title_dialog_state.enabled_items(),
+            crate::terminal_title::default_items()
+        );
     }
 
     #[tokio::test]

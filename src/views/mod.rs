@@ -17,6 +17,7 @@ pub mod storage_dialog;
 pub mod suggestions_popup;
 pub mod themes_dialog;
 pub mod timeline_dialog;
+pub mod title_dialog;
 pub mod which_key;
 
 pub use agents_dialog::AgentsDialogState;
@@ -36,5 +37,6 @@ pub use skills_dialog::SkillsDialogState;
 pub use storage_dialog::StorageDialogState;
 pub use suggestions_popup::SuggestionsPopupState;
 pub use themes_dialog::ThemesDialogState;
+pub use title_dialog::TitleDialogState;
 #[allow(unused_imports)]
 pub use which_key::WhichKeyAction;

@@ -299,6 +299,12 @@ fn core_palette_items(
             "Appearance",
             "Choose a color theme",
         ),
+        (
+            "title",
+            "Configure Terminal Title",
+            "Appearance",
+            "Choose and reorder terminal title items",
+        ),
         ("exit", "Quit Crabcode", "Application", "Exit the app"),
     ] {
         let Some(registered) = registry.get(command) else {

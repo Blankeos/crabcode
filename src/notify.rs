@@ -172,7 +172,7 @@ pub fn terminal_bell_supported() -> bool {
 }
 
 pub fn terminal_title_supported() -> bool {
-    terminal_bell_supported()
+    io::stdout().is_terminal()
 }
 
 pub fn set_terminal_title(title: &str) -> io::Result<()> {

@@ -20,6 +20,7 @@ mod session;
 mod skill;
 mod sound;
 mod streaming;
+mod terminal_title;
 mod theme;
 mod toast;
 mod tools;

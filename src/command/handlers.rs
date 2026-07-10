@@ -12,6 +12,23 @@ pub fn handle_exit<'a>(
     Box::pin(async { CommandResult::Success("Exiting...".to_string()) })
 }
 
+pub fn handle_title<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error(
+                "This command only opens the terminal title dialog. Usage: /title".to_string(),
+            );
+        }
+
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_sessions<'a>(
     _parsed: &'a ParsedCommand,
     sm: &'a mut SessionManager,
@@ -911,6 +928,14 @@ pub fn register_all_commands(registry: &mut Registry) {
         hidden_tokens: vec![],
         chat_only: false,
     });
+
+    registry.register(Command {
+        name: "title".to_string(),
+        description: "Configure terminal title".to_string(),
+        handler: handle_title,
+        hidden_tokens: vec!["terminal".to_string(), "window".to_string()],
+        chat_only: false,
+    });
 }
 
 #[cfg(test)]
@@ -1259,7 +1284,7 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 19);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
@@ -1277,6 +1302,7 @@ mod tests {
         assert!(names.contains(&"move".to_string()));
         assert!(names.contains(&"skills".to_string()));
         assert!(names.contains(&"mcp".to_string()));
+        assert!(names.contains(&"title".to_string()));
         assert!(registry.is_chat_only("compact"));
         assert!(registry.is_chat_only("fork"));
         assert!(registry.is_chat_only("move"));

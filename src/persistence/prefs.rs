@@ -7,6 +7,7 @@ use super::{ensure_data_dir, get_data_dir};
 
 const MODEL_PREFS_KEY: &str = "model_preferences";
 const ACTIVE_THEME_KEY: &str = "active_theme";
+const TERMINAL_TITLE_ITEMS_KEY: &str = "terminal_title_items";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRef {
@@ -201,6 +202,25 @@ impl PrefsDAO {
 
     pub fn set_active_theme(&self, theme_id: String) -> Result<()> {
         self.set_pref(ACTIVE_THEME_KEY, theme_id.trim())
+    }
+
+    pub fn get_terminal_title_items(
+        &self,
+    ) -> Result<Option<Vec<crate::terminal_title::TerminalTitleItem>>> {
+        match self.get_pref(TERMINAL_TITLE_ITEMS_KEY)? {
+            Some(json_str) => Ok(Some(crate::terminal_title::normalized_items(
+                serde_json::from_str::<Vec<crate::terminal_title::TerminalTitleItem>>(&json_str)?,
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_terminal_title_items(
+        &self,
+        items: &[crate::terminal_title::TerminalTitleItem],
+    ) -> Result<()> {
+        let json_str = serde_json::to_string(items)?;
+        self.set_pref(TERMINAL_TITLE_ITEMS_KEY, &json_str)
     }
 
     pub fn get_json_pref(&self, key: &str) -> Result<Option<serde_json::Value>> {
