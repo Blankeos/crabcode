@@ -1,5 +1,5 @@
 use crate::theme::ThemeColors;
-use crate::ui::markdown::table::preprocess_tables;
+use crate::ui::markdown::table::{contains_markdown_table, preprocess_tables};
 use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
 use ratatui::{
     style::{Modifier, Style},
@@ -17,6 +17,7 @@ use ratatui::{
 #[derive(Debug, Clone)]
 pub struct SimpleStreamingRenderer {
     content: String,
+    contains_table: bool,
     needs_render: bool,
     cached_lines: Vec<Line<'static>>,
     cached_width: usize,
@@ -37,6 +38,7 @@ impl SimpleStreamingRenderer {
     pub fn new() -> Self {
         Self {
             content: String::new(),
+            contains_table: false,
             needs_render: true,
             cached_lines: Vec::new(),
             cached_width: 0,
@@ -48,6 +50,7 @@ impl SimpleStreamingRenderer {
     /// Reset the renderer for a new message
     pub fn reset(&mut self) {
         self.content.clear();
+        self.contains_table = false;
         self.needs_render = true;
         self.cached_lines.clear();
         self.cached_width = 0;
@@ -58,6 +61,9 @@ impl SimpleStreamingRenderer {
     /// Append new content from the stream
     pub fn append(&mut self, chunk: &str) {
         self.content.push_str(chunk);
+        if !self.contains_table && (chunk.contains('|') || chunk.contains('-')) {
+            self.contains_table = contains_markdown_table(&self.content);
+        }
         self.needs_render = true;
     }
 
@@ -102,7 +108,8 @@ impl SimpleStreamingRenderer {
             && !render_config_changed
             && !self.cached_lines.is_empty()
             && self.last_rendered_at.map_or(false, |last| {
-                last.elapsed() < streaming_markdown_render_interval(self.content.len())
+                last.elapsed()
+                    < streaming_markdown_render_interval(self.content.len(), self.contains_table)
             })
         {
             return false;
@@ -116,8 +123,17 @@ impl SimpleStreamingRenderer {
     }
 }
 
-fn streaming_markdown_render_interval(content_len: usize) -> std::time::Duration {
-    if content_len >= LONG_STREAM_CONTENT_BYTES {
+fn streaming_markdown_render_interval(
+    content_len: usize,
+    contains_table: bool,
+) -> std::time::Duration {
+    if contains_table && content_len >= LONG_STREAM_CONTENT_BYTES {
+        std::time::Duration::from_millis(500)
+    } else if contains_table && content_len >= MEDIUM_STREAM_CONTENT_BYTES {
+        std::time::Duration::from_millis(250)
+    } else if contains_table {
+        std::time::Duration::from_millis(150)
+    } else if content_len >= LONG_STREAM_CONTENT_BYTES {
         LONG_STREAM_MARKDOWN_RENDER_INTERVAL
     } else if content_len >= MEDIUM_STREAM_CONTENT_BYTES {
         MEDIUM_STREAM_MARKDOWN_RENDER_INTERVAL
@@ -201,7 +217,7 @@ pub fn render_markdown(
     // Pre-process tables: render them as Unicode box-drawing text
     let processed = preprocess_tables(content, max_width);
 
-    render_processed_markdown(&processed, max_width, colors)
+    render_processed_markdown(processed.as_ref(), max_width, colors)
 }
 
 fn render_processed_markdown(
@@ -632,6 +648,22 @@ mod tests {
         assert!(renderer.needs_render());
         renderer.mark_rendered();
         assert!(!renderer.needs_render());
+    }
+
+    #[test]
+    fn table_streams_use_a_slower_markdown_refresh_interval() {
+        let mut renderer = SimpleStreamingRenderer::new();
+        renderer.append("| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+
+        assert!(renderer.contains_table);
+        assert_eq!(
+            streaming_markdown_render_interval(renderer.content.len(), true),
+            std::time::Duration::from_millis(150)
+        );
+        assert!(
+            streaming_markdown_render_interval(renderer.content.len(), true)
+                > streaming_markdown_render_interval(renderer.content.len(), false)
+        );
     }
 
     #[test]

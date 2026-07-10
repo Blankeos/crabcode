@@ -278,10 +278,11 @@ impl Message {
             .last_mut()
             .filter(|part| part.part_type == "text")
         {
-            let current = part.data.get("text").and_then(|value| value.as_str());
-            let mut text = current.unwrap_or_default().to_string();
-            text.push_str(chunk);
-            part.data = serde_json::json!({ "text": text });
+            if let Some(JsonValue::String(text)) = part.data.get_mut("text") {
+                text.push_str(chunk);
+            } else {
+                part.data["text"] = JsonValue::String(chunk.to_string());
+            }
         } else {
             self.parts.push(MessagePart::text(chunk));
         }
@@ -304,10 +305,11 @@ impl Message {
             .last_mut()
             .filter(|part| part.part_type == "reasoning")
         {
-            let current = part.data.get("text").and_then(|value| value.as_str());
-            let mut text = current.unwrap_or_default().to_string();
-            text.push_str(chunk);
-            part.data = serde_json::json!({ "text": text });
+            if let Some(JsonValue::String(text)) = part.data.get_mut("text") {
+                text.push_str(chunk);
+            } else {
+                part.data["text"] = JsonValue::String(chunk.to_string());
+            }
         } else {
             self.parts.push(MessagePart::reasoning(chunk));
         }
@@ -655,9 +657,25 @@ mod tests {
     #[test]
     fn test_message_append() {
         let mut msg = Message::incomplete("hello");
+        msg.parts[0].data["source"] = JsonValue::String("stream".to_string());
         msg.append(" world");
         assert_eq!(msg.content, "hello world");
+        assert_eq!(msg.parts[0].text_value(), Some("hello world"));
+        assert_eq!(msg.parts[0].data["source"], "stream");
         assert!(!msg.is_complete);
+    }
+
+    #[test]
+    fn test_message_reasoning_append_preserves_part_metadata() {
+        let mut msg = Message::incomplete("");
+        msg.append_reasoning("plan");
+        msg.parts[0].data["source"] = JsonValue::String("stream".to_string());
+
+        msg.append_reasoning(" ahead");
+
+        assert_eq!(msg.reasoning.as_deref(), Some("plan ahead"));
+        assert_eq!(msg.parts[0].text_value(), Some("plan ahead"));
+        assert_eq!(msg.parts[0].data["source"], "stream");
     }
 
     #[test]

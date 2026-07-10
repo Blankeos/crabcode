@@ -115,6 +115,7 @@ pub fn parse_model_ref(model: &str) -> (String, String) {
             return (provider_id.to_string(), model_id.to_string());
         }
     }
+
     ("opencode".to_string(), model.to_string())
 }
 
@@ -401,7 +402,8 @@ enum SelectionAction {
 const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TERMINAL_TITLE_SPINNER_INTERVAL_MS: u128 = 100;
-const STREAM_CHUNK_DRAIN_LIMIT: usize = 256;
+const STREAM_CHUNK_DRAIN_LIMIT: usize = 8 * 1024;
+const STREAM_CHUNK_DRAIN_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
 const STREAM_MESSAGE_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn disconnected_stream_warning_message(error: &str) -> Option<String> {
@@ -435,107 +437,167 @@ fn coalesce_streaming_chunks(
 ) -> Vec<crate::llm::ChunkMessage> {
     use crate::llm::ChunkMessage;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    enum StreamChunkKind {
+        Text,
+        Reasoning,
+        Retry,
+    }
+
+    fn split_route(chunk: ChunkMessage) -> (Vec<String>, ChunkMessage) {
+        let mut route = Vec::new();
+        let mut current = chunk;
+        loop {
+            match current {
+                ChunkMessage::SubagentChunk { session_id, chunk } => {
+                    route.push(session_id);
+                    current = *chunk;
+                }
+                leaf => return (route, leaf),
+            }
+        }
+    }
+
+    fn wrap_route(route: Vec<String>, mut chunk: ChunkMessage) -> ChunkMessage {
+        for session_id in route.into_iter().rev() {
+            chunk = ChunkMessage::SubagentChunk {
+                session_id,
+                chunk: Box::new(chunk),
+            };
+        }
+        chunk
+    }
+
+    fn routed_leaf_mut<'a>(
+        chunk: &'a mut ChunkMessage,
+        route: &[String],
+    ) -> Option<&'a mut ChunkMessage> {
+        let Some((session_id, remaining)) = route.split_first() else {
+            return Some(chunk);
+        };
+        match chunk {
+            ChunkMessage::SubagentChunk {
+                session_id: chunk_session_id,
+                chunk,
+            } if chunk_session_id == session_id => routed_leaf_mut(chunk, remaining),
+            _ => None,
+        }
+    }
+
+    fn route_is_prefix(prefix: &[String], route: &[String]) -> bool {
+        prefix.len() <= route.len()
+            && prefix
+                .iter()
+                .zip(route.iter())
+                .all(|(prefix, route)| prefix == route)
+    }
+
+    fn clear_pending_for_event(
+        pending: &mut std::collections::HashMap<(Vec<String>, StreamChunkKind), usize>,
+        route: &[String],
+        keep: Option<StreamChunkKind>,
+    ) {
+        pending.retain(|(pending_route, pending_kind), _| {
+            if pending_route == route {
+                return keep == Some(*pending_kind);
+            }
+
+            // A nested event is an ordering boundary for every ancestor route.
+            // Unrelated sibling routes remain mergeable across each other.
+            !route_is_prefix(pending_route, route)
+        });
+    }
+
     let mut coalesced = Vec::with_capacity(chunks.len());
+    let mut pending = std::collections::HashMap::<(Vec<String>, StreamChunkKind), usize>::new();
     for chunk in chunks {
+        let (route, chunk) = split_route(chunk);
         match chunk {
             ChunkMessage::Text(text) => {
                 if text.is_empty() {
                     continue;
                 }
-                if let Some(ChunkMessage::Text(previous)) = coalesced.last_mut() {
-                    previous.push_str(&text);
-                } else {
-                    coalesced.push(ChunkMessage::Text(text));
+                clear_pending_for_event(&mut pending, &route, Some(StreamChunkKind::Text));
+                let key = (route.clone(), StreamChunkKind::Text);
+                if let Some(index) = pending.get(&key).copied() {
+                    if let Some(ChunkMessage::Text(previous)) =
+                        routed_leaf_mut(&mut coalesced[index], &route)
+                    {
+                        previous.push_str(&text);
+                        continue;
+                    }
                 }
+                let index = coalesced.len();
+                coalesced.push(wrap_route(route, ChunkMessage::Text(text)));
+                pending.insert(key, index);
             }
             ChunkMessage::Reasoning(reasoning) => {
                 if reasoning.is_empty() {
                     continue;
                 }
-                if let Some(ChunkMessage::Reasoning(previous)) = coalesced.last_mut() {
-                    previous.push_str(&reasoning);
-                } else {
-                    coalesced.push(ChunkMessage::Reasoning(reasoning));
+                clear_pending_for_event(&mut pending, &route, Some(StreamChunkKind::Reasoning));
+                let key = (route.clone(), StreamChunkKind::Reasoning);
+                if let Some(index) = pending.get(&key).copied() {
+                    if let Some(ChunkMessage::Reasoning(previous)) =
+                        routed_leaf_mut(&mut coalesced[index], &route)
+                    {
+                        previous.push_str(&reasoning);
+                        continue;
+                    }
                 }
+                let index = coalesced.len();
+                coalesced.push(wrap_route(route, ChunkMessage::Reasoning(reasoning)));
+                pending.insert(key, index);
             }
             ChunkMessage::Retry(status) => {
-                if let Some(ChunkMessage::Retry(previous)) = coalesced.last_mut() {
-                    *previous = status;
-                } else {
-                    coalesced.push(ChunkMessage::Retry(status));
+                clear_pending_for_event(&mut pending, &route, Some(StreamChunkKind::Retry));
+                let key = (route.clone(), StreamChunkKind::Retry);
+                if let Some(index) = pending.get(&key).copied() {
+                    if let Some(ChunkMessage::Retry(previous)) =
+                        routed_leaf_mut(&mut coalesced[index], &route)
+                    {
+                        *previous = status;
+                        continue;
+                    }
                 }
+                let index = coalesced.len();
+                coalesced.push(wrap_route(route, ChunkMessage::Retry(status)));
+                pending.insert(key, index);
             }
-            ChunkMessage::SubagentChunk { session_id, chunk } => match *chunk {
-                ChunkMessage::Text(text) => {
-                    if text.is_empty() {
-                        continue;
-                    }
-                    if let Some(ChunkMessage::SubagentChunk {
-                        session_id: previous_session_id,
-                        chunk: previous_chunk,
-                    }) = coalesced.last_mut()
-                    {
-                        if previous_session_id == &session_id {
-                            if let ChunkMessage::Text(previous) = previous_chunk.as_mut() {
-                                previous.push_str(&text);
-                                continue;
-                            }
-                        }
-                    }
-                    coalesced.push(ChunkMessage::SubagentChunk {
-                        session_id,
-                        chunk: Box::new(ChunkMessage::Text(text)),
-                    });
-                }
-                ChunkMessage::Reasoning(reasoning) => {
-                    if reasoning.is_empty() {
-                        continue;
-                    }
-                    if let Some(ChunkMessage::SubagentChunk {
-                        session_id: previous_session_id,
-                        chunk: previous_chunk,
-                    }) = coalesced.last_mut()
-                    {
-                        if previous_session_id == &session_id {
-                            if let ChunkMessage::Reasoning(previous) = previous_chunk.as_mut() {
-                                previous.push_str(&reasoning);
-                                continue;
-                            }
-                        }
-                    }
-                    coalesced.push(ChunkMessage::SubagentChunk {
-                        session_id,
-                        chunk: Box::new(ChunkMessage::Reasoning(reasoning)),
-                    });
-                }
-                ChunkMessage::Retry(status) => {
-                    if let Some(ChunkMessage::SubagentChunk {
-                        session_id: previous_session_id,
-                        chunk: previous_chunk,
-                    }) = coalesced.last_mut()
-                    {
-                        if previous_session_id == &session_id {
-                            if let ChunkMessage::Retry(previous) = previous_chunk.as_mut() {
-                                *previous = status;
-                                continue;
-                            }
-                        }
-                    }
-                    coalesced.push(ChunkMessage::SubagentChunk {
-                        session_id,
-                        chunk: Box::new(ChunkMessage::Retry(status)),
-                    });
-                }
-                inner => coalesced.push(ChunkMessage::SubagentChunk {
-                    session_id,
-                    chunk: Box::new(inner),
-                }),
-            },
-            other => coalesced.push(other),
+            other => {
+                clear_pending_for_event(&mut pending, &route, None);
+                coalesced.push(wrap_route(route, other));
+            }
         }
     }
 
     coalesced
+}
+
+fn drain_streaming_chunks(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<crate::llm::ChunkMessage>,
+    limit: usize,
+    time_budget: std::time::Duration,
+) -> (Vec<crate::llm::ChunkMessage>, bool) {
+    let started_at = std::time::Instant::now();
+    let mut chunks = Vec::new();
+    let mut disconnected = false;
+
+    for _ in 0..limit {
+        match receiver.try_recv() {
+            Ok(chunk) => chunks.push(chunk),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+        }
+        if chunks.len().is_multiple_of(64) && started_at.elapsed() >= time_budget {
+            break;
+        }
+    }
+
+    (chunks, disconnected)
 }
 
 type ReasoningEffortOverrides =
@@ -7537,16 +7599,11 @@ impl App {
             let mut disconnected = false;
 
             if let Some(stream) = self.stream_for_session_mut(&session_id) {
-                for _ in 0..STREAM_CHUNK_DRAIN_LIMIT {
-                    match stream.chunk_receiver.try_recv() {
-                        Ok(chunk) => chunks.push(chunk),
-                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                            disconnected = true;
-                            break;
-                        }
-                    }
-                }
+                (chunks, disconnected) = drain_streaming_chunks(
+                    &mut stream.chunk_receiver,
+                    STREAM_CHUNK_DRAIN_LIMIT,
+                    STREAM_CHUNK_DRAIN_TIME_BUDGET,
+                );
             }
 
             let mut keep_current_stream = true;
@@ -7967,7 +8024,7 @@ impl App {
             for idx in (start..chat.messages.len()).rev() {
                 if chat.messages[idx].role == crate::session::types::MessageRole::Assistant {
                     chat.messages[idx].mark_interrupted();
-                    chat.mark_render_dirty();
+                    chat.mark_render_dirty_from(idx);
                     return;
                 }
             }
@@ -8097,7 +8154,7 @@ impl App {
                         msg.add_tool_call_part(call.id, call.function.name, args_value);
                         inserted.push((call_id, idx));
                     }
-                    chat.mark_render_dirty();
+                    chat.mark_render_dirty_from(idx);
                 }
             }
         }
@@ -8189,7 +8246,7 @@ impl App {
                     } else {
                         msg.content = v.to_string();
                     }
-                    chat.mark_render_dirty();
+                    chat.mark_render_dirty_from(idx);
                     handled = true;
                 }
             }
@@ -8202,13 +8259,12 @@ impl App {
                     "output_preview": result.content.clone(),
                 });
 
-                if let Some(msg) =
-                    chat.messages.iter_mut().rev().find(|message| {
-                        message.role == crate::session::types::MessageRole::Assistant
-                    })
-                {
+                if let Some(idx) = chat.messages.iter().rposition(|message| {
+                    message.role == crate::session::types::MessageRole::Assistant
+                }) {
+                    let msg = &mut chat.messages[idx];
                     msg.add_or_update_tool_result_part(content);
-                    chat.mark_render_dirty();
+                    chat.mark_render_dirty_from(idx);
                 } else {
                     chat.add_message(crate::session::types::Message::tool(content.to_string()));
                 }
@@ -10756,6 +10812,97 @@ mod tests {
             crate::llm::ChunkMessage::Reasoning(text) => assert_eq!(text, "thinking"),
             _ => panic!("expected coalesced reasoning chunk"),
         }
+    }
+
+    #[test]
+    fn interleaved_subagent_text_chunks_are_coalesced_per_session() {
+        use crate::llm::ChunkMessage;
+
+        let subagent_text = |session_id: &str, text: &str| ChunkMessage::SubagentChunk {
+            session_id: session_id.to_string(),
+            chunk: Box::new(ChunkMessage::Text(text.to_string())),
+        };
+        let mut interleaved = Vec::with_capacity(3 * 1024);
+        for _ in 0..1024 {
+            interleaved.push(subagent_text("a", "a"));
+            interleaved.push(subagent_text("b", "b"));
+            interleaved.push(subagent_text("c", "c"));
+        }
+        let chunks = coalesce_streaming_chunks(interleaved);
+
+        assert_eq!(chunks.len(), 3);
+        for (chunk, (expected_session, expected_text)) in chunks.iter().zip([
+            ("a", "a".repeat(1024)),
+            ("b", "b".repeat(1024)),
+            ("c", "c".repeat(1024)),
+        ]) {
+            match chunk {
+                ChunkMessage::SubagentChunk { session_id, chunk } => {
+                    assert_eq!(session_id, expected_session);
+                    assert!(
+                        matches!(chunk.as_ref(), ChunkMessage::Text(text) if text == &expected_text)
+                    );
+                }
+                _ => panic!("expected subagent chunk"),
+            }
+        }
+    }
+
+    #[test]
+    fn subagent_coalescing_does_not_cross_same_session_tool_events() {
+        use crate::llm::ChunkMessage;
+
+        let wrapped = |chunk| ChunkMessage::SubagentChunk {
+            session_id: "child".to_string(),
+            chunk: Box::new(chunk),
+        };
+        let chunks = coalesce_streaming_chunks(vec![
+            wrapped(ChunkMessage::Text("before".to_string())),
+            wrapped(ChunkMessage::Warning("tool boundary".to_string())),
+            wrapped(ChunkMessage::Text("after".to_string())),
+        ]);
+
+        assert_eq!(chunks.len(), 3);
+    }
+
+    #[test]
+    fn coalescing_preserves_parent_text_boundaries_around_nested_subagent_events() {
+        use crate::llm::ChunkMessage;
+
+        let chunks = coalesce_streaming_chunks(vec![
+            ChunkMessage::Text("before".to_string()),
+            ChunkMessage::SubagentChunk {
+                session_id: "child".to_string(),
+                chunk: Box::new(ChunkMessage::Text("nested".to_string())),
+            },
+            ChunkMessage::Text("after".to_string()),
+        ]);
+
+        assert_eq!(chunks.len(), 3);
+        assert!(matches!(&chunks[0], ChunkMessage::Text(text) if text == "before"));
+        assert!(matches!(&chunks[1], ChunkMessage::SubagentChunk { .. }));
+        assert!(matches!(&chunks[2], ChunkMessage::Text(text) if text == "after"));
+    }
+
+    #[test]
+    fn streaming_drain_consumes_bursts_larger_than_the_old_frame_cap() {
+        use crate::llm::ChunkMessage;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..1024 {
+            sender.send(ChunkMessage::Text("x".to_string())).unwrap();
+        }
+        drop(sender);
+
+        let (chunks, disconnected) = drain_streaming_chunks(
+            &mut receiver,
+            STREAM_CHUNK_DRAIN_LIMIT,
+            std::time::Duration::from_secs(1),
+        );
+
+        assert_eq!(chunks.len(), 1024);
+        assert!(disconnected);
+        assert_eq!(coalesce_streaming_chunks(chunks).len(), 1);
     }
 
     #[test]

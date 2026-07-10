@@ -1,4 +1,4 @@
-use crate::session::types::{Message, MessageRole};
+use crate::session::types::{Message, MessagePart, MessageRole};
 use crate::theme::ThemeColors;
 use crate::ui::markdown::streaming::{render_markdown, SimpleStreamingRenderer};
 use crate::ui::scrollbar::{
@@ -23,6 +23,32 @@ pub struct ChatSearchMatch {
     pub line: usize,
     pub start: usize,
     pub end: usize,
+}
+
+fn streaming_markdown_content(message: &Message) -> &str {
+    if message
+        .parts
+        .iter()
+        .any(|part| matches!(part.part_type.as_str(), "tool_call" | "tool_result"))
+    {
+        message
+            .parts
+            .iter()
+            .rev()
+            .find(|part| part.part_type == "text")
+            .and_then(MessagePart::text_value)
+            .unwrap_or("")
+    } else {
+        &message.content
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedMarkdownPart {
+    content_hash: u64,
+    width: usize,
+    colors_hash: u64,
+    lines: Vec<Line<'static>>,
 }
 
 fn path_mention_score(path: &std::path::Path, text: &str) -> Option<usize> {
@@ -84,6 +110,9 @@ pub struct Chat {
     streaming_message_idx: Option<usize>,
     /// Byte length of the streaming message already mirrored into streaming_renderer.
     streaming_renderer_content_len: usize,
+    /// Markdown rendered for stable text parts in assistant messages that also contain tools.
+    ordered_markdown_cache:
+        std::cell::RefCell<std::collections::HashMap<(usize, usize), CachedMarkdownPart>>,
     /// Earliest streaming assistant index with text appended since the last markdown/layout refresh.
     pending_streaming_render_dirty_from: Option<usize>,
     /// Whether pending streaming changes include message content that must wait for markdown refresh.
@@ -1292,6 +1321,7 @@ impl Chat {
             streaming_renderer: None,
             streaming_message_idx: None,
             streaming_renderer_content_len: 0,
+            ordered_markdown_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             pending_streaming_render_dirty_from: None,
             pending_streaming_content_dirty: false,
             last_streaming_cache_refresh_at: None,
@@ -1350,6 +1380,7 @@ impl Chat {
             streaming_renderer: None,
             streaming_message_idx: None,
             streaming_renderer_content_len: 0,
+            ordered_markdown_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             pending_streaming_render_dirty_from: None,
             pending_streaming_content_dirty: false,
             last_streaming_cache_refresh_at: None,
@@ -1404,6 +1435,10 @@ impl Chat {
 
     pub fn mark_render_dirty(&mut self) {
         self.invalidate_cache();
+    }
+
+    pub fn mark_render_dirty_from(&mut self, message_idx: usize) {
+        self.invalidate_cache_from(message_idx);
     }
 
     pub fn render_revision(&self) -> u64 {
@@ -1609,6 +1644,44 @@ impl Chat {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         colors.hash(&mut h);
         h.finish()
+    }
+
+    fn render_ordered_markdown_part(
+        &self,
+        message_idx: usize,
+        part_idx: usize,
+        content: &str,
+        max_width: usize,
+        colors: &ThemeColors,
+    ) -> Vec<Line<'static>> {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut hasher);
+        let content_hash = hasher.finish();
+        let colors_hash = Self::cache_colors_hash(colors);
+        let key = (message_idx, part_idx);
+
+        if let Some(cached) = self.ordered_markdown_cache.borrow().get(&key) {
+            if cached.content_hash == content_hash
+                && cached.width == max_width
+                && cached.colors_hash == colors_hash
+            {
+                return cached.lines.clone();
+            }
+        }
+
+        let lines = render_markdown(content, max_width, colors);
+        self.ordered_markdown_cache.borrow_mut().insert(
+            key,
+            CachedMarkdownPart {
+                content_hash,
+                width: max_width,
+                colors_hash,
+                lines: lines.clone(),
+            },
+        );
+        lines
     }
 
     fn compute_fingerprint(&self, max_width: usize, colors: &ThemeColors) -> u64 {
@@ -1952,16 +2025,20 @@ impl Chat {
         // Update the renderer content if needed
         if let Some(ref mut renderer) = self.streaming_renderer {
             if let Some(msg) = self.messages.get(last_idx) {
-                if msg.content.len() >= self.streaming_renderer_content_len {
-                    let chunk = &msg.content[self.streaming_renderer_content_len..];
+                let content = streaming_markdown_content(msg);
+                let renderer_content = renderer.content();
+                if content.len() >= self.streaming_renderer_content_len
+                    && content.starts_with(renderer_content)
+                {
+                    let chunk = &content[self.streaming_renderer_content_len..];
                     if !chunk.is_empty() {
                         renderer.append(chunk);
-                        self.streaming_renderer_content_len = msg.content.len();
+                        self.streaming_renderer_content_len = content.len();
                     }
                 } else {
                     renderer.reset();
-                    renderer.append(&msg.content);
-                    self.streaming_renderer_content_len = msg.content.len();
+                    renderer.append(content);
+                    self.streaming_renderer_content_len = content.len();
                 }
                 if renderer.ensure_rendered(max_width, colors, false) {
                     let dirty_from = self
@@ -3708,7 +3785,16 @@ impl Chat {
                         );
                     }
 
-                    for part in &message.parts {
+                    let streaming_text_part_idx = is_streaming
+                        .then(|| {
+                            message
+                                .parts
+                                .iter()
+                                .rposition(|part| part.part_type == "text")
+                        })
+                        .flatten();
+
+                    for (part_idx, part) in message.parts.iter().enumerate() {
                         match part.part_type.as_str() {
                             "reasoning" => {
                                 let Some(reasoning) = part
@@ -3757,7 +3843,28 @@ impl Chat {
                                     &mut emitted_anything,
                                 );
                                 emitted_anything = true;
-                                lines.extend(render_markdown(visible_text, max_width, colors));
+                                if streaming_text_part_idx == Some(part_idx) {
+                                    if let Some(cached_lines) = streaming_lines {
+                                        lines.extend(cached_lines.iter().cloned());
+                                    } else {
+                                        let line = Line::from(Span::styled(
+                                            visible_text.to_string(),
+                                            Style::default().fg(colors.markdown_text),
+                                        ));
+                                        lines.extend(wrap_styled_line(
+                                            &line,
+                                            WrapOptions::new(max_width),
+                                        ));
+                                    }
+                                } else {
+                                    lines.extend(self.render_ordered_markdown_part(
+                                        idx,
+                                        part_idx,
+                                        visible_text,
+                                        max_width,
+                                        colors,
+                                    ));
+                                }
                                 lines.push(Line::from(""));
                             }
                             "tool_call" | "tool_result" => {
@@ -5939,6 +6046,32 @@ mod tests {
             .any(|line| line.contains('│') && line.contains("Steps")));
         assert!(lines.iter().any(|line| line.contains("│ 1. Read")));
         assert!(lines.iter().any(|line| line.contains("│ 2. Render")));
+    }
+
+    #[test]
+    fn ordered_part_streaming_renderer_tracks_only_the_active_text_part() {
+        let mut assistant = Message::incomplete("Earlier text");
+        assistant.add_tool_call_part("call_1", "bash", serde_json::json!({"command": "true"}));
+        assistant.append("| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+        let mut chat = Chat::with_messages(vec![assistant]);
+        chat.begin_streaming_turn();
+        let colors = test_colors();
+
+        chat.update_streaming_renderer(100, &colors);
+
+        assert_eq!(
+            chat.streaming_renderer
+                .as_ref()
+                .map(|renderer| renderer.content()),
+            Some("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
+        );
+        let rendered = chat
+            .build_all_lines(100, "model", &colors)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert!(rendered.iter().any(|line| line.contains("Earlier text")));
+        assert!(rendered.iter().any(|line| line.contains('┌')));
     }
 
     #[test]

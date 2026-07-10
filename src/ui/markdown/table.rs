@@ -1,9 +1,14 @@
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use std::borrow::Cow;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Pre-process markdown content to extract and render tables,
 /// replacing table markdown with Unicode box-drawing rendered tables.
-pub fn preprocess_tables(content: &str, max_width: usize) -> String {
+pub fn preprocess_tables(content: &str, max_width: usize) -> Cow<'_, str> {
+    if !contains_markdown_table(content) {
+        return Cow::Borrowed(content);
+    }
+
     let parser = Parser::new_ext(content, Options::ENABLE_TABLES).into_offset_iter();
 
     let mut result = String::with_capacity(content.len());
@@ -85,7 +90,33 @@ pub fn preprocess_tables(content: &str, max_width: usize) -> String {
 
     // Flush remaining content after last table
     result.push_str(&content[last_end..]);
-    result
+    Cow::Owned(result)
+}
+
+pub(crate) fn contains_markdown_table(content: &str) -> bool {
+    let lines = content.lines().collect::<Vec<_>>();
+    lines.iter().enumerate().any(|(index, line)| {
+        let line = line.trim().trim_matches('|');
+        let cells = line.split('|').map(str::trim).collect::<Vec<_>>();
+        if cells.is_empty() {
+            return false;
+        }
+        let mut cells = cells.into_iter();
+        let Some(first) = cells.next() else {
+            return false;
+        };
+        let is_delimiter = |cell: &str| {
+            let cell = cell.trim_matches(':').trim();
+            cell.len() >= 3 && cell.bytes().all(|byte| byte == b'-')
+        };
+        let delimiter_row = is_delimiter(first) && cells.all(is_delimiter);
+        let has_adjacent_table_row = index
+            .checked_sub(1)
+            .and_then(|index| lines.get(index))
+            .or_else(|| lines.get(index + 1))
+            .is_some_and(|line| line.contains('|'));
+        delimiter_row && has_adjacent_table_row
+    })
 }
 
 fn wrap_cell(text: &str, width: usize) -> Vec<String> {
@@ -505,6 +536,11 @@ mod tests {
         let input = "No table here";
         let result = preprocess_tables(input, 80);
         assert_eq!(result, "No table here");
+    }
+
+    #[test]
+    fn horizontal_rule_is_not_detected_as_a_table() {
+        assert!(!contains_markdown_table("Before\n\n---\n\nAfter"));
     }
 
     #[test]
