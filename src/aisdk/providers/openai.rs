@@ -9,6 +9,7 @@ use eventsource_stream::{EventStreamError, Eventsource};
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::error::Error as StdError;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -40,6 +41,18 @@ pub struct OpenAI {
     reasoning_effort: Option<String>,
     responses_websocket: bool,
     websocket_state: Arc<Mutex<OpenAIWebsocketState>>,
+}
+
+fn openai_chunk_is_terminal(chunk: &Result<ChunkType>) -> bool {
+    matches!(
+        chunk,
+        Ok(ChunkType::End { .. })
+            | Ok(ChunkType::ResponseCompleted { .. })
+            | Ok(ChunkType::RetryableFailure(_))
+            | Ok(ChunkType::Failed(_))
+            | Ok(ChunkType::Incomplete(_))
+            | Err(_)
+    )
 }
 
 impl OpenAI {
@@ -366,18 +379,40 @@ impl Provider for OpenAI {
         }
 
         let request_url = url.clone();
+        let saw_terminal_event = Arc::new(AtomicBool::new(false));
+        let saw_terminal_event_in_stream = saw_terminal_event.clone();
         let stream = response
             .bytes_stream()
             .eventsource()
             .filter_map(move |ev| match ev {
-                Ok(event) => futures::future::ready(response_sse_data_to_chunk(&event.data)),
+                Ok(event) => {
+                    let chunk = response_sse_data_to_chunk(&event.data);
+                    if chunk
+                        .as_ref()
+                        .is_some_and(|chunk| openai_chunk_is_terminal(chunk))
+                    {
+                        saw_terminal_event_in_stream.store(true, Ordering::Relaxed);
+                    }
+                    futures::future::ready(chunk)
+                }
                 Err(e) => {
                     let err = format_openai_sse_error(&e, &request_url);
+                    saw_terminal_event_in_stream.store(true, Ordering::Relaxed);
                     futures::future::ready(Some(Ok(ChunkType::RetryableFailure(
                         RetryError::from_message(err),
                     ))))
                 }
             })
+            .chain(
+                futures::stream::once(async move {
+                    (!saw_terminal_event.load(Ordering::Relaxed)).then(|| {
+                        Ok(ChunkType::RetryableFailure(RetryError::from_message(
+                            "OpenAI Responses stream closed before response.completed",
+                        )))
+                    })
+                })
+                .filter_map(futures::future::ready),
+            )
             .boxed();
 
         if let Some(warning) = fallback_warning {
@@ -547,6 +582,13 @@ impl OpenAI {
                                 &mut items_added,
                             );
                             if let Some(chunk) = response_sse_data_to_chunk(&text) {
+                                let is_terminal = matches!(
+                                    chunk,
+                                    Ok(ChunkType::ResponseCompleted { .. })
+                                        | Ok(ChunkType::RetryableFailure(_))
+                                        | Ok(ChunkType::Failed(_))
+                                        | Ok(ChunkType::Incomplete(_))
+                                );
                                 let is_completed =
                                     matches!(chunk, Ok(ChunkType::ResponseCompleted { .. }));
                                 if let Ok(ref chunk) = chunk {
@@ -566,6 +608,10 @@ impl OpenAI {
                                             items_added,
                                         });
                                     }
+                                    return;
+                                }
+                                if is_terminal {
+                                    websocket_state.lock().await.clear_connection();
                                     return;
                                 }
                             }
@@ -1163,25 +1209,17 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
                 .and_then(|resp| resp.get("error"))
                 .is_some_and(|error| !error.is_null())
             {
-                return Some(Ok(ChunkType::Failed(responses_provider_error_message(
-                    &value,
-                    "Response completed with error",
-                ))));
+                return Some(Ok(responses_error_chunk(&value, event_type)));
             }
             let resp = &value["response"];
             Some(Ok(ChunkType::ResponseCompleted {
                 end_turn: resp.get("end_turn").and_then(|value| value.as_bool()),
             }))
         }
-        "response.incomplete" => Some(Ok(ChunkType::Incomplete("Response incomplete".to_string()))),
-        "response.failed" => Some(Ok(ChunkType::Failed(responses_provider_error_message(
-            &value,
-            "Response failed",
+        "response.incomplete" => Some(Ok(ChunkType::RetryableFailure(RetryError::from_message(
+            responses_incomplete_message(&value),
         )))),
-        "error" => Some(Ok(ChunkType::Failed(responses_provider_error_message(
-            &value,
-            "OpenAI Responses stream error",
-        )))),
+        "response.failed" | "error" => Some(Ok(responses_error_chunk(&value, event_type))),
         _ => {
             if let Some(message_phase) = responses_assistant_message_phase_chunk(&value) {
                 Some(Ok(message_phase))
@@ -1208,10 +1246,124 @@ fn responses_provider_error_message(value: &serde_json::Value, fallback: &str) -
     }
 }
 
+fn responses_error_chunk(value: &serde_json::Value, event_type: &str) -> ChunkType {
+    let fallback = match event_type {
+        "response.failed" => "Response failed",
+        "response.completed" => "Response completed with error",
+        _ => "OpenAI Responses stream error",
+    };
+    let message = responses_provider_error_message(value, fallback);
+    let retry_error = RetryError::from_message(message.clone());
+
+    if !responses_error_is_permanent(value)
+        && (responses_error_is_retryable(value)
+            || crate::retry::retryable(&retry_error)
+            || matches!(
+                event_type,
+                "response.failed" | "response.completed" | "error"
+            ))
+    {
+        ChunkType::RetryableFailure(retry_error)
+    } else {
+        ChunkType::Failed(message)
+    }
+}
+
+fn responses_error_is_permanent(value: &serde_json::Value) -> bool {
+    if response_error_status(value)
+        .is_some_and(|status| matches!(status, 400 | 401 | 403 | 404 | 409 | 413 | 422))
+    {
+        return true;
+    }
+
+    let code = response_error_field(value, "code")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let error_type = response_error_field(value, "type")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [code.as_str(), error_type.as_str()].iter().any(|value| {
+        matches!(
+            *value,
+            "authentication_error"
+                | "authorization_error"
+                | "bio_policy"
+                | "content_filter"
+                | "context_length_exceeded"
+                | "cyber_policy"
+                | "forbidden"
+                | "insufficient_quota"
+                | "invalid_api_key"
+                | "invalid_prompt"
+                | "invalid_request_error"
+                | "invalid_token"
+                | "usage_not_included"
+        )
+    })
+}
+
+fn responses_error_is_retryable(value: &serde_json::Value) -> bool {
+    let code = response_error_field(value, "code").unwrap_or_default();
+    let error_type = response_error_field(value, "type").unwrap_or_default();
+    let status = response_error_status(value);
+
+    if status.is_some_and(|status| status == 429 || status >= 500) {
+        return true;
+    }
+
+    [code, error_type].iter().any(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "server_error"
+                | "internal_server_error"
+                | "rate_limit_exceeded"
+                | "too_many_requests"
+                | "temporarily_unavailable"
+                | "websocket_connection_limit_reached"
+        )
+    })
+}
+
+fn response_error_status(value: &serde_json::Value) -> Option<u64> {
+    value
+        .get("status")
+        .or_else(|| value.get("status_code"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|error| error.get("status").or_else(|| error.get("status_code")))
+                .and_then(serde_json::Value::as_u64)
+        })
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(|error| error.get("status").or_else(|| error.get("status_code")))
+                .and_then(serde_json::Value::as_u64)
+        })
+}
+
+fn responses_incomplete_message(value: &serde_json::Value) -> String {
+    let reason = value
+        .get("response")
+        .and_then(|response| response.get("incomplete_details"))
+        .and_then(|details| details.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    format!("Incomplete response returned, reason: {reason}")
+}
+
 fn response_error_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str> {
     value
         .get(field)
         .and_then(|field_value| field_value.as_str())
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|error| error.get(field))
+                .and_then(|field_value| field_value.as_str())
+        })
         .or_else(|| {
             value
                 .get("response")
@@ -1470,9 +1622,10 @@ fn openai_tool_output_content(tool: &crate::message::ToolOutputMessage) -> serde
 #[cfg(test)]
 mod tests {
     use super::{
-        build_openai_messages, request_snapshot_from_body, response_sse_data_to_chunk,
-        responses_function_call_chunk, websocket_request_body_from_state, OpenAI,
-        OpenAIResponseSnapshot, OpenAIWebsocketState, WebsocketStreamProgress,
+        build_openai_messages, openai_chunk_is_terminal, request_snapshot_from_body,
+        response_sse_data_to_chunk, responses_function_call_chunk,
+        websocket_request_body_from_state, OpenAI, OpenAIResponseSnapshot, OpenAIWebsocketState,
+        WebsocketStreamProgress,
     };
     use crate::chunk::{ChunkType, MessagePhase};
     use crate::message::Message;
@@ -1515,6 +1668,56 @@ mod tests {
     }
 
     #[test]
+    fn retryable_failure_is_terminal_for_sse_eof_tracking() {
+        let chunk = Ok(ChunkType::RetryableFailure(
+            crate::retry::RetryError::from_message("stream error"),
+        ));
+
+        assert!(openai_chunk_is_terminal(&chunk));
+    }
+
+    #[test]
+    fn nested_transient_error_event_is_retryable() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"error","error":{"type":"server_error","code":"server_error","message":"The server encountered an error"}}"#,
+        )
+        .expect("expected failure chunk");
+
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::RetryableFailure(error))
+                if error.message == "server_error: The server encountered an error"
+        ));
+    }
+
+    #[test]
+    fn nested_permanent_error_event_is_not_retryable() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_prompt","message":"Invalid prompt"}}"#,
+        )
+        .expect("expected failure chunk");
+
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::Failed(message)) if message == "invalid_prompt: Invalid prompt"
+        ));
+    }
+
+    #[test]
+    fn response_incomplete_is_retryable_with_reason() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"server_error"}}}"#,
+        )
+        .expect("expected incomplete chunk");
+
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::RetryableFailure(error))
+                if error.message == "Incomplete response returned, reason: server_error"
+        ));
+    }
+
+    #[test]
     fn response_failed_includes_nested_provider_error() {
         let chunk = response_sse_data_to_chunk(
             r#"{"type":"response.failed","response":{"error":{"code":"invalid_token","message":"OAuth token expired"}}}"#,
@@ -1543,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn response_completed_error_uses_readable_error_code() {
+    fn response_completed_rate_limit_error_is_retryable() {
         let chunk = response_sse_data_to_chunk(
             r#"{"type":"response.completed","response":{"error":{"code":"rate_limit_exceeded"}}}"#,
         )
@@ -1551,7 +1754,7 @@ mod tests {
 
         assert!(matches!(
             chunk,
-            Ok(ChunkType::Failed(message)) if message == "rate_limit_exceeded"
+            Ok(ChunkType::RetryableFailure(error)) if error.message == "rate_limit_exceeded"
         ));
     }
 
