@@ -17,6 +17,12 @@ Notifications are crabcode-specific and apply only to `crabcode` config files. E
       "soundFile": "",
       "desktop": true,
     },
+    "subagentComplete": {
+      "terminal": "auto",
+      "soundEnabled": true,
+      "soundFile": "/absolute/path/to/subagent-complete.wav",
+      "desktop": false,
+    },
     "error": {
       "soundEnabled": true,
       "soundFile": "",
@@ -38,7 +44,7 @@ Notifications are crabcode-specific and apply only to `crabcode` config files. E
 }
 ```
 
-Events are `complete`, `error`, `permission`, and `question`.
+Events are `complete`, `subagentComplete`, `error`, `permission`, and `question`.
 
 | Field          | Behavior                                                                                     |
 | -------------- | -------------------------------------------------------------------------------------------- |
@@ -47,7 +53,7 @@ Events are `complete`, `error`, `permission`, and `question`.
 | `soundFile`    | Optional absolute path to a custom audio file. Use `""`, `null`, or omit it to use defaults. |
 | `desktop`      | Sends a native desktop notification.                                                         |
 
-`complete` and `error` default to `soundEnabled: true` and use bundled sounds when `soundFile` is unset. `permission` and `question` default to silent unless you enable them and provide a file.
+`complete`, `subagentComplete`, and `error` default to `soundEnabled: true` and use their own bundled sounds when `soundFile` is unset. `subagentComplete` runs whenever a subagent finishes. When omitted, it inherits the `complete` event's enable, terminal, and desktop settings, but not its custom `soundFile`; the dedicated bundled subagent completion sound is used instead. Configure `subagentComplete` separately to use a custom sound or notification behavior. `permission` and `question` default to silent unless you enable them and provide a file.
 
 ## Terminal Notifications
 

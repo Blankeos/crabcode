@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Command;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SoundEvent {
     Error,
     Complete,
+    SubagentComplete,
     Permission,
     Question,
 }
@@ -15,6 +16,7 @@ pub enum SoundEvent {
 pub struct ResolvedSoundsConfig {
     pub error: Option<PathBuf>,
     pub complete: Option<PathBuf>,
+    pub subagent_complete: Option<PathBuf>,
     pub permission: Option<PathBuf>,
     pub question: Option<PathBuf>,
 }
@@ -24,6 +26,7 @@ impl ResolvedSoundsConfig {
         match event {
             SoundEvent::Error => self.error.as_deref(),
             SoundEvent::Complete => self.complete.as_deref(),
+            SoundEvent::SubagentComplete => self.subagent_complete.as_deref(),
             SoundEvent::Permission => self.permission.as_deref(),
             SoundEvent::Question => self.question.as_deref(),
         }
@@ -34,16 +37,19 @@ impl ResolvedSoundsConfig {
 enum BuiltInSound {
     Error,
     Complete,
+    SubagentComplete,
 }
 
 #[derive(Debug, Default)]
 struct BuiltInSoundCache {
     error: Option<PathBuf>,
     complete: Option<PathBuf>,
+    subagent_complete: Option<PathBuf>,
 }
 
 const BUILTIN_ERROR_MP3: &[u8] = include_bytes!("../sounds/error.mp3");
 const BUILTIN_COMPLETE_MP3: &[u8] = include_bytes!("../sounds/complete.mp3");
+const BUILTIN_SUBAGENT_COMPLETE_MP3: &[u8] = include_bytes!("../sounds/subagent_complete.mp3");
 
 pub fn resolve_effective_sounds(
     config: &crate::config::NotificationsConfig,
@@ -63,6 +69,13 @@ pub fn resolve_effective_sounds(
             "notifications.complete",
             &config.complete,
             Some(BuiltInSound::Complete),
+            &mut built_in_cache,
+            &mut warnings,
+        ),
+        subagent_complete: resolve_event_path(
+            "notifications.subagentComplete",
+            &config.subagent_complete,
+            Some(BuiltInSound::SubagentComplete),
             &mut built_in_cache,
             &mut warnings,
         ),
@@ -135,6 +148,7 @@ fn materialize_built_in_sound(
     let cached = match sound {
         BuiltInSound::Error => built_in_cache.error.as_ref(),
         BuiltInSound::Complete => built_in_cache.complete.as_ref(),
+        BuiltInSound::SubagentComplete => built_in_cache.subagent_complete.as_ref(),
     };
     if let Some(path) = cached {
         return Some(path.clone());
@@ -143,6 +157,7 @@ fn materialize_built_in_sound(
     let (file_name, bytes) = match sound {
         BuiltInSound::Error => ("error.mp3", BUILTIN_ERROR_MP3),
         BuiltInSound::Complete => ("complete.mp3", BUILTIN_COMPLETE_MP3),
+        BuiltInSound::SubagentComplete => ("subagent_complete.mp3", BUILTIN_SUBAGENT_COMPLETE_MP3),
     };
 
     let sounds_dir = crate::persistence::get_data_dir().join("sounds");
@@ -171,6 +186,9 @@ fn materialize_built_in_sound(
         }
         BuiltInSound::Complete => {
             built_in_cache.complete = Some(out_path.clone());
+        }
+        BuiltInSound::SubagentComplete => {
+            built_in_cache.subagent_complete = Some(out_path.clone());
         }
     }
 

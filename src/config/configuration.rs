@@ -167,6 +167,7 @@ pub struct NotificationEventConfig {
 pub struct NotificationsConfig {
     pub error: NotificationEventConfig,
     pub complete: NotificationEventConfig,
+    pub subagent_complete: NotificationEventConfig,
     pub permission: NotificationEventConfig,
     pub question: NotificationEventConfig,
     pub terminal_condition: TerminalNotificationCondition,
@@ -178,6 +179,7 @@ impl NotificationsConfig {
         match event {
             crate::sound::SoundEvent::Error => self.error.desktop,
             crate::sound::SoundEvent::Complete => self.complete.desktop,
+            crate::sound::SoundEvent::SubagentComplete => self.subagent_complete.desktop,
             crate::sound::SoundEvent::Permission => self.permission.desktop,
             crate::sound::SoundEvent::Question => self.question.desktop,
         }
@@ -186,6 +188,7 @@ impl NotificationsConfig {
     pub fn any_desktop_enabled(&self) -> bool {
         self.error.desktop
             || self.complete.desktop
+            || self.subagent_complete.desktop
             || self.permission.desktop
             || self.question.desktop
     }
@@ -201,6 +204,12 @@ impl Default for NotificationsConfig {
                 desktop: false,
             },
             complete: NotificationEventConfig {
+                terminal: TerminalNotificationMode::Auto,
+                sound_enabled: true,
+                sound_file: None,
+                desktop: false,
+            },
+            subagent_complete: NotificationEventConfig {
                 terminal: TerminalNotificationMode::Auto,
                 sound_enabled: true,
                 sound_file: None,
@@ -1915,6 +1924,15 @@ fn apply_notifications(
         "notifications.complete",
         diagnostics,
     );
+    notifications.subagent_complete = notifications.complete.clone();
+    notifications.subagent_complete.sound_file = None;
+    apply_notification_event(
+        &mut notifications.subagent_complete,
+        map.get("subagentComplete")
+            .or_else(|| map.get("subagent_complete")),
+        "notifications.subagentComplete",
+        diagnostics,
+    );
     apply_notification_event(
         &mut notifications.permission,
         map.get("permission"),
@@ -2250,6 +2268,10 @@ mod tests {
                         "soundEnabled": true,
                         "soundFile": "/tmp/complete.wav"
                     },
+                    "subagentComplete": {
+                        "terminal": "disabled",
+                        "soundFile": "/tmp/subagent-complete.wav"
+                    },
                     "permission": {
                         "terminal": "enabled"
                     },
@@ -2272,6 +2294,15 @@ mod tests {
             Some(PathBuf::from("/tmp/complete.wav"))
         );
         assert_eq!(
+            config.notifications.subagent_complete.terminal,
+            TerminalNotificationMode::Disabled
+        );
+        assert!(config.notifications.subagent_complete.desktop);
+        assert_eq!(
+            config.notifications.subagent_complete.sound_file,
+            Some(PathBuf::from("/tmp/subagent-complete.wav"))
+        );
+        assert_eq!(
             config.notifications.permission.terminal,
             TerminalNotificationMode::Enabled
         );
@@ -2287,6 +2318,39 @@ mod tests {
             config.notifications.macos_backend,
             MacosNotificationBackend::Osascript
         );
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn subagent_complete_notification_inherits_complete_settings_but_not_sound_file() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "notifications": {
+                    "complete": {
+                        "terminal": "disabled",
+                        "desktop": true,
+                        "soundEnabled": false,
+                        "soundFile": "/tmp/complete.wav"
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.notifications.subagent_complete.terminal,
+            config.notifications.complete.terminal
+        );
+        assert_eq!(
+            config.notifications.subagent_complete.sound_enabled,
+            config.notifications.complete.sound_enabled
+        );
+        assert_eq!(
+            config.notifications.subagent_complete.desktop,
+            config.notifications.complete.desktop
+        );
+        assert_eq!(config.notifications.subagent_complete.sound_file, None);
         assert!(diagnostics.warnings.is_empty());
     }
 

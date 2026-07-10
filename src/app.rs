@@ -1098,6 +1098,9 @@ impl App {
 
         let mode = match event {
             crate::sound::SoundEvent::Complete => self.notifications.complete.terminal,
+            crate::sound::SoundEvent::SubagentComplete => {
+                self.notifications.subagent_complete.terminal
+            }
             crate::sound::SoundEvent::Permission => self.notifications.permission.terminal,
             crate::sound::SoundEvent::Question => self.notifications.question.terminal,
             crate::sound::SoundEvent::Error => self.notifications.error.terminal,
@@ -7873,11 +7876,16 @@ impl App {
         if self.submit_queued_messages_for_session(session_id) {
             return;
         }
+        let completion_event = if self.session_manager.parent_id_of(session_id).is_some() {
+            crate::sound::SoundEvent::SubagentComplete
+        } else {
+            crate::sound::SoundEvent::Complete
+        };
         self.play_sound_event_with_notification_detail(
-            crate::sound::SoundEvent::Complete,
+            completion_event,
             completion_stats.as_deref(),
         );
-        self.notify_terminal_event(crate::sound::SoundEvent::Complete);
+        self.notify_terminal_event(completion_event);
     }
 
     fn defer_finish_if_tools_are_running(&mut self, session_id: &str) -> bool {

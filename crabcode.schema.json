@@ -190,6 +190,26 @@
             }
           ]
         },
+        "subagentComplete": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NotificationEventConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subagent_complete": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NotificationEventConfigFile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "error": {
           "anyOf": [
             {

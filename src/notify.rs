@@ -270,6 +270,11 @@ fn notification_content(
                 "Your assistant response is ready.".to_string(),
             )
         }
+        crate::sound::SoundEvent::SubagentComplete => (
+            notification_title(workspace_name),
+            "Subagent complete".to_string(),
+            "A subagent response is ready.".to_string(),
+        ),
         crate::sound::SoundEvent::Error => (
             "crabcode".to_string(),
             "Action failed".to_string(),
