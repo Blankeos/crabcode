@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.7] - 2026-07-12
+
+### Bug Fixes
+
+- Classify SSE errors as retryable/permanent and enforce stream termination by @Blankeos
+
+### Chores
+
+- Add per-task model selection and hard-task defaults by @Blankeos
+
+### Features
+
+- Add watched file indexer for completion suggestions by @Blankeos
+- Support mouse handling for permission/question dialogs by @Blankeos
+- Play notification sounds for print-mode lifecycle events by @Blankeos
+- Add configurable terminal title composition by @Blankeos
+- Add dedicated subagent completion notification event by @Blankeos
+
+### Performance
+
+- Improve subagent-aware chunk coalescing and markdown render performance by @Blankeos
+
 ## [0.0.6] - 2026-07-09
 
 ### Bug Fixes
