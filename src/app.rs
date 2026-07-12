@@ -863,7 +863,7 @@ impl App {
             })
             .collect();
         input.autocomplete = Some(
-            AutoComplete::new(crate::autocomplete::CommandAuto::new(&registry))
+            AutoComplete::new_at(crate::autocomplete::CommandAuto::new(&registry), &cwd_path)
                 .with_agents(agent_suggestions),
         );
 
@@ -8837,7 +8837,11 @@ impl App {
                     })
                     .collect::<Vec<_>>();
                 suggestions.extend(
-                    crate::autocomplete::FileAuto::new_at(&self.cwd).get_suggestions(query),
+                    self.input
+                        .autocomplete
+                        .as_ref()
+                        .map(|autocomplete| autocomplete.file_auto.get_suggestions(query))
+                        .unwrap_or_default(),
                 );
                 suggestions
             }

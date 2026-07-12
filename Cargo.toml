@@ -48,6 +48,7 @@ futures = "0.3"
 dirs = "5.0"
 lazy_static = "1.5"
 nucleo-matcher = "0.3"
+notify = "8.2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 cuid2 = "0.1"
 chrono = { version = "0.4", features = ["serde"] }

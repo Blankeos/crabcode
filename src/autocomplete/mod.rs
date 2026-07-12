@@ -18,9 +18,13 @@ pub struct AutoComplete {
 
 impl AutoComplete {
     pub fn new(command_auto: CommandAuto) -> Self {
+        Self::new_at(command_auto, ".")
+    }
+
+    pub fn new_at(command_auto: CommandAuto, root: impl Into<std::path::PathBuf>) -> Self {
         Self {
             command_auto,
-            file_auto: FileAuto::new(),
+            file_auto: FileAuto::new_at(root),
             agents: Vec::new(),
             mode: AutoCompleteMode::Command,
         }

@@ -112,13 +112,15 @@ I tried crabcode specifically for these providers:
 - Gemini - It's OAuth + also very unsure. So currently no.
 - Claude Code Subscription - Known to explicitly not like harnesses. So never will, sorry.
 
-## Development
+## Performance
 
-### Run tests
+Like any benchmark, please take this with a grain of salt. I have a cherry-picked benchmark for 1 purpose only: "Is crabcode at least as reliable as codex/opencode?". It's a useful feedback loop for my Crabcode trying to improve itself. We're honestly only chasing for at least: best parity if not better perf while having massively better TUI UX based on my personal preferences. Here is my most recent run (Jul 13, 2026):
 
-```bash
-cargo test
-```
+| Agent       | Score | Checks | Avg time | Est. tokens | Est. cost |
+| ----------- | ----: | -----: | -------: | ----------: | --------: |
+| 🦀 crabcode |  100% |  19/19 |    21.3s |        2851 |   $0.0103 |
+| 🔲 opencode |  100% |  19/19 |    24.2s |        3837 |   $0.0201 |
+| ⚛️ codex    |  100% |  19/19 |    24.9s |       56172 |   $0.5435 |
 
 ## Contributing
 
