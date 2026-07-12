@@ -411,3 +411,7 @@ I think this is how the TUI works already anyway right?
 - [x] Currently /connect can't be found w/ `/provider`, but usually it should because it kinda responds to that, even tho `/connect` is still the command. Think of it like a fuzzysearch possible keyword.
 
 - [x] Click on [Pasted Content 1918 chars] and see a tooltip to "expand" it. And yes, this is irreversible
+
+- [x] sound on headless mode `-p`
+
+- [ ] questions dialog and permissions dialog can click with mouse.

@@ -296,6 +296,11 @@ async fn run_print_mode(
 
     // Load config and model preferences
     let loaded_config = crate::config::ConfigLoader::load()?;
+    let (sounds, notification_warnings) =
+        crate::sound::resolve_effective_sounds(&loaded_config.merged_config.notifications);
+    for warning in notification_warnings {
+        eprintln!("Notification warning: {warning}");
+    }
     crate::skill::init_skill_store(&loaded_config.xdg_config_home, &loaded_config.project_root);
     let prefs_dao = crate::persistence::PrefsDAO::new().ok();
 
@@ -439,15 +444,18 @@ async fn run_print_mode(
             crate::llm::ChunkMessage::ToolCalls(_) | crate::llm::ChunkMessage::ToolResult(_) => {}
             crate::llm::ChunkMessage::End => {
                 println!();
+                play_resolved_sound(&sounds, crate::sound::SoundEvent::Complete);
                 break;
             }
             crate::llm::ChunkMessage::Failed(error) => {
+                play_resolved_sound(&sounds, crate::sound::SoundEvent::Error);
                 return Err(anyhow::anyhow!(error));
             }
             crate::llm::ChunkMessage::Warning(warning) => {
                 eprintln!("Warning: {}", warning);
             }
             crate::llm::ChunkMessage::PermissionRequest(prompt) => {
+                play_resolved_sound(&sounds, crate::sound::SoundEvent::Permission);
                 eprintln!(
                     "Permission required: {}. Re-run with --dangerously-skip-permissions to allow non-interactive tool execution.",
                     prompt.reason
@@ -457,6 +465,7 @@ async fn run_print_mode(
                     .send(crate::tools::PermissionResponse::Deny);
             }
             crate::llm::ChunkMessage::QuestionRequest { response_tx, .. } => {
+                play_resolved_sound(&sounds, crate::sound::SoundEvent::Question);
                 let _ = response_tx.send(serde_json::json!({
                     "skipped": true,
                     "reason": "Question prompts are unavailable in non-interactive print mode"
@@ -468,6 +477,15 @@ async fn run_print_mode(
 
     let _ = no_session_persistence;
     Ok(())
+}
+
+fn play_resolved_sound(
+    sounds: &crate::sound::ResolvedSoundsConfig,
+    event: crate::sound::SoundEvent,
+) {
+    if let Some(path) = sounds.path_for_event(event) {
+        crate::sound::play_file(path);
+    }
 }
 
 fn preflight_print_mode_prompt_size(
