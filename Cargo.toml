@@ -27,6 +27,7 @@ include = [
     "/mascot.txt",
     "/sounds/complete.mp3",
     "/sounds/error.mp3",
+    "/sounds/subagent_complete.mp3",
     "/remote-client/dist/client/**",
 ]
 
