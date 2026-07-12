@@ -7,6 +7,8 @@ export type BenchmarkTask = {
   title: string
   prompt: string
   files: Record<string, string>
+  /** When set, used unless `--model` / `BENCH_MODEL` overrides the whole run. */
+  model?: string
   difficulty?: BenchmarkDifficulty
   tags?: string[]
   timeoutMs?: number
@@ -25,6 +27,7 @@ export type CheckResult = {
 export type RunResult = {
   agent: AgentName
   task: string
+  model?: string
   ok: boolean
   passedChecks: number
   totalChecks: number

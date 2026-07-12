@@ -32,6 +32,7 @@ export function writeMarkdownReport(
     workspacesRoot: string
     logsRoot: string
     model: string
+    modelSelection?: Record<string, string>
     agents: AgentName[]
     tasks: BenchmarkTask[]
     runs: number
@@ -52,7 +53,15 @@ export function writeMarkdownReport(
   lines.push(`Generated: ${new Date().toISOString()}`)
   lines.push(`Run ID: \`${report.runId}\``)
   lines.push(`Model: \`${report.model || '(agent defaults)'}\``)
-  lines.push(`Agent model args: ${report.agents.map((agent) => `\`${displayAgent(agent)}=${modelForAgent(agent, report.model)}\``).join(', ')}`)
+  if (report.modelSelection && Object.keys(report.modelSelection).length) {
+    lines.push(
+      `Per-task models: ${Object.entries(report.modelSelection)
+        .map(([id, m]) => `\`${id}=${m}\``)
+        .join(', ')}`,
+    )
+  } else if (report.model && report.model !== '(per-task)') {
+    lines.push(`Agent model args: ${report.agents.map((agent) => `\`${displayAgent(agent)}=${modelForAgent(agent, report.model)}\``).join(', ')}`)
+  }
   lines.push(`Agents: ${report.agents.map((agent) => `\`${displayAgent(agent)}\``).join(', ')}`)
   lines.push(`Tasks: ${report.tasks.map((task) => `\`${task.id}\``).join(', ')}`)
   lines.push(`Runs per agent/task: ${report.runs}`)
@@ -86,13 +95,13 @@ export function writeMarkdownReport(
 
   lines.push(`## Runs`)
   lines.push('')
-  lines.push('| Status | Agent | Task | Checks | Time | Est. tokens | Est. cost | Workspace | Stdout | Stderr | Error |')
-  lines.push('|---|---|---|---:|---:|---:|---:|---|---|---|---|')
+  lines.push('| Status | Agent | Task | Model | Checks | Time | Est. tokens | Est. cost | Workspace | Stdout | Stderr | Error |')
+  lines.push('|---|---|---|---|---:|---:|---:|---:|---|---|---|---|')
   for (const result of report.results) {
     const status = result.ok ? 'PASS' : 'FAIL'
     const tokens = result.estimatedInputTokens + result.estimatedOutputTokens
     lines.push(
-      `| ${status} | ${displayAgent(result.agent)} | ${result.task} | ${result.passedChecks}/${result.totalChecks} | ${formatDuration(result.elapsedMs)} | ${tokens} | ${formatUsd(result.estimatedCostUsd)} | \`${result.workspace ?? ''}\` | \`${result.stdoutPath ?? ''}\` | \`${result.stderrPath ?? ''}\` | ${escapeMarkdownTable(result.error ?? '')} |`,
+      `| ${status} | ${displayAgent(result.agent)} | ${result.task} | \`${result.model ?? ''}\` | ${result.passedChecks}/${result.totalChecks} | ${formatDuration(result.elapsedMs)} | ${tokens} | ${formatUsd(result.estimatedCostUsd)} | \`${result.workspace ?? ''}\` | \`${result.stdoutPath ?? ''}\` | \`${result.stderrPath ?? ''}\` | ${escapeMarkdownTable(result.error ?? '')} |`,
     )
   }
   lines.push('')

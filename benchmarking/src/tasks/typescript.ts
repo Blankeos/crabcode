@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { bunTestCheck, bunTestWithHiddenFileCheck } from '../checks.ts'
+import { BENCHMARK_MODEL_CODEX_SPARK } from '../models.ts'
 import { defineTask } from './define.ts'
+
+const FIXTURE_BENCHMARK_MODEL = BENCHMARK_MODEL_CODEX_SPARK
 
 export const typescriptTasks = [
   defineTask({
@@ -78,7 +81,7 @@ import { parseConfig } from '../src/config'
 test('parses line comments and trailing commas', () => {
   const config = parseConfig(\`{
     // default benchmark model
-    "model": "openai/gpt-5.3-codex",
+    "model": "${FIXTURE_BENCHMARK_MODEL}",
     "limits": {
       "maxTurns": 8,
     },
@@ -89,7 +92,7 @@ test('parses line comments and trailing commas', () => {
   }\`)
 
   expect(config).toEqual({
-    model: 'openai/gpt-5.3-codex',
+    model: '${FIXTURE_BENCHMARK_MODEL}',
     limits: { maxTurns: 8 },
     features: ['shell', 'edit'],
   })

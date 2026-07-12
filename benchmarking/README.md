@@ -19,6 +19,17 @@ just bench-agents --difficulty hard
 just bench-agents --estimate --agents crabcode,codex
 ```
 
+## Models
+
+OpenAI `gpt-5.3-codex` is no longer used. Default selection (unless `--model` / `BENCH_MODEL` forces one model for the whole run):
+
+| Tier | Model |
+|------|--------|
+| Most tasks (smoke / medium) | `openai/gpt-5.3-codex-spark` |
+| Hard tasks (`workflow-planner-ts`, `issue-triage-pipeline-ts`, or `difficulty: hard`) | `openai/gpt-5.5` |
+
+Optional per-task `model` on a task definition overrides the tier default. Use `openai/gpt-5.4-mini` on specific tasks when spark is not appropriate.
+
 ## Layout
 
 ```text

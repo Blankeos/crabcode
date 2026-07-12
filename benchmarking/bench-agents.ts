@@ -7,11 +7,11 @@ import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { benchmarkPrompt, commandFor, displayAgent, modelForAgent, resolveTaskPrompt } from './src/agents.ts'
+import { resolveBenchmarkModel } from './src/models.ts'
 import { parseAgents, parseArgs, printHelp, printTaskList, selectTasks } from './src/cli.ts'
 import {
   DEFAULT_AGENTS,
   DEFAULT_INPUT_USD_PER_MTOK,
-  DEFAULT_MODEL,
   DEFAULT_OUTPUT_USD_PER_MTOK,
   DEFAULT_REPORT_DIR,
   DEFAULT_RUNS,
@@ -59,7 +59,7 @@ const selectedTasks = selectTasks(
   args.tags ?? process.env.BENCH_TAGS,
   args.difficulty ?? process.env.BENCH_DIFFICULTY,
 )
-const model = String(args.model ?? process.env.BENCH_MODEL ?? DEFAULT_MODEL)
+const modelOverride = args.model || process.env.BENCH_MODEL ? String(args.model ?? process.env.BENCH_MODEL) : undefined
 const timeoutMs = Number(args['timeout-ms'] ?? process.env.BENCH_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS)
 const runs = Number(args.runs ?? process.env.BENCH_RUNS ?? DEFAULT_RUNS)
 const keep = Boolean(args.keep)
@@ -88,7 +88,10 @@ if (!Number.isFinite(runs) || runs <= 0) {
 }
 
 const plannedPrompts = selectedTasks.length * agents.length * runs
-const estimatedInputTokens = selectedTasks.reduce((sum, task) => sum + estimateTokens(benchmarkPrompt(task.prompt)), 0) * agents.length * runs
+const estimatedInputTokens = selectedTasks.reduce(
+  (sum, task) => sum + estimateTokens(benchmarkPrompt(resolveTaskPrompt(task))) * agents.length * runs,
+  0,
+)
 const plannedCost = estimateCost(estimatedInputTokens, 0, inputPrice, outputPrice)
 const maxRunTimeoutMs = Math.max(timeoutMs, ...selectedTasks.map((task) => Number(task.timeoutMs ?? timeoutMs)))
 
@@ -137,7 +140,10 @@ try {
       JSON.stringify(
         {
           generatedAt: new Date().toISOString(),
-          model,
+          model: modelOverride ?? null,
+          modelSelection: Object.fromEntries(
+            selectedTasks.map((task) => [task.id, resolveBenchmarkModel(task, modelOverride)]),
+          ),
           agents,
           tasks: selectedTasks.map((task) => task.id),
           runs,
@@ -146,7 +152,9 @@ try {
           workspacesRoot,
           logsRoot,
           markdownReport: reportPath,
-          agentModels: Object.fromEntries(agents.map((agent) => [agent, modelForAgent(agent, model)])),
+          agentModels: modelOverride
+            ? Object.fromEntries(agents.map((agent) => [agent, modelForAgent(agent, modelOverride)]))
+            : undefined,
           pricing: {
             inputUsdPerMillionTokens: inputPrice,
             outputUsdPerMillionTokens: outputPrice,
@@ -177,7 +185,10 @@ function writeCurrentMarkdownReport() {
     runRoot,
     workspacesRoot,
     logsRoot,
-    model,
+    model: modelOverride ?? '(per-task)',
+    modelSelection: Object.fromEntries(
+      selectedTasks.map((task) => [task.id, resolveBenchmarkModel(task, modelOverride)]),
+    ),
     agents,
     tasks: selectedTasks,
     runs,
@@ -228,6 +239,7 @@ async function runBenchmark(
   const runLabel = `${String(runIndex + 1).padStart(2, '0')}-${agent}-${task.id}`
   const workspace = join(workspacesRoot, runLabel)
   const runTimeoutMs = Number(task.timeoutMs ?? timeoutMs)
+  const model = resolveBenchmarkModel(task, modelOverride)
   mkdirSync(workspace, { recursive: true })
   activeWorkspaces.add(workspace)
   let staticServer: Awaited<ReturnType<typeof startStaticServer>> | null = null
@@ -235,11 +247,9 @@ async function runBenchmark(
   try {
     writeFixture(workspace, task)
 
-    if (model) {
-      writeFileSync(join(workspace, 'crabcode.jsonc'), JSON.stringify({ model }, null, 2) + '\n')
-    }
+    writeFileSync(join(workspace, 'crabcode.jsonc'), JSON.stringify({ model }, null, 2) + '\n')
 
-    printRunStart(runNumber, totalRuns, agent, task.id, workspace)
+    printRunStart(runNumber, totalRuns, agent, task.id, workspace, model)
 
     if (task.site) {
       try {
@@ -250,6 +260,7 @@ async function runBenchmark(
         return {
           agent,
           task: task.id,
+          model,
           ok: false,
           passedChecks,
           totalChecks: checks.length,
@@ -289,6 +300,7 @@ async function runBenchmark(
     return {
       agent,
       task: task.id,
+      model,
       ok,
       passedChecks,
       totalChecks: checks.length,
@@ -420,7 +432,21 @@ function printIntro() {
   console.log('Agent benchmark')
   console.log('')
   console.log('Config')
-  console.log(`  model:        ${model}`)
+  if (modelOverride) {
+    console.log(`  model:        ${modelOverride} (all tasks)`)
+    console.log('')
+    console.log('Agent model args')
+    for (const agent of agents) {
+      console.log(`  ${displayAgent(agent).padEnd(12)} ${modelForAgent(agent, modelOverride)}`)
+    }
+  } else {
+    console.log('  model:        per-task (spark default, gpt-5.5 for hard)')
+    console.log('  per task:')
+    for (const task of selectedTasks) {
+      const taskModel = resolveBenchmarkModel(task, modelOverride)
+      console.log(`    ${task.id.padEnd(28)} ${taskModel}`)
+    }
+  }
   console.log(`  agents:       ${agents.map(displayAgent).join(', ')}`)
   console.log(`  tasks:        ${selectedTasks.map((task) => task.id).join(', ')}`)
   console.log(`  runs:         ${runs}`)
@@ -429,11 +455,6 @@ function printIntro() {
     `  timeout:      ${formatDuration(timeoutMs)}${maxRunTimeoutMs === timeoutMs ? '' : ` default, ${formatDuration(maxRunTimeoutMs)} max`}`,
   )
   console.log(`  prompt cost:  ${formatUsd(plannedCost)} estimated`)
-  console.log('')
-  console.log('Agent model args')
-  for (const agent of agents) {
-    console.log(`  ${displayAgent(agent).padEnd(12)} ${modelForAgent(agent, model)}`)
-  }
   console.log('')
 }
 
@@ -456,8 +477,16 @@ function printPaths() {
   console.log('')
 }
 
-function printRunStart(runNumber: number, totalRuns: number, agent: AgentName, taskId: string, workspace: string) {
+function printRunStart(
+  runNumber: number,
+  totalRuns: number,
+  agent: AgentName,
+  taskId: string,
+  workspace: string,
+  model: string,
+) {
   console.log(`Run ${runNumber}/${totalRuns}: ${displayAgent(agent)} / ${taskId}`)
+  console.log(`  model:     ${model}`)
   console.log(`  workspace: ${workspace}`)
 }
 

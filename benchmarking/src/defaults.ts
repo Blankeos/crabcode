@@ -2,7 +2,7 @@ import { join, resolve } from 'node:path'
 import type { AgentName } from './types.ts'
 
 export const REPO_ROOT = resolve(import.meta.dir, '..', '..')
-export const DEFAULT_MODEL = 'openai/gpt-5.3-codex'
+export { DEFAULT_MODEL } from './models.ts'
 export const DEFAULT_TIMEOUT_MS = 45_000
 export const DEFAULT_RUNS = 1
 export const DEFAULT_INPUT_USD_PER_MTOK = 1.25

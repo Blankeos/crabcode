@@ -78,7 +78,7 @@ export function printHelp(tasks: BenchmarkTask[]) {
   console.log(`Usage: bun run scripts/bench-agents.ts [options]
 
 Options:
-  --model provider/model             Model passed to each agent.
+  --model provider/model             Force one model for every task (overrides per-task defaults).
   --agents crabcode,opencode,codex   Agents to run.
   --tasks id-a,id-b                  Task IDs to run.
   --tags typescript,hidden-tests     Run tasks containing every listed tag.
@@ -97,7 +97,7 @@ Options:
   --keep                             Keep temporary workspaces for inspection.
 
 Default params:
-  model: ${DEFAULT_MODEL}
+  model: per-task — ${DEFAULT_MODEL} (smoke/medium), openai/gpt-5.5 (hard); override with --model
   agents: ${DEFAULT_AGENTS.join(',')}
   tasks: ${tasks.map((task) => task.id).join(',')}
   runs: ${DEFAULT_RUNS}
