@@ -25,6 +25,19 @@ struct QuestionOption {
     description: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct QuestionMouseHitbox {
+    area: Rect,
+    target: QuestionMouseTarget,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum QuestionMouseTarget {
+    Option(usize),
+    Confirm,
+    Cancel,
+}
+
 #[derive(Clone, Debug)]
 struct QuestionItem {
     header: String,
@@ -238,6 +251,7 @@ pub struct QuestionDialogState {
     current: Option<QuestionDialogRequest>,
     queue: VecDeque<QuestionDialogRequest>,
     tab_hitboxes: Vec<QuestionTabHitbox>,
+    mouse_hitboxes: Vec<QuestionMouseHitbox>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -246,6 +260,7 @@ struct QuestionTabHitbox {
     index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionDialogAction {
     Submit,
     Cancel,
@@ -263,6 +278,7 @@ impl QuestionDialogState {
             current: None,
             queue: VecDeque::new(),
             tab_hitboxes: Vec::new(),
+            mouse_hitboxes: Vec::new(),
         }
     }
 
@@ -271,6 +287,10 @@ impl QuestionDialogState {
         if self.current.is_none() {
             self.current = Some(request);
             self.tab_hitboxes.clear();
+            self.mouse_hitboxes.clear();
+            self.mouse_hitboxes.clear();
+            self.mouse_hitboxes.clear();
+            self.mouse_hitboxes.clear();
         } else {
             self.queue.push_back(request);
         }
@@ -955,23 +975,129 @@ pub fn handle_question_dialog_key_event(
 pub fn handle_question_dialog_mouse_event(
     state: &mut QuestionDialogState,
     event: MouseEvent,
-) -> bool {
-    if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
-        return false;
+) -> QuestionDialogAction {
+    if !matches!(
+        event.kind,
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Moved
+    ) {
+        return QuestionDialogAction::NotHandled;
     }
 
     let point = Position::new(event.column, event.row);
-    let Some(tab_index) = state.tab_index_at(point) else {
-        return false;
+    if let Some(tab_index) = state.tab_index_at(point) {
+        if matches!(event.kind, MouseEventKind::Moved) {
+            return QuestionDialogAction::NotHandled;
+        }
+
+        let Some(request) = state.active_mut() else {
+            return QuestionDialogAction::NotHandled;
+        };
+
+        request.current_index = tab_index.min(request.questions.len());
+        request.sync_editing_for_current_focus();
+        return QuestionDialogAction::Handled;
+    }
+
+    let target = state
+        .mouse_hitboxes
+        .iter()
+        .find(|hitbox| hitbox.area.contains(point))
+        .map(|hitbox| hitbox.target);
+    let Some(target) = target else {
+        return QuestionDialogAction::NotHandled;
     };
 
     let Some(request) = state.active_mut() else {
-        return false;
+        return QuestionDialogAction::NotHandled;
     };
 
-    request.current_index = tab_index.min(request.questions.len());
-    request.sync_editing_for_current_focus();
-    true
+    if matches!(event.kind, MouseEventKind::Moved) {
+        if let QuestionMouseTarget::Option(index) = target {
+            if let Some(answer) = request.current_answer_mut() {
+                answer.cursor = index;
+            }
+            request.editing_custom = false;
+            return QuestionDialogAction::Handled;
+        }
+        return QuestionDialogAction::NotHandled;
+    }
+
+    match target {
+        QuestionMouseTarget::Option(index) => {
+            if let Some(answer) = request.current_answer_mut() {
+                answer.cursor = index;
+            }
+            if request.current_is_custom_row() {
+                request.begin_custom_editing();
+            } else {
+                let is_multiple = request
+                    .current_question()
+                    .map(|question| question.multiple)
+                    .unwrap_or(false);
+                request.toggle_current();
+                if !is_multiple && request.next_question_or_submit() {
+                    return QuestionDialogAction::Submit;
+                }
+            }
+            QuestionDialogAction::Handled
+        }
+        QuestionMouseTarget::Confirm if request.is_confirm_tab() => QuestionDialogAction::Submit,
+        QuestionMouseTarget::Confirm => {
+            if request.current_is_text_entry() {
+                if request.finish_custom_editing() && request.next_question_or_submit() {
+                    QuestionDialogAction::Submit
+                } else {
+                    QuestionDialogAction::Handled
+                }
+            } else {
+                request.confirm_current_selection();
+                if request.next_question_or_submit() {
+                    QuestionDialogAction::Submit
+                } else {
+                    QuestionDialogAction::Handled
+                }
+            }
+        }
+        QuestionMouseTarget::Cancel => QuestionDialogAction::Cancel,
+    }
+}
+
+fn line_wrapped_height(line: &Line<'_>, width: u16) -> u16 {
+    wrapped_lines_height(std::slice::from_ref(line), width)
+}
+
+fn question_body_hitboxes(
+    request: &QuestionDialogRequest,
+    body_lines: &[Line<'_>],
+    body_area: Rect,
+) -> Vec<QuestionMouseHitbox> {
+    let Some(question) = request.current_question() else {
+        return Vec::new();
+    };
+    if question.options.is_empty() {
+        return Vec::new();
+    }
+
+    let option_start = 3 + usize::from(question.multiple);
+    let mut y = body_area.y;
+    let mut hitboxes = Vec::new();
+    for (line_index, line) in body_lines.iter().enumerate() {
+        let height = line_wrapped_height(line, body_area.width).max(1);
+        if line_index >= option_start && line_index < option_start + option_row_count(question) {
+            let visible_height = height.min(body_area.bottom().saturating_sub(y));
+            if visible_height > 0 {
+                hitboxes.push(QuestionMouseHitbox {
+                    area: Rect::new(body_area.x, y, body_area.width, visible_height),
+                    target: QuestionMouseTarget::Option(line_index - option_start),
+                });
+            }
+        }
+        y = y.saturating_add(height);
+        if y >= body_area.bottom() {
+            break;
+        }
+    }
+    hitboxes
 }
 
 fn push_tab_hitbox(
@@ -1131,6 +1257,7 @@ pub fn render_question_dialog(
 ) {
     let Some(request) = state.active() else {
         state.tab_hitboxes.clear();
+        state.mouse_hitboxes.clear();
         return;
     };
 
@@ -1208,6 +1335,15 @@ pub fn render_question_dialog(
         header_chunks[0],
     );
     let tab_hitboxes = question_tab_hitboxes(request, header_chunks[0], tab_scroll_x);
+    let mut mouse_hitboxes = question_body_hitboxes(request, &body_lines, chunks[1]);
+    mouse_hitboxes.push(QuestionMouseHitbox {
+        area: header_chunks[1],
+        target: QuestionMouseTarget::Cancel,
+    });
+    mouse_hitboxes.push(QuestionMouseHitbox {
+        area: chunks[3],
+        target: QuestionMouseTarget::Confirm,
+    });
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             cancel_text,
@@ -1229,6 +1365,7 @@ pub fn render_question_dialog(
     let footer = footer_line(request, &colors);
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Left), chunks[3]);
     state.tab_hitboxes = tab_hitboxes;
+    state.mouse_hitboxes = mouse_hitboxes;
 }
 
 fn parse_questions(value: Value) -> Vec<QuestionItem> {
@@ -1779,6 +1916,15 @@ mod tests {
         }
     }
 
+    fn mouse_moved(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
     fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
         (0..buffer.area.height)
             .map(|y| {
@@ -1980,6 +2126,57 @@ mod tests {
     }
 
     #[test]
+    fn mouse_hovering_tabs_does_not_change_active_question() {
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([
+                {
+                    "question": "Pick one",
+                    "header": "One",
+                    "options": [{ "label": "A" }]
+                },
+                {
+                    "question": "Pick two",
+                    "header": "Two",
+                    "options": [{ "label": "B" }]
+                }
+            ]),
+            tx,
+        );
+
+        let header_area = Rect {
+            x: 4,
+            y: 2,
+            width: 80,
+            height: 1,
+        };
+        state.tab_hitboxes = {
+            let request = state.current.as_ref().unwrap();
+            question_tab_hitboxes(
+                request,
+                header_area,
+                active_tab_scroll(request, header_area.width),
+            )
+        };
+
+        for hitbox in state
+            .tab_hitboxes
+            .iter()
+            .skip(1)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            let action = handle_question_dialog_mouse_event(
+                &mut state,
+                mouse_moved(hitbox.area.x.saturating_add(1), hitbox.area.y),
+            );
+            assert_eq!(action, QuestionDialogAction::NotHandled);
+            assert_eq!(state.current.as_ref().unwrap().current_index, 0);
+        }
+    }
+
+    #[test]
     fn enter_moves_to_confirm_then_submit() {
         let (tx, _rx) = oneshot::channel();
         let mut state = QuestionDialogState::new();
@@ -2043,7 +2240,7 @@ mod tests {
             &mut state,
             mouse_down(second.x.saturating_add(1), second.y),
         );
-        assert!(handled);
+        assert_eq!(handled, QuestionDialogAction::Handled);
         assert_eq!(state.current.as_ref().unwrap().current_index, 1);
 
         let confirm = state.tab_hitboxes[2].area;
@@ -2051,8 +2248,122 @@ mod tests {
             &mut state,
             mouse_down(confirm.x.saturating_add(1), confirm.y),
         );
-        assert!(handled);
+        assert_eq!(handled, QuestionDialogAction::Handled);
         assert_eq!(state.current.as_ref().unwrap().current_index, 2);
+    }
+
+    #[test]
+    fn mouse_clicking_single_option_selects_it_and_advances() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "Pick one",
+                "options": [{ "label": "A" }, { "label": "B" }]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(64, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let option_area = state
+            .mouse_hitboxes
+            .iter()
+            .find(|hitbox| matches!(hitbox.target, QuestionMouseTarget::Option(1)))
+            .unwrap()
+            .area;
+        assert_eq!(
+            handle_question_dialog_mouse_event(
+                &mut state,
+                mouse_down(option_area.x, option_area.y)
+            ),
+            QuestionDialogAction::Handled
+        );
+        assert!(state.current.as_ref().unwrap().answers[0].selected[1]);
+        assert!(state.current.as_ref().unwrap().is_confirm_tab());
+    }
+
+    #[test]
+    fn mouse_clicking_multiple_option_toggles_without_advancing() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "Pick any",
+                "multiple": true,
+                "options": [{ "label": "A" }, { "label": "B" }]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(64, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let option_area = state
+            .mouse_hitboxes
+            .iter()
+            .find(|hitbox| matches!(hitbox.target, QuestionMouseTarget::Option(1)))
+            .unwrap()
+            .area;
+        assert_eq!(
+            handle_question_dialog_mouse_event(
+                &mut state,
+                mouse_down(option_area.x, option_area.y)
+            ),
+            QuestionDialogAction::Handled
+        );
+
+        let request = state.current.as_ref().unwrap();
+        assert!(request.answers[0].selected[1]);
+        assert_eq!(request.current_index, 0);
+    }
+
+    #[test]
+    fn mouse_hovering_option_updates_cursor_without_selecting_it() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "Pick one",
+                "options": [{ "label": "A" }, { "label": "B" }]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(64, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let option_area = state
+            .mouse_hitboxes
+            .iter()
+            .find(|hitbox| matches!(hitbox.target, QuestionMouseTarget::Option(1)))
+            .unwrap()
+            .area;
+        let action = handle_question_dialog_mouse_event(
+            &mut state,
+            mouse_moved(option_area.x, option_area.y),
+        );
+
+        assert_eq!(action, QuestionDialogAction::Handled);
+        let answer = &state.current.as_ref().unwrap().answers[0];
+        assert_eq!(answer.cursor, 1);
+        assert!(!answer.selected[1]);
     }
 
     #[test]

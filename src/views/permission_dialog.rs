@@ -1,8 +1,8 @@
 use crate::theme::{contrast_text, ThemeColors};
 use crate::tools::{PermissionAction, PermissionGrant, PermissionPrompt, PermissionResponse};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
@@ -19,6 +19,7 @@ pub struct PermissionDialogState {
     current: Option<PermissionPrompt>,
     queue: VecDeque<PermissionPrompt>,
     selected_action: usize,
+    action_hitboxes: Vec<(Rect, PermissionResponse)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +41,7 @@ impl PermissionDialogState {
             current: None,
             queue: VecDeque::new(),
             selected_action: 1,
+            action_hitboxes: Vec::new(),
         }
     }
 
@@ -151,6 +153,7 @@ fn permission_action_label(action: PermissionAction) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionDialogAction {
     Respond(PermissionResponse),
     Handled,
@@ -196,10 +199,37 @@ pub fn handle_permission_dialog_key_event(
 }
 
 pub fn handle_permission_dialog_mouse_event(
-    _state: &mut PermissionDialogState,
-    _event: MouseEvent,
-) -> bool {
-    false
+    state: &mut PermissionDialogState,
+    event: MouseEvent,
+) -> PermissionDialogAction {
+    if !state.has_active() {
+        return PermissionDialogAction::NotHandled;
+    }
+
+    let point = Position::new(event.column, event.row);
+    let response = state
+        .action_hitboxes
+        .iter()
+        .find(|(area, _)| area.contains(point))
+        .map(|(_, response)| *response);
+    let Some(response) = response else {
+        return PermissionDialogAction::NotHandled;
+    };
+
+    if matches!(event.kind, MouseEventKind::Moved) {
+        state.selected_action = match response {
+            PermissionResponse::Deny => 0,
+            PermissionResponse::AllowOnce => 1,
+            PermissionResponse::AllowAlways => 2,
+        };
+        return PermissionDialogAction::Handled;
+    }
+
+    if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return PermissionDialogAction::Respond(response);
+    }
+
+    PermissionDialogAction::NotHandled
 }
 
 fn permission_detail_lines(prompt: &PermissionPrompt, colors: ThemeColors) -> Vec<Line<'static>> {
@@ -446,6 +476,25 @@ pub fn render_permission_dialog(
         .alignment(Alignment::Left);
     let help_width = help.width() as u16;
     f.render_widget(actions_block, chunks[4]);
+    state.action_hitboxes = [
+        PermissionResponse::AllowOnce,
+        PermissionResponse::AllowAlways,
+        PermissionResponse::Deny,
+    ]
+    .into_iter()
+    .enumerate()
+    .filter_map(|(row, response)| {
+        (row < chunks[4].height as usize).then_some((
+            Rect {
+                x: chunks[4].x,
+                y: chunks[4].y.saturating_add(row as u16),
+                width: chunks[4].width,
+                height: 1,
+            },
+            response,
+        ))
+    })
+    .collect();
 
     let can_render_help = chunks[5].width > 42;
     if can_render_help {
@@ -646,5 +695,86 @@ mod tests {
         assert!(rendered.contains("Allow once"));
         assert!(rendered.contains("Allow always"));
         assert!(rendered.contains("Reject"));
+    }
+
+    #[test]
+    fn clicking_permission_action_returns_response() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let mut state = PermissionDialogState::new();
+        state.enqueue(PermissionPrompt {
+            tool_id: "read".to_string(),
+            action: PermissionAction::Read,
+            permission: "read".to_string(),
+            patterns: vec!["/tmp/file".to_string()],
+            target: Some("/tmp/file".to_string()),
+            command: None,
+            workdir: None,
+            reason: "explicit approval required".to_string(),
+            response_tx,
+        });
+        let colors = Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(64, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_permission_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let reject_area = state.action_hitboxes[2].0;
+        let action = handle_permission_dialog_mouse_event(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: reject_area.x,
+                row: reject_area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+
+        assert_eq!(
+            action,
+            PermissionDialogAction::Respond(PermissionResponse::Deny)
+        );
+    }
+
+    #[test]
+    fn hovering_permission_action_updates_selection_without_responding() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let mut state = PermissionDialogState::new();
+        state.enqueue(PermissionPrompt {
+            tool_id: "read".to_string(),
+            action: PermissionAction::Read,
+            permission: "read".to_string(),
+            patterns: vec!["/tmp/file".to_string()],
+            target: Some("/tmp/file".to_string()),
+            command: None,
+            workdir: None,
+            reason: "explicit approval required".to_string(),
+            response_tx,
+        });
+        let colors = Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(64, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_permission_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let always_area = state.action_hitboxes[1].0;
+        let action = handle_permission_dialog_mouse_event(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: always_area.x,
+                row: always_area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+
+        assert_eq!(action, PermissionDialogAction::Handled);
+        assert_eq!(state.selected_action, 2);
+        assert!(state.has_active());
     }
 }

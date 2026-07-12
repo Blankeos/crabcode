@@ -414,4 +414,5 @@ I think this is how the TUI works already anyway right?
 
 - [x] sound on headless mode `-p`
 
-- [ ] questions dialog and permissions dialog can click with mouse.
+- [x] questions dialog and permissions dialog can click with mouse.
+- [x] simultaneous question and permission dialog will lead to a stuck UI. permission shows first, dialog is supposed to show shows second (but it doesn't)

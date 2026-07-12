@@ -3276,17 +3276,7 @@ impl App {
                         if self.permission_dialog_state.has_active() {
                             self.overlay_focus = OverlayFocus::PermissionDialog;
                         } else {
-                            self.chat_state.chat.resume_streaming_tps_timer();
-                            if let Some(session_id) =
-                                self.session_manager.get_current_session_id().cloned()
-                            {
-                                let _ = self.session_manager.set_session_status(
-                                    &session_id,
-                                    crate::session::types::SessionStatus::Streaming,
-                                    None,
-                                );
-                            }
-                            self.restore_focus_after_priority_overlay();
+                            self.resume_remote_wait_if_clear();
                         }
                         true
                     }
@@ -3302,17 +3292,7 @@ impl App {
                         if self.question_dialog_state.has_active() {
                             self.overlay_focus = OverlayFocus::QuestionDialog;
                         } else {
-                            self.chat_state.chat.resume_streaming_tps_timer();
-                            if let Some(session_id) =
-                                self.session_manager.get_current_session_id().cloned()
-                            {
-                                let _ = self.session_manager.set_session_status(
-                                    &session_id,
-                                    crate::session::types::SessionStatus::Streaming,
-                                    None,
-                                );
-                            }
-                            self.restore_focus_after_priority_overlay();
+                            self.resume_remote_wait_if_clear();
                         }
                         true
                     }
@@ -4169,8 +4149,12 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
             }
         } else if self.overlay_focus == OverlayFocus::PermissionDialog {
-            let handled =
+            let action =
                 handle_permission_dialog_mouse_event(&mut self.permission_dialog_state, mouse);
+            let handled = !matches!(action, PermissionDialogAction::NotHandled);
+            if let PermissionDialogAction::Respond(response) = action {
+                self.remote_respond_permission(response);
+            }
             if !handled
                 && matches!(
                     mouse.kind,
@@ -4219,7 +4203,22 @@ impl App {
                 let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
             }
         } else if self.overlay_focus == OverlayFocus::QuestionDialog {
-            let _ = handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse);
+            match handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse) {
+                QuestionDialogAction::Submit => {
+                    self.question_dialog_state.submit_current();
+                    if self.question_dialog_state.has_active() {
+                        self.overlay_focus = OverlayFocus::QuestionDialog;
+                    } else {
+                        self.resume_remote_wait_if_clear();
+                    }
+                }
+                QuestionDialogAction::Cancel => {
+                    self.question_dialog_state.clear_with_empty();
+                    self.resume_remote_wait_if_clear();
+                    self.cancel_streaming();
+                }
+                QuestionDialogAction::Handled | QuestionDialogAction::NotHandled => {}
+            }
         } else if self.overlay_focus == OverlayFocus::RemoteDialog {
             let action = handle_remote_dialog_mouse_event(&mut self.remote_dialog_state, mouse);
             let _ = self.handle_remote_dialog_action(action);
@@ -5306,6 +5305,18 @@ impl App {
     fn close_copy_actions_dialog(&mut self) {
         self.copy_actions_dialog = None;
         self.overlay_focus = OverlayFocus::None;
+    }
+
+    fn focus_pending_priority_overlay(&mut self) -> bool {
+        if self.permission_dialog_state.has_active() {
+            self.overlay_focus = OverlayFocus::PermissionDialog;
+            true
+        } else if self.question_dialog_state.has_active() {
+            self.overlay_focus = OverlayFocus::QuestionDialog;
+            true
+        } else {
+            false
+        }
     }
 
     fn reject_chat_only_command_outside_chat(&mut self, command_name: &str) -> bool {
@@ -7905,7 +7916,12 @@ impl App {
                     chat.pause_streaming_tps_timer();
                 }
                 self.permission_dialog_state.enqueue(prompt);
-                self.overlay_focus = OverlayFocus::PermissionDialog;
+                if !matches!(
+                    self.overlay_focus,
+                    OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+                ) {
+                    self.overlay_focus = OverlayFocus::PermissionDialog;
+                }
                 true
             }
             crate::llm::ChunkMessage::QuestionRequest {
@@ -7927,7 +7943,12 @@ impl App {
                     chat.pause_streaming_tps_timer();
                 }
                 self.question_dialog_state.enqueue(questions, response_tx);
-                self.overlay_focus = OverlayFocus::QuestionDialog;
+                if !matches!(
+                    self.overlay_focus,
+                    OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+                ) {
+                    self.overlay_focus = OverlayFocus::QuestionDialog;
+                }
                 true
             }
         }
@@ -8623,6 +8644,10 @@ impl App {
     }
 
     fn resume_remote_wait_if_clear(&mut self) {
+        if self.focus_pending_priority_overlay() {
+            return;
+        }
+
         self.chat_state.chat.resume_streaming_tps_timer();
         if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
             let _ = self.session_manager.set_session_status(
@@ -9937,6 +9962,8 @@ impl Default for App {
 mod tests {
     use super::*;
     use crate::command::parser::parse_input;
+    use crate::tools::{PermissionAction, PermissionPrompt};
+    use serde_json::json;
 
     fn test_app() -> App {
         let mut registry = Registry::new();
@@ -10126,6 +10153,68 @@ mod tests {
         app.overlay_focus = OverlayFocus::PermissionDialog;
 
         assert_eq!(app.terminal_title_text(), "[!] sheetpilot");
+    }
+
+    #[test]
+    fn resolving_permission_promotes_pending_question() {
+        let mut app = test_app();
+        let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
+        app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_id: "list".to_string(),
+            action: PermissionAction::List,
+            permission: "external_directory".to_string(),
+            patterns: vec!["/tmp/*".to_string()],
+            target: Some("/tmp".to_string()),
+            command: None,
+            workdir: None,
+            reason: "approval required".to_string(),
+            response_tx: permission_tx,
+        });
+        let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
+        app.question_dialog_state.enqueue(
+            json!([{
+                "question": "Continue?",
+                "options": [{ "label": "Yes" }, { "label": "No" }]
+            }]),
+            question_tx,
+        );
+        app.overlay_focus = OverlayFocus::PermissionDialog;
+
+        assert!(app.remote_respond_permission(PermissionResponse::Deny));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::QuestionDialog);
+        assert!(app.question_dialog_state.has_active());
+    }
+
+    #[test]
+    fn resolving_question_promotes_pending_permission() {
+        let mut app = test_app();
+        let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
+        app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_id: "list".to_string(),
+            action: PermissionAction::List,
+            permission: "external_directory".to_string(),
+            patterns: vec!["/tmp/*".to_string()],
+            target: Some("/tmp".to_string()),
+            command: None,
+            workdir: None,
+            reason: "approval required".to_string(),
+            response_tx: permission_tx,
+        });
+        let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
+        app.question_dialog_state.enqueue(
+            json!([{
+                "question": "Continue?",
+                "options": [{ "label": "Yes" }, { "label": "No" }]
+            }]),
+            question_tx,
+        );
+        app.overlay_focus = OverlayFocus::QuestionDialog;
+
+        assert!(app.remote_answer_question(json!([["Yes"]])));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::PermissionDialog);
+        assert!(app.permission_dialog_state.has_active());
     }
 
     #[tokio::test]
