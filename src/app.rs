@@ -6077,6 +6077,12 @@ impl App {
 
     fn show_message_actions_from(&mut self, idx: usize, return_focus: OverlayFocus) {
         let can_undo = self.selected_message_can_undo(idx);
+        let can_copy_response_markdown = self
+            .session_manager
+            .get_current_session()
+            .and_then(|session| session.messages.get(idx))
+            .and_then(message_response_markdown)
+            .is_some();
         self.message_actions_index = Some(idx);
         self.message_actions_return_focus = return_focus;
 
@@ -6094,6 +6100,18 @@ impl App {
                 description: "Create new session (Will include this message)".to_string(),
             },
         ];
+
+        if can_copy_response_markdown {
+            items.insert(
+                1,
+                ActionDialogItem {
+                    id: "copy_response_markdown".to_string(),
+                    key: 'm',
+                    label: "Copy text response as markdown".to_string(),
+                    description: "Copy only the assistant's text response as Markdown".to_string(),
+                },
+            );
+        }
 
         if can_undo {
             items.push(ActionDialogItem {
@@ -6192,6 +6210,18 @@ impl App {
                 if let Some(text) = copy_text {
                     let _ = crate::utils::clipboard::copy_text(&text);
                     push_toast(Toast::new("Copied to clipboard", ToastLevel::Info, None));
+                }
+                self.close_message_actions();
+            }
+            "copy_response_markdown" => {
+                let response = self
+                    .session_manager
+                    .get_current_session()
+                    .and_then(|session| session.messages.get(idx))
+                    .and_then(message_response_markdown);
+
+                if let Some(response) = response {
+                    self.copy_text_with_toast(&response, "Text response copied as Markdown");
                 }
                 self.close_message_actions();
             }
@@ -9804,6 +9834,12 @@ fn message_block_clipboard_text(
         .join("\n\n")
 }
 
+fn message_response_markdown(message: &crate::session::types::Message) -> Option<String> {
+    (message.role == crate::session::types::MessageRole::Assistant)
+        .then(|| message.content.trim().to_string())
+        .filter(|content| !content.is_empty())
+}
+
 fn is_remote_browser_unsupported_command(name: &str) -> bool {
     matches!(
         name,
@@ -10512,6 +10548,46 @@ mod tests {
         assert!(text.contains("Final answer"));
         assert!(text.contains("Tool:\n{"));
         assert!(text.contains("\"output_preview\": \"contents\""));
+    }
+
+    #[test]
+    fn message_response_markdown_only_returns_assistant_text() {
+        let mut assistant = crate::session::types::Message::assistant(
+            "\n## Result\n\n```rust\nfn main() {}\n```\n",
+        );
+        assistant.reasoning = Some("Internal reasoning".to_string());
+
+        assert_eq!(
+            message_response_markdown(&assistant).as_deref(),
+            Some("## Result\n\n```rust\nfn main() {}\n```")
+        );
+        assert!(
+            message_response_markdown(&crate::session::types::Message::user("Prompt")).is_none()
+        );
+        assert!(
+            message_response_markdown(&crate::session::types::Message::assistant("   ")).is_none()
+        );
+    }
+
+    #[test]
+    fn assistant_message_actions_include_markdown_copy() {
+        let mut app = test_app();
+        app.create_new_session(Some("Copy response".to_string()));
+        add_current_session_message(
+            &mut app,
+            crate::session::types::Message::assistant("**Markdown**"),
+        );
+
+        app.show_message_actions(0);
+
+        let dialog = app
+            .message_actions_dialog
+            .as_ref()
+            .expect("message actions");
+        assert!(dialog
+            .items
+            .iter()
+            .any(|item| item.id == "copy_response_markdown"));
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
