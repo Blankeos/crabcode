@@ -364,6 +364,12 @@ pub async fn stream_llm_with_cancellation(
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
 ) -> Result<(), DynError> {
+    struct SessionConfigGuard(crate::agent::config::LlmSessionRegistration);
+    impl Drop for SessionConfigGuard {
+        fn drop(&mut self) {
+            crate::agent::config::remove_llm_session_if_owned(&self.0);
+        }
+    }
     crate::emit_log!(
         "GOING TO STREAM session_id={} provider={} model={} agent_mode={} agent_max_steps={:?} input_messages={}",
         session_id,
@@ -388,7 +394,7 @@ pub async fn stream_llm_with_cancellation(
     )
     .await;
     // Set LLM session config for subagent use
-    crate::agent::config::set_llm_session(crate::agent::config::LlmSessionConfig {
+    let llm_session = crate::agent::config::LlmSessionConfig {
         provider_name: request_config.provider_name.clone(),
         model: request_config.model_name.clone(),
         api_key: request_config.api_key.clone(),
@@ -401,7 +407,11 @@ pub async fn stream_llm_with_cancellation(
         reasoning_effort: request_config.reasoning_effort,
         supports_image_input: request_config.supports_image_input,
         openai_options: request_config.openai_options.clone(),
-    });
+    };
+    crate::agent::config::set_llm_session(llm_session.clone());
+    let session_registration =
+        crate::agent::config::set_llm_session_for(session_id.clone(), llm_session);
+    let _session_config_guard = SessionConfigGuard(session_registration);
 
     let show_vlm_agent_hint = !request_config.supports_image_input
         && vlm_agent_has_model(&agent_registry)
@@ -1144,7 +1154,6 @@ async fn stream_provider_request(
     cancel_token: Option<CancellationToken>,
 ) -> Result<StreamTextResponse, DynError> {
     let headers = HashMap::new();
-
     match config.kind {
         ProviderKind::OpenAICompatible => {
             let mut builder = OpenAICompatible::builder()

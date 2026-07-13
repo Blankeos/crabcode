@@ -20,6 +20,51 @@ pub struct TaskTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::config::test_scoped_llm_session_lock;
+
+    #[test]
+    fn task_requires_parent_session_scoped_llm_config() {
+        let _lock = test_scoped_llm_session_lock();
+        let _reg = crate::agent::config::set_llm_session_for(
+            "other-session",
+            crate::agent::config::LlmSessionConfig {
+                provider_name: "other-provider".to_string(),
+                model: "other-model".to_string(),
+                api_key: None,
+                provider_kind: crate::agent::config::ProviderKind::OpenAICompatible,
+                base_url: "https://example.test".to_string(),
+                reasoning_effort: None,
+                supports_image_input: false,
+                openai_options: crate::agent::config::OpenAIRequestOptions::default(),
+            },
+        );
+
+        let task = TaskTool::new(ToolRegistry::new()).with_runtime_options(
+            crate::tools::ToolPermissions::new("."),
+            AgentRegistry::default(),
+            CancellationToken::new(),
+        );
+        let params = serde_json::json!({
+            "subagent_type": "explore",
+            "description": "test",
+            "prompt": "look around"
+        });
+        let ctx = ToolContext::from_cancel_token(
+            "parent-session",
+            "message",
+            "Build",
+            CancellationToken::new(),
+        );
+
+        let result = tokio_test::block_on(task.execute(params, &ctx));
+        assert!(
+            matches!(result, Err(ToolError::Execution(ref msg)) if msg.contains("LLM session not configured")),
+            "expected missing scoped config error, got {:?}",
+            result
+        );
+
+        crate::agent::config::remove_llm_session_for("other-session");
+    }
 
     #[test]
     fn plan_parent_cannot_invoke_general_subagent() {
@@ -58,7 +103,8 @@ mod tests {
 
     #[test]
     fn subagent_display_model_prefers_agent_model_override() {
-        crate::agent::config::set_llm_session(crate::agent::config::LlmSessionConfig {
+        let _lock = test_scoped_llm_session_lock();
+        let parent_session = crate::agent::config::LlmSessionConfig {
             provider_name: "parent-provider".to_string(),
             model: "parent-model".to_string(),
             api_key: None,
@@ -67,7 +113,7 @@ mod tests {
             reasoning_effort: None,
             supports_image_input: false,
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
-        });
+        };
 
         let mut warnings = Vec::new();
         let defs = crate::agent::definition::parse_agent_definitions_from_config(
@@ -83,10 +129,48 @@ mod tests {
 
         assert!(warnings.is_empty());
         assert_eq!(
-            subagent_display_provider(agent).as_deref(),
+            subagent_display_provider(agent, &parent_session).as_deref(),
             Some("opencode-go")
         );
-        assert_eq!(subagent_display_model(agent).as_deref(), Some("kimi-k2.6"));
+        assert_eq!(
+            subagent_display_model(agent, &parent_session).as_deref(),
+            Some("kimi-k2.6")
+        );
+    }
+
+    #[test]
+    fn subagent_display_metadata_falls_back_to_parent_session() {
+        let _lock = test_scoped_llm_session_lock();
+        let parent_session = crate::agent::config::LlmSessionConfig {
+            provider_name: "parent-provider".to_string(),
+            model: "parent-model".to_string(),
+            api_key: None,
+            provider_kind: crate::agent::config::ProviderKind::OpenAICompatible,
+            base_url: "https://example.test".to_string(),
+            reasoning_effort: None,
+            supports_image_input: false,
+            openai_options: crate::agent::config::OpenAIRequestOptions::default(),
+        };
+        let mut warnings = Vec::new();
+        let defs = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "explore": {
+                    "mode": "subagent"
+                }
+            })),
+            &mut warnings,
+        );
+        let agent = defs.first().expect("agent definition");
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            subagent_display_provider(agent, &parent_session).as_deref(),
+            Some("parent-provider")
+        );
+        assert_eq!(
+            subagent_display_model(agent, &parent_session).as_deref(),
+            Some("parent-model")
+        );
     }
 }
 
@@ -213,6 +297,8 @@ impl ToolHandler for TaskTool {
         let max_steps = subagent.max_steps;
 
         let child_session_id = cuid2::create_id();
+        let parent_llm_session = crate::agent::config::get_llm_session_for(&ctx.session_id)
+            .ok_or_else(|| ToolError::Execution("LLM session not configured".to_string()))?;
         let title = format!(
             "{} (@{} subagent)",
             if description.trim().is_empty() {
@@ -239,8 +325,8 @@ impl ToolHandler for TaskTool {
             child_session_id.clone(),
             title.clone(),
             subagent.name.clone(),
-            subagent_display_provider(&subagent),
-            subagent_display_model(&subagent),
+            subagent_display_provider(&subagent, &parent_llm_session),
+            subagent_display_model(&subagent, &parent_llm_session),
             description.clone(),
             prompt.clone(),
         );
@@ -248,6 +334,7 @@ impl ToolHandler for TaskTool {
         let started_at = std::time::Instant::now();
         let result = match subagent::run_subagent(
             subagent.clone(),
+            parent_llm_session,
             &description,
             &prompt,
             &self.tool_registry,
@@ -347,7 +434,10 @@ impl TaskTool {
     }
 }
 
-fn subagent_display_model(agent: &crate::agent::definition::AgentDefinition) -> Option<String> {
+fn subagent_display_model(
+    agent: &crate::agent::definition::AgentDefinition,
+    parent_session: &crate::agent::config::LlmSessionConfig,
+) -> Option<String> {
     agent
         .model
         .as_deref()
@@ -360,10 +450,13 @@ fn subagent_display_model(agent: &crate::agent::definition::AgentDefinition) -> 
                 .unwrap_or(model_ref)
                 .to_string()
         })
-        .or_else(|| crate::agent::config::get_llm_session().map(|session| session.model))
+        .or_else(|| Some(parent_session.model.clone()))
 }
 
-fn subagent_display_provider(agent: &crate::agent::definition::AgentDefinition) -> Option<String> {
+fn subagent_display_provider(
+    agent: &crate::agent::definition::AgentDefinition,
+    parent_session: &crate::agent::config::LlmSessionConfig,
+) -> Option<String> {
     agent
         .model
         .as_deref()
@@ -374,5 +467,5 @@ fn subagent_display_provider(agent: &crate::agent::definition::AgentDefinition) 
                 .split_once('/')
                 .map(|(provider, _)| provider.trim().to_string())
         })
-        .or_else(|| crate::agent::config::get_llm_session().map(|session| session.provider_name))
+        .or_else(|| Some(parent_session.provider_name.clone()))
 }

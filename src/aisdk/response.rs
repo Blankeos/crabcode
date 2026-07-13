@@ -21,6 +21,16 @@ pub struct StreamTextResponse {
     _handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
+impl Drop for StreamTextResponse {
+    /// Safety net: abort the background provider/tool loop if the consumer drops
+    /// the response without draining the stream (e.g. cancellation or early exit).
+    fn drop(&mut self) {
+        for handle in &self._handles {
+            handle.abort();
+        }
+    }
+}
+
 pub struct LanguageModelStream {
     rx: mpsc::UnboundedReceiver<ChunkType>,
 }
@@ -140,13 +150,18 @@ pub async fn stream_with_tools<P: Provider>(
             {
                 Ok(stream) => stream,
                 Err(error) => {
-                    let err = provider_step_error_message(
-                        step_idx,
-                        current_messages.len(),
-                        tools.len(),
-                        &step_summary,
-                        error,
-                    );
+                    let err = match error {
+                        Error::Provider(message) if message == "Streaming cancelled by user" => {
+                            message
+                        }
+                        error => provider_step_error_message(
+                            step_idx,
+                            current_messages.len(),
+                            tools.len(),
+                            &step_summary,
+                            error,
+                        ),
+                    };
                     let _ = tx_loop.send(ChunkType::Failed(err.clone()));
                     *stop_reason_arc.lock().await = Some(StopReason::Error(err));
                     return;
@@ -164,7 +179,21 @@ pub async fn stream_with_tools<P: Provider>(
             let mut current_assistant_message_phase = None;
             let mut emitted_non_replayable_output = false;
 
-            while let Some(chunk) = stream.next().await {
+            loop {
+                let next_chunk = if let Some(token) = cancel_token.as_ref() {
+                    tokio::select! {
+                        _ = token.cancelled() => {
+                            let err = "Streaming cancelled by user".to_string();
+                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                            *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                            return;
+                        }
+                        chunk = stream.next() => chunk,
+                    }
+                } else {
+                    stream.next().await
+                };
+                let Some(chunk) = next_chunk else { break };
                 match chunk {
                     Ok(ChunkType::AssistantMessagePhase { phase }) => {
                         current_assistant_message_phase = phase;
@@ -575,7 +604,7 @@ pub async fn stream_with_tools<P: Provider>(
                 messages_arc.lock().await.extend(tool_call_messages);
             }
 
-            let tool_results = join_all(tool_calls_to_run.into_iter().map(
+            let tool_work = join_all(tool_calls_to_run.into_iter().map(
                 |(call_id, tool_name, args, cache_key)| {
                     let tool = tools.iter().find(|t| t.name == tool_name).cloned();
 
@@ -610,8 +639,20 @@ pub async fn stream_with_tools<P: Provider>(
                         }
                     }
                 },
-            ))
-            .await;
+            ));
+            let tool_results = if let Some(token) = cancel_token.as_ref() {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        let err = "Tool execution cancelled by user".to_string();
+                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                        *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                        return;
+                    }
+                    results = tool_work => results,
+                }
+            } else {
+                tool_work.await
+            };
 
             for result in tool_results {
                 if result.is_error {
@@ -869,7 +910,17 @@ async fn open_provider_stream_with_retries<P: Provider>(
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> std::result::Result<ProviderStream, Error> {
     loop {
-        match provider.stream_text(messages, tools, headers).await {
+        let stream_result = if let Some(token) = cancel_token {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    return Err(Error::Provider("Streaming cancelled by user".to_string()));
+                }
+                result = provider.stream_text(messages, tools, headers) => result,
+            }
+        } else {
+            provider.stream_text(messages, tools, headers).await
+        };
+        match stream_result {
             Ok(stream) => return Ok(stream),
             Err(error) => match retry_error_from_provider_error(error) {
                 Ok(retry_error) if *attempt <= PROVIDER_STEP_MAX_RETRIES => {
@@ -1205,12 +1256,113 @@ mod tests {
     use futures::StreamExt;
     use schemars::Schema;
     use std::collections::HashMap;
+    use std::pin::Pin;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     };
     use std::time::Duration;
     use tokio::sync::Barrier;
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Debug, Clone)]
+    struct BlockingTextProvider;
+
+    #[derive(Debug, Clone)]
+    struct NeverEndingProvider {
+        polled: Arc<AtomicUsize>,
+        stream_dropped: Arc<AtomicBool>,
+    }
+
+    struct NeverEndingStream {
+        polled: Arc<AtomicUsize>,
+        stream_dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for NeverEndingStream {
+        fn drop(&mut self) {
+            self.stream_dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl futures::Stream for NeverEndingStream {
+        type Item = crate::error::Result<ChunkType>;
+
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.polled.fetch_add(1, Ordering::SeqCst);
+            std::task::Poll::Pending
+        }
+    }
+
+    #[async_trait]
+    impl Provider for NeverEndingProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            Ok(Box::pin(NeverEndingStream {
+                polled: self.polled.clone(),
+                stream_dropped: self.stream_dropped.clone(),
+            }))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct BlockingStartupProvider;
+
+    #[async_trait]
+    impl Provider for BlockingStartupProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            std::future::pending::<()>().await;
+            unreachable!("stream_text should not return while blocked")
+        }
+    }
+
+    #[async_trait]
+    impl Provider for BlockingTextProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            Ok(Box::pin(futures::stream::pending()))
+        }
+    }
 
     #[derive(Debug, Clone)]
     struct TwoToolCallProvider {
@@ -1635,6 +1787,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_during_tool_execution_emits_failed() {
+        let cancel_token = CancellationToken::new();
+        let provider = TwoToolCallProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let started = Arc::new(AtomicUsize::new(0));
+
+        let tool_started = started.clone();
+        let wait_tool = Tool::builder()
+            .name("wait")
+            .description("block until cancelled")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(move |_input| {
+                let tool_started = tool_started.clone();
+                async move {
+                    tool_started.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending::<()>().await;
+                    Ok("ok".to_string())
+                }
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider,
+            vec![Message::user("run tools")],
+            vec![wait_tool],
+            None,
+            None,
+            HashMap::new(),
+            Some(cancel_token.clone()),
+        )
+        .await
+        .unwrap();
+
+        let drain = tokio::spawn(async move {
+            let mut failed = None;
+            while let Some(chunk) = response.stream.next().await {
+                if let ChunkType::Failed(msg) = chunk {
+                    failed = Some(msg);
+                }
+            }
+            failed
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("tool execution should start before cancellation");
+
+        cancel_token.cancel();
+
+        let failed = tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("stream should finish promptly after tool cancellation")
+            .expect("drain task should complete");
+        assert_eq!(failed.as_deref(), Some("Tool execution cancelled by user"));
+    }
+
+    #[tokio::test]
     async fn executes_same_step_tool_calls_concurrently() {
         let provider = TwoToolCallProvider {
             requests: Arc::new(AtomicUsize::new(0)),
@@ -1699,6 +1914,120 @@ mod tests {
         assert_eq!(observations.len(), 2);
         assert!(observations.iter().any(|output| output.call_id == "call_1"));
         assert!(observations.iter().any(|output| output.call_id == "call_2"));
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_text_response_drops_provider_stream_promptly() {
+        let polled = Arc::new(AtomicUsize::new(0));
+        let stream_dropped = Arc::new(AtomicBool::new(false));
+        let provider = NeverEndingProvider {
+            polled: polled.clone(),
+            stream_dropped: stream_dropped.clone(),
+        };
+
+        let response = stream_with_tools(
+            provider,
+            vec![Message::user("hello")],
+            Vec::new(),
+            None,
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while polled.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background task should start polling the provider stream");
+
+        drop(response);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !stream_dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping StreamTextResponse should drop the provider stream promptly");
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_blocked_on_provider_stream_next_emits_failed_and_closes() {
+        let cancel_token = CancellationToken::new();
+        let provider = BlockingTextProvider;
+
+        let mut response = stream_with_tools(
+            provider,
+            vec![Message::user("hello")],
+            Vec::new(),
+            None,
+            None,
+            HashMap::new(),
+            Some(cancel_token.clone()),
+        )
+        .await
+        .unwrap();
+
+        let drain = tokio::spawn(async move {
+            let mut failed = None;
+            while let Some(chunk) = response.stream.next().await {
+                if let ChunkType::Failed(msg) = chunk {
+                    failed = Some(msg);
+                }
+            }
+            failed
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        cancel_token.cancel();
+
+        let failed = tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("stream should close promptly after cancel during stream.next")
+            .expect("drain task should complete");
+        assert_eq!(failed.as_deref(), Some("Streaming cancelled by user"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_blocked_on_provider_stream_text_startup_emits_failed_and_closes() {
+        let cancel_token = CancellationToken::new();
+        let provider = BlockingStartupProvider;
+
+        let mut response = stream_with_tools(
+            provider,
+            vec![Message::user("hello")],
+            Vec::new(),
+            None,
+            None,
+            HashMap::new(),
+            Some(cancel_token.clone()),
+        )
+        .await
+        .unwrap();
+
+        let drain = tokio::spawn(async move {
+            let mut failed = None;
+            while let Some(chunk) = response.stream.next().await {
+                if let ChunkType::Failed(msg) = chunk {
+                    failed = Some(msg);
+                }
+            }
+            failed
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        cancel_token.cancel();
+
+        let failed = tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("stream should close promptly after cancel during provider startup")
+            .expect("drain task should complete");
+        assert_eq!(failed.as_deref(), Some("Streaming cancelled by user"));
     }
 
     #[tokio::test]

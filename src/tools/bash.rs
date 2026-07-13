@@ -90,6 +90,7 @@ impl ToolHandler for BashTool {
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         let mut child = cmd
             .spawn()

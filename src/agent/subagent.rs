@@ -1,4 +1,4 @@
-use crate::agent::config::{get_llm_session, ProviderKind};
+use crate::agent::config::ProviderKind;
 use crate::agent::definition::AgentDefinition;
 use crate::tools::ToolRegistry;
 
@@ -31,6 +31,7 @@ pub async fn build_scoped_registry(
 
 pub async fn run_subagent(
     agent: AgentDefinition,
+    parent_session: crate::agent::config::LlmSessionConfig,
     description: &str,
     prompt: &str,
     full_registry: &ToolRegistry,
@@ -46,7 +47,6 @@ pub async fn run_subagent(
     use futures::StreamExt;
     use std::collections::HashMap;
 
-    let parent_session = get_llm_session().ok_or("LLM session not configured")?;
     let session = resolve_subagent_session(&agent, parent_session, sender.as_ref()).await?;
 
     let scoped_registry = build_scoped_registry(full_registry, &agent).await;
