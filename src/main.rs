@@ -1038,15 +1038,6 @@ async fn run_event_loop(
 
         let animation_needed = app.is_animation_running();
 
-        app.process_streaming_chunks();
-        app.update_animations();
-        app.update_terminal_title_signal();
-        remove_expired_toasts();
-        if needs_redraw || animation_needed {
-            terminal.draw(|f| app.render(f))?;
-            needs_redraw = false;
-        }
-
         let poll_duration = if animation_needed && app.is_streaming_animation_only() {
             STREAMING_POLL
         } else if animation_needed {
@@ -1055,16 +1046,18 @@ async fn run_event_loop(
             SLOW_POLL
         };
 
-        // Calculate how long the loop iteration took
-        let elapsed = loop_start.elapsed();
-
-        let poll_timeout = if elapsed < poll_duration {
-            poll_duration - elapsed
+        let elapsed_before_poll = loop_start.elapsed();
+        let poll_timeout = if needs_redraw {
+            Duration::from_millis(0)
+        } else if elapsed_before_poll < poll_duration {
+            poll_duration - elapsed_before_poll
         } else {
             Duration::from_millis(0)
         };
 
+        let mut had_input = false;
         if event::poll(poll_timeout)? {
+            had_input = true;
             let event = event::read()?;
 
             if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
@@ -1180,6 +1173,15 @@ async fn run_event_loop(
                     needs_redraw = true;
                 }
             }
+        }
+
+        app.process_streaming_chunks();
+        app.update_animations();
+        app.update_terminal_title_signal();
+        remove_expired_toasts();
+        if needs_redraw || had_input || animation_needed {
+            terminal.draw(|f| app.render(f))?;
+            needs_redraw = false;
         }
     }
     Ok(())

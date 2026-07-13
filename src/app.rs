@@ -408,7 +408,11 @@ const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TERMINAL_TITLE_SPINNER_INTERVAL_MS: u128 = 100;
 const STREAM_CHUNK_DRAIN_LIMIT: usize = 8 * 1024;
-const STREAM_CHUNK_DRAIN_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+/// Total time spent draining stream chunks across all sessions per event-loop iteration.
+const STREAM_CHUNK_GLOBAL_DRAIN_TIME_BUDGET: std::time::Duration =
+    std::time::Duration::from_millis(4);
+const SESSIONS_DIALOG_METADATA_PROBE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(200);
 const STREAM_MESSAGE_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn disconnected_stream_warning_message(error: &str) -> Option<String> {
@@ -577,6 +581,66 @@ fn coalesce_streaming_chunks(
     }
 
     coalesced
+}
+
+fn drain_streaming_chunks_global(
+    sessions: &mut [(
+        String,
+        &mut tokio::sync::mpsc::UnboundedReceiver<crate::llm::ChunkMessage>,
+    )],
+    per_session_limit: usize,
+    global_time_budget: std::time::Duration,
+    rotation: usize,
+) -> (Vec<(String, Vec<crate::llm::ChunkMessage>, bool)>, usize) {
+    if sessions.is_empty() {
+        return (Vec::new(), rotation);
+    }
+
+    sessions.sort_by(|a, b| a.0.cmp(&b.0));
+    let session_count = sessions.len();
+    let start = rotation % session_count;
+
+    let budget_started = std::time::Instant::now();
+    let mut drained = Vec::new();
+    let mut next_rotation = rotation;
+
+    while budget_started.elapsed() < global_time_budget {
+        let mut round_progress = false;
+        for step in 0..session_count {
+            let remaining = global_time_budget.saturating_sub(budget_started.elapsed());
+            if remaining == std::time::Duration::ZERO {
+                break;
+            }
+
+            let sessions_left = session_count - step;
+            let per_turn_budget = remaining
+                .checked_div(sessions_left as u32)
+                .unwrap_or(remaining)
+                .max(std::time::Duration::from_nanos(1));
+
+            let index = (start + step) % session_count;
+            let (session_id, receiver) = &mut sessions[index];
+            let (chunks, disconnected) =
+                drain_streaming_chunks(receiver, per_session_limit, per_turn_budget);
+
+            if !chunks.is_empty() || disconnected {
+                drained.push((session_id.clone(), chunks, disconnected));
+                round_progress = true;
+            }
+
+            next_rotation = (index + 1) % session_count;
+
+            if budget_started.elapsed() >= global_time_budget {
+                break;
+            }
+        }
+
+        if !round_progress {
+            break;
+        }
+    }
+
+    (drained, next_rotation)
 }
 
 fn drain_streaming_chunks(
@@ -753,6 +817,9 @@ pub struct App {
     pending_session_title: Option<String>,
     session_view_states: std::collections::HashMap<String, ClientSessionState>,
     session_spinner_frame: usize,
+    stream_drain_rotation: usize,
+    sessions_dialog_live_dirty: bool,
+    last_sessions_dialog_metadata_probe: std::time::Instant,
     last_frame_size: ratatui::layout::Rect,
     last_animation_update: std::time::Instant,
     last_session_spinner_update: std::time::Instant,
@@ -1053,6 +1120,9 @@ impl App {
             pending_session_title: None,
             session_view_states: std::collections::HashMap::new(),
             session_spinner_frame: 0,
+            stream_drain_rotation: 0,
+            sessions_dialog_live_dirty: true,
+            last_sessions_dialog_metadata_probe: now,
             last_frame_size: ratatui::layout::Rect::default(),
             last_animation_update: now,
             last_session_spinner_update: now,
@@ -5934,12 +6004,18 @@ impl App {
             .to_string()
     }
 
-    fn refresh_sessions_dialog(&mut self) {
+    fn build_sessions_dialog_list(
+        &self,
+    ) -> (
+        Vec<crate::ui::components::dialog::DialogItem>,
+        crate::views::sessions_dialog::SessionsDialogListSignature,
+        std::collections::HashMap<String, i64>,
+    ) {
+        use crate::views::sessions_dialog::{SessionsDialogFilter, SessionsDialogRowSignature};
+
         let mut sessions = self.session_manager.list_sessions();
         let current_workspace_id = self.session_manager.current_workspace_id();
         let filter = self.sessions_dialog_state.filter;
-        self.sessions_dialog_state
-            .set_current_workspace_id(current_workspace_id);
 
         sessions.retain(|session| {
             if session.parent_id.is_some() {
@@ -5972,6 +6048,7 @@ impl App {
         });
 
         let mut workspace_group_ids = std::collections::HashMap::new();
+        let mut signature_rows = Vec::with_capacity(sessions.len());
         let items: Vec<crate::ui::components::dialog::DialogItem> = sessions
             .into_iter()
             .map(|session| {
@@ -5981,7 +6058,10 @@ impl App {
                     || session.status.is_active();
                 let unread_completed = view_state.is_some_and(|state| state.unread_completed);
                 let marker = if is_streaming {
-                    format!("{} ", self.session_loading_glyph())
+                    format!(
+                        "{} ",
+                        crate::views::sessions_dialog::session_loading_glyph(0)
+                    )
                 } else if unread_completed {
                     "● ".to_string()
                 } else {
@@ -5992,7 +6072,8 @@ impl App {
                 } else {
                     ""
                 };
-                let name = format!("{}{}{}", marker, pin, session.title);
+                let title = session.title.clone();
+                let name = format!("{}{}{}", marker, pin, title);
                 let group = if session.workspace_name.trim().is_empty() {
                     session.workspace_path.clone()
                 } else {
@@ -6002,28 +6083,104 @@ impl App {
                     .entry(group.clone())
                     .or_insert(session.workspace_id);
 
+                let tip = Some(crate::utils::time::relative_readable_time_from_now(
+                    session.updated_at,
+                ));
+                signature_rows.push(SessionsDialogRowSignature {
+                    id: session.id.clone(),
+                    title: title.clone(),
+                    pinned: session.pinned_at.is_some(),
+                    tip: tip.clone(),
+                    group: group.clone(),
+                    is_streaming,
+                    unread_completed,
+                });
+
                 crate::ui::components::dialog::DialogItem {
                     id: session.id.clone(),
                     name,
                     group,
                     description: String::new(),
-                    tip: Some(crate::utils::time::relative_readable_time_from_now(
-                        session.updated_at,
-                    )),
-                    provider_id: session.title.clone(),
+                    tip,
+                    provider_id: title,
                     active: false,
                 }
             })
             .collect();
 
-        self.sessions_dialog_state.refresh_items(items);
-        self.sessions_dialog_state
-            .set_workspace_group_ids(workspace_group_ids);
+        let signature = crate::views::sessions_dialog::SessionsDialogListSignature {
+            rows: signature_rows,
+        };
+
+        (items, signature, workspace_group_ids)
     }
 
-    fn session_loading_glyph(&self) -> &'static str {
-        const SPINNER_CHARS: &[&str] = &["·", "✻", "✽", "✶", "✳", "✢"];
-        SPINNER_CHARS[self.session_spinner_frame % SPINNER_CHARS.len()]
+    fn mark_sessions_dialog_live_dirty(&mut self) {
+        self.sessions_dialog_live_dirty = true;
+    }
+
+    fn refresh_sessions_dialog(&mut self) {
+        let current_workspace_id = self.session_manager.current_workspace_id();
+        self.sessions_dialog_state
+            .set_current_workspace_id(current_workspace_id);
+
+        let (items, signature, workspace_group_ids) = self.build_sessions_dialog_list();
+        self.sessions_dialog_state.last_list_signature = None;
+        self.sessions_dialog_state
+            .refresh_items_if_changed(items, signature);
+        self.sessions_dialog_state
+            .set_workspace_group_ids(workspace_group_ids);
+        self.sessions_dialog_live_dirty = false;
+        self.last_sessions_dialog_metadata_probe = std::time::Instant::now();
+    }
+
+    fn update_sessions_dialog_live_state(&mut self, spinner_frame_advanced: bool) {
+        if self.overlay_focus != OverlayFocus::SessionsDialog
+            || !self.sessions_dialog_state.dialog.is_visible()
+            || self.sessions_dialog_state.dialog.is_dragging_scrollbar
+        {
+            return;
+        }
+
+        let metadata_due = self.sessions_dialog_live_dirty
+            || self.last_sessions_dialog_metadata_probe.elapsed()
+                >= SESSIONS_DIALOG_METADATA_PROBE_INTERVAL;
+
+        if metadata_due {
+            let current_workspace_id = self.session_manager.current_workspace_id();
+            self.sessions_dialog_state
+                .set_current_workspace_id(current_workspace_id);
+
+            let (items, signature, workspace_group_ids) = self.build_sessions_dialog_list();
+            if self.sessions_dialog_state.last_list_signature.as_ref() != Some(&signature) {
+                self.sessions_dialog_state
+                    .refresh_items_if_changed(items, signature);
+                self.sessions_dialog_state
+                    .set_workspace_group_ids(workspace_group_ids);
+            }
+            self.sessions_dialog_live_dirty = false;
+            self.last_sessions_dialog_metadata_probe = std::time::Instant::now();
+        }
+
+        if !spinner_frame_advanced {
+            return;
+        }
+
+        let streaming_ids: Vec<String> = self
+            .sessions_dialog_state
+            .last_list_signature
+            .as_ref()
+            .map(|signature| {
+                signature
+                    .rows
+                    .iter()
+                    .filter(|row| row.is_streaming)
+                    .map(|row| row.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.sessions_dialog_state
+            .apply_streaming_row_markers(&streaming_ids, self.session_spinner_frame);
     }
 
     fn open_timeline_dialog(&mut self) {
@@ -7664,6 +7821,7 @@ impl App {
         }
 
         self.sync_active_streaming_flag();
+        self.mark_sessions_dialog_live_dirty();
     }
 
     fn cancel_streaming(&mut self) {
@@ -7734,6 +7892,7 @@ impl App {
         if self.last_session_spinner_update.elapsed() >= SESSION_SPINNER_INTERVAL {
             self.session_spinner_frame = (self.session_spinner_frame + 1) % 6;
             self.last_session_spinner_update = std::time::Instant::now();
+            self.update_sessions_dialog_live_state(true);
         }
     }
 
@@ -7751,18 +7910,55 @@ impl App {
                 .values()
                 .any(|state| state.stream.is_some() || state.external_stream.is_some())
             || (self.overlay_focus == OverlayFocus::SessionsDialog
-                && self.sessions_dialog_state.dialog.is_visible())
+                && self.sessions_dialog_state.dialog.is_visible()
+                && self.sessions_dialog_has_streaming_rows())
+    }
+
+    fn sessions_dialog_has_streaming_rows(&self) -> bool {
+        if let Some(signature) = self.sessions_dialog_state.last_list_signature.as_ref() {
+            return signature.rows.iter().any(|row| row.is_streaming);
+        }
+
+        self.session_view_states
+            .values()
+            .any(|state| state.stream.is_some() || state.external_stream.is_some())
+    }
+
+    /// Sessions dialog open while only background (non-current-chat) streams run.
+    fn sessions_dialog_passive_streaming_view(&self) -> bool {
+        if self.overlay_focus != OverlayFocus::SessionsDialog
+            || !self.sessions_dialog_state.dialog.is_visible()
+        {
+            return false;
+        }
+
+        let current = self
+            .session_manager
+            .get_current_session_id()
+            .map(|id| id.as_str());
+
+        self.session_view_states.iter().any(|(id, state)| {
+            (state.stream.is_some() || state.external_stream.is_some())
+                && current != Some(id.as_str())
+        })
     }
 
     pub fn is_streaming_animation_only(&self) -> bool {
-        (self.is_streaming || self.chat_state.chat.has_active_tool_messages())
+        let streaming_only = (self.is_streaming || self.chat_state.chat.has_active_tool_messages())
             && self.base_focus != BaseFocus::Home
             && !self.has_active_selection_edge_scroll()
             && !self.has_active_retry_status()
             && self.compaction_receiver.is_none()
             && self.storage_receiver.is_none()
-            && self.title_generation_receiver.is_none()
-            && self.overlay_focus != OverlayFocus::SessionsDialog
+            && self.title_generation_receiver.is_none();
+
+        if self.overlay_focus == OverlayFocus::SessionsDialog
+            && self.sessions_dialog_state.dialog.is_visible()
+        {
+            return streaming_only || self.sessions_dialog_passive_streaming_view();
+        }
+
+        streaming_only && self.overlay_focus != OverlayFocus::SessionsDialog
     }
 
     fn has_active_selection_edge_scroll(&self) -> bool {
@@ -7782,24 +7978,24 @@ impl App {
         self.process_storage_events();
         self.process_title_generation_events();
 
-        let streaming_ids: Vec<String> = self
-            .session_view_states
-            .iter()
-            .filter_map(|(id, state)| state.stream.as_ref().map(|_| id.clone()))
-            .collect();
-
-        for session_id in streaming_ids {
-            let mut chunks = Vec::new();
-            let mut disconnected = false;
-
-            if let Some(stream) = self.stream_for_session_mut(&session_id) {
-                (chunks, disconnected) = drain_streaming_chunks(
-                    &mut stream.chunk_receiver,
-                    STREAM_CHUNK_DRAIN_LIMIT,
-                    STREAM_CHUNK_DRAIN_TIME_BUDGET,
-                );
+        let drained = {
+            let mut receivers = Vec::new();
+            for (id, state) in &mut self.session_view_states {
+                if let Some(stream) = state.stream.as_mut() {
+                    receivers.push((id.clone(), &mut stream.chunk_receiver));
+                }
             }
+            let (drained, next_rotation) = drain_streaming_chunks_global(
+                &mut receivers,
+                STREAM_CHUNK_DRAIN_LIMIT,
+                STREAM_CHUNK_GLOBAL_DRAIN_TIME_BUDGET,
+                self.stream_drain_rotation,
+            );
+            self.stream_drain_rotation = next_rotation;
+            drained
+        };
 
+        for (session_id, chunks, mut disconnected) in drained {
             let mut keep_current_stream = true;
             for chunk in coalesce_streaming_chunks(chunks) {
                 if !self.process_streaming_chunk_for_session(&session_id, chunk) {
@@ -7835,13 +8031,7 @@ impl App {
         }
 
         self.sync_active_streaming_flag();
-
-        if self.overlay_focus == OverlayFocus::SessionsDialog
-            && self.sessions_dialog_state.dialog.is_visible()
-            && !self.sessions_dialog_state.dialog.is_dragging_scrollbar
-        {
-            self.refresh_sessions_dialog();
-        }
+        self.update_sessions_dialog_live_state(false);
     }
 
     fn process_streaming_chunk_for_session(
@@ -7952,6 +8142,7 @@ impl App {
                 ) {
                     self.overlay_focus = OverlayFocus::PermissionDialog;
                 }
+                self.mark_sessions_dialog_live_dirty();
                 true
             }
             crate::llm::ChunkMessage::QuestionRequest {
@@ -7979,6 +8170,7 @@ impl App {
                 ) {
                     self.overlay_focus = OverlayFocus::QuestionDialog;
                 }
+                self.mark_sessions_dialog_live_dirty();
                 true
             }
         }
@@ -8553,6 +8745,7 @@ impl App {
             crate::session::types::SessionStatus::Streaming,
             None,
         );
+        self.mark_sessions_dialog_live_dirty();
 
         let agent_mode = self.agent.clone();
         let (provider_name, model) = self.active_primary_agent_model_provider();
@@ -9194,6 +9387,7 @@ impl App {
             crate::session::types::SessionStatus::Streaming,
             None,
         );
+        self.mark_sessions_dialog_live_dirty();
 
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();
@@ -10093,6 +10287,9 @@ mod tests {
             pending_session_title: None,
             session_view_states: std::collections::HashMap::new(),
             session_spinner_frame: 0,
+            stream_drain_rotation: 0,
+            sessions_dialog_live_dirty: true,
+            last_sessions_dialog_metadata_probe: std::time::Instant::now(),
             last_frame_size: ratatui::layout::Rect::default(),
             last_animation_update: std::time::Instant::now(),
             last_session_spinner_update: std::time::Instant::now(),
@@ -11232,6 +11429,120 @@ mod tests {
     }
 
     #[test]
+    fn global_stream_drain_respects_shared_time_budget() {
+        use crate::llm::ChunkMessage;
+
+        let (sender_a, mut receiver_a) = tokio::sync::mpsc::unbounded_channel();
+        let (sender_b, mut receiver_b) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..512 {
+            sender_a.send(ChunkMessage::Text("a".to_string())).unwrap();
+            sender_b.send(ChunkMessage::Text("b".to_string())).unwrap();
+        }
+        drop(sender_a);
+        drop(sender_b);
+
+        let mut receivers = [
+            ("a".to_string(), &mut receiver_a),
+            ("b".to_string(), &mut receiver_b),
+        ];
+        let (drained, _) = drain_streaming_chunks_global(
+            &mut receivers,
+            STREAM_CHUNK_DRAIN_LIMIT,
+            std::time::Duration::from_secs(1),
+            0,
+        );
+
+        let total_chunks: usize = drained.iter().map(|(_, chunks, _)| chunks.len()).sum();
+        assert_eq!(total_chunks, 1024);
+        let drained_a: usize = drained
+            .iter()
+            .filter(|(id, _, _)| id == "a")
+            .map(|(_, chunks, _)| chunks.len())
+            .sum();
+        let drained_b: usize = drained
+            .iter()
+            .filter(|(id, _, _)| id == "b")
+            .map(|(_, chunks, _)| chunks.len())
+            .sum();
+        assert_eq!(drained_a, 512);
+        assert_eq!(drained_b, 512);
+    }
+
+    #[test]
+    fn global_stream_drain_rotates_fairly_under_tight_budget() {
+        use crate::llm::ChunkMessage;
+
+        let (sender_a, mut receiver_a) = tokio::sync::mpsc::unbounded_channel();
+        let (sender_b, mut receiver_b) = tokio::sync::mpsc::unbounded_channel();
+        let (sender_c, mut receiver_c) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..256 {
+            sender_a.send(ChunkMessage::Text("a".to_string())).unwrap();
+            sender_b.send(ChunkMessage::Text("b".to_string())).unwrap();
+            sender_c.send(ChunkMessage::Text("c".to_string())).unwrap();
+        }
+        drop(sender_a);
+        drop(sender_b);
+        drop(sender_c);
+
+        let budget = std::time::Duration::from_micros(200);
+        let mut rotation = 0usize;
+        let mut served = std::collections::HashSet::new();
+
+        for _ in 0..48 {
+            let mut receivers = [
+                ("a".to_string(), &mut receiver_a),
+                ("b".to_string(), &mut receiver_b),
+                ("c".to_string(), &mut receiver_c),
+            ];
+            let (drained, next_rotation) =
+                drain_streaming_chunks_global(&mut receivers, 64, budget, rotation);
+            rotation = next_rotation;
+            for (id, chunks, _) in drained {
+                if !chunks.is_empty() {
+                    served.insert(id);
+                }
+            }
+            if served.len() == 3 {
+                break;
+            }
+        }
+
+        assert_eq!(served.len(), 3);
+        assert!(served.contains("a"));
+        assert!(served.contains("b"));
+        assert!(served.contains("c"));
+    }
+
+    #[test]
+    fn sessions_dialog_streaming_only_uses_streaming_poll_cadence() {
+        let mut app = test_app();
+        app.overlay_focus = OverlayFocus::SessionsDialog;
+        app.sessions_dialog_state.dialog.show();
+        app.is_streaming = false;
+        app.base_focus = BaseFocus::Home;
+
+        assert!(!app.is_streaming_animation_only());
+
+        let background_id = app.create_new_session(Some("bg".to_string()));
+        let _current_id = app.create_new_session(Some("foreground".to_string()));
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states
+            .get_mut(&background_id)
+            .unwrap()
+            .stream = Some(SessionStreamState::new(
+            receiver,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            None,
+            0,
+        ));
+
+        app.refresh_sessions_dialog();
+        assert!(app.is_animation_running());
+        assert!(app.is_streaming_animation_only());
+    }
+
+    #[test]
     fn streaming_drain_consumes_bursts_larger_than_the_old_frame_cap() {
         use crate::llm::ChunkMessage;
 
@@ -11331,6 +11642,62 @@ mod tests {
                 .content,
             "hello world"
         );
+    }
+
+    #[test]
+    fn streaming_text_chunks_do_not_dirty_sessions_dialog_live_state() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Text only".to_string()));
+        app.overlay_focus = OverlayFocus::SessionsDialog;
+        app.sessions_dialog_state.dialog.show();
+        app.refresh_sessions_dialog();
+        app.sessions_dialog_live_dirty = false;
+        let probe_before = app.last_sessions_dialog_metadata_probe;
+
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete(""));
+        app.chat_state.chat.begin_streaming_turn();
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender
+            .send(crate::llm::ChunkMessage::Text("hello".to_string()))
+            .unwrap();
+        sender
+            .send(crate::llm::ChunkMessage::Text(" world".to_string()))
+            .unwrap();
+
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+
+        app.process_streaming_chunks();
+
+        assert!(!app.sessions_dialog_live_dirty);
+        assert_eq!(app.last_sessions_dialog_metadata_probe, probe_before);
+
+        sender.send(crate::llm::ChunkMessage::End).unwrap();
+        app.process_streaming_chunks();
+
+        assert!(!app.sessions_dialog_live_dirty);
+        let signature = app
+            .sessions_dialog_state
+            .last_list_signature
+            .as_ref()
+            .expect("sessions list refreshed after stream end");
+        let row = signature
+            .rows
+            .iter()
+            .find(|row| row.id == session_id)
+            .expect("session row present");
+        assert!(!row.is_streaming);
     }
 
     #[tokio::test(flavor = "multi_thread")]

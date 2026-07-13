@@ -198,6 +198,42 @@ impl Dialog {
         self.update_scrollbar();
     }
 
+    pub fn set_items_preserve_ui(&mut self, items: Vec<DialogItem>) {
+        let selected_item = self
+            .get_selected()
+            .map(|item| (item.id.clone(), item.provider_id.clone()));
+        let focused_group = self.get_focused_group_header().map(str::to_string);
+        let scroll_offset = self.scroll_offset;
+        let visible_row_count = self.visible_row_count;
+        let collapsed_groups = self.collapsed_groups();
+        let was_dragging = self.is_dragging_scrollbar;
+        let drag_offset = self.scrollbar_drag_offset;
+
+        self.items = items;
+        self.group_items();
+        self.apply_filter(FilterSelectionMode::Preserve);
+
+        if let Some(group) = focused_group {
+            let _ = self.focus_group_header(&group);
+        } else if let Some((id, provider_id)) = selected_item {
+            self.select_item_by_key(&id, &provider_id);
+        }
+
+        self.visible_row_count = visible_row_count;
+        self.scroll_offset = scroll_offset;
+        self.set_collapsed_groups(collapsed_groups);
+        self.is_dragging_scrollbar = was_dragging;
+        self.scrollbar_drag_offset = drag_offset;
+        self.update_scrollbar();
+    }
+
+    pub fn update_items_in_place(&mut self, items: Vec<DialogItem>) {
+        self.items = items;
+        self.group_items();
+        self.apply_filter(FilterSelectionMode::Preserve);
+        self.update_scrollbar();
+    }
+
     fn group_items(&mut self) {
         self.grouped_items.clear();
         self.groups.clear();

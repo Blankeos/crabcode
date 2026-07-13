@@ -33,6 +33,27 @@ impl SessionsDialogFilter {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionsDialogListSignature {
+    pub rows: Vec<SessionsDialogRowSignature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionsDialogRowSignature {
+    pub id: String,
+    pub title: String,
+    pub pinned: bool,
+    pub tip: Option<String>,
+    pub group: String,
+    pub is_streaming: bool,
+    pub unread_completed: bool,
+}
+
+pub fn session_loading_glyph(frame: usize) -> &'static str {
+    const SPINNER_CHARS: &[&str] = &["·", "✻", "✽", "✶", "✳", "✢"];
+    SPINNER_CHARS[frame % SPINNER_CHARS.len()]
+}
+
 #[derive(Debug)]
 pub struct SessionsDialogState {
     pub dialog: Dialog,
@@ -40,6 +61,7 @@ pub struct SessionsDialogState {
     pub filter: SessionsDialogFilter,
     workspace_group_ids: HashMap<String, i64>,
     current_workspace_id: Option<i64>,
+    pub(crate) last_list_signature: Option<SessionsDialogListSignature>,
 }
 
 impl SessionsDialogState {
@@ -50,6 +72,7 @@ impl SessionsDialogState {
             filter: SessionsDialogFilter::All,
             workspace_group_ids: HashMap::new(),
             current_workspace_id: None,
+            last_list_signature: None,
         }
     }
 
@@ -64,6 +87,7 @@ impl SessionsDialogState {
             filter: SessionsDialogFilter::All,
             workspace_group_ids: HashMap::new(),
             current_workspace_id: None,
+            last_list_signature: None,
         }
     }
 
@@ -105,6 +129,45 @@ impl SessionsDialogState {
         self.dialog.scroll_offset = scroll_offset;
         self.dialog
             .preserve_scrollbar_drag_state_from(&previous_dialog);
+    }
+
+    pub fn refresh_items_if_changed(
+        &mut self,
+        items: Vec<DialogItem>,
+        signature: SessionsDialogListSignature,
+    ) {
+        if self.last_list_signature.as_ref() == Some(&signature) {
+            return;
+        }
+        self.last_list_signature = Some(signature);
+        self.refresh_items(items);
+    }
+
+    pub fn apply_streaming_row_markers(&mut self, streaming_session_ids: &[String], frame: usize) {
+        let glyph = format!("{} ", session_loading_glyph(frame));
+        let streaming: std::collections::HashSet<&str> =
+            streaming_session_ids.iter().map(String::as_str).collect();
+
+        for item in &mut self.dialog.items {
+            let pin = if item.name.contains('★') {
+                "★ "
+            } else {
+                ""
+            };
+            let title = item.provider_id.clone();
+            if streaming.contains(item.id.as_str()) {
+                item.name = format!("{glyph}{pin}{title}");
+            } else {
+                let unread = item.name.starts_with('●');
+                item.name = if unread {
+                    format!("● {pin}{title}")
+                } else {
+                    format!("{pin}{title}")
+                };
+            }
+        }
+        let items = std::mem::take(&mut self.dialog.items);
+        self.dialog.update_items_in_place(items);
     }
 
     pub fn set_workspace_group_ids(&mut self, group_ids: HashMap<String, i64>) {
@@ -487,6 +550,50 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    #[test]
+    fn refresh_items_if_changed_skips_identical_signature() {
+        let items = vec![session_item("session-1", "First session")];
+        let mut state = init_sessions_dialog("Sessions", items.clone());
+        state.dialog.show();
+        state.dialog.selected_index = 0;
+
+        let signature = SessionsDialogListSignature {
+            rows: vec![SessionsDialogRowSignature {
+                id: "session-1".to_string(),
+                title: String::new(),
+                pinned: false,
+                tip: None,
+                group: "Today".to_string(),
+                is_streaming: false,
+                unread_completed: false,
+            }],
+        };
+
+        state.refresh_items_if_changed(items.clone(), signature.clone());
+        let selected_after_first = state.dialog.selected_index;
+
+        state.refresh_items_if_changed(items, signature);
+        assert_eq!(state.dialog.selected_index, selected_after_first);
+    }
+
+    #[test]
+    fn apply_streaming_row_markers_clears_spinner_when_not_streaming() {
+        let mut state = init_sessions_dialog(
+            "Sessions",
+            vec![DialogItem {
+                id: "s1".to_string(),
+                name: "✻ ★ Title".to_string(),
+                group: "Today".to_string(),
+                description: String::new(),
+                tip: None,
+                provider_id: "Title".to_string(),
+                active: false,
+            }],
+        );
+        state.apply_streaming_row_markers(&[], 2);
+        assert_eq!(state.dialog.items[0].name, "★ Title");
     }
 
     #[test]
