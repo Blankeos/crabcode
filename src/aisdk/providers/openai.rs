@@ -188,11 +188,7 @@ struct OpenAIWebsocketState {
 
 impl OpenAIWebsocketState {
     fn discard_idle_connection(&mut self) {
-        let is_idle = self
-            .last_used_at
-            .map(|last_used_at| last_used_at.elapsed() > OPENAI_WEBSOCKET_IDLE_MAX)
-            .unwrap_or(false);
-        if is_idle {
+        if websocket_connection_is_idle(self.last_used_at, OPENAI_WEBSOCKET_IDLE_MAX) {
             self.connection = None;
             self.last_used_at = None;
         }
@@ -222,6 +218,14 @@ struct OpenAIRequestSnapshot {
 struct OpenAIResponseSnapshot {
     response_id: String,
     items_added: Vec<serde_json::Value>,
+}
+
+/// Whether the outbound websocket request reuses the live socket that produced
+/// `last_response`, or opens/sends on a different socket (reconnect, idle eviction, retry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebsocketContinuationMode {
+    SameLiveSocket,
+    FreshSocket,
 }
 
 #[derive(Debug, Default)]
@@ -514,7 +518,7 @@ impl OpenAI {
         headers: &reqwest::header::HeaderMap,
     ) -> Result<ProviderStream> {
         let ws_url = websocket_url(self.base_url.trim_end_matches('/'), &self.responses_path)?;
-        let (request_body, mut ws, reused_connection) = {
+        let (mut sent_request_body, mut ws, reused_connection) = {
             let mut state = self.websocket_state.lock().await;
             if state.disabled {
                 return Err(Error::Provider("websocket transport disabled".to_string()));
@@ -531,7 +535,7 @@ impl OpenAI {
             }
         };
 
-        let request_text = serde_json::to_string(&request_body)
+        let mut request_text = serde_json::to_string(&sent_request_body)
             .map_err(|err| Error::Provider(format!("failed to encode websocket request: {err}")))?;
         if let Err(err) = ws.send(WsMessage::Text(request_text.clone())).await {
             if !reused_connection {
@@ -544,6 +548,10 @@ impl OpenAI {
             }
 
             let mut fresh_ws = connect_openai_websocket(ws_url.clone(), headers).await?;
+            sent_request_body = fresh_websocket_request_body(&full_body);
+            request_text = serde_json::to_string(&sent_request_body).map_err(|err| {
+                Error::Provider(format!("failed to encode websocket request: {err}"))
+            })?;
             fresh_ws
                 .send(WsMessage::Text(request_text.clone()))
                 .await
@@ -554,8 +562,8 @@ impl OpenAI {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(Ok(ChunkType::Metadata(format!(
             "openai_transport=responses_websocket previous_response_id={} input_items={}",
-            request_body.get("previous_response_id").is_some(),
-            request_body
+            sent_request_body.get("previous_response_id").is_some(),
+            sent_request_body
                 .get("input")
                 .and_then(|value| value.as_array())
                 .map(|items| items.len())
@@ -563,6 +571,7 @@ impl OpenAI {
         ))));
         let websocket_state = Arc::clone(&self.websocket_state);
         let request_snapshot = request_snapshot_from_body(&full_body);
+        let retry_full_body = full_body.clone();
         let retry_ws_url = ws_url.clone();
         let retry_headers = headers.clone();
         tokio::spawn(async move {
@@ -669,7 +678,27 @@ impl OpenAI {
                         }
                     };
 
-                    if let Err(err) = fresh_ws.send(WsMessage::Text(request_text.clone())).await {
+                    let retry_request_text = match serde_json::to_string(
+                        &fresh_websocket_request_body(&retry_full_body),
+                    ) {
+                        Ok(text) => text,
+                        Err(err) => {
+                            websocket_state.lock().await.disable();
+                            let disconnected = stream_disconnected_before_completion(&format!(
+                                "{}; websocket retry encode failed: {}",
+                                failure, err
+                            ));
+                            let _ = tx.send(Ok(ChunkType::Warning(format!(
+                                "Falling back from WebSockets to HTTPS transport. {disconnected}"
+                            ))));
+                            let _ = tx.send(Ok(ChunkType::RetryableFailure(
+                                RetryError::from_message(disconnected),
+                            )));
+                            return;
+                        }
+                    };
+
+                    if let Err(err) = fresh_ws.send(WsMessage::Text(retry_request_text)).await {
                         websocket_state.lock().await.disable();
                         let disconnected = stream_disconnected_before_completion(&format!(
                             "{}; websocket retry send failed: {}",
@@ -772,10 +801,44 @@ fn websocket_url(base_url: &str, responses_path: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
-fn websocket_request_body_from_state(
+fn websocket_connection_is_idle(last_used_at: Option<Instant>, idle_max: Duration) -> bool {
+    last_used_at
+        .map(|last_used_at| last_used_at.elapsed() > idle_max)
+        .unwrap_or(false)
+}
+
+fn websocket_continuation_mode_for_live_connection(
+    has_live_connection: bool,
+) -> WebsocketContinuationMode {
+    if has_live_connection {
+        WebsocketContinuationMode::SameLiveSocket
+    } else {
+        WebsocketContinuationMode::FreshSocket
+    }
+}
+
+/// Continuation mode after idle policy: a socket that would be evicted is not live.
+#[cfg(test)]
+fn websocket_continuation_mode_after_idle_policy(
+    has_connection: bool,
+    last_used_at: Option<Instant>,
+    idle_max: Duration,
+) -> WebsocketContinuationMode {
+    let connection_survives_idle =
+        has_connection && !websocket_connection_is_idle(last_used_at, idle_max);
+    websocket_continuation_mode_for_live_connection(connection_survives_idle)
+}
+
+fn websocket_continuation_mode_from_state(
+    state: &OpenAIWebsocketState,
+) -> WebsocketContinuationMode {
+    websocket_continuation_mode_for_live_connection(state.connection.is_some())
+}
+
+fn compute_incremental_websocket_input(
     state: &OpenAIWebsocketState,
     full_body: &serde_json::Value,
-) -> serde_json::Value {
+) -> Option<(String, Vec<serde_json::Value>)> {
     let input = full_body
         .get("input")
         .and_then(|value| value.as_array())
@@ -783,7 +846,7 @@ fn websocket_request_body_from_state(
         .unwrap_or_default();
     let body_without_input = body_without_input(full_body);
 
-    let incremental_input = state
+    state
         .last_request
         .as_ref()
         .zip(state.last_response.as_ref())
@@ -802,12 +865,43 @@ fn websocket_request_body_from_state(
             } else {
                 None
             }
-        });
+        })
+}
 
+fn build_websocket_request_body(
+    state: &OpenAIWebsocketState,
+    full_body: &serde_json::Value,
+    continuation_mode: WebsocketContinuationMode,
+) -> serde_json::Value {
     let mut request_body = full_body.clone();
-    if let Some((previous_response_id, delta_input)) = incremental_input {
-        request_body["previous_response_id"] = serde_json::Value::String(previous_response_id);
-        request_body["input"] = serde_json::Value::Array(delta_input);
+    if continuation_mode == WebsocketContinuationMode::SameLiveSocket {
+        if let Some((previous_response_id, delta_input)) =
+            compute_incremental_websocket_input(state, full_body)
+        {
+            request_body["previous_response_id"] = serde_json::Value::String(previous_response_id);
+            request_body["input"] = serde_json::Value::Array(delta_input);
+        }
+    }
+    request_body["type"] = serde_json::Value::String("response.create".to_string());
+    request_body
+}
+
+fn websocket_request_body_from_state(
+    state: &OpenAIWebsocketState,
+    full_body: &serde_json::Value,
+) -> serde_json::Value {
+    build_websocket_request_body(
+        state,
+        full_body,
+        websocket_continuation_mode_from_state(state),
+    )
+}
+
+/// Request body for send-failure reconnect and stream retry (always full replay, no delta).
+fn fresh_websocket_request_body(full_body: &serde_json::Value) -> serde_json::Value {
+    let mut request_body = full_body.clone();
+    if let Some(obj) = request_body.as_object_mut() {
+        obj.remove("previous_response_id");
     }
     request_body["type"] = serde_json::Value::String("response.create".to_string());
     request_body
@@ -1622,10 +1716,12 @@ fn openai_tool_output_content(tool: &crate::message::ToolOutputMessage) -> serde
 #[cfg(test)]
 mod tests {
     use super::{
-        build_openai_messages, openai_chunk_is_terminal, request_snapshot_from_body,
-        response_sse_data_to_chunk, responses_function_call_chunk,
-        websocket_request_body_from_state, OpenAI, OpenAIResponseSnapshot, OpenAIWebsocketState,
-        WebsocketStreamProgress,
+        build_openai_messages, build_websocket_request_body, fresh_websocket_request_body,
+        openai_chunk_is_terminal, request_snapshot_from_body, response_sse_data_to_chunk,
+        responses_function_call_chunk, websocket_connection_is_idle,
+        websocket_continuation_mode_after_idle_policy, websocket_continuation_mode_from_state,
+        OpenAI, OpenAIResponseSnapshot, OpenAIWebsocketState, WebsocketContinuationMode,
+        WebsocketStreamProgress, OPENAI_WEBSOCKET_IDLE_MAX,
     };
     use crate::chunk::{ChunkType, MessagePhase};
     use crate::message::Message;
@@ -1979,7 +2075,11 @@ mod tests {
         let next_body = provider.build_responses_body(next_input, &[]);
 
         let state = provider.websocket_state.lock().await;
-        let ws_body = websocket_request_body_from_state(&state, &next_body);
+        let ws_body = build_websocket_request_body(
+            &state,
+            &next_body,
+            WebsocketContinuationMode::SameLiveSocket,
+        );
 
         assert_eq!(ws_body["type"], "response.create");
         assert_eq!(ws_body["previous_response_id"], "resp_1");
@@ -2026,10 +2126,172 @@ mod tests {
         let next_body = provider.build_responses_body(next_input, &[]);
 
         let state = provider.websocket_state.lock().await;
-        let ws_body = websocket_request_body_from_state(&state, &next_body);
+        let ws_body = build_websocket_request_body(
+            &state,
+            &next_body,
+            WebsocketContinuationMode::SameLiveSocket,
+        );
 
         assert_eq!(ws_body["previous_response_id"], "resp_1");
         assert_eq!(ws_body["input"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn websocket_connection_is_idle_detects_expired_last_used() {
+        assert!(!websocket_connection_is_idle(
+            None,
+            OPENAI_WEBSOCKET_IDLE_MAX
+        ));
+        assert!(websocket_connection_is_idle(
+            Some(Instant::now() - Duration::from_secs(120)),
+            OPENAI_WEBSOCKET_IDLE_MAX,
+        ));
+        assert!(!websocket_connection_is_idle(
+            Some(Instant::now() - Duration::from_secs(10)),
+            OPENAI_WEBSOCKET_IDLE_MAX,
+        ));
+    }
+
+    #[test]
+    fn websocket_idle_policy_drops_live_socket_continuation_eligibility() {
+        let expired = Instant::now() - Duration::from_secs(120);
+        let recent = Instant::now() - Duration::from_secs(10);
+
+        assert_eq!(
+            websocket_continuation_mode_after_idle_policy(
+                true,
+                Some(expired),
+                OPENAI_WEBSOCKET_IDLE_MAX,
+            ),
+            WebsocketContinuationMode::FreshSocket,
+        );
+        assert_eq!(
+            websocket_continuation_mode_after_idle_policy(
+                true,
+                Some(recent),
+                OPENAI_WEBSOCKET_IDLE_MAX,
+            ),
+            WebsocketContinuationMode::SameLiveSocket,
+        );
+        assert_eq!(
+            websocket_continuation_mode_after_idle_policy(
+                false,
+                Some(recent),
+                OPENAI_WEBSOCKET_IDLE_MAX,
+            ),
+            WebsocketContinuationMode::FreshSocket,
+        );
+    }
+
+    #[test]
+    fn websocket_continuation_mode_requires_live_connection() {
+        let mut state = OpenAIWebsocketState::default();
+        assert_eq!(
+            websocket_continuation_mode_from_state(&state),
+            WebsocketContinuationMode::FreshSocket
+        );
+
+        state.last_response = Some(OpenAIResponseSnapshot {
+            response_id: "resp_1".to_string(),
+            items_added: vec![],
+        });
+        assert_eq!(
+            websocket_continuation_mode_from_state(&state),
+            WebsocketContinuationMode::FreshSocket
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_request_after_idle_eviction_replays_full_input_not_delta() {
+        let provider = OpenAI::builder()
+            .base_url("https://chatgpt.com")
+            .api_key("")
+            .model_name("gpt-test")
+            .build()
+            .unwrap();
+        let previous_input = vec![serde_json::json!({
+            "role": "user",
+            "content": "read the file"
+        })];
+        let previous_body = provider.build_responses_body(previous_input.clone(), &[]);
+        let function_call = serde_json::json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "read",
+            "arguments": "{\"file_path\":\"Cargo.toml\"}"
+        });
+        let function_output = serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "00001| [package]"
+        });
+
+        let mut next_input = previous_input;
+        next_input.push(function_call);
+        next_input.push(function_output);
+        let next_body = provider.build_responses_body(next_input, &[]);
+
+        {
+            let mut state = provider.websocket_state.lock().await;
+            state.last_request = Some(request_snapshot_from_body(&previous_body));
+            state.last_response = Some(OpenAIResponseSnapshot {
+                response_id: "resp_1".to_string(),
+                items_added: vec![serde_json::json!({
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": "{\"file_path\":\"Cargo.toml\"}"
+                })],
+            });
+        }
+
+        let state = provider.websocket_state.lock().await;
+        let live_delta_body = build_websocket_request_body(
+            &state,
+            &next_body,
+            WebsocketContinuationMode::SameLiveSocket,
+        );
+        assert_eq!(live_delta_body["previous_response_id"], "resp_1");
+        assert_ne!(live_delta_body["input"], next_body["input"]);
+
+        let after_idle_mode = websocket_continuation_mode_after_idle_policy(
+            true,
+            Some(Instant::now() - Duration::from_secs(120)),
+            OPENAI_WEBSOCKET_IDLE_MAX,
+        );
+        assert_eq!(after_idle_mode, WebsocketContinuationMode::FreshSocket);
+
+        let ws_body = build_websocket_request_body(&state, &next_body, after_idle_mode);
+        assert!(ws_body.get("previous_response_id").is_none());
+        assert_eq!(ws_body["input"], next_body["input"]);
+    }
+
+    #[test]
+    fn fresh_websocket_request_body_strips_previous_response_id_and_preserves_full_input() {
+        let mut body = serde_json::json!({
+            "model": "gpt-test",
+            "previous_response_id": "resp_synthetic",
+            "input": [
+                {"role": "user", "content": "read the file"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+            ]
+        });
+        let expected_input = body["input"].clone();
+
+        let send_reconnect_body = fresh_websocket_request_body(&body);
+        let stream_retry_body = fresh_websocket_request_body(&body);
+
+        assert_eq!(send_reconnect_body, stream_retry_body);
+        assert_eq!(send_reconnect_body["type"], "response.create");
+        assert!(send_reconnect_body.get("previous_response_id").is_none());
+        assert_eq!(send_reconnect_body["input"], expected_input);
+
+        body["previous_response_id"] = serde_json::Value::String("resp_again".to_string());
+        let fresh = fresh_websocket_request_body(&body);
+        assert!(fresh.get("previous_response_id").is_none());
+        assert_eq!(fresh["input"], expected_input);
     }
 
     #[test]
@@ -2081,7 +2343,11 @@ mod tests {
         );
 
         let state = provider.websocket_state.lock().await;
-        let ws_body = websocket_request_body_from_state(&state, &next_body);
+        let ws_body = build_websocket_request_body(
+            &state,
+            &next_body,
+            WebsocketContinuationMode::SameLiveSocket,
+        );
 
         assert!(ws_body.get("previous_response_id").is_none());
         assert_eq!(ws_body["input"], next_body["input"]);
