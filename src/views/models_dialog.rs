@@ -46,8 +46,8 @@ fn render_loading_message(f: &mut Frame, dialog: &Dialog, colors: ThemeColors, m
 }
 
 pub fn render_refresh_models_dialog(f: &mut Frame, area: Rect, colors: ThemeColors, frame: usize) {
-    let width = area.width.min(42);
-    let height = area.height.min(5);
+    let width = area.width.min(52);
+    let height = area.height.min(7);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -65,24 +65,43 @@ pub fn render_refresh_models_dialog(f: &mut Frame, area: Rect, colors: ThemeColo
         width: popup.width.saturating_sub(4),
         height: popup.height.saturating_sub(2),
     };
+    f.render_widget(
+        Paragraph::new(refresh_models_dialog_lines(colors, frame)),
+        content,
+    );
+}
+
+fn refresh_models_dialog_lines(colors: ThemeColors, frame: usize) -> Vec<Line<'static>> {
     let glyph = crate::views::sessions_dialog::session_loading_glyph(frame);
-    let lines = vec![
+    vec![
         Line::from(Span::styled(
             "Refreshing models",
             Style::default()
                 .fg(colors.text)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::default(),
         Line::from(Span::styled(
-            format!("{} Updating model caches...", glyph),
+            format!("{} Updating provider catalogs and local models...", glyph),
             Style::default().fg(colors.text_weak),
         )),
-        Line::from(Span::styled(
-            "esc  close",
-            Style::default().fg(colors.primary),
-        )),
-    ];
-    f.render_widget(Paragraph::new(lines), content);
+        Line::default(),
+        Line::from(vec![
+            Span::styled(
+                "Close",
+                Style::default()
+                    .fg(colors.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "esc",
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]),
+    ]
 }
 
 #[derive(Debug)]
@@ -642,6 +661,26 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Refreshing models"));
-        assert!(rendered.contains("Updating model caches..."));
+        assert!(rendered.contains("Updating provider catalogs and local models..."));
+        assert!(rendered.contains("Close  esc"));
+    }
+
+    #[test]
+    fn compact_refresh_footer_matches_standard_action_styles() {
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let lines = refresh_models_dialog_lines(colors, 0);
+
+        assert_eq!(lines.len(), 5);
+        assert!(lines[1].spans.is_empty());
+        assert!(lines[3].spans.is_empty());
+        assert_eq!(lines[4].spans[0].content.as_ref(), "Close");
+        assert_eq!(lines[4].spans[0].style.fg, Some(colors.primary));
+        assert!(lines[4].spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(lines[4].spans[2].content.as_ref(), "esc");
+        assert_eq!(lines[4].spans[2].style.fg, Some(colors.text_weak));
+        assert!(lines[4].spans[2].style.add_modifier.contains(Modifier::DIM));
     }
 }
