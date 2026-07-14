@@ -1386,7 +1386,7 @@ impl Dialog {
         if matches!(
             event.kind,
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-        ) && self.dialog_area.contains(point)
+        ) && list_area.contains(point)
         {
             match event.kind {
                 MouseEventKind::ScrollDown => self.scroll_down(),
@@ -1405,14 +1405,6 @@ impl Dialog {
         let is_on_scrollbar = scrollbar_area.contains(point);
 
         match event.kind {
-            MouseEventKind::ScrollDown => {
-                self.scroll_down();
-                true
-            }
-            MouseEventKind::ScrollUp => {
-                self.scroll_up();
-                true
-            }
             MouseEventKind::Down(MouseButton::Left) => {
                 if is_on_scrollbar {
                     let total_lines = self.get_content_line_count();

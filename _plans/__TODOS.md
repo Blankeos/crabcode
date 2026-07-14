@@ -419,4 +419,4 @@ I think this is how the TUI works already anyway right?
 
 - [x] nonblocking /models check and caching.
 - [ ] better pty and interactive cli handling i.e. running `npx expo-doctor` will block the agent forever if expo-doctor is not installed yet.
-- [ ] scrollbar in /models dialog when I use mouse scrollwheel. It seems to spaz out when there's a `<    high    >` (the thinking effort values). It spazzes out because it seems to consider that as part of the scrollarea when it's not. No problems with keyboard or just dragging the scroll thum.
+- [x] scrollbar in /models dialog when I use mouse scrollwheel. It seems to spaz out when there's a `<    high    >` (the thinking effort values). It spazzes out because it seems to consider that as part of the scrollarea when it's not. No problems with keyboard or just dragging the scroll thum.

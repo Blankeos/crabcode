@@ -565,6 +565,56 @@ mod tests {
     }
 
     #[test]
+    fn mouse_wheel_over_reasoning_control_does_not_scroll_models() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let mut state = init_models_dialog(
+            "Models",
+            (0..24)
+                .map(|idx| model_item(&idx.to_string(), &format!("Model {idx}"), "openai"))
+                .collect(),
+        );
+        state.dialog.show();
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_models_dialog(
+                    frame,
+                    &mut state,
+                    Rect::new(0, 0, 80, 30),
+                    colors,
+                    Some("high"),
+                );
+            })
+            .unwrap();
+
+        let control_row = state.dialog.content_area.y
+            + state
+                .dialog
+                .content_area
+                .height
+                .saturating_sub(state.dialog.footer_height() + 2);
+        let control_column = state.dialog.content_area.x;
+        let initial_offset = state.dialog.scroll_offset;
+
+        let action = handle_models_dialog_mouse_event(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: control_column,
+                row: control_row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+
+        assert_eq!(action, ModelsDialogAction::None);
+        assert_eq!(state.dialog.scroll_offset, initial_offset);
+    }
+
+    #[test]
     fn selected_last_reasoning_model_stays_visible_above_control() {
         use ratatui::{backend::TestBackend, Terminal};
 
