@@ -26,6 +26,7 @@ use crate::ui::components::popup::Popup;
 use crate::ui::hyperlink::HyperlinkTarget;
 use crate::utils::git;
 
+use crate::tools::TerminalSessionEvent;
 use crate::views::agents_dialog::{
     handle_agents_dialog_key_event, handle_agents_dialog_mouse_event, init_agents_dialog,
     render_agents_dialog, AgentsDialogAction,
@@ -88,6 +89,10 @@ use crate::views::suggestions_popup::{
     handle_suggestions_popup_mouse_event, init_suggestions_popup, is_suggestions_visible,
     render_suggestions_popup, set_suggestions,
 };
+use crate::views::terminal_session_dialog::{
+    handle_terminal_session_dialog_key_event, init_terminal_session_dialog,
+    render_terminal_session_dialog, TerminalSessionResponse,
+};
 use crate::views::themes_dialog::{
     handle_themes_dialog_key_event, handle_themes_dialog_mouse_event, init_themes_dialog,
     render_themes_dialog,
@@ -100,7 +105,7 @@ use crate::views::{
     AgentsDialogState, ChatState, ConnectDialogState, HomeState, McpDialogState, ModelsDialogState,
     MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState, QuestionDialogState,
     RemoteDialogState, SessionRenameDialogState, SessionsDialogState, StorageDialogState,
-    SuggestionsPopupState, ThemesDialogState, TitleDialogState,
+    SuggestionsPopupState, TerminalSessionDialogState, ThemesDialogState, TitleDialogState,
 };
 
 use crate::{
@@ -209,6 +214,7 @@ pub enum OverlayFocus {
     MoveSessionDialog,
     PermissionDialog,
     QuestionDialog,
+    TerminalSessionDialog,
     RemoteDialog,
     SkillsDialog,
     McpDialog,
@@ -781,6 +787,7 @@ pub struct App {
     pub session_rename_dialog_state: SessionRenameDialogState,
     pub permission_dialog_state: PermissionDialogState,
     pub question_dialog_state: QuestionDialogState,
+    pub terminal_session_dialog_state: TerminalSessionDialogState,
     pub remote_dialog_state: RemoteDialogState,
     pub skills_dialog_state: crate::views::SkillsDialogState,
     pub mcp_dialog_state: McpDialogState,
@@ -892,6 +899,7 @@ impl App {
         let move_session_dialog_state = init_move_session_dialog();
         let permission_dialog_state = init_permission_dialog();
         let question_dialog_state = init_question_dialog();
+        let terminal_session_dialog_state = init_terminal_session_dialog();
         let remote_dialog_state = init_remote_dialog();
         let skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
         let mcp_dialog_state = init_mcp_dialog("MCP", vec![]);
@@ -1087,6 +1095,7 @@ impl App {
             session_rename_dialog_state,
             permission_dialog_state,
             question_dialog_state,
+            terminal_session_dialog_state,
             remote_dialog_state,
             skills_dialog_state,
             mcp_dialog_state,
@@ -1317,7 +1326,9 @@ impl App {
     fn terminal_title_requires_action(&self) -> bool {
         if matches!(
             self.overlay_focus,
-            OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+            OverlayFocus::PermissionDialog
+                | OverlayFocus::QuestionDialog
+                | OverlayFocus::TerminalSessionDialog
         ) {
             return true;
         }
@@ -2898,6 +2909,20 @@ impl App {
             self.reset_esc_timeline_state();
         }
 
+        if self.overlay_focus == OverlayFocus::TerminalSessionDialog
+            && self.terminal_session_dialog_state.has_active()
+        {
+            let resp = handle_terminal_session_dialog_key_event(
+                &mut self.terminal_session_dialog_state,
+                key,
+            );
+            if resp == TerminalSessionResponse::Close {
+                self.after_terminal_session_overlay_closed();
+            }
+            self.record_overlay_close_after_key(overlay_before_key);
+            return;
+        }
+
         if key.code == KeyCode::Char('p')
             && key.modifiers == event::KeyModifiers::CONTROL
             && matches!(
@@ -3410,6 +3435,7 @@ impl App {
                     QuestionDialogAction::NotHandled => true,
                 }
             }
+            OverlayFocus::TerminalSessionDialog => true,
             OverlayFocus::RemoteDialog => {
                 let submit_enabled = self.can_launch_remote_now();
                 let action = handle_remote_dialog_key_event(
@@ -4160,6 +4186,12 @@ impl App {
         if matches!(mouse.kind, MouseEventKind::Moved) && self.base_focus != BaseFocus::Chat {
             self.chat_state.chat.clear_hovered_image();
             self.chat_state.chat.clear_hovered_hyperlink();
+        }
+
+        if self.overlay_focus == OverlayFocus::TerminalSessionDialog
+            && self.terminal_session_dialog_state.has_active()
+        {
+            return;
         }
 
         // If text is selected and user clicks on an overlay, clear selection instead
@@ -4932,6 +4964,9 @@ impl App {
             (_, OverlayFocus::QuestionDialog) => {
                 self.question_dialog_state.insert_text(&text);
             }
+            (_, OverlayFocus::TerminalSessionDialog) => {
+                self.terminal_session_dialog_state.insert_paste(&text);
+            }
             (_, OverlayFocus::RemoteDialog) => {
                 self.remote_dialog_state.insert_text(&text);
             }
@@ -5417,8 +5452,40 @@ impl App {
         } else if self.question_dialog_state.has_active() {
             self.overlay_focus = OverlayFocus::QuestionDialog;
             true
+        } else if self.terminal_session_dialog_state.has_active() {
+            self.overlay_focus = OverlayFocus::TerminalSessionDialog;
+            true
         } else {
             false
+        }
+    }
+
+    fn after_terminal_session_overlay_closed(&mut self) {
+        if self.terminal_session_dialog_state.has_active() {
+            self.overlay_focus = OverlayFocus::TerminalSessionDialog;
+            return;
+        }
+        if self.focus_pending_priority_overlay() {
+            return;
+        }
+        self.resume_remote_wait_if_clear();
+    }
+
+    fn handle_terminal_session_stream_event(
+        &mut self,
+        tool_call_id: &str,
+        event: TerminalSessionEvent,
+    ) {
+        let auto_close = matches!(
+            event,
+            TerminalSessionEvent::Exited { .. } | TerminalSessionEvent::Stopped
+        );
+        let is_current = self
+            .terminal_session_dialog_state
+            .apply_event(tool_call_id, event);
+        if auto_close && is_current {
+            self.terminal_session_dialog_state.close_current();
+            self.after_terminal_session_overlay_closed();
         }
     }
 
@@ -6481,6 +6548,7 @@ impl App {
     }
 
     fn quit(&mut self) {
+        self.terminal_session_dialog_state.clear_all_with_stop();
         self.running = false;
     }
 
@@ -7990,6 +8058,10 @@ impl App {
                 self.question_dialog_state.clear_with_empty();
                 self.overlay_focus = OverlayFocus::None;
             }
+            self.terminal_session_dialog_state.clear_all_with_stop();
+            if self.overlay_focus == OverlayFocus::TerminalSessionDialog {
+                self.overlay_focus = OverlayFocus::None;
+            }
         }
 
         self.sync_active_streaming_flag();
@@ -8078,6 +8150,7 @@ impl App {
             || self.storage_receiver.is_some()
             || self.models_receiver.is_some()
             || self.title_generation_receiver.is_some()
+            || self.terminal_session_dialog_state.has_active()
             || self
                 .session_view_states
                 .values()
@@ -8342,7 +8415,9 @@ impl App {
                 self.permission_dialog_state.enqueue(prompt);
                 if !matches!(
                     self.overlay_focus,
-                    OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+                    OverlayFocus::PermissionDialog
+                        | OverlayFocus::QuestionDialog
+                        | OverlayFocus::TerminalSessionDialog
                 ) {
                     self.overlay_focus = OverlayFocus::PermissionDialog;
                 }
@@ -8370,11 +8445,45 @@ impl App {
                 self.question_dialog_state.enqueue(questions, response_tx);
                 if !matches!(
                     self.overlay_focus,
-                    OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+                    OverlayFocus::PermissionDialog
+                        | OverlayFocus::QuestionDialog
+                        | OverlayFocus::TerminalSessionDialog
                 ) {
                     self.overlay_focus = OverlayFocus::QuestionDialog;
                 }
                 self.mark_sessions_dialog_live_dirty();
+                true
+            }
+            crate::llm::ChunkMessage::TerminalSessionRequest(request) => {
+                self.maybe_persist_streaming_snapshot_for_session(session_id, true);
+                let _ = self.session_manager.set_session_status(
+                    session_id,
+                    crate::session::types::SessionStatus::Waiting,
+                    None,
+                );
+                if !self.is_active_session(session_id) {
+                    let _ = self.switch_to_session(session_id);
+                }
+                self.play_sound_event(crate::sound::SoundEvent::Permission);
+                self.notify_terminal_event(crate::sound::SoundEvent::Permission);
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.pause_streaming_tps_timer();
+                }
+                self.terminal_session_dialog_state.enqueue(request);
+                if !matches!(
+                    self.overlay_focus,
+                    OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+                ) {
+                    self.overlay_focus = OverlayFocus::TerminalSessionDialog;
+                }
+                self.mark_sessions_dialog_live_dirty();
+                true
+            }
+            crate::llm::ChunkMessage::TerminalSessionEvent {
+                tool_call_id,
+                event,
+            } => {
+                self.handle_terminal_session_stream_event(&tool_call_id, event);
                 true
             }
         }
@@ -10012,6 +10121,17 @@ impl App {
             render_question_dialog(f, &mut self.question_dialog_state, size, colors);
         }
 
+        if self.overlay_focus == OverlayFocus::TerminalSessionDialog
+            && self.terminal_session_dialog_state.has_active()
+        {
+            render_terminal_session_dialog(
+                f,
+                &mut self.terminal_session_dialog_state,
+                size,
+                colors,
+            );
+        }
+
         if self.overlay_focus == OverlayFocus::RemoteDialog && self.remote_dialog_state.is_visible()
         {
             let submit_enabled = self.can_launch_remote_now();
@@ -10445,6 +10565,7 @@ mod tests {
             session_rename_dialog_state: init_session_rename_dialog(colors),
             permission_dialog_state: init_permission_dialog(),
             question_dialog_state: init_question_dialog(),
+            terminal_session_dialog_state: init_terminal_session_dialog(),
             remote_dialog_state: init_remote_dialog(),
             skills_dialog_state: crate::views::skills_dialog::init_skills_dialog("Skills", vec![]),
             mcp_dialog_state: init_mcp_dialog("MCP", vec![]),

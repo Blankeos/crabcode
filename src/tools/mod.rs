@@ -14,6 +14,7 @@ pub mod question;
 pub mod registry;
 pub mod skill;
 pub mod task;
+pub mod terminal_session;
 pub mod types;
 pub mod update_plan;
 pub mod webfetch;
@@ -36,6 +37,10 @@ pub use question::QuestionTool;
 pub use registry::ToolRegistry;
 pub use skill::SkillTool;
 pub use task::TaskTool;
+pub use terminal_session::{
+    TerminalSessionControl, TerminalSessionEvent, TerminalSessionRequest, TerminalSessionStart,
+    TerminalSessionTool,
+};
 pub use types::{ParameterSchema, ParameterType, Tool, ToolError, ToolResult};
 pub use update_plan::UpdatePlanTool;
 pub use webfetch::WebfetchTool;

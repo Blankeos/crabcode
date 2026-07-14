@@ -4,6 +4,7 @@ pub mod tool_calls;
 
 pub use tool_calls::{FunctionCall, ToolCall, ToolCallResult};
 
+use crate::tools::terminal_session::{TerminalSessionEvent, TerminalSessionRequest};
 use tokio::sync::mpsc;
 
 pub enum ChunkMessage {
@@ -31,6 +32,11 @@ pub enum ChunkMessage {
     QuestionRequest {
         questions: serde_json::Value,
         response_tx: tokio::sync::oneshot::Sender<serde_json::Value>,
+    },
+    TerminalSessionRequest(TerminalSessionRequest),
+    TerminalSessionEvent {
+        tool_call_id: String,
+        event: TerminalSessionEvent,
     },
     End,
     Failed(String),

@@ -6,12 +6,13 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
-const MAX_OUTPUT_SIZE: usize = 51200; // 50KB
+const MAX_OUTPUT_BYTES: usize = 51_200;
+const READ_CHUNK_SIZE: usize = 4_096;
 
 pub struct BashTool;
 
@@ -21,12 +22,64 @@ impl BashTool {
     }
 }
 
+#[cfg(unix)]
+fn kill_process_group(child: &tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        unsafe {
+            let _ = libc::killpg(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(child: &tokio::process::Child) {
+    let _ = child.start_kill();
+}
+
+#[cfg(unix)]
+async fn terminate_child(child: &mut tokio::process::Child) {
+    kill_process_group(child);
+    let _ = child.kill().await;
+}
+
+#[cfg(not(unix))]
+async fn terminate_child(child: &mut tokio::process::Child) {
+    let _ = child.kill().await;
+}
+
+async fn drain_reader(mut reader: impl tokio::io::AsyncRead + Unpin) {
+    let mut buffer = vec![0u8; READ_CHUNK_SIZE];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+}
+
+fn append_capped(buffer: &mut Vec<u8>, chunk: &[u8], truncated: &mut bool) {
+    if *truncated {
+        return;
+    }
+    let remaining = MAX_OUTPUT_BYTES.saturating_sub(buffer.len());
+    if remaining == 0 {
+        *truncated = true;
+        return;
+    }
+    let take = chunk.len().min(remaining);
+    buffer.extend_from_slice(&chunk[..take]);
+    if take < chunk.len() {
+        *truncated = true;
+    }
+}
+
 #[async_trait]
 impl ToolHandler for BashTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "bash".to_string(),
-            description: "Execute shell commands with timeout and output streaming.".to_string(),
+            description: "Execute non-interactive shell commands with a timeout and captured output. Stdin is closed, so commands that prompt for input will receive EOF; use `terminal_session` when a TTY or user interaction is required."
+                .to_string(),
             parameters: vec![
                 ParameterSchema {
                     name: "command".to_string(),
@@ -88,9 +141,15 @@ impl ToolHandler for BashTool {
             cmd.current_dir(dir);
         }
 
+        cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.kill_on_drop(true);
+
+        #[cfg(unix)]
+        {
+            cmd.process_group(0);
+        }
 
         let mut child = cmd
             .spawn()
@@ -99,59 +158,74 @@ impl ToolHandler for BashTool {
         let stdout = child.stdout.take().expect("stdout should be piped");
         let stderr = child.stderr.take().expect("stderr should be piped");
 
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
+        let mut stdout_reader = BufReader::new(stdout);
+        let mut stderr_reader = BufReader::new(stderr);
 
-        let mut stdout_lines: Vec<String> = Vec::new();
-        let mut stderr_lines: Vec<String> = Vec::new();
+        let mut stdout_buf: Vec<u8> = Vec::new();
+        let mut stderr_buf: Vec<u8> = Vec::new();
+        let mut stdout_truncated = false;
+        let mut stderr_truncated = false;
 
         let timeout_duration = Duration::from_secs(timeout_seconds);
 
         let result = timeout(timeout_duration, async {
+            let mut stdout_done = false;
+            let mut stderr_done = false;
+            let mut stdout_chunk = vec![0u8; READ_CHUNK_SIZE];
+            let mut stderr_chunk = vec![0u8; READ_CHUNK_SIZE];
+
             loop {
                 if ctx.is_aborted() {
-                    let _ = child.kill().await;
+                    terminate_child(&mut child).await;
                     return Err(ToolError::Execution("Command aborted".to_string()));
                 }
 
+                if stdout_done && stderr_done {
+                    return match child.wait().await {
+                        Ok(exit_status) => Ok(exit_status),
+                        Err(e) => Err(ToolError::Execution(format!("Process error: {}", e))),
+                    };
+                }
+
                 tokio::select! {
-                    line = stdout_reader.next_line() => {
-                        match line {
-                            Ok(Some(l)) => {
-                                if stdout_lines.len() < MAX_OUTPUT_SIZE {
-                                    stdout_lines.push(l);
-                                }
-                            }
-                            Ok(None) => {}
+                    read = stdout_reader.read(&mut stdout_chunk), if !stdout_done => {
+                        match read {
+                            Ok(0) => stdout_done = true,
+                            Ok(n) => append_capped(&mut stdout_buf, &stdout_chunk[..n], &mut stdout_truncated),
                             Err(e) => return Err(ToolError::Execution(format!("Error reading stdout: {}", e))),
                         }
                     }
-                    line = stderr_reader.next_line() => {
-                        match line {
-                            Ok(Some(l)) => {
-                                if stderr_lines.len() < MAX_OUTPUT_SIZE {
-                                    stderr_lines.push(l);
-                                }
-                            }
-                            Ok(None) => {}
+                    read = stderr_reader.read(&mut stderr_chunk), if !stderr_done => {
+                        match read {
+                            Ok(0) => stderr_done = true,
+                            Ok(n) => append_capped(&mut stderr_buf, &stderr_chunk[..n], &mut stderr_truncated),
                             Err(e) => return Err(ToolError::Execution(format!("Error reading stderr: {}", e))),
                         }
                     }
-                    status = child.wait() => {
+                    status = child.wait(), if stdout_done && stderr_done => {
                         return match status {
                             Ok(exit_status) => Ok(exit_status),
                             Err(e) => Err(ToolError::Execution(format!("Process error: {}", e))),
                         };
                     }
+                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
                 }
             }
-        }).await;
+        })
+        .await;
 
         let exit_status = match result {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => return Err(e),
             Err(_) => {
-                let _ = child.kill().await;
+                terminate_child(&mut child).await;
+                if let Some(stdout) = child.stdout.take() {
+                    drain_reader(stdout).await;
+                }
+                if let Some(stderr) = child.stderr.take() {
+                    drain_reader(stderr).await;
+                }
+                let _ = child.wait().await;
                 return Err(ToolError::Execution(format!(
                     "Command timed out after {} seconds",
                     timeout_seconds
@@ -159,17 +233,18 @@ impl ToolHandler for BashTool {
             }
         };
 
+        let stdout_text = String::from_utf8_lossy(&stdout_buf).into_owned();
+        let stderr_text = String::from_utf8_lossy(&stderr_buf).into_owned();
+
         let mut output_parts = Vec::new();
-
-        if !stdout_lines.is_empty() {
-            output_parts.push(stdout_lines.join("\n"));
+        if !stdout_text.is_empty() {
+            output_parts.push(stdout_text);
         }
-
-        if !stderr_lines.is_empty() {
+        if !stderr_text.is_empty() {
             if !output_parts.is_empty() {
                 output_parts.push("\n--- stderr ---".to_string());
             }
-            output_parts.push(stderr_lines.join("\n"));
+            output_parts.push(stderr_text);
         }
 
         let output = if output_parts.is_empty() {
@@ -178,12 +253,11 @@ impl ToolHandler for BashTool {
             output_parts.join("\n")
         };
 
-        let truncated =
-            stdout_lines.len() >= MAX_OUTPUT_SIZE || stderr_lines.len() >= MAX_OUTPUT_SIZE;
+        let truncated = stdout_truncated || stderr_truncated;
         let final_output = if truncated {
             format!(
                 "{}\n\n[Output truncated to {} bytes]",
-                output, MAX_OUTPUT_SIZE
+                output, MAX_OUTPUT_BYTES
             )
         } else {
             output
@@ -196,5 +270,40 @@ impl ToolHandler for BashTool {
                 .with_metadata("exit_code", serde_json::json!(exit_code))
                 .with_metadata("command", serde_json::json!(command_str)),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn append_capped_respects_byte_limit() {
+        let mut buf = Vec::new();
+        let mut truncated = false;
+        append_capped(&mut buf, &[b'a'; MAX_OUTPUT_BYTES + 10], &mut truncated);
+        assert_eq!(buf.len(), MAX_OUTPUT_BYTES);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn interactive_read_receives_eof_instead_of_hanging() {
+        let ctx =
+            ToolContext::from_cancel_token("session", "message", "Build", CancellationToken::new());
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            BashTool::new().execute(
+                serde_json::json!({
+                    "command": "if IFS= read -r value; then echo unexpected; else echo eof; fi"
+                }),
+                &ctx,
+            ),
+        )
+        .await
+        .expect("non-interactive bash should not wait for terminal input")
+        .expect("bash command should execute");
+
+        assert!(result.output.contains("eof"));
     }
 }

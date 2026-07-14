@@ -1,7 +1,7 @@
 use crate::tools::{
     fs::{GlobTool, GrepTool, ListTool, ReadTool, ViewImageTool, WriteFilesTool, WriteTool},
-    ApplyPatchTool, BashTool, EditTool, QuestionTool, SkillTool, TaskTool, ToolPermissions,
-    ToolRegistry, UpdatePlanTool, WebfetchTool, WebsearchTool,
+    ApplyPatchTool, BashTool, EditTool, QuestionTool, SkillTool, TaskTool, TerminalSessionTool,
+    ToolPermissions, ToolRegistry, UpdatePlanTool, WebfetchTool, WebsearchTool,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -83,9 +83,13 @@ pub async fn register_dynamic_tools(
     registry
         .register(Arc::new(
             TaskTool::new(registry.clone())
-                .with_sender_opt(sender)
+                .with_sender_opt(sender.clone())
                 .with_runtime_options(permissions, agent_registry, cancel_token),
         ))
+        .await;
+
+    registry
+        .register(Arc::new(TerminalSessionTool::new().with_sender_opt(sender)))
         .await;
 }
 
@@ -153,6 +157,7 @@ mod tests {
 
         assert!(registry.get("question").await.is_some());
         assert!(registry.get("task").await.is_some());
+        assert!(registry.get("terminal_session").await.is_some());
     }
 
     #[tokio::test]
@@ -170,6 +175,7 @@ mod tests {
         assert!(scoped.get("read").await.is_some());
         assert!(scoped.get("task").await.is_some());
         assert!(scoped.get("bash").await.is_none());
+        assert!(scoped.get("terminal_session").await.is_none());
         assert!(scoped.get("apply_patch").await.is_none());
         assert!(scoped.get("write").await.is_none());
         assert!(scoped.get("edit").await.is_none());

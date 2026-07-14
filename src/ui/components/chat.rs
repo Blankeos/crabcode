@@ -922,6 +922,54 @@ fn display_path(raw: &str, basename_only: bool) -> String {
     trimmed.to_string()
 }
 
+fn push_terminal_preview<'a>(
+    out: &mut Vec<Line<'a>>,
+    preview: &str,
+    max_width: usize,
+    style: Style,
+) {
+    let safe_preview = crate::tools::terminal_session::sanitize_terminal_output(preview.as_bytes());
+    let trimmed = safe_preview.trim_matches('\n');
+    if trimmed.trim().is_empty() {
+        return;
+    }
+
+    let raw_lines: Vec<&str> = trimmed.lines().collect();
+    let max_lines = TOOL_RESULT_MAX_SCREEN_LINES.max(1);
+    let display_lines = if raw_lines.len() <= max_lines {
+        raw_lines.iter().map(|line| (*line).to_string()).collect()
+    } else {
+        let tail_count = usize::from(max_lines >= 3);
+        let head_count = max_lines.saturating_sub(tail_count + 1).max(1);
+        let mut lines = raw_lines
+            .iter()
+            .take(head_count)
+            .map(|line| (*line).to_string())
+            .collect::<Vec<_>>();
+        lines.push(format!(
+            "… +{} lines",
+            raw_lines.len().saturating_sub(head_count + tail_count)
+        ));
+        if tail_count > 0 {
+            lines.extend(
+                raw_lines[raw_lines.len().saturating_sub(tail_count)..]
+                    .iter()
+                    .map(|line| (*line).to_string()),
+            );
+        }
+        lines
+    };
+
+    for raw_line in display_lines {
+        let line = Line::from(Span::styled(format!("    {}", raw_line), style));
+        out.extend(wrap_styled_line(
+            &line,
+            WrapOptions::new(max_width.max(1))
+                .subsequent_indent(Line::from(Span::styled("    ", style))),
+        ));
+    }
+}
+
 fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
     let mut candidates = Vec::new();
     let mut push_candidate = |value: Option<&str>| {
@@ -4662,6 +4710,7 @@ impl Chat {
             "write" => "Write",
             "edit" => "Edit",
             "bash" => "Bash",
+            "terminal_session" => "Terminal",
             "list" => "List",
             "grep" => "Grep",
             "update_plan" | "todowrite" => "Updated Plan",
@@ -4961,6 +5010,122 @@ impl Chat {
                         .fg(colors.text_weak)
                         .add_modifier(Modifier::DIM);
                     push_preview_lines(&mut out, preview, max_width, result_style);
+                }
+            }
+        } else if name == "terminal_session" {
+            let command = metadata
+                .as_ref()
+                .and_then(|m| m.get("command"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    args_obj
+                        .and_then(|o| o.get("command"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("command");
+            let description = metadata
+                .as_ref()
+                .and_then(|m| m.get("description"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    args_obj
+                        .and_then(|o| o.get("description"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| strip_tool_title(title.as_deref(), "Terminal session"))
+                .filter(|value| !value.trim().is_empty() && value.trim() != command.trim());
+            let workdir = metadata
+                .as_ref()
+                .and_then(|m| m.get("workdir"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    args_obj
+                        .and_then(|o| o.get("workdir").or_else(|| o.get("path")))
+                        .and_then(|v| v.as_str())
+                });
+            let active = matches!(status.as_str(), "running" | "pending");
+            let stopped = metadata
+                .as_ref()
+                .and_then(|m| m.get("stopped_by_user"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let exit_code = metadata
+                .as_ref()
+                .and_then(|m| m.get("exit_code"))
+                .and_then(|v| v.as_i64());
+            let failed = status == "error" || exit_code.is_some_and(|code| code != 0 && !stopped);
+            let verb = if active {
+                "Running terminal"
+            } else if stopped {
+                "Stopped terminal"
+            } else if failed {
+                "Terminal failed"
+            } else {
+                "Ran terminal"
+            };
+            let marker_style = Style::default()
+                .fg(if failed {
+                    colors.error
+                } else if active {
+                    colors.accent
+                } else {
+                    colors.success
+                })
+                .add_modifier(Modifier::BOLD);
+            let title_style = Style::default()
+                .fg(if failed { colors.error } else { colors.text })
+                .add_modifier(Modifier::BOLD);
+            let detail_style = Style::default().fg(colors.text_weak);
+            let gutter_style = detail_style.add_modifier(Modifier::DIM);
+            let mut heading = vec![
+                Span::styled(self.tool_marker(active), marker_style),
+                Span::raw(" "),
+                Span::styled(verb.to_string(), title_style),
+            ];
+            if let Some(description) = description {
+                heading.push(Span::styled(" · ", detail_style));
+                heading.push(Span::styled(description.trim().to_string(), detail_style));
+            }
+            push_wrapped(
+                &mut out,
+                Line::from(heading),
+                max_width,
+                Line::from(Span::styled("  ", marker_style)),
+            );
+            push_wrapped(
+                &mut out,
+                Line::from(vec![
+                    Span::styled("  └ ", gutter_style),
+                    Span::styled(command.to_string(), Style::default().fg(colors.text)),
+                ]),
+                max_width,
+                Line::from(Span::styled("    ", gutter_style)),
+            );
+
+            let mut facts = Vec::new();
+            if let Some(workdir) = workdir {
+                facts.push(format!("in {}", display_path(workdir, false)));
+            }
+            if stopped {
+                facts.push("stopped by user".to_string());
+            } else if let Some(exit_code) = exit_code {
+                facts.push(format!("exit {}", exit_code));
+            }
+            if !facts.is_empty() {
+                push_wrapped(
+                    &mut out,
+                    Line::from(Span::styled(
+                        format!("    {}", facts.join(" · ")),
+                        detail_style,
+                    )),
+                    max_width,
+                    Line::from(Span::styled("    ", detail_style)),
+                );
+            }
+
+            if status == "ok" {
+                if let Some(ref preview) = output_preview {
+                    push_terminal_preview(&mut out, preview, max_width, gutter_style);
                 }
             }
         } else if name == "bash" {
@@ -6867,6 +7032,71 @@ mod tests {
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
         assert_eq!(rendered, vec!["⬢ Ran printf hello", "  └ hello"]);
+    }
+
+    #[test]
+    fn test_terminal_session_renders_semantic_tree_card() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "terminal_session",
+            "status": "ok",
+            "args": {
+                "command": "npx expo@latest",
+                "description": "Run the latest Expo CLI",
+                "workdir": "/Users/carlo/Desktop/Projects/demo"
+            },
+            "metadata": {
+                "command": "npx expo@latest",
+                "description": "Run the latest Expo CLI",
+                "workdir": "/Users/carlo/Desktop/Projects/demo",
+                "exit_code": 0,
+                "stopped_by_user": false
+            },
+            "output_preview": "Expo ready"
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let rendered = chat
+            .format_tool_row(&msg, 100, &colors, false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered[0], "⬢ Ran terminal · Run the latest Expo CLI");
+        assert_eq!(rendered[1], "  └ npx expo@latest");
+        assert!(rendered[2].contains("in "));
+        assert!(rendered[2].contains("exit 0"));
+        assert_eq!(rendered[3], "    Expo ready");
+        assert!(!rendered.join("\n").contains("command="));
+        assert!(!rendered.join("\n").contains("description="));
+    }
+
+    #[test]
+    fn test_terminal_session_sanitizes_legacy_raw_preview() {
+        let chat = Chat::new();
+        let content = serde_json::json!({
+            "name": "terminal_session",
+            "status": "ok",
+            "args": { "command": "wizard" },
+            "metadata": { "exit_code": 0 },
+            "output_preview": "\u{001b}[2J\u{001b}[Hprogress 10%\rprogress 100%\r\n"
+        })
+        .to_string();
+        let msg = Message::tool(content);
+        let colors = test_colors();
+
+        let rendered = chat
+            .format_tool_row(&msg, 80, &colors, false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        let text = rendered.join("\n");
+
+        assert!(text.contains("progress 100%"));
+        assert!(!text.contains("progress 10%"));
+        assert!(!text.chars().any(|ch| ch.is_control() && ch != '\n'));
     }
 
     #[test]

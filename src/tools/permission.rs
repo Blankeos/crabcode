@@ -31,7 +31,7 @@ impl PermissionAction {
             "list" => Self::List,
             "glob" => Self::Glob,
             "grep" => Self::Grep,
-            "bash" => Self::Bash,
+            "bash" | "terminal_session" => Self::Bash,
             _ => Self::Unknown,
         }
     }
@@ -173,7 +173,7 @@ impl AgentToolPolicies {
             // policies above can still opt specific tools back in.
             return !matches!(
                 tool.as_str(),
-                "bash" | "write" | "write_files" | "edit" | "apply_patch"
+                "bash" | "terminal_session" | "write" | "write_files" | "edit" | "apply_patch"
             );
         }
 
@@ -713,6 +713,7 @@ fn permission_key_for_tool_id(tool_id: &str) -> String {
     match tool_id.trim().to_ascii_lowercase().as_str() {
         "write" | "write_files" | "edit" | "apply_patch" => "edit".to_string(),
         "read" | "view_image" => "read".to_string(),
+        "terminal_session" => "bash".to_string(),
         other => other.to_string(),
     }
 }
@@ -728,7 +729,7 @@ fn permission_patterns_for_tool(
     let mut patterns = Vec::new();
 
     match tool_id {
-        "bash" => {
+        "bash" | "terminal_session" => {
             if let Some(command) = command {
                 push_nonempty(&mut patterns, command);
             }
@@ -1141,6 +1142,7 @@ mod tests {
         assert!(policies.is_allowed("plan", "read"));
         assert!(policies.is_allowed("plan", "glob"));
         assert!(!policies.is_allowed("plan", "bash"));
+        assert!(!policies.is_allowed("plan", "terminal_session"));
         assert!(!policies.is_allowed("plan", "write"));
         assert!(!policies.is_allowed("plan", "write_files"));
         assert!(!policies.is_allowed("plan", "edit"));

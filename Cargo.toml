@@ -85,6 +85,9 @@ syntect = "5.3"
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 rmcp = { version = "2.0.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-native-tls"] }
 http = "1.3"
+portable-pty = "0.9"
+libc = "0.2"
+vt100 = "0.15.2"
 
 [dev-dependencies]
 tokio-test = "0.4"

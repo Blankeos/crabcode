@@ -441,7 +441,15 @@ async fn run_print_mode(
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
             }
-            crate::llm::ChunkMessage::ToolCalls(_) | crate::llm::ChunkMessage::ToolResult(_) => {}
+            crate::llm::ChunkMessage::ToolCalls(_)
+            | crate::llm::ChunkMessage::ToolResult(_)
+            | crate::llm::ChunkMessage::Metrics { .. }
+            | crate::llm::ChunkMessage::Cancelled
+            | crate::llm::ChunkMessage::Reasoning(_)
+            | crate::llm::ChunkMessage::Retry(_)
+            | crate::llm::ChunkMessage::SubagentStarted { .. }
+            | crate::llm::ChunkMessage::SubagentChunk { .. }
+            | crate::llm::ChunkMessage::TerminalSessionEvent { .. } => {}
             crate::llm::ChunkMessage::End => {
                 println!();
                 play_resolved_sound(&sounds, crate::sound::SoundEvent::Complete);
@@ -471,7 +479,16 @@ async fn run_print_mode(
                     "reason": "Question prompts are unavailable in non-interactive print mode"
                 }));
             }
-            _ => {}
+            crate::llm::ChunkMessage::TerminalSessionRequest(request) => {
+                play_resolved_sound(&sounds, crate::sound::SoundEvent::Permission);
+                eprintln!(
+                    "Terminal session required ({}): interactive PTY is unavailable in non-interactive print mode; stopping session.",
+                    request.start.description
+                );
+                let _ = request
+                    .control_tx
+                    .send(crate::tools::TerminalSessionControl::Stop);
+            }
         }
     }
 

@@ -15,6 +15,7 @@ pub mod sessions_dialog;
 pub mod skills_dialog;
 pub mod storage_dialog;
 pub mod suggestions_popup;
+pub mod terminal_session_dialog;
 pub mod themes_dialog;
 pub mod timeline_dialog;
 pub mod title_dialog;
@@ -36,6 +37,7 @@ pub use sessions_dialog::SessionsDialogState;
 pub use skills_dialog::SkillsDialogState;
 pub use storage_dialog::StorageDialogState;
 pub use suggestions_popup::SuggestionsPopupState;
+pub use terminal_session_dialog::TerminalSessionDialogState;
 pub use themes_dialog::ThemesDialogState;
 pub use title_dialog::TitleDialogState;
 #[allow(unused_imports)]
