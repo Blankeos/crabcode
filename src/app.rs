@@ -4843,7 +4843,6 @@ impl App {
                         .lines()
                         .join(""),
                 );
-                self.agents_dialog_state.dialog.selected_index = 0;
             }
             (_, OverlayFocus::ModelsDialog) => {
                 self.models_dialog_state
@@ -4857,7 +4856,6 @@ impl App {
                         .lines()
                         .join(""),
                 );
-                self.models_dialog_state.dialog.selected_index = 0;
             }
             (_, OverlayFocus::ThemesDialog) => {
                 self.themes_dialog_state
@@ -4871,7 +4869,6 @@ impl App {
                         .lines()
                         .join(""),
                 );
-                self.themes_dialog_state.dialog.selected_index = 0;
 
                 if let Some(theme_id) = self
                     .themes_dialog_state
@@ -4894,7 +4891,6 @@ impl App {
                         .lines()
                         .join(""),
                 );
-                self.connect_dialog_state.dialog.selected_index = 0;
             }
             (_, OverlayFocus::SessionsDialog) => {
                 self.sessions_dialog_state
@@ -4908,7 +4904,6 @@ impl App {
                         .lines()
                         .join(""),
                 );
-                self.sessions_dialog_state.dialog.selected_index = 0;
             }
             (_, OverlayFocus::SkillsDialog) => {
                 self.skills_dialog_state
@@ -4922,7 +4917,6 @@ impl App {
                         .lines()
                         .join(""),
                 );
-                self.skills_dialog_state.dialog.selected_index = 0;
             }
             (_, OverlayFocus::CommandPalette) => {
                 self.command_palette_state
@@ -4936,7 +4930,6 @@ impl App {
                         .lines()
                         .join(""),
                 );
-                self.command_palette_state.dialog.selected_index = 0;
             }
             (_, OverlayFocus::FindBar) => {
                 self.find_bar.insert_text(&text);

@@ -29,7 +29,6 @@ const PROVIDER_PREFIX_MATCH_BOOST: u32 = 900_000;
 enum FilterSelectionMode {
     Preserve,
     Reset,
-    PreserveIfNearTop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -320,7 +319,7 @@ impl Dialog {
         } else if self.search_query == previous_query {
             FilterSelectionMode::Preserve
         } else {
-            FilterSelectionMode::PreserveIfNearTop
+            FilterSelectionMode::Reset
         };
         self.apply_filter(selection_mode);
     }
@@ -630,43 +629,6 @@ impl Dialog {
             };
 
             if let Some(pos) = selected_pos {
-                if selection_mode == FilterSelectionMode::PreserveIfNearTop
-                    && !self.search_priority_groups.is_empty()
-                {
-                    let should_reset_to_priority_match = {
-                        let flat_items = self.get_flat_items();
-                        flat_items.first().is_some_and(|top_item| {
-                            flat_items.get(pos).is_some_and(|selected_item| {
-                                Self::search_group_priority(
-                                    &self.search_priority_groups,
-                                    &top_item.group,
-                                ) < Self::search_group_priority(
-                                    &self.search_priority_groups,
-                                    &selected_item.group,
-                                )
-                            })
-                        })
-                    };
-
-                    if should_reset_to_priority_match {
-                        self.selected_index = 0;
-                        self.focused_group_header = None;
-                        self.scroll_offset = 0;
-                        self.adjust_scroll();
-                        return;
-                    }
-                }
-
-                if selection_mode == FilterSelectionMode::PreserveIfNearTop
-                    && self.get_line_index_of_item(pos) >= self.get_visible_row_count().max(1)
-                {
-                    self.selected_index = 0;
-                    self.focused_group_header = None;
-                    self.scroll_offset = 0;
-                    self.adjust_scroll();
-                    return;
-                }
-
                 self.selected_index = pos;
                 self.focused_group_header = None;
                 self.adjust_scroll();
@@ -785,50 +747,12 @@ impl Dialog {
         let visible_rows = self.get_visible_row_count().max(1);
         let max_offset = total_lines.saturating_sub(visible_rows);
         self.scroll_offset = (self.scroll_offset + 1).min(max_offset);
-        self.sync_focus_after_scroll(1);
         self.update_scrollbar();
     }
 
     pub fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
-        self.sync_focus_after_scroll(-1);
         self.update_scrollbar();
-    }
-
-    fn sync_focus_after_scroll(&mut self, direction: isize) {
-        let visible_rows = self.get_visible_row_count().max(1);
-        let start_line = self.scroll_offset;
-        let end_line = start_line.saturating_add(visible_rows);
-
-        let mut fallback_group: Option<String> = None;
-        let mut fallback_item: Option<usize> = None;
-
-        let line_range: Box<dyn Iterator<Item = usize>> = if direction >= 0 {
-            Box::new(start_line..end_line)
-        } else {
-            Box::new((start_line..end_line).rev())
-        };
-
-        for line in line_range {
-            if fallback_group.is_none() {
-                fallback_group = self.get_group_from_line(line);
-            }
-            if fallback_item.is_none() {
-                fallback_item = self.get_item_index_from_line(line);
-            }
-            if fallback_group.is_some() || fallback_item.is_some() {
-                break;
-            }
-        }
-
-        if let Some(item_index) = fallback_item {
-            self.selected_index = item_index;
-            self.focused_group_header = None;
-        } else if let Some(group) = fallback_group {
-            if self.focusable_group_headers {
-                self.focused_group_header = Some(group);
-            }
-        }
     }
 
     fn move_focus_wrapping(&mut self, delta: isize) {
@@ -1326,7 +1250,7 @@ impl Dialog {
                 let selection_mode = if self.search_query == previous_query {
                     FilterSelectionMode::Preserve
                 } else {
-                    FilterSelectionMode::PreserveIfNearTop
+                    FilterSelectionMode::Reset
                 };
                 self.apply_filter(selection_mode);
                 true
@@ -1633,15 +1557,6 @@ impl Dialog {
         let new_offset =
             scrollbar_offset_from_row_with_grab(metrics, scrollbar_area, row, grab_offset);
         self.scroll_offset = new_offset.min(max_offset);
-
-        let flat_items = self.get_flat_items();
-        if !flat_items.is_empty() && visible_rows > 0 {
-            let item_at_offset = self.get_item_index_from_line(self.scroll_offset);
-            if let Some(idx) = item_at_offset {
-                self.selected_index = idx;
-                self.focused_group_header = None;
-            }
-        }
 
         self.update_scrollbar();
     }
@@ -2207,6 +2122,7 @@ mod tests {
                 .get_content_line_count()
                 .saturating_sub(dialog.get_visible_row_count())
         );
+        assert_eq!(dialog.selected_index, 0);
 
         let handled = dialog.handle_mouse_event(MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
@@ -2415,18 +2331,20 @@ mod tests {
     }
 
     #[test]
-    fn test_dialog_search_preserves_near_top_selection_when_query_changes() {
-        let mut dialog = Dialog::with_items("Providers", create_fuzzy_test_items());
+    fn test_dialog_search_selects_highest_ranked_match_when_query_changes() {
+        let mut dialog = Dialog::with_items("Models", create_provider_weight_test_items());
 
-        dialog.selected_index = 1;
-        assert_eq!(dialog.get_selected().unwrap().name, "github");
+        assert_eq!(dialog.get_selected().unwrap().provider_id, "nanogpt");
 
-        dialog.set_search_query("gu");
-        assert_eq!(dialog.get_selected().unwrap().name, "github");
+        dialog.set_search_query("openai");
+
+        assert_eq!(dialog.selected_index, 0);
+        assert_eq!(dialog.scroll_offset, 0);
+        assert_eq!(dialog.get_selected().unwrap().provider_id, "openai");
     }
 
     #[test]
-    fn test_dialog_search_resets_selection_when_match_is_below_first_viewport() {
+    fn test_dialog_search_selects_first_match_regardless_of_previous_viewport() {
         let mut items = create_many_test_items(40);
         for item in &mut items {
             item.id = format!("gpt-5.5-{}", item.id);
@@ -2442,6 +2360,43 @@ mod tests {
 
         assert_eq!(dialog.selected_index, 0);
         assert_eq!(dialog.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_dialog_wheel_scroll_does_not_change_selection() {
+        let mut dialog = Dialog::with_items("Models", create_many_test_items(40));
+        dialog.visible_row_count = 5;
+        dialog.selected_index = 10;
+        dialog.scroll_offset = 0;
+
+        for _ in 0..20 {
+            dialog.scroll_down();
+        }
+        assert_eq!(dialog.scroll_offset, 20);
+        assert_eq!(dialog.selected_index, 10);
+
+        for _ in 0..5 {
+            dialog.scroll_up();
+        }
+        assert_eq!(dialog.scroll_offset, 15);
+        assert_eq!(dialog.selected_index, 10);
+    }
+
+    #[test]
+    fn test_dialog_wheel_scroll_does_not_change_focused_group_header() {
+        let mut dialog = Dialog::with_items("Sessions", create_many_test_items(40))
+            .with_focusable_group_headers(true);
+        dialog.visible_row_count = 5;
+        assert!(dialog.focus_group_header("Group"));
+        dialog.scroll_offset = 0;
+
+        for _ in 0..10 {
+            dialog.scroll_down();
+        }
+
+        assert_eq!(dialog.scroll_offset, 10);
+        assert_eq!(dialog.get_focused_group_header(), Some("Group"));
+        assert_eq!(dialog.selected_index, 0);
     }
 
     #[test]

@@ -482,16 +482,10 @@ impl ActionDialog {
         let visible_rows = self.visible_row_count.max(1);
         let max_offset = self.items.len().saturating_sub(visible_rows);
         self.scroll_offset = (self.scroll_offset + 1).min(max_offset);
-        if !self.items.is_empty() {
-            self.selected_index = self.scroll_offset.min(self.items.len().saturating_sub(1));
-        }
     }
 
     fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
-        if !self.items.is_empty() {
-            self.selected_index = self.scroll_offset.min(self.items.len().saturating_sub(1));
-        }
     }
 
     fn adjust_scroll(&mut self) {
@@ -519,9 +513,6 @@ impl ActionDialog {
         self.scroll_offset =
             scrollbar_offset_from_row_with_grab(metrics, scrollbar_area, row, grab_offset)
                 .min(max_offset);
-        if !self.items.is_empty() {
-            self.selected_index = self.scroll_offset.min(self.items.len().saturating_sub(1));
-        }
     }
 
     fn list_area(&self) -> Rect {
@@ -588,5 +579,53 @@ impl ActionDialog {
 
         result.push_str(ELLIPSIS);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn items(count: usize) -> Vec<ActionDialogItem> {
+        (0..count)
+            .map(|index| ActionDialogItem {
+                id: index.to_string(),
+                key: 'a',
+                label: format!("Action {index}"),
+                description: String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wheel_scroll_does_not_change_selection() {
+        let mut dialog = ActionDialog::with_items("Actions", items(40));
+        dialog.visible_row_count = 5;
+        dialog.selected_index = 10;
+
+        for _ in 0..20 {
+            dialog.scroll_down();
+        }
+        assert_eq!(dialog.scroll_offset, 20);
+        assert_eq!(dialog.selected_index, 10);
+
+        for _ in 0..5 {
+            dialog.scroll_up();
+        }
+        assert_eq!(dialog.scroll_offset, 15);
+        assert_eq!(dialog.selected_index, 10);
+    }
+
+    #[test]
+    fn scrollbar_scroll_does_not_change_selection() {
+        let mut dialog = ActionDialog::with_items("Actions", items(40));
+        dialog.visible_row_count = 5;
+        dialog.selected_index = 10;
+        let scrollbar_area = Rect::new(0, 0, 1, 5);
+
+        dialog.scroll_to_position(4, scrollbar_area);
+
+        assert!(dialog.scroll_offset > 0);
+        assert_eq!(dialog.selected_index, 10);
     }
 }
