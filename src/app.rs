@@ -198,6 +198,7 @@ pub enum OverlayFocus {
     None,
     AgentsDialog,
     ModelsDialog,
+    RefreshModelsDialog,
     ThemesDialog,
     ConnectDialog,
     ProviderOAuthFlow,
@@ -296,6 +297,18 @@ enum CompactionTaskMessage {
 #[derive(Debug)]
 enum StorageTaskMessage {
     Loaded(crate::utils::storage::StorageReport),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelsTaskKind {
+    Load,
+    Refresh,
+}
+
+#[derive(Debug)]
+struct ModelsTaskMessage {
+    kind: ModelsTaskKind,
+    result: crate::command::registry::CommandResult,
 }
 
 #[derive(Debug)]
@@ -781,6 +794,7 @@ pub struct App {
     compaction_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<CompactionTaskMessage>>,
     compaction_pending: Option<CompactionPending>,
     storage_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<StorageTaskMessage>>,
+    models_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<ModelsTaskMessage>>,
     title_generation_receiver:
         Option<tokio::sync::mpsc::UnboundedReceiver<TitleGenerationTaskMessage>>,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
@@ -1086,6 +1100,7 @@ impl App {
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,
+            models_receiver: None,
             title_generation_receiver: None,
             prefs_dao,
             agent,
@@ -2982,7 +2997,10 @@ impl App {
                 true
             }
             OverlayFocus::ModelsDialog => {
-                if key.code == KeyCode::Char('a') && key.modifiers == event::KeyModifiers::CONTROL {
+                if !self.models_dialog_state.is_loading()
+                    && key.code == KeyCode::Char('a')
+                    && key.modifiers == event::KeyModifiers::CONTROL
+                {
                     self.models_dialog_state.dialog.hide();
                     if let crate::command::parser::InputType::Command(parsed) =
                         crate::command::parser::parse_input("/connect")
@@ -3058,6 +3076,12 @@ impl App {
                 }
 
                 if !self.models_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
+            OverlayFocus::RefreshModelsDialog => {
+                if key.code == KeyCode::Esc {
                     self.overlay_focus = OverlayFocus::None;
                 }
                 true
@@ -5584,6 +5608,9 @@ impl App {
                     }
                     return;
                 }
+                if self.start_models_command(&mut parsed) {
+                    return;
+                }
                 if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
                     self.open_copy_actions_dialog();
                     return;
@@ -5811,6 +5838,9 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+        if self.start_models_command(&mut parsed) {
             return;
         }
         if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
@@ -6863,6 +6893,52 @@ impl App {
         self.overlay_focus = OverlayFocus::ModelsDialog;
     }
 
+    fn start_models_command(&mut self, parsed: &mut crate::command::parser::ParsedCommand) -> bool {
+        let kind = match parsed.name.as_str() {
+            "models" => ModelsTaskKind::Load,
+            "refreshmodels" => ModelsTaskKind::Refresh,
+            _ => return false,
+        };
+
+        if self.models_receiver.is_some() {
+            push_toast(Toast::new(
+                "Model discovery is already running",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
+            return true;
+        }
+
+        parsed.prefs_data = self
+            .prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_model_preferences().ok());
+        parsed.active_model_id = Some(self.model.clone());
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.models_receiver = Some(receiver);
+
+        match kind {
+            ModelsTaskKind::Load => {
+                self.show_models_dialog("Available Models", Vec::new());
+                self.models_dialog_state.start_loading();
+            }
+            ModelsTaskKind::Refresh => {
+                self.overlay_focus = OverlayFocus::RefreshModelsDialog;
+            }
+        }
+
+        let parsed = parsed.clone();
+        tokio::spawn(async move {
+            let result = match kind {
+                ModelsTaskKind::Load => crate::command::handlers::load_models(parsed).await,
+                ModelsTaskKind::Refresh => crate::command::handlers::refresh_models().await,
+            };
+            let _ = sender.send(ModelsTaskMessage { kind, result });
+        });
+        true
+    }
+
     fn focus_current_session_or_workspace_in_sessions_dialog(&mut self) {
         if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
             if self
@@ -7762,6 +7838,93 @@ impl App {
         }
     }
 
+    fn process_models_events(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+
+        if let Some(receiver) = &mut self.models_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected || !events.is_empty() {
+            self.models_receiver = None;
+        }
+
+        if disconnected && events.is_empty() {
+            self.models_dialog_state.finish_loading();
+            if matches!(
+                self.overlay_focus,
+                OverlayFocus::ModelsDialog | OverlayFocus::RefreshModelsDialog
+            ) {
+                self.overlay_focus = OverlayFocus::None;
+            }
+            push_toast(Toast::new(
+                "Model discovery ended before returning results",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        for event in events {
+            match (event.kind, event.result) {
+                (
+                    ModelsTaskKind::Load,
+                    crate::command::registry::CommandResult::ShowDialog { title, items },
+                ) => {
+                    let dialog_items = items
+                        .into_iter()
+                        .map(|item| crate::ui::components::dialog::DialogItem {
+                            id: item.id,
+                            name: item.name,
+                            group: item.group,
+                            description: item.description,
+                            tip: item.tip,
+                            provider_id: item.provider_id,
+                            active: item.active,
+                        })
+                        .collect();
+                    self.models_dialog_state.finish_loading();
+                    if self.overlay_focus == OverlayFocus::ModelsDialog {
+                        self.show_models_dialog(title, dialog_items);
+                    }
+                }
+                (ModelsTaskKind::Load, crate::command::registry::CommandResult::Error(message)) => {
+                    self.models_dialog_state.finish_loading();
+                    if self.overlay_focus == OverlayFocus::ModelsDialog {
+                        self.overlay_focus = OverlayFocus::None;
+                    }
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
+                    push_toast(Toast::new(
+                        message,
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                }
+                (ModelsTaskKind::Refresh, _) => {
+                    if self.overlay_focus == OverlayFocus::RefreshModelsDialog {
+                        self.overlay_focus = OverlayFocus::None;
+                    }
+                }
+                (ModelsTaskKind::Load, _) => {
+                    self.models_dialog_state.finish_loading();
+                    if self.overlay_focus == OverlayFocus::ModelsDialog {
+                        self.overlay_focus = OverlayFocus::None;
+                    }
+                }
+            }
+        }
+    }
+
     fn process_title_generation_events(&mut self) {
         let mut events = Vec::new();
         let mut disconnected = false;
@@ -7904,6 +8067,7 @@ impl App {
             || self.has_active_retry_status()
             || self.compaction_receiver.is_some()
             || self.storage_receiver.is_some()
+            || self.models_receiver.is_some()
             || self.title_generation_receiver.is_some()
             || self
                 .session_view_states
@@ -7950,6 +8114,7 @@ impl App {
             && !self.has_active_retry_status()
             && self.compaction_receiver.is_none()
             && self.storage_receiver.is_none()
+            && self.models_receiver.is_none()
             && self.title_generation_receiver.is_none();
 
         if self.overlay_focus == OverlayFocus::SessionsDialog
@@ -7976,6 +8141,7 @@ impl App {
         self.process_provider_oauth_events();
         self.process_compaction_events();
         self.process_storage_events();
+        self.process_models_events();
         self.process_title_generation_events();
 
         let drained = {
@@ -9703,6 +9869,15 @@ impl App {
             );
         }
 
+        if self.overlay_focus == OverlayFocus::RefreshModelsDialog {
+            crate::views::models_dialog::render_refresh_models_dialog(
+                f,
+                size,
+                colors,
+                self.session_spinner_frame,
+            );
+        }
+
         if self.overlay_focus == OverlayFocus::ThemesDialog
             && self.themes_dialog_state.dialog.is_visible()
         {
@@ -10254,6 +10429,7 @@ mod tests {
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,
+            models_receiver: None,
             title_generation_receiver: None,
             prefs_dao: None,
             agent: "Build".to_string(),
@@ -11269,6 +11445,70 @@ mod tests {
         let input_type = parse_input("/models");
 
         assert!(App::can_submit_input(&input_type, true));
+    }
+
+    #[test]
+    fn loaded_models_are_applied_from_receiver() {
+        let mut app = test_app();
+        app.show_models_dialog("Available Models", Vec::new());
+        app.models_dialog_state.start_loading();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender
+            .send(ModelsTaskMessage {
+                kind: ModelsTaskKind::Load,
+                result: crate::command::registry::CommandResult::ShowDialog {
+                    title: "Available Models".to_string(),
+                    items: vec![crate::command::registry::DialogItem {
+                        id: "test-model".to_string(),
+                        name: "Test Model".to_string(),
+                        group: "Test".to_string(),
+                        description: String::new(),
+                        tip: None,
+                        provider_id: "test-provider".to_string(),
+                        active: false,
+                    }],
+                },
+            })
+            .unwrap();
+        app.models_receiver = Some(receiver);
+
+        app.process_models_events();
+
+        assert!(app.models_receiver.is_none());
+        assert!(!app.models_dialog_state.is_loading());
+        assert_eq!(app.overlay_focus, OverlayFocus::ModelsDialog);
+        assert_eq!(app.models_dialog_state.dialog.items.len(), 1);
+        assert!(app.models_dialog_state.dialog.items[0].active);
+    }
+
+    #[test]
+    fn refresh_completion_closes_compact_dialog() {
+        let mut app = test_app();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender
+            .send(ModelsTaskMessage {
+                kind: ModelsTaskKind::Refresh,
+                result: crate::command::registry::CommandResult::Success(String::new()),
+            })
+            .unwrap();
+        app.models_receiver = Some(receiver);
+        app.overlay_focus = OverlayFocus::RefreshModelsDialog;
+
+        app.process_models_events();
+
+        assert!(app.models_receiver.is_none());
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+    }
+
+    #[test]
+    fn model_tasks_keep_animation_loop_active() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.models_receiver = Some(receiver);
+
+        assert!(app.is_animation_running());
+        assert!(!app.is_streaming_animation_only());
     }
 
     #[test]

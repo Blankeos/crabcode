@@ -416,3 +416,6 @@ I think this is how the TUI works already anyway right?
 
 - [x] questions dialog and permissions dialog can click with mouse.
 - [x] simultaneous question and permission dialog will lead to a stuck UI. permission shows first, dialog is supposed to show shows second (but it doesn't)
+
+- [x] nonblocking /models check and caching.
+- [ ] better pty and interactive cli handling i.e. running `npx expo-doctor` will block the agent forever if expo-doctor is not installed yet.

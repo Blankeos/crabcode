@@ -245,6 +245,11 @@ pub fn handle_models<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let parsed = parsed.clone();
+    Box::pin(async move { load_models(parsed).await })
+}
+
+pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
     use crate::command::registry::DialogItem;
     use crate::model::discovery::Discovery;
     use crate::model::types::Model as ModelType;
@@ -259,7 +264,7 @@ pub fn handle_models<'a>(
     let active_model_id = parsed.active_model_id.clone();
     let prefs_data = parsed.prefs_data.clone();
 
-    Box::pin(async move {
+    async move {
         let auth_dao = match AuthDAO::new() {
             Ok(dao) => dao,
             Err(e) => return CommandResult::Error(format!("Failed to load auth config: {}", e)),
@@ -524,7 +529,8 @@ pub fn handle_models<'a>(
                 items,
             }
         }
-    })
+    }
+    .await
 }
 
 pub fn handle_themes<'a>(
@@ -711,7 +717,11 @@ pub fn handle_refreshmodels<'a>(
     _parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
+    Box::pin(refresh_models())
+}
+
+pub async fn refresh_models() -> CommandResult {
+    async move {
         let discovery = match crate::model::discovery::Discovery::new() {
             Ok(d) => d,
             Err(e) => {
@@ -781,7 +791,8 @@ pub fn handle_refreshmodels<'a>(
         ));
 
         CommandResult::Success(String::new())
-    })
+    }
+    .await
 }
 
 pub fn register_all_commands(registry: &mut Registry) {

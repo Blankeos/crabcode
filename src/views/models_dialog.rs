@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph},
     Frame,
 };
 
@@ -30,14 +30,73 @@ pub enum ModelsDialogAction {
     None,
 }
 
+fn render_loading_message(f: &mut Frame, dialog: &Dialog, colors: ThemeColors, message: &str) {
+    let area = Rect {
+        x: dialog.content_area.x,
+        y: dialog.content_area.y + dialog.content_area.height / 2,
+        width: dialog.content_area.width,
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(message)
+            .style(Style::default().fg(colors.text_weak))
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
+pub fn render_refresh_models_dialog(f: &mut Frame, area: Rect, colors: ThemeColors, frame: usize) {
+    let width = area.width.min(42);
+    let height = area.height.min(5);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(colors.dialog_background)),
+        popup,
+    );
+    let content = Rect {
+        x: popup.x + 2,
+        y: popup.y + 1,
+        width: popup.width.saturating_sub(4),
+        height: popup.height.saturating_sub(2),
+    };
+    let glyph = crate::views::sessions_dialog::session_loading_glyph(frame);
+    let lines = vec![
+        Line::from(Span::styled(
+            "Refreshing models",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("{} Updating model caches...", glyph),
+            Style::default().fg(colors.text_weak),
+        )),
+        Line::from(Span::styled(
+            "esc  close",
+            Style::default().fg(colors.primary),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), content);
+}
+
 #[derive(Debug)]
 pub struct ModelsDialogState {
     pub dialog: Dialog,
+    loading: bool,
 }
 
 impl ModelsDialogState {
     pub fn new(dialog: Dialog) -> Self {
-        Self { dialog }
+        Self {
+            dialog,
+            loading: false,
+        }
     }
 
     pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
@@ -45,7 +104,20 @@ impl ModelsDialogState {
             dialog: Dialog::with_items(title, items)
                 .with_search_priority_groups(vec!["Favorite".to_string()])
                 .with_actions(base_actions()),
+            loading: false,
         }
+    }
+
+    pub fn start_loading(&mut self) {
+        self.loading = true;
+    }
+
+    pub fn finish_loading(&mut self) {
+        self.loading = false;
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading
     }
 
     pub fn refresh_items(&mut self, items: Vec<DialogItem>) {
@@ -85,6 +157,14 @@ pub fn render_models_dialog(
     colors: ThemeColors,
     reasoning_effort: Option<&str>,
 ) {
+    if dialog_state.loading {
+        dialog_state.dialog.actions.clear();
+        dialog_state.dialog.set_bottom_gap_height(1);
+        dialog_state.dialog.render(f, area, colors);
+        render_loading_message(f, &dialog_state.dialog, colors, "Loading models...");
+        return;
+    }
+
     dialog_state.dialog.actions = base_actions();
     dialog_state
         .dialog
@@ -199,6 +279,13 @@ pub fn handle_models_dialog_key_event(
         return ModelsDialogAction::None;
     }
 
+    if dialog_state.loading {
+        if event.code == KeyCode::Esc {
+            dialog_state.dialog.hide();
+        }
+        return ModelsDialogAction::None;
+    }
+
     match event.code {
         KeyCode::Enter => {
             dialog_state.dialog.hide();
@@ -250,7 +337,7 @@ pub fn handle_models_dialog_mouse_event(
     dialog_state: &mut ModelsDialogState,
     event: MouseEvent,
 ) -> ModelsDialogAction {
-    if !dialog_state.dialog.is_visible() {
+    if !dialog_state.dialog.is_visible() || dialog_state.loading {
         return ModelsDialogAction::None;
     }
 
@@ -499,5 +586,62 @@ mod tests {
         assert!((0..buffer.area.width).any(|x| buffer
             .cell((x, selected_row))
             .is_some_and(|cell| cell.style().bg == Some(colors.primary))));
+    }
+    #[test]
+    fn loading_dialog_renders_message_and_escape_closes_it() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let mut state = init_models_dialog("Available Models", vec![]);
+        state.dialog.show();
+        state.start_loading();
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_models_dialog(frame, &mut state, Rect::new(0, 0, 80, 30), colors, None);
+            })
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Loading models..."));
+
+        let action = handle_models_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert_eq!(action, ModelsDialogAction::None);
+        assert!(!state.dialog.is_visible());
+    }
+
+    #[test]
+    fn compact_refresh_dialog_renders_progress() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_refresh_models_dialog(frame, Rect::new(0, 0, 80, 24), colors, 0);
+            })
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Refreshing models"));
+        assert!(rendered.contains("Updating model caches..."));
     }
 }
