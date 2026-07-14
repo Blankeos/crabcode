@@ -25,6 +25,83 @@ pub struct ChatSearchMatch {
     pub end: usize,
 }
 
+#[derive(Debug, Clone)]
+struct CachedOrderedToolPrefix {
+    message_idx: usize,
+    text_part_idx: usize,
+    width: usize,
+    colors_hash: u64,
+    lines: Vec<Line<'static>>,
+}
+
+fn assistant_tool_part_info(
+    message: &Message,
+    part: &crate::session::types::MessagePart,
+    result_ids: &std::collections::HashSet<String>,
+) -> Option<ParsedToolMessage> {
+    match part.part_type.as_str() {
+        "tool_call" => {
+            let id = part.tool_id()?;
+            if result_ids.contains(id) {
+                return None;
+            }
+
+            let mut info = parsed_tool_message_from_object(part.data.as_object()?, false);
+            if part.data.get("status").is_none() {
+                info.status = "running".to_string();
+            }
+            Some(info)
+        }
+        "tool_result" => {
+            let mut info = parsed_tool_message_from_object(part.data.as_object()?, false);
+            if info.args.is_none() {
+                info.args = part
+                    .tool_id()
+                    .and_then(|id| message.tool_call_part_data(id))
+                    .and_then(|call| call.get("args"))
+                    .cloned();
+            }
+            Some(info)
+        }
+        _ => None,
+    }
+}
+
+fn streaming_reasoning_content(message: &Message) -> &str {
+    if message
+        .parts
+        .iter()
+        .any(|part| matches!(part.part_type.as_str(), "tool_call" | "tool_result"))
+    {
+        message
+            .parts
+            .iter()
+            .rev()
+            .find(|part| part.part_type == "reasoning")
+            .and_then(MessagePart::text_value)
+            .unwrap_or("")
+    } else {
+        message.reasoning.as_deref().unwrap_or("")
+    }
+}
+
+fn reasoning_theme_colors(colors: &ThemeColors) -> ThemeColors {
+    let mut reasoning_colors = *colors;
+    reasoning_colors.markdown_text = colors.text_weak;
+    reasoning_colors.markdown_heading = colors.text_weak;
+    reasoning_colors.markdown_link = colors.info;
+    reasoning_colors.markdown_link_text = colors.info;
+    reasoning_colors.markdown_code = colors.text;
+    reasoning_colors.markdown_block_quote = colors.text_weak;
+    reasoning_colors.markdown_emph = colors.text_weak;
+    reasoning_colors.markdown_strong = colors.text;
+    reasoning_colors.markdown_horizontal_rule = colors.text_weak;
+    reasoning_colors.markdown_list_item = colors.text_weak;
+    reasoning_colors.markdown_list_enumeration = colors.text_weak;
+    reasoning_colors.markdown_code_block = colors.text;
+    reasoning_colors
+}
+
 fn streaming_markdown_content(message: &Message) -> &str {
     if message
         .parts
@@ -110,9 +187,17 @@ pub struct Chat {
     streaming_message_idx: Option<usize>,
     /// Byte length of the streaming message already mirrored into streaming_renderer.
     streaming_renderer_content_len: usize,
+    /// Markdown renderer for the actively streaming reasoning/thinking part.
+    streaming_reasoning_renderer: Option<SimpleStreamingRenderer>,
+    /// Index of the message currently mirrored into streaming_reasoning_renderer.
+    streaming_reasoning_message_idx: Option<usize>,
+    /// Byte length of reasoning already mirrored into streaming_reasoning_renderer.
+    streaming_reasoning_renderer_content_len: usize,
     /// Markdown rendered for stable text parts in assistant messages that also contain tools.
     ordered_markdown_cache:
         std::cell::RefCell<std::collections::HashMap<(usize, usize), CachedMarkdownPart>>,
+    /// Stable formatted tool prefix before the actively streaming final text part.
+    ordered_tool_prefix_cache: std::cell::RefCell<Option<CachedOrderedToolPrefix>>,
     /// Earliest streaming assistant index with text appended since the last markdown/layout refresh.
     pending_streaming_render_dirty_from: Option<usize>,
     /// Whether pending streaming changes include message content that must wait for markdown refresh.
@@ -197,6 +282,14 @@ const MIN_MOUSE_WHEEL_LINES: usize = 1;
 const MAX_MOUSE_WHEEL_LINES: usize = 3;
 const MOUSE_WHEEL_VIEWPORT_FRACTION: usize = 8;
 const STREAMING_RENDER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+const TOOL_HEAVY_STREAMING_RENDER_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(150);
+const TOOL_VERY_HEAVY_STREAMING_RENDER_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(250);
+const SCROLLED_TOOL_HEAVY_STREAMING_RENDER_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(500);
+const TOOL_HEAVY_PART_COUNT: usize = 64;
+const TOOL_VERY_HEAVY_PART_COUNT: usize = 128;
 const TOOL_RESULT_MAX_SCREEN_LINES: usize = 8;
 const PATCH_DIFF_PREVIEW_MAX_LINES: usize = 40;
 const TOOL_MARKER_ACTIVE: &str = "⬡";
@@ -706,7 +799,14 @@ fn parse_tool_message(content: &str) -> Option<ParsedToolMessage> {
         return None;
     };
 
-    Some(ParsedToolMessage {
+    Some(parsed_tool_message_from_object(&obj, true))
+}
+
+fn parsed_tool_message_from_object(
+    obj: &serde_json::Map<String, JsonValue>,
+    include_output_preview: bool,
+) -> ParsedToolMessage {
+    ParsedToolMessage {
         name: obj
             .get("name")
             .and_then(|v| v.as_str())
@@ -719,15 +819,15 @@ fn parse_tool_message(content: &str) -> Option<ParsedToolMessage> {
             .to_string(),
         args: obj.get("args").cloned(),
         metadata: obj.get("metadata").cloned(),
-        output_preview: obj
-            .get("output_preview")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        output_preview: include_output_preview
+            .then(|| obj.get("output_preview").and_then(|v| v.as_str()))
+            .flatten()
+            .map(str::to_string),
         title: obj
             .get("title")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-    })
+    }
 }
 
 fn assistant_tool_result_ids(message: &Message) -> std::collections::HashSet<String> {
@@ -879,10 +979,8 @@ fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
             if !matches!(part.part_type.as_str(), "tool_call" | "tool_result") {
                 continue;
             }
-            if let Some(content) = assistant_tool_part_content(message, part, &result_ids) {
-                if let Some(info) = parse_tool_message(&content) {
-                    push_tool_info(info);
-                }
+            if let Some(info) = assistant_tool_part_info(message, part, &result_ids) {
+                push_tool_info(info);
             }
         }
     }
@@ -1321,7 +1419,11 @@ impl Chat {
             streaming_renderer: None,
             streaming_message_idx: None,
             streaming_renderer_content_len: 0,
+            streaming_reasoning_renderer: None,
+            streaming_reasoning_message_idx: None,
+            streaming_reasoning_renderer_content_len: 0,
             ordered_markdown_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            ordered_tool_prefix_cache: std::cell::RefCell::new(None),
             pending_streaming_render_dirty_from: None,
             pending_streaming_content_dirty: false,
             last_streaming_cache_refresh_at: None,
@@ -1380,7 +1482,11 @@ impl Chat {
             streaming_renderer: None,
             streaming_message_idx: None,
             streaming_renderer_content_len: 0,
+            streaming_reasoning_renderer: None,
+            streaming_reasoning_message_idx: None,
+            streaming_reasoning_renderer_content_len: 0,
             ordered_markdown_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            ordered_tool_prefix_cache: std::cell::RefCell::new(None),
             pending_streaming_render_dirty_from: None,
             pending_streaming_content_dirty: false,
             last_streaming_cache_refresh_at: None,
@@ -1438,11 +1544,40 @@ impl Chat {
     }
 
     pub fn mark_render_dirty_from(&mut self, message_idx: usize) {
+        self.clear_ordered_tool_prefix_cache_from(message_idx);
         self.invalidate_cache_from(message_idx);
+    }
+
+    pub fn mark_streaming_tool_render_pending(&mut self, message_idx: usize) {
+        self.clear_ordered_tool_prefix_cache_from(message_idx);
+        if self.is_streaming() {
+            self.mark_streaming_render_pending(message_idx, false);
+        } else {
+            self.invalidate_cache_from(message_idx);
+        }
     }
 
     pub fn render_revision(&self) -> u64 {
         self.render_revision
+    }
+
+    pub fn tool_heavy_streaming_render_interval(&self) -> Option<std::time::Duration> {
+        let idx = self.streaming_assistant_idx()?;
+        let tool_parts = self.messages[idx]
+            .parts
+            .iter()
+            .filter(|part| matches!(part.part_type.as_str(), "tool_call" | "tool_result"))
+            .count();
+        if tool_parts < TOOL_HEAVY_PART_COUNT {
+            return None;
+        }
+        Some(if self.user_scrolled_up {
+            SCROLLED_TOOL_HEAVY_STREAMING_RENDER_INTERVAL
+        } else if tool_parts >= TOOL_VERY_HEAVY_PART_COUNT {
+            TOOL_VERY_HEAVY_STREAMING_RENDER_INTERVAL
+        } else {
+            TOOL_HEAVY_STREAMING_RENDER_INTERVAL
+        })
     }
 
     pub fn thinking_visible(&self) -> bool {
@@ -1550,7 +1685,9 @@ impl Chat {
             self.messages.push(msg);
         }
 
-        self.mark_streaming_render_pending(appended_idx, false);
+        if self.thinking_visible {
+            self.mark_streaming_render_pending(appended_idx, true);
+        }
 
         let now = std::time::Instant::now();
         if self.streaming_start_time.is_none() {
@@ -1601,7 +1738,11 @@ impl Chat {
         self.cached_fingerprint = 0;
         self.cached_active_tools_revision.set(0);
         self.cached_has_active_tools.set(false);
+        *self.ordered_tool_prefix_cache.borrow_mut() = None;
         self.streaming_renderer_content_len = 0;
+        self.streaming_reasoning_renderer = None;
+        self.streaming_reasoning_message_idx = None;
+        self.streaming_reasoning_renderer_content_len = 0;
         self.pending_streaming_render_dirty_from = None;
         self.pending_streaming_content_dirty = false;
         self.last_streaming_cache_refresh_at = None;
@@ -1624,6 +1765,18 @@ impl Chat {
         self.render_dirty_from = 0;
         self.cached_fingerprint = 0;
         self.cached_active_tools_revision.set(0);
+        *self.ordered_tool_prefix_cache.borrow_mut() = None;
+    }
+
+    fn clear_ordered_tool_prefix_cache_from(&self, message_idx: usize) {
+        let should_clear = self
+            .ordered_tool_prefix_cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|cache| cache.message_idx >= message_idx);
+        if should_clear {
+            *self.ordered_tool_prefix_cache.borrow_mut() = None;
+        }
     }
 
     fn invalidate_cache_from(&mut self, message_idx: usize) {
@@ -1881,6 +2034,9 @@ impl Chat {
         self.streaming_renderer = None;
         self.streaming_message_idx = None;
         self.streaming_renderer_content_len = 0;
+        self.streaming_reasoning_renderer = None;
+        self.streaming_reasoning_message_idx = None;
+        self.streaming_reasoning_renderer_content_len = 0;
         self.streaming_token_counter = None;
         self.invalidate_cache();
     }
@@ -1996,6 +2152,9 @@ impl Chat {
                 self.streaming_renderer = None;
                 self.streaming_message_idx = None;
             }
+            self.streaming_reasoning_renderer = None;
+            self.streaming_reasoning_message_idx = None;
+            self.streaming_reasoning_renderer_content_len = 0;
             return;
         }
 
@@ -2004,6 +2163,9 @@ impl Chat {
                 self.streaming_renderer = None;
                 self.streaming_message_idx = None;
             }
+            self.streaming_reasoning_renderer = None;
+            self.streaming_reasoning_message_idx = None;
+            self.streaming_reasoning_renderer_content_len = 0;
             return;
         };
 
@@ -2022,7 +2184,36 @@ impl Chat {
             self.streaming_renderer_content_len = 0;
         }
 
+        if self.thinking_visible {
+            if self.streaming_reasoning_message_idx != Some(last_idx) {
+                self.streaming_reasoning_renderer = Some(SimpleStreamingRenderer::new());
+                self.streaming_reasoning_message_idx = Some(last_idx);
+                self.streaming_reasoning_renderer_content_len = 0;
+            }
+        } else {
+            self.streaming_reasoning_renderer = None;
+            self.streaming_reasoning_message_idx = None;
+            self.streaming_reasoning_renderer_content_len = 0;
+        }
+
+        let ordered_tool_part_count = self.messages[last_idx]
+            .parts
+            .iter()
+            .filter(|part| matches!(part.part_type.as_str(), "tool_call" | "tool_result"))
+            .count();
+        let layout_min_interval =
+            if self.user_scrolled_up && ordered_tool_part_count >= TOOL_HEAVY_PART_COUNT {
+                SCROLLED_TOOL_HEAVY_STREAMING_RENDER_INTERVAL
+            } else if ordered_tool_part_count >= TOOL_VERY_HEAVY_PART_COUNT {
+                TOOL_VERY_HEAVY_STREAMING_RENDER_INTERVAL
+            } else if ordered_tool_part_count >= TOOL_HEAVY_PART_COUNT {
+                TOOL_HEAVY_STREAMING_RENDER_INTERVAL
+            } else {
+                std::time::Duration::ZERO
+            };
+
         // Update the renderer content if needed
+        let mut refreshed = false;
         if let Some(ref mut renderer) = self.streaming_renderer {
             if let Some(msg) = self.messages.get(last_idx) {
                 let content = streaming_markdown_content(msg);
@@ -2040,16 +2231,54 @@ impl Chat {
                     renderer.append(content);
                     self.streaming_renderer_content_len = content.len();
                 }
-                if renderer.ensure_rendered(max_width, colors, false) {
-                    let dirty_from = self
-                        .pending_streaming_render_dirty_from
-                        .take()
-                        .unwrap_or(last_idx);
-                    self.pending_streaming_content_dirty = false;
-                    self.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
-                    self.invalidate_cache_from(dirty_from);
+                if renderer.ensure_rendered_with_min_interval(
+                    max_width,
+                    colors,
+                    false,
+                    layout_min_interval,
+                ) {
+                    refreshed = true;
                 }
             }
+        }
+
+        if let Some(ref mut renderer) = self.streaming_reasoning_renderer {
+            if let Some(msg) = self.messages.get(last_idx) {
+                let content = streaming_reasoning_content(msg);
+                let renderer_content = renderer.content();
+                if content.len() >= self.streaming_reasoning_renderer_content_len
+                    && content.starts_with(renderer_content)
+                {
+                    let chunk = &content[self.streaming_reasoning_renderer_content_len..];
+                    if !chunk.is_empty() {
+                        renderer.append(chunk);
+                        self.streaming_reasoning_renderer_content_len = content.len();
+                    }
+                } else {
+                    renderer.reset();
+                    renderer.append(content);
+                    self.streaming_reasoning_renderer_content_len = content.len();
+                }
+                let reasoning_colors = reasoning_theme_colors(colors);
+                if renderer.ensure_rendered_with_min_interval(
+                    max_width.saturating_sub(2),
+                    &reasoning_colors,
+                    false,
+                    layout_min_interval,
+                ) {
+                    refreshed = true;
+                }
+            }
+        }
+
+        if refreshed {
+            let dirty_from = self
+                .pending_streaming_render_dirty_from
+                .take()
+                .unwrap_or(last_idx);
+            self.pending_streaming_content_dirty = false;
+            self.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
+            self.invalidate_cache_from(dirty_from);
         }
 
         self.flush_non_content_streaming_render_pending();
@@ -2064,9 +2293,29 @@ impl Chat {
             return;
         };
 
+        let min_interval = self
+            .streaming_assistant_idx()
+            .and_then(|idx| self.messages.get(idx))
+            .map(|message| {
+                let ordered_tool_part_count = message
+                    .parts
+                    .iter()
+                    .filter(|part| matches!(part.part_type.as_str(), "tool_call" | "tool_result"))
+                    .count();
+                if self.user_scrolled_up && ordered_tool_part_count >= TOOL_HEAVY_PART_COUNT {
+                    SCROLLED_TOOL_HEAVY_STREAMING_RENDER_INTERVAL
+                } else if ordered_tool_part_count >= TOOL_VERY_HEAVY_PART_COUNT {
+                    TOOL_VERY_HEAVY_STREAMING_RENDER_INTERVAL
+                } else if ordered_tool_part_count >= TOOL_HEAVY_PART_COUNT {
+                    TOOL_HEAVY_STREAMING_RENDER_INTERVAL
+                } else {
+                    STREAMING_RENDER_INTERVAL
+                }
+            })
+            .unwrap_or(STREAMING_RENDER_INTERVAL);
         let should_refresh = self
             .last_streaming_cache_refresh_at
-            .map_or(true, |last| last.elapsed() >= STREAMING_RENDER_INTERVAL);
+            .map_or(true, |last| last.elapsed() >= min_interval);
         if should_refresh {
             self.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
             self.invalidate_cache_from(dirty_from);
@@ -3511,6 +3760,7 @@ impl Chat {
         reasoning: &str,
         max_width: usize,
         colors: &ThemeColors,
+        cached_rendered: Option<&[Line<'static>]>,
     ) -> Vec<Line<'static>> {
         let max_width = max_width.max(1);
         let marker_style = Style::default()
@@ -3562,21 +3812,10 @@ impl Chat {
         }
 
         let content_width = max_width.saturating_sub(2).max(1);
-        let mut reasoning_colors = *colors;
-        reasoning_colors.markdown_text = colors.text_weak;
-        reasoning_colors.markdown_heading = colors.text_weak;
-        reasoning_colors.markdown_link = colors.info;
-        reasoning_colors.markdown_link_text = colors.info;
-        reasoning_colors.markdown_code = colors.text;
-        reasoning_colors.markdown_block_quote = colors.text_weak;
-        reasoning_colors.markdown_emph = colors.text_weak;
-        reasoning_colors.markdown_strong = colors.text;
-        reasoning_colors.markdown_horizontal_rule = colors.text_weak;
-        reasoning_colors.markdown_list_item = colors.text_weak;
-        reasoning_colors.markdown_list_enumeration = colors.text_weak;
-        reasoning_colors.markdown_code_block = colors.text;
-
-        let rendered = render_markdown(reasoning, content_width, &reasoning_colors)
+        let reasoning_colors = reasoning_theme_colors(colors);
+        let rendered = cached_rendered
+            .map(|lines| lines.to_vec())
+            .unwrap_or_else(|| render_markdown(reasoning, content_width, &reasoning_colors))
             .into_iter()
             .map(|mut line| {
                 line.style = line.style.patch(Style::default().fg(colors.text_weak));
@@ -3794,7 +4033,40 @@ impl Chat {
                         })
                         .flatten();
 
-                    for (part_idx, part) in message.parts.iter().enumerate() {
+                    let cacheable_text_part_idx = streaming_text_part_idx.filter(|part_idx| {
+                        *part_idx + 1 == message.parts.len()
+                            && message.parts[..*part_idx]
+                                .iter()
+                                .filter(|part| {
+                                    matches!(part.part_type.as_str(), "tool_call" | "tool_result")
+                                })
+                                .count()
+                                >= TOOL_HEAVY_PART_COUNT
+                    });
+                    let colors_hash = Self::cache_colors_hash(colors);
+                    let cached_prefix = cacheable_text_part_idx.and_then(|text_part_idx| {
+                        self.ordered_tool_prefix_cache
+                            .borrow()
+                            .as_ref()
+                            .filter(|cache| {
+                                cache.message_idx == idx
+                                    && cache.text_part_idx == text_part_idx
+                                    && cache.width == max_width
+                                    && cache.colors_hash == colors_hash
+                            })
+                            .map(|cache| cache.lines.clone())
+                    });
+                    let part_start = if let (Some(text_part_idx), Some(prefix)) =
+                        (cacheable_text_part_idx, cached_prefix)
+                    {
+                        emitted_anything = !prefix.is_empty();
+                        lines.extend(prefix);
+                        text_part_idx
+                    } else {
+                        0
+                    };
+
+                    for (part_idx, part) in message.parts.iter().enumerate().skip(part_start) {
                         match part.part_type.as_str() {
                             "reasoning" => {
                                 let Some(reasoning) = part
@@ -3816,7 +4088,21 @@ impl Chat {
                                 );
                                 emitted_anything = true;
                                 lines.extend(
-                                    self.format_thinking_block(reasoning, max_width, colors),
+                                    self.format_thinking_block(
+                                        reasoning,
+                                        max_width,
+                                        colors,
+                                        (is_streaming
+                                            && message.parts[part_idx + 1..]
+                                                .iter()
+                                                .all(|part| part.part_type != "reasoning"))
+                                        .then(|| {
+                                            self.streaming_reasoning_renderer
+                                                .as_ref()
+                                                .and_then(SimpleStreamingRenderer::rendered_lines)
+                                        })
+                                        .flatten(),
+                                    ),
                                 );
                                 lines.push(Line::from(""));
                             }
@@ -3842,6 +4128,30 @@ impl Chat {
                                     colors,
                                     &mut emitted_anything,
                                 );
+                                if cacheable_text_part_idx == Some(part_idx)
+                                    && part_start == 0
+                                    && self.ordered_tool_prefix_cache.borrow().as_ref().is_none_or(
+                                        |cache| {
+                                            cache.message_idx != idx
+                                                || cache.text_part_idx != part_idx
+                                                || cache.width != max_width
+                                                || cache.colors_hash != colors_hash
+                                        },
+                                    )
+                                {
+                                    *self.ordered_tool_prefix_cache.borrow_mut() =
+                                        Some(CachedOrderedToolPrefix {
+                                            message_idx: idx,
+                                            text_part_idx: part_idx,
+                                            width: max_width,
+                                            colors_hash,
+                                            lines: lines
+                                                .iter()
+                                                .cloned()
+                                                .map(line_to_static)
+                                                .collect(),
+                                        });
+                                }
                                 emitted_anything = true;
                                 if streaming_text_part_idx == Some(part_idx) {
                                     if let Some(cached_lines) = streaming_lines {
@@ -3868,15 +4178,13 @@ impl Chat {
                                 lines.push(Line::from(""));
                             }
                             "tool_call" | "tool_result" => {
-                                let Some(content) =
-                                    assistant_tool_part_content(message, part, &result_ids)
+                                let Some(parsed) =
+                                    assistant_tool_part_info(message, part, &result_ids)
                                 else {
                                     continue;
                                 };
 
-                                let parsed = parse_tool_message(&content);
-                                if let Some(item) = parsed.as_ref().and_then(exploration_tool_item)
-                                {
+                                if let Some(item) = exploration_tool_item(&parsed) {
                                     flush_pending_tasks(
                                         self,
                                         &mut pending_tasks,
@@ -3889,7 +4197,7 @@ impl Chat {
                                     continue;
                                 }
 
-                                if let Some(item) = parsed.as_ref().and_then(task_tool_item) {
+                                if let Some(item) = task_tool_item(&parsed) {
                                     flush_pending_exploration(
                                         self,
                                         &mut pending_exploration,
@@ -3912,6 +4220,11 @@ impl Chat {
                                     &mut emitted_anything,
                                 );
                                 emitted_anything = true;
+                                let Some(content) =
+                                    assistant_tool_part_content(message, part, &result_ids)
+                                else {
+                                    continue;
+                                };
                                 let tool_message = Message::tool(content);
                                 let tool_lines =
                                     self.format_tool_row(&tool_message, max_width, colors, true);
@@ -3973,11 +4286,20 @@ impl Chat {
                     let reasoning_trimmed = reasoning.trim();
                     if !reasoning_trimmed.is_empty() {
                         emitted_anything = true;
-                        lines.extend(self.format_thinking_block(
-                            reasoning_trimmed,
-                            max_width,
-                            colors,
-                        ));
+                        lines.extend(
+                            self.format_thinking_block(
+                                reasoning_trimmed,
+                                max_width,
+                                colors,
+                                is_streaming
+                                    .then(|| {
+                                        self.streaming_reasoning_renderer
+                                            .as_ref()
+                                            .and_then(SimpleStreamingRenderer::rendered_lines)
+                                    })
+                                    .flatten(),
+                            ),
+                        );
 
                         // Add separator between reasoning and content (only if there's content)
                         if has_visible_content {
@@ -5508,6 +5830,15 @@ fn infer_editor_locations_for_lines(
     lines: &[Line<'_>],
 ) -> Vec<Option<EditorLocation>> {
     let mut locations = vec![None; lines.len()];
+    let has_diff_content = lines.iter().any(|line| {
+        let text = plain_line_text(line);
+        parse_rendered_diff_line(&text).is_some()
+            || parse_sign_only_rendered_diff_line(&text).is_some()
+    });
+    if !has_diff_content {
+        return locations;
+    }
+
     let candidates = tool_path_candidates(message);
     if candidates.is_empty() {
         return locations;
@@ -6072,6 +6403,158 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(rendered.iter().any(|line| line.contains("Earlier text")));
         assert!(rendered.iter().any(|line| line.contains('┌')));
+    }
+
+    #[test]
+    fn tool_heavy_streaming_message_defers_full_layout_refresh() {
+        let mut assistant = Message::incomplete("");
+        for idx in 0..80 {
+            let call_id = format!("call_{idx}");
+            assistant.add_tool_call_part(
+                call_id.clone(),
+                "read",
+                serde_json::json!({"path": format!("src/file_{idx}.rs")}),
+            );
+            assistant.add_or_update_tool_result_part(serde_json::json!({
+                "id": call_id,
+                "name": "read",
+                "status": "ok",
+                "args": {"path": format!("src/file_{idx}.rs")},
+                "output_preview": "x".repeat(4_000),
+            }));
+        }
+        assistant.append("Initial answer");
+        let mut chat = Chat::with_messages(vec![assistant]);
+        chat.begin_streaming_turn();
+        let colors = test_colors();
+
+        chat.update_streaming_renderer(100, &colors);
+        let first_line_count = chat.build_all_lines(100, "model", &colors).len();
+        let first_revision = chat.render_revision;
+        let cached_prefix_len = chat
+            .ordered_tool_prefix_cache
+            .borrow()
+            .as_ref()
+            .map(|cache| cache.lines.len())
+            .expect("tool prefix cache");
+        assert!(cached_prefix_len > 0);
+        chat.append_to_last_assistant(" continues");
+        chat.update_streaming_renderer(100, &colors);
+
+        assert_eq!(chat.render_revision, first_revision);
+        assert!(chat.pending_streaming_content_dirty);
+        assert_eq!(
+            chat.streaming_renderer
+                .as_ref()
+                .map(SimpleStreamingRenderer::content),
+            Some("Initial answer continues")
+        );
+
+        chat.last_streaming_cache_refresh_at =
+            Some(std::time::Instant::now() - TOOL_VERY_HEAVY_STREAMING_RENDER_INTERVAL);
+        chat.update_streaming_renderer(100, &colors);
+        let refreshed_lines = chat.build_all_lines(100, "model", &colors);
+        assert!(chat.ordered_tool_prefix_cache.borrow().is_some());
+        assert!(refreshed_lines.len() >= first_line_count);
+    }
+
+    #[test]
+    fn tool_heavy_streaming_events_share_adaptive_layout_cadence() {
+        let mut assistant = Message::incomplete("");
+        for idx in 0..64 {
+            let call_id = format!("call_{idx}");
+            assistant.add_tool_call_part(
+                call_id.clone(),
+                "grep",
+                serde_json::json!({"pattern": "unused", "path": "src"}),
+            );
+            assistant.add_or_update_tool_result_part(serde_json::json!({
+                "id": call_id,
+                "name": "grep",
+                "status": "ok",
+                "args": {"pattern": "unused", "path": "src"},
+                "output_preview": "x".repeat(4_000),
+            }));
+        }
+        let mut chat = Chat::with_messages(vec![assistant]);
+        chat.begin_streaming_turn();
+        let colors = test_colors();
+        chat.update_streaming_renderer(100, &colors);
+        let first_revision = chat.render_revision;
+
+        let idx = chat.messages.len() - 1;
+        chat.messages[idx].add_tool_call_part(
+            "call_new",
+            "read",
+            serde_json::json!({"path": "src/app.rs"}),
+        );
+        chat.mark_streaming_tool_render_pending(idx);
+        assert!(chat.ordered_tool_prefix_cache.borrow().is_none());
+        chat.update_streaming_renderer(100, &colors);
+
+        assert_eq!(chat.render_revision, first_revision);
+        assert_eq!(chat.pending_streaming_render_dirty_from, Some(idx));
+    }
+
+    #[test]
+    fn non_diff_tool_summary_skips_editor_path_candidate_scan() {
+        let mut assistant = Message::assistant("");
+        assistant.add_tool_call_part("call_1", "read", serde_json::json!({"path": "src/app.rs"}));
+        assistant.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_1",
+            "name": "read",
+            "status": "ok",
+            "args": {"path": "src/app.rs"},
+            "output_preview": "large preview that is not rendered as a diff",
+        }));
+        let chat = Chat::with_messages(vec![assistant.clone()]);
+        let colors = test_colors();
+        let lines = chat.format_message(&assistant, 100, 0, 1, None, None, "model", &colors, false);
+
+        assert!(infer_editor_locations_for_lines(&assistant, &lines)
+            .iter()
+            .all(Option::is_none));
+    }
+
+    #[test]
+    fn streaming_reasoning_renderer_batches_markdown_refreshes() {
+        let mut assistant = Message::incomplete("");
+        assistant.append_reasoning("# Plan\n\n- Inspect");
+        let mut chat = Chat::with_messages(vec![assistant]);
+        chat.begin_streaming_turn();
+        let colors = test_colors();
+
+        chat.update_streaming_renderer(100, &colors);
+        let first_revision = chat.render_revision;
+        assert_eq!(
+            chat.streaming_reasoning_renderer
+                .as_ref()
+                .map(SimpleStreamingRenderer::content),
+            Some("# Plan\n\n- Inspect")
+        );
+
+        chat.append_reasoning_to_last_assistant(" files");
+        chat.update_streaming_renderer(100, &colors);
+
+        assert_eq!(chat.render_revision, first_revision);
+        assert!(chat.pending_streaming_content_dirty);
+        assert_eq!(
+            chat.streaming_reasoning_renderer
+                .as_ref()
+                .map(SimpleStreamingRenderer::content),
+            Some("# Plan\n\n- Inspect files")
+        );
+    }
+
+    #[test]
+    fn collapsed_streaming_reasoning_does_not_schedule_content_refresh() {
+        let mut chat = Chat::with_messages(vec![Message::incomplete("")]);
+        chat.begin_streaming_turn();
+        chat.set_thinking_visible(false);
+        chat.append_reasoning_to_last_assistant("hidden reasoning");
+
+        assert!(!chat.pending_streaming_content_dirty);
+        assert!(chat.pending_streaming_render_dirty_from.is_none());
     }
 
     #[test]

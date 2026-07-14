@@ -94,6 +94,16 @@ impl SimpleStreamingRenderer {
     }
 
     pub fn ensure_rendered(&mut self, max_width: usize, colors: &ThemeColors, force: bool) -> bool {
+        self.ensure_rendered_with_min_interval(max_width, colors, force, std::time::Duration::ZERO)
+    }
+
+    pub fn ensure_rendered_with_min_interval(
+        &mut self,
+        max_width: usize,
+        colors: &ThemeColors,
+        force: bool,
+        min_interval: std::time::Duration,
+    ) -> bool {
         let max_width = max_width.max(1);
         let colors_hash = theme_colors_hash(colors);
         let render_config_changed =
@@ -110,6 +120,7 @@ impl SimpleStreamingRenderer {
             && self.last_rendered_at.map_or(false, |last| {
                 last.elapsed()
                     < streaming_markdown_render_interval(self.content.len(), self.contains_table)
+                        .max(min_interval)
             })
         {
             return false;

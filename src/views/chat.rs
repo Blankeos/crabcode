@@ -1,9 +1,10 @@
 use ratatui::{
+    buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Widget},
     Frame,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -21,6 +22,51 @@ const QUEUED_MESSAGES_TOP_PADDING: u16 = 1;
 const QUEUED_MESSAGES_BOTTOM_PADDING: u16 = 1;
 const STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH: u16 = 64;
 const SUBAGENT_FOOTER_NAV_GAP: &str = "   ";
+
+/// Paint only the animated loading cells into an already rendered frame.
+/// Callers must start from the last complete buffer; this deliberately skips
+/// transcript layout and every other chat widget.
+pub fn render_subagent_spinner_only(
+    buffer: &mut Buffer,
+    wave_spinner: &mut WaveSpinner,
+    agent_color: Color,
+) -> bool {
+    let size = buffer.area;
+    if size.width == 0 || size.height < SUBAGENT_FOOTER_HEIGHT + 2 {
+        return false;
+    }
+
+    let main_height = size.height.saturating_sub(1);
+    let footer = Rect::new(
+        size.x,
+        size.y
+            + main_height
+                .saturating_sub(SUBAGENT_FOOTER_HEIGHT)
+                .saturating_sub(1),
+        size.width,
+        SUBAGENT_FOOTER_HEIGHT,
+    );
+    let inner = Rect::new(
+        footer.x.saturating_add(1),
+        footer.y,
+        footer.width.saturating_sub(1),
+        footer.height,
+    );
+    let content = centered_subagent_footer_content(inner);
+    if content.width == 0 || content.height == 0 {
+        return false;
+    }
+
+    let spinner_width = if footer.width < STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH {
+        1
+    } else {
+        WaveSpinner::WIDTH.min(content.width)
+    };
+    wave_spinner.set_color(agent_color);
+    let spinner = Line::from(wave_spinner.spans_for_width(spinner_width));
+    Paragraph::new(spinner).render(Rect::new(content.x, content.y, spinner_width, 1), buffer);
+    true
+}
 
 #[derive(Debug)]
 pub struct ChatState {
@@ -858,13 +904,13 @@ fn centered_subagent_footer_content(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_status_layout_widths, display_agent_name, streaming_status_spans, subagent_nav_width,
-        subagent_streaming_status_spans, ChatStatusLayoutWidths,
-        STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
+        chat_status_layout_widths, display_agent_name, render_subagent_spinner_only,
+        streaming_status_spans, subagent_nav_width, subagent_streaming_status_spans,
+        ChatStatusLayoutWidths, STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
     };
     use crate::theme::ThemeColors;
     use crate::ui::components::{chat::Chat, wave_spinner::WaveSpinner};
-    use ratatui::style::Color;
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
     fn test_colors() -> ThemeColors {
         ThemeColors {
@@ -1004,6 +1050,52 @@ mod tests {
 
         assert_eq!(compact[0].content.as_ref(), "⠋");
         assert_eq!(full[0].content.as_ref(), "■");
+    }
+
+    #[test]
+    fn isolated_subagent_spinner_preserves_every_cell_outside_spinner() {
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buffer = Buffer::filled(area, ratatui::buffer::Cell::new("x"));
+        let original = buffer.clone();
+        let mut spinner = WaveSpinner::new(Color::Blue);
+
+        assert!(render_subagent_spinner_only(
+            &mut buffer,
+            &mut spinner,
+            Color::Blue
+        ));
+
+        let spinner_y = 26;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if y != spinner_y || !(3..11).contains(&x) {
+                    assert_eq!(buffer[(x, y)], original[(x, y)], "changed ({x}, {y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_compact_spinner_changes_exactly_one_cell() {
+        let area = Rect::new(0, 0, STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH - 1, 20);
+        let mut buffer = Buffer::filled(area, ratatui::buffer::Cell::new("x"));
+        let original = buffer.clone();
+        let mut spinner = WaveSpinner::new(Color::Blue);
+
+        assert!(render_subagent_spinner_only(
+            &mut buffer,
+            &mut spinner,
+            Color::Blue
+        ));
+        assert_eq!(
+            buffer
+                .content
+                .iter()
+                .zip(&original.content)
+                .filter(|(current, previous)| current != previous)
+                .count(),
+            1
+        );
     }
 
     #[test]

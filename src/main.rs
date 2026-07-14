@@ -72,7 +72,7 @@ use ratatui::crossterm::{
         LeaveAlternateScreen,
     },
 };
-use ratatui::{backend::CrosstermBackend, style::Color, Terminal};
+use ratatui::{backend::CrosstermBackend, buffer::Buffer, style::Color, Terminal};
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::Command as ProcessCommand;
 use std::sync::Mutex;
@@ -1028,10 +1028,12 @@ async fn run_event_loop(
     // Adaptive poll duration: fast when animations run (home page / streaming),
     // slow otherwise to avoid wasting CPU on unnecessary re-renders.
     const FAST_POLL: Duration = Duration::from_millis(16); // ~60fps for interactive animations
-    const STREAMING_POLL: Duration = Duration::from_millis(50); // ~20fps for token streams
+    const STREAMING_POLL: Duration = Duration::from_millis(40); // 25fps, matches wave spinner
     const SLOW_POLL: Duration = Duration::from_millis(250); // ~4fps idle
 
     let mut needs_redraw = true;
+    let mut last_complete_frame: Option<Buffer> = None;
+    let mut last_full_render_at = std::time::Instant::now();
 
     while app.running {
         let loop_start = std::time::Instant::now();
@@ -1179,8 +1181,28 @@ async fn run_event_loop(
         app.update_animations();
         app.update_terminal_title_signal();
         remove_expired_toasts();
+        let isolated_spinner_interval = app.isolated_subagent_spinner_interval();
+        let full_render_due = isolated_spinner_interval.is_none_or(|interval| {
+            last_complete_frame.is_none() || last_full_render_at.elapsed() >= interval
+        });
         if needs_redraw || had_input || animation_needed {
-            terminal.draw(|f| app.render(f))?;
+            if isolated_spinner_interval.is_some()
+                && !needs_redraw
+                && !had_input
+                && !full_render_due
+            {
+                if let Some(base) = last_complete_frame.as_ref() {
+                    let base = base.clone();
+                    terminal.draw(|f| {
+                        *f.buffer_mut() = base;
+                        app.render_isolated_subagent_spinner(f.buffer_mut());
+                    })?;
+                }
+            } else {
+                let completed = terminal.draw(|f| app.render(f))?;
+                last_complete_frame = Some(completed.buffer.clone());
+                last_full_render_at = std::time::Instant::now();
+            }
             needs_redraw = false;
         }
     }

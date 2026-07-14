@@ -31,8 +31,8 @@ use crate::views::agents_dialog::{
     render_agents_dialog, AgentsDialogAction,
 };
 use crate::views::chat::{
-    agent_color_for_tab, init_chat, queued_messages_height, render_chat, SubagentTab, SubagentTabs,
-    SUBAGENT_FOOTER_HEIGHT,
+    agent_color_for_tab, init_chat, queued_messages_height, render_chat,
+    render_subagent_spinner_only, SubagentTab, SubagentTabs, SUBAGENT_FOOTER_HEIGHT,
 };
 use crate::views::command_palette::{
     handle_command_palette_key_event, handle_command_palette_mouse_event, init_command_palette,
@@ -421,6 +421,8 @@ const TERMINAL_TITLE_SPINNER_FRAMES: [&str; 10] =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TERMINAL_TITLE_SPINNER_INTERVAL_MS: u128 = 100;
 const STREAM_CHUNK_DRAIN_LIMIT: usize = 8 * 1024;
+/// Bound downstream coalescing and mutation work, not only time spent in `try_recv`.
+const STREAM_CHUNK_GLOBAL_DRAIN_LIMIT: usize = 1024;
 /// Total time spent draining stream chunks across all sessions per event-loop iteration.
 const STREAM_CHUNK_GLOBAL_DRAIN_TIME_BUDGET: std::time::Duration =
     std::time::Duration::from_millis(4);
@@ -602,6 +604,7 @@ fn drain_streaming_chunks_global(
         &mut tokio::sync::mpsc::UnboundedReceiver<crate::llm::ChunkMessage>,
     )],
     per_session_limit: usize,
+    global_limit: usize,
     global_time_budget: std::time::Duration,
     rotation: usize,
 ) -> (Vec<(String, Vec<crate::llm::ChunkMessage>, bool)>, usize) {
@@ -617,7 +620,8 @@ fn drain_streaming_chunks_global(
     let mut drained = Vec::new();
     let mut next_rotation = rotation;
 
-    while budget_started.elapsed() < global_time_budget {
+    let mut total_drained = 0usize;
+    while total_drained < global_limit && budget_started.elapsed() < global_time_budget {
         let mut round_progress = false;
         for step in 0..session_count {
             let remaining = global_time_budget.saturating_sub(budget_started.elapsed());
@@ -633,8 +637,13 @@ fn drain_streaming_chunks_global(
 
             let index = (start + step) % session_count;
             let (session_id, receiver) = &mut sessions[index];
-            let (chunks, disconnected) =
-                drain_streaming_chunks(receiver, per_session_limit, per_turn_budget);
+            let remaining_limit = global_limit.saturating_sub(total_drained);
+            let (chunks, disconnected) = drain_streaming_chunks(
+                receiver,
+                per_session_limit.min(remaining_limit),
+                per_turn_budget,
+            );
+            total_drained = total_drained.saturating_add(chunks.len());
 
             if !chunks.is_empty() || disconnected {
                 drained.push((session_id.clone(), chunks, disconnected));
@@ -643,7 +652,7 @@ fn drain_streaming_chunks_global(
 
             next_rotation = (index + 1) % session_count;
 
-            if budget_started.elapsed() >= global_time_budget {
+            if total_drained >= global_limit || budget_started.elapsed() >= global_time_budget {
                 break;
             }
         }
@@ -8111,7 +8120,7 @@ impl App {
         let streaming_only = (self.is_streaming || self.chat_state.chat.has_active_tool_messages())
             && self.base_focus != BaseFocus::Home
             && !self.has_active_selection_edge_scroll()
-            && !self.has_active_retry_status()
+            && self.current_session_retry_status().is_none()
             && self.compaction_receiver.is_none()
             && self.storage_receiver.is_none()
             && self.models_receiver.is_none()
@@ -8124,6 +8133,34 @@ impl App {
         }
 
         streaming_only && self.overlay_focus != OverlayFocus::SessionsDialog
+    }
+
+    pub fn isolated_subagent_spinner_interval(&self) -> Option<std::time::Duration> {
+        if self.base_focus != BaseFocus::Chat
+            || self.overlay_focus != OverlayFocus::None
+            || !self.is_streaming
+            || self.current_session_retry_status().is_some()
+            || self.compaction_receiver.is_some()
+            || !self
+                .subagent_tabs_for_current_session()
+                .is_some_and(|tabs| tabs.is_child_session)
+        {
+            return None;
+        }
+        self.chat_state.chat.tool_heavy_streaming_render_interval()
+    }
+
+    pub fn render_isolated_subagent_spinner(
+        &mut self,
+        buffer: &mut ratatui::buffer::Buffer,
+    ) -> bool {
+        let Some(tabs) = self.subagent_tabs_for_current_session() else {
+            return false;
+        };
+        let Some(active) = tabs.tabs.iter().find(|tab| tab.active) else {
+            return false;
+        };
+        render_subagent_spinner_only(buffer, &mut self.chat_state.wave_spinner, active.color)
     }
 
     fn has_active_selection_edge_scroll(&self) -> bool {
@@ -8154,6 +8191,7 @@ impl App {
             let (drained, next_rotation) = drain_streaming_chunks_global(
                 &mut receivers,
                 STREAM_CHUNK_DRAIN_LIMIT,
+                STREAM_CHUNK_GLOBAL_DRAIN_LIMIT,
                 STREAM_CHUNK_GLOBAL_DRAIN_TIME_BUDGET,
                 self.stream_drain_rotation,
             );
@@ -8721,7 +8759,7 @@ impl App {
                         msg.add_tool_call_part(call.id, call.function.name, args_value);
                         inserted.push((call_id, idx));
                     }
-                    chat.mark_render_dirty_from(idx);
+                    chat.mark_streaming_tool_render_pending(idx);
                 }
             }
         }
@@ -8735,7 +8773,7 @@ impl App {
                 state.tool_calls.tool_call_order.push(call_id);
             }
         }
-        self.persist_chat_messages_for_session(session_id);
+        self.mark_streaming_snapshot_pending(session_id);
     }
 
     fn add_tool_result_to_session(
@@ -8813,7 +8851,7 @@ impl App {
                     } else {
                         msg.content = v.to_string();
                     }
-                    chat.mark_render_dirty_from(idx);
+                    chat.mark_streaming_tool_render_pending(idx);
                     handled = true;
                 }
             }
@@ -8831,14 +8869,14 @@ impl App {
                 }) {
                     let msg = &mut chat.messages[idx];
                     msg.add_or_update_tool_result_part(content);
-                    chat.mark_render_dirty_from(idx);
+                    chat.mark_streaming_tool_render_pending(idx);
                 } else {
                     chat.add_message(crate::session::types::Message::tool(content.to_string()));
                 }
             }
         }
 
-        self.persist_chat_messages_for_session(session_id);
+        self.mark_streaming_snapshot_pending(session_id);
 
         if self.finish_deferred_streaming_session_if_ready(session_id) {
             return false;
@@ -11688,6 +11726,7 @@ mod tests {
         let (drained, _) = drain_streaming_chunks_global(
             &mut receivers,
             STREAM_CHUNK_DRAIN_LIMIT,
+            STREAM_CHUNK_GLOBAL_DRAIN_LIMIT,
             std::time::Duration::from_secs(1),
             0,
         );
@@ -11706,6 +11745,29 @@ mod tests {
             .sum();
         assert_eq!(drained_a, 512);
         assert_eq!(drained_b, 512);
+    }
+
+    #[test]
+    fn global_stream_drain_caps_downstream_chunk_work() {
+        use crate::llm::ChunkMessage;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..4096 {
+            sender.send(ChunkMessage::Text("x".to_string())).unwrap();
+        }
+
+        let mut receivers = [("session".to_string(), &mut receiver)];
+        let (drained, _) = drain_streaming_chunks_global(
+            &mut receivers,
+            STREAM_CHUNK_DRAIN_LIMIT,
+            128,
+            std::time::Duration::from_secs(1),
+            0,
+        );
+
+        let total_chunks: usize = drained.iter().map(|(_, chunks, _)| chunks.len()).sum();
+        assert_eq!(total_chunks, 128);
+        assert_eq!(receiver.len(), 4096 - 128);
     }
 
     #[test]
@@ -11735,7 +11797,7 @@ mod tests {
                 ("c".to_string(), &mut receiver_c),
             ];
             let (drained, next_rotation) =
-                drain_streaming_chunks_global(&mut receivers, 64, budget, rotation);
+                drain_streaming_chunks_global(&mut receivers, 64, 192, budget, rotation);
             rotation = next_rotation;
             for (id, chunks, _) in drained {
                 if !chunks.is_empty() {
@@ -11779,6 +11841,31 @@ mod tests {
 
         app.refresh_sessions_dialog();
         assert!(app.is_animation_running());
+        assert!(app.is_streaming_animation_only());
+    }
+
+    #[test]
+    fn background_retry_does_not_force_foreground_stream_to_fast_animation_cadence() {
+        let mut app = test_app();
+        let background_id = app.create_new_session(Some("background".to_string()));
+        let foreground_id = app.create_new_session(Some("foreground".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.is_streaming = true;
+        app.session_view_states
+            .get_mut(&background_id)
+            .unwrap()
+            .retry_status = Some(StreamingRetryStatus {
+            attempt: 1,
+            message: "retrying background stream".to_string(),
+            next_epoch_ms: 1,
+        });
+
+        assert_eq!(
+            app.session_manager
+                .get_current_session_id()
+                .map(String::as_str),
+            Some(foreground_id.as_str())
+        );
         assert!(app.is_streaming_animation_only());
     }
 
@@ -11882,6 +11969,78 @@ mod tests {
                 .content,
             "hello world"
         );
+    }
+
+    #[test]
+    fn streaming_tool_events_share_snapshot_throttling() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Tool snapshot throttle".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete(""));
+        app.chat_state.chat.begin_streaming_turn();
+
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+
+        app.add_tool_calls_to_session(
+            &session_id,
+            vec![crate::llm::ToolCall {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({ "path": "Cargo.toml" }).to_string(),
+                },
+            }],
+        );
+        app.add_tool_result_to_session(
+            &session_id,
+            crate::llm::ToolCallResult {
+                tool_call_id: "call_1".to_string(),
+                role: "tool".to_string(),
+                name: "read".to_string(),
+                content: serde_json::json!({
+                    "status": "ok",
+                    "output_preview": "contents"
+                })
+                .to_string(),
+            },
+        );
+
+        assert_eq!(app.chat_state.chat.messages[0].parts.len(), 2);
+        assert!(app
+            .session_view_states
+            .get(&session_id)
+            .and_then(|state| state.stream.as_ref())
+            .is_some_and(|stream| stream.pending_message_snapshot));
+        assert!(app
+            .session_manager
+            .get_session_ref(&session_id)
+            .unwrap()
+            .messages
+            .iter()
+            .all(|message| message.tool_call_part_data("call_1").is_none()
+                && message.tool_result_part_data("call_1").is_none()));
+
+        app.finish_streaming_session(&session_id);
+
+        let persisted = &app
+            .session_manager
+            .get_session_ref(&session_id)
+            .unwrap()
+            .messages[0];
+        assert_eq!(persisted.parts.len(), 2);
+        assert!(persisted.tool_result_part_data("call_1").is_some());
     }
 
     #[test]

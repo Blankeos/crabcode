@@ -17,10 +17,104 @@ pub struct TaskTool {
     cancel_token: CancellationToken,
 }
 
+fn stream_chunk_can_batch(chunk: &crate::llm::ChunkMessage) -> bool {
+    matches!(
+        chunk,
+        crate::llm::ChunkMessage::Text(_)
+            | crate::llm::ChunkMessage::Reasoning(_)
+            | crate::llm::ChunkMessage::Retry(_)
+    )
+}
+
+fn merge_adjacent_stream_chunks(
+    current: &mut crate::llm::ChunkMessage,
+    next: crate::llm::ChunkMessage,
+) -> Result<(), crate::llm::ChunkMessage> {
+    match (current, next) {
+        (crate::llm::ChunkMessage::Text(current), crate::llm::ChunkMessage::Text(next)) => {
+            current.push_str(&next);
+            Ok(())
+        }
+        (
+            crate::llm::ChunkMessage::Reasoning(current),
+            crate::llm::ChunkMessage::Reasoning(next),
+        ) => {
+            current.push_str(&next);
+            Ok(())
+        }
+        (crate::llm::ChunkMessage::Retry(current), crate::llm::ChunkMessage::Retry(next)) => {
+            *current = next;
+            Ok(())
+        }
+        (_, next) => Err(next),
+    }
+}
+
+fn send_subagent_chunk(
+    sender: &crate::llm::ChunkSender,
+    session_id: &str,
+    chunk: crate::llm::ChunkMessage,
+) -> Result<(), tokio::sync::mpsc::error::SendError<crate::llm::ChunkMessage>> {
+    sender.send(crate::llm::ChunkMessage::SubagentChunk {
+        session_id: session_id.to_string(),
+        chunk: Box::new(chunk),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::config::test_scoped_llm_session_lock;
+
+    #[test]
+    fn child_stream_batching_merges_only_adjacent_compatible_chunks() {
+        let mut text = crate::llm::ChunkMessage::Text("hello".to_string());
+        assert!(merge_adjacent_stream_chunks(
+            &mut text,
+            crate::llm::ChunkMessage::Text(" world".to_string())
+        )
+        .is_ok());
+        assert!(
+            matches!(text, crate::llm::ChunkMessage::Text(ref value) if value == "hello world")
+        );
+
+        let boundary = merge_adjacent_stream_chunks(
+            &mut text,
+            crate::llm::ChunkMessage::Reasoning("think".to_string()),
+        )
+        .expect_err("reasoning must remain an ordering boundary for text");
+        assert!(matches!(
+            boundary,
+            crate::llm::ChunkMessage::Reasoning(ref value) if value == "think"
+        ));
+    }
+
+    #[test]
+    fn child_stream_batching_keeps_latest_retry_status() {
+        let first = crate::aisdk::retry::RetryStatus {
+            attempt: 1,
+            message: "first".to_string(),
+            delay_ms: 10,
+            next_epoch_ms: 20,
+        };
+        let second = crate::aisdk::retry::RetryStatus {
+            attempt: 2,
+            message: "second".to_string(),
+            delay_ms: 30,
+            next_epoch_ms: 40,
+        };
+        let mut retry = crate::llm::ChunkMessage::Retry(first);
+
+        assert!(
+            merge_adjacent_stream_chunks(&mut retry, crate::llm::ChunkMessage::Retry(second))
+                .is_ok()
+        );
+        assert!(matches!(
+            retry,
+            crate::llm::ChunkMessage::Retry(status)
+                if status.attempt == 2 && status.message == "second"
+        ));
+    }
 
     #[test]
     fn task_requires_parent_session_scoped_llm_config() {
@@ -420,12 +514,39 @@ impl TaskTool {
         });
 
         tokio::spawn(async move {
+            const CHILD_STREAM_BATCH_INTERVAL: std::time::Duration =
+                std::time::Duration::from_millis(4);
+
             crate::emit_log!("[TASK] child_forwarder_start session_id={}", session_id);
             while let Some(chunk) = child_rx.recv().await {
-                let _ = ui_sender.send(crate::llm::ChunkMessage::SubagentChunk {
-                    session_id: session_id.clone(),
-                    chunk: Box::new(chunk),
-                });
+                let mut chunk = chunk;
+                let batch_started = std::time::Instant::now();
+
+                loop {
+                    let remaining =
+                        CHILD_STREAM_BATCH_INTERVAL.saturating_sub(batch_started.elapsed());
+                    if remaining.is_zero() || !stream_chunk_can_batch(&chunk) {
+                        break;
+                    }
+
+                    let next = match tokio::time::timeout(remaining, child_rx.recv()).await {
+                        Ok(Some(next)) => next,
+                        Ok(None) | Err(_) => break,
+                    };
+
+                    match merge_adjacent_stream_chunks(&mut chunk, next) {
+                        Ok(()) => {}
+                        Err(next) => {
+                            let _ = send_subagent_chunk(&ui_sender, &session_id, chunk);
+                            chunk = next;
+                            if !stream_chunk_can_batch(&chunk) {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let _ = send_subagent_chunk(&ui_sender, &session_id, chunk);
             }
             crate::emit_log!("[TASK] child_forwarder_closed session_id={}", session_id);
         });

@@ -5,8 +5,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub struct WaveSpinner {
     frames: Vec<Vec<Span<'static>>>,
-    current_frame: usize,
-    last_update: Instant,
+    animation_origin: Instant,
     base_color: Color,
     frame_duration: Duration,
 }
@@ -22,8 +21,7 @@ impl WaveSpinner {
         let frames = Self::generate_frames(base_color);
         Self {
             frames,
-            current_frame: 0,
-            last_update: Instant::now(),
+            animation_origin: Instant::now(),
             base_color,
             frame_duration: Self::DEFAULT_FRAME_DURATION,
         }
@@ -36,23 +34,32 @@ impl WaveSpinner {
     }
 
     pub fn set_speed(&mut self, frame_duration_ms: u64) {
-        self.frame_duration = Duration::from_millis(frame_duration_ms);
+        self.frame_duration = Duration::from_millis(frame_duration_ms.max(1));
+        self.animation_origin = Instant::now();
     }
 
-    pub fn update(&mut self) {
-        let elapsed = self.last_update.elapsed();
-        if elapsed >= self.frame_duration {
-            // Advance multiple frames if enough time has passed (prevents
-            // catching up after lag, but also prevents going too fast)
-            let frames_to_advance =
-                (elapsed.as_millis() / self.frame_duration.as_millis()) as usize;
-            self.current_frame = (self.current_frame + frames_to_advance) % self.frames.len();
-            self.last_update = Instant::now();
+    /// Kept for callers that update other animations imperatively. Spinner
+    /// phase itself is wall-clock derived so delayed frames cannot slow it.
+    pub fn update(&mut self) {}
+
+    fn current_frame(&self) -> usize {
+        Self::frame_for_elapsed(
+            self.animation_origin.elapsed(),
+            self.frame_duration,
+            self.frames.len(),
+        )
+    }
+
+    fn frame_for_elapsed(elapsed: Duration, frame_duration: Duration, frame_count: usize) -> usize {
+        if frame_count == 0 || frame_duration.is_zero() {
+            return 0;
         }
+
+        ((elapsed.as_nanos() / frame_duration.as_nanos()) % frame_count as u128) as usize
     }
 
     pub fn spans(&self) -> Vec<Span<'static>> {
-        self.frames[self.current_frame].clone()
+        self.frames[self.current_frame()].clone()
     }
 
     pub fn spans_for_width(&self, width: u16) -> Vec<Span<'static>> {
@@ -60,7 +67,7 @@ impl WaveSpinner {
             Vec::new()
         } else if width < Self::WIDTH {
             vec![Span::styled(
-                Self::COMPACT_FRAMES[self.current_frame % Self::COMPACT_FRAMES.len()],
+                Self::COMPACT_FRAMES[self.current_frame() % Self::COMPACT_FRAMES.len()],
                 Style::default().fg(self.base_color),
             )]
         } else {
@@ -245,7 +252,14 @@ mod tests {
     fn test_wave_spinner_new() {
         let spinner = WaveSpinner::new(Color::Rgb(255, 165, 0));
         assert_eq!(spinner.frames.len(), 32);
-        assert_eq!(spinner.current_frame, 0);
+        assert_eq!(
+            WaveSpinner::frame_for_elapsed(
+                Duration::ZERO,
+                spinner.frame_duration,
+                spinner.frames.len()
+            ),
+            0
+        );
     }
 
     #[test]
@@ -255,6 +269,26 @@ mod tests {
 
         spinner.set_speed(75);
         assert_eq!(spinner.frame_duration, Duration::from_millis(75));
+    }
+
+    #[test]
+    fn frame_phase_catches_up_after_delayed_draws() {
+        assert_eq!(
+            WaveSpinner::frame_for_elapsed(
+                Duration::from_millis(205),
+                Duration::from_millis(40),
+                32
+            ),
+            5
+        );
+        assert_eq!(
+            WaveSpinner::frame_for_elapsed(
+                Duration::from_millis(1_320),
+                Duration::from_millis(40),
+                32
+            ),
+            1
+        );
     }
 
     #[test]
