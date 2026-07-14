@@ -118,11 +118,17 @@ impl ModelExtensions {
     }
 
     pub async fn runtime_models_for_dialog_cached() -> RuntimeDialogModelsResult {
+        use futures::future::join_all;
+
         let mut models = Vec::new();
         let mut errors = Vec::new();
 
-        for extension in Self::runtime() {
-            match extension.models_for_dialog_cached().await {
+        let discoveries = Self::runtime().iter().map(|extension| async move {
+            (*extension, extension.models_for_dialog_cached().await)
+        });
+
+        for (extension, result) in join_all(discoveries).await {
+            match result {
                 Ok(provider_models) => models.extend(provider_models),
                 Err(err) => errors.push(ProviderExtensionError {
                     provider_id: extension.provider_id(),

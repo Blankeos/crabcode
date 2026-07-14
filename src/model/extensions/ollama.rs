@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const PROVIDER_ID: &str = "ollama";
 pub const PROVIDER_NAME: &str = "Ollama (Local)";
@@ -10,6 +10,7 @@ pub const BASE_URL: &str = "http://localhost:11434/v1";
 pub const NPM_PACKAGE: &str = "@ai-sdk/openai-compatible";
 
 const OLLAMA_LS_TIMEOUT: Duration = Duration::from_secs(5);
+const OLLAMA_ERROR_CACHE_TTL: Duration = Duration::from_secs(30);
 
 pub static EXTENSION: Extension = Extension;
 
@@ -61,12 +62,18 @@ pub struct OllamaModel {
     pub name: String,
 }
 
-static MODEL_CACHE: OnceLock<Mutex<Option<Vec<OllamaModel>>>> = OnceLock::new();
+#[derive(Debug, Clone)]
+enum ModelCacheEntry {
+    Models(Vec<OllamaModel>),
+    Error { message: String, cached_at: Instant },
+}
+
+static MODEL_CACHE: OnceLock<Mutex<Option<ModelCacheEntry>>> = OnceLock::new();
 
 #[cfg(test)]
 static TEST_CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn cache() -> &'static Mutex<Option<Vec<OllamaModel>>> {
+fn cache() -> &'static Mutex<Option<ModelCacheEntry>> {
     MODEL_CACHE.get_or_init(|| Mutex::new(None))
 }
 
@@ -83,26 +90,49 @@ pub fn provider() -> crate::model::discovery::Provider {
 }
 
 pub async fn list_models_cached() -> Result<Vec<OllamaModel>> {
-    if let Some(models) = cache().lock().ok().and_then(|guard| guard.clone()) {
-        return Ok(models);
+    if let Some(entry) = cache().lock().ok().and_then(|guard| guard.clone()) {
+        match entry {
+            ModelCacheEntry::Models(models) => return Ok(models),
+            ModelCacheEntry::Error { message, cached_at }
+                if cached_at.elapsed() < OLLAMA_ERROR_CACHE_TTL =>
+            {
+                return Err(anyhow::anyhow!(message));
+            }
+            ModelCacheEntry::Error { .. } => {}
+        }
     }
 
     refresh_model_cache().await
 }
 
 pub async fn refresh_model_cache() -> Result<Vec<OllamaModel>> {
-    let models = list_models_from_cli().await?;
-    if let Ok(mut guard) = cache().lock() {
-        *guard = Some(models.clone());
+    match list_models_from_cli().await {
+        Ok(models) => {
+            if let Ok(mut guard) = cache().lock() {
+                *guard = Some(ModelCacheEntry::Models(models.clone()));
+            }
+            Ok(models)
+        }
+        Err(err) => {
+            if let Ok(mut guard) = cache().lock() {
+                *guard = Some(ModelCacheEntry::Error {
+                    message: err.to_string(),
+                    cached_at: Instant::now(),
+                });
+            }
+            Err(err)
+        }
     }
-    Ok(models)
 }
 
 pub fn models_from_runtime_cache() -> Vec<crate::model::types::Model> {
     cache()
         .lock()
         .ok()
-        .and_then(|guard| guard.clone())
+        .and_then(|guard| match guard.clone() {
+            Some(ModelCacheEntry::Models(models)) => Some(models),
+            Some(ModelCacheEntry::Error { .. }) | None => None,
+        })
         .unwrap_or_default()
         .into_iter()
         .map(model_for_dialog)
@@ -138,7 +168,10 @@ pub fn model_for_dialog(model: OllamaModel) -> crate::model::types::Model {
 
 fn cached_discovery_models(
 ) -> Option<std::collections::HashMap<String, crate::model::discovery::Model>> {
-    let models = cache().lock().ok().and_then(|guard| guard.clone())?;
+    let models = cache().lock().ok().and_then(|guard| match guard.clone() {
+        Some(ModelCacheEntry::Models(models)) => Some(models),
+        Some(ModelCacheEntry::Error { .. }) | None => None,
+    })?;
     Some(
         models
             .into_iter()
@@ -242,7 +275,7 @@ fn model_family(model_id: &str) -> String {
 #[cfg(test)]
 pub fn set_cached_models_for_test(models: Vec<OllamaModel>) {
     if let Ok(mut guard) = cache().lock() {
-        *guard = Some(models);
+        *guard = Some(ModelCacheEntry::Models(models));
     }
 }
 
@@ -299,6 +332,22 @@ mod tests {
         assert_eq!(provider.id, PROVIDER_ID);
         assert_eq!(provider.name, PROVIDER_NAME);
         assert!(provider.models.contains_key("llama3.2:latest"));
+        clear_cache_for_test();
+    }
+
+    #[tokio::test]
+    async fn recent_cli_errors_are_cached() {
+        let _guard = test_cache_lock();
+        if let Ok(mut guard) = cache().lock() {
+            *guard = Some(ModelCacheEntry::Error {
+                message: "ollama unavailable".to_string(),
+                cached_at: Instant::now(),
+            });
+        }
+
+        let error = list_models_cached().await.unwrap_err();
+
+        assert_eq!(error.to_string(), "ollama unavailable");
         clear_cache_for_test();
     }
 }

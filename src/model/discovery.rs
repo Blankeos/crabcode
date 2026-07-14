@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
@@ -25,6 +26,37 @@ pub struct Provider {
     pub npm: String,
     #[serde(default)]
     pub models: HashMap<String, Model>,
+}
+
+static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+static MEMORY_CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<CacheEntry>>>> = OnceLock::new();
+static MEMORY_MODEL_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedModels>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct CachedModels {
+    models: Vec<crate::model::types::Model>,
+    cached_at: std::time::Instant,
+}
+
+fn shared_http_client() -> Result<Client> {
+    if let Some(client) = HTTP_CLIENT.get() {
+        return Ok(client.clone());
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("Failed to create HTTP client")?;
+    let _ = HTTP_CLIENT.set(client.clone());
+    Ok(client)
+}
+
+fn memory_cache() -> &'static Mutex<HashMap<PathBuf, Arc<CacheEntry>>> {
+    MEMORY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn memory_model_cache() -> &'static Mutex<HashMap<PathBuf, CachedModels>> {
+    MEMORY_MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +139,7 @@ pub struct Limit {
     pub output: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CacheEntry {
     data: HashMap<String, Provider>,
     timestamp: u64,
@@ -129,10 +161,7 @@ impl Discovery {
             let cache_path = cache_dir.join("models_dev_cache.json");
 
             Ok(Self {
-                client: Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .context("Failed to create HTTP client")?,
+                client: shared_http_client()?,
                 cache_path,
             })
         } else {
@@ -142,10 +171,7 @@ impl Discovery {
             let cache_path = cache_dir.join("models_dev_cache.json");
 
             Ok(Self {
-                client: Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .context("Failed to create HTTP client")?,
+                client: shared_http_client()?,
                 cache_path,
             })
         }
@@ -196,8 +222,16 @@ impl Discovery {
         Ok(providers)
     }
 
-    fn load_from_cache(&self) -> Result<Option<HashMap<String, Provider>>> {
+    fn load_cache_entry(&self) -> Result<Option<Arc<CacheEntry>>> {
         let cache_path = self.get_cache_path();
+
+        if let Some(entry) = memory_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(cache_path).cloned())
+        {
+            return Ok(Some(entry));
+        }
 
         if !cache_path.exists() {
             return Ok(None);
@@ -205,8 +239,22 @@ impl Discovery {
 
         let cached_json = fs::read_to_string(cache_path).context("Failed to read cache file")?;
 
-        let entry: CacheEntry =
-            serde_json::from_str(&cached_json).context("Failed to parse cache file")?;
+        let entry = Arc::new(
+            serde_json::from_str::<CacheEntry>(&cached_json)
+                .context("Failed to parse cache file")?,
+        );
+
+        if let Ok(mut cache) = memory_cache().lock() {
+            cache.insert(cache_path.clone(), entry.clone());
+        }
+
+        Ok(Some(entry))
+    }
+
+    fn load_from_cache(&self) -> Result<Option<HashMap<String, Provider>>> {
+        let Some(entry) = self.load_cache_entry()? else {
+            return Ok(None);
+        };
 
         if entry.schema_version < CACHE_SCHEMA_VERSION {
             return Ok(None);
@@ -217,11 +265,11 @@ impl Discovery {
             .context("System time is before UNIX epoch")?
             .as_secs();
 
-        if now - entry.timestamp > CACHE_TTL_SECONDS {
+        if now.saturating_sub(entry.timestamp) > CACHE_TTL_SECONDS {
             return Ok(None);
         }
 
-        Ok(Some(entry.data))
+        Ok(Some(entry.data.clone()))
     }
 
     fn save_to_cache(&self, data: &HashMap<String, Provider>) -> Result<()> {
@@ -242,6 +290,13 @@ impl Discovery {
             serde_json::to_string_pretty(&entry).context("Failed to serialize cache data")?;
 
         fs::write(cache_path, serialized).context("Failed to write cache file")?;
+
+        if let Ok(mut cache) = memory_cache().lock() {
+            cache.insert(cache_path.clone(), Arc::new(entry));
+        }
+        if let Ok(mut cache) = memory_model_cache().lock() {
+            cache.remove(cache_path);
+        }
 
         Ok(())
     }
@@ -319,11 +374,23 @@ impl Discovery {
 
     pub async fn fetch_models(&self) -> Result<Vec<crate::model::types::Model>> {
         let mut models = crate::model::extensions::ModelExtensions::runtime_models_from_cache();
+        if let Some(cached) = memory_model_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(self.get_cache_path()).cloned())
+            .filter(|cached| cached.cached_at.elapsed().as_secs() <= CACHE_TTL_SECONDS)
+        {
+            models.extend(cached.models);
+            return Ok(models);
+        }
+
         let providers = match self.fetch_providers().await {
             Ok(providers) => providers,
             Err(_err) if !models.is_empty() => return Ok(models),
             Err(err) => return Err(err),
         };
+
+        let mut persistent_models = Vec::new();
 
         for (provider_id, provider) in providers {
             if crate::model::extensions::ModelExtensions::is_runtime_provider(&provider_id) {
@@ -347,7 +414,7 @@ impl Discovery {
                 });
 
                 if is_text_model {
-                    models.push(crate::model::types::Model {
+                    persistent_models.push(crate::model::types::Model {
                         id: model_id.clone(),
                         name: model.name.clone(),
                         family: model.family.clone(),
@@ -363,28 +430,29 @@ impl Discovery {
             }
         }
 
+        if let Ok(mut cache) = memory_model_cache().lock() {
+            cache.insert(
+                self.get_cache_path().clone(),
+                CachedModels {
+                    models: persistent_models.clone(),
+                    cached_at: std::time::Instant::now(),
+                },
+            );
+        }
+        models.extend(persistent_models);
+
         Ok(models)
     }
 
     pub fn get_model_pricing(&self, provider_id: &str, model_id: &str) -> Option<Cost> {
-        let cache_path = self.get_cache_path();
-        if !cache_path.exists() {
-            return None;
-        }
-        let cached_json = std::fs::read_to_string(cache_path).ok()?;
-        let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
+        let entry = self.load_cache_entry().ok()??;
         let provider = entry.data.get(provider_id)?;
         let model = provider.models.get(model_id)?;
         model.cost.clone()
     }
 
     pub fn get_model_limit(&self, provider_id: &str, model_id: &str) -> Option<u32> {
-        let cache_path = self.get_cache_path();
-        if !cache_path.exists() {
-            return None;
-        }
-        let cached_json = std::fs::read_to_string(cache_path).ok()?;
-        let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
+        let entry = self.load_cache_entry().ok()??;
         let provider = entry.data.get(provider_id)?;
         let model = provider.models.get(model_id)?;
         model.limit.as_ref().map(|l| l.context)
@@ -395,12 +463,7 @@ impl Discovery {
         provider_id: &str,
         model_id: &str,
     ) -> Option<crate::model::reasoning::ReasoningCapability> {
-        let cache_path = self.get_cache_path();
-        if !cache_path.exists() {
-            return None;
-        }
-        let cached_json = std::fs::read_to_string(cache_path).ok()?;
-        let entry: CacheEntry = serde_json::from_str(&cached_json).ok()?;
+        let entry = self.load_cache_entry().ok()??;
         let provider = entry.data.get(provider_id)?;
         let model = provider.models.get(model_id)?;
         let provider_npm = model
@@ -819,6 +882,36 @@ mod tests {
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().len(), 1);
 
+        let _ = fs::remove_file(cache_path);
+    }
+
+    #[test]
+    fn parsed_cache_is_reused_from_memory() {
+        let mut discovery = Discovery::new().unwrap();
+        let cache_path = unique_test_cache_path("models_dev_memory_cache");
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        discovery.cache_path = cache_path.clone();
+
+        let providers = HashMap::from([(
+            "test-provider".to_string(),
+            Provider {
+                id: "test-provider".to_string(),
+                name: "Test Provider".to_string(),
+                api: String::new(),
+                doc: String::new(),
+                env: Vec::new(),
+                npm: String::new(),
+                models: HashMap::new(),
+            },
+        )]);
+        discovery.save_to_cache(&providers).unwrap();
+
+        let first = discovery.load_cache_entry().unwrap().unwrap();
+        let second = discovery.load_cache_entry().unwrap().unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
         let _ = fs::remove_file(cache_path);
     }
 }
