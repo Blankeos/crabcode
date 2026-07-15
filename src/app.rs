@@ -8372,6 +8372,20 @@ impl App {
                 self.set_session_retry_status(session_id, Some(status.into()));
                 true
             }
+            crate::llm::ChunkMessage::StreamRollback { text, reasoning } => {
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    if !chat.rollback_streamed_output(&text, &reasoning) {
+                        crate::emit_log!(
+                            "[STREAM_ROLLBACK_MISMATCH] session_id={} text_chars={} reasoning_chars={}",
+                            session_id,
+                            text.len(),
+                            reasoning.len(),
+                        );
+                    }
+                }
+                self.mark_streaming_snapshot_pending(session_id);
+                true
+            }
             crate::llm::ChunkMessage::Warning(msg) => {
                 push_toast(Toast::new(msg, ToastLevel::Warning, None));
                 true

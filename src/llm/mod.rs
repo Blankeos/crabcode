@@ -11,6 +11,10 @@ pub enum ChunkMessage {
     Text(String),
     Reasoning(String),
     Retry(crate::aisdk::retry::RetryStatus),
+    StreamRollback {
+        text: String,
+        reasoning: String,
+    },
     Warning(String),
     ToolCalls(Vec<ToolCall>),
     ToolResult(ToolCallResult),

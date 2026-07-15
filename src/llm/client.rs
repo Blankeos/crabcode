@@ -660,6 +660,11 @@ pub async fn summarize_for_compaction(
             | ChunkType::Metadata(_)
             | ChunkType::Start
             | ChunkType::Incomplete(_) => {}
+            ChunkType::StreamRollback { text, .. } => {
+                if summary.ends_with(&text) {
+                    summary.truncate(summary.len() - text.len());
+                }
+            }
         }
     }
 
@@ -708,6 +713,11 @@ pub async fn generate_session_title(
             | ChunkType::Metadata(_)
             | ChunkType::Start
             | ChunkType::Incomplete(_) => {}
+            ChunkType::StreamRollback { text, .. } => {
+                if title.ends_with(&text) {
+                    title.truncate(title.len() - text.len());
+                }
+            }
         }
     }
 
@@ -1491,6 +1501,16 @@ async fn relay_stream_to_sender(
                     status.message,
                 );
                 let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
+            }
+            ChunkType::StreamRollback { text, reasoning } => {
+                let rolled_back_tokens = estimate_tokens(&text) + estimate_tokens(&reasoning);
+                *token_count = token_count.saturating_sub(rolled_back_tokens);
+                crate::emit_log!(
+                    "[RELAY] StreamRollback text_chars={} reasoning_chars={}",
+                    text.len(),
+                    reasoning.len(),
+                );
+                let _ = sender.send(crate::llm::ChunkMessage::StreamRollback { text, reasoning });
             }
             ChunkType::Warning(message) => {
                 let elapsed_ms = start_time.elapsed().as_millis();

@@ -447,6 +447,7 @@ async fn run_print_mode(
             | crate::llm::ChunkMessage::Cancelled
             | crate::llm::ChunkMessage::Reasoning(_)
             | crate::llm::ChunkMessage::Retry(_)
+            | crate::llm::ChunkMessage::StreamRollback { .. }
             | crate::llm::ChunkMessage::SubagentStarted { .. }
             | crate::llm::ChunkMessage::SubagentChunk { .. }
             | crate::llm::ChunkMessage::TerminalSessionEvent { .. } => {}

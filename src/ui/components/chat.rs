@@ -1753,6 +1753,39 @@ impl Chat {
         }
     }
 
+    pub fn rollback_streamed_output(&mut self, text: &str, reasoning: &str) -> bool {
+        let Some(message_idx) = self.streaming_assistant_idx() else {
+            return false;
+        };
+        let rolled_back = self.messages[message_idx].rollback_streamed_output(text, reasoning);
+        if !rolled_back {
+            return false;
+        }
+
+        let remaining_output = {
+            let message = &self.messages[message_idx];
+            let mut output = message.reasoning.clone().unwrap_or_default();
+            output.push_str(&message.content);
+            output
+        };
+        if let Some(counter) = self.streaming_token_counter.as_mut() {
+            counter.reset();
+            self.streaming_token_count = counter.add_text(&remaining_output);
+        } else {
+            self.streaming_token_count = estimate_tokens(&remaining_output);
+        }
+        self.update_streaming_tokens_per_sec();
+
+        self.streaming_renderer = None;
+        self.streaming_message_idx = None;
+        self.streaming_renderer_content_len = 0;
+        self.streaming_reasoning_renderer = None;
+        self.streaming_reasoning_message_idx = None;
+        self.streaming_reasoning_renderer_content_len = 0;
+        self.invalidate_cache_from(message_idx);
+        true
+    }
+
     pub fn clear(&mut self) {
         self.messages.clear();
         self.scroll_offset = 0;
@@ -6446,6 +6479,23 @@ mod tests {
         let chat = Chat::new();
         assert!(chat.messages.is_empty());
         assert_eq!(chat.scroll_offset, 0);
+    }
+
+    #[test]
+    fn stream_rollback_rebuilds_visible_output_and_token_count() {
+        let mut chat = Chat::new();
+        chat.prepare_streaming_token_counter("gpt-5");
+        chat.append_to_last_assistant("before");
+        chat.append_reasoning_to_last_assistant("thinking");
+        chat.append_to_last_assistant(" partial");
+        let tokens_before_rollback = chat.streaming_token_count();
+
+        assert!(chat.rollback_streamed_output(" partial", "thinking"));
+
+        let message = chat.messages.last().expect("streaming assistant");
+        assert_eq!(message.content, "before");
+        assert_eq!(message.reasoning, None);
+        assert!(chat.streaming_token_count() < tokens_before_rollback);
     }
 
     #[test]

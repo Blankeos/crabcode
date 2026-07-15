@@ -1,6 +1,6 @@
 use crate::chunk::{ChunkType, MessagePhase};
 use crate::error::{Error, Result};
-use crate::message::Message;
+use crate::message::{is_prefixed_response_item_id, Message};
 use crate::provider::{Provider, ProviderStream};
 use crate::retry::RetryError;
 use crate::tool::Tool;
@@ -24,7 +24,9 @@ const OPENAI_ERROR_BODY_MAX_CHARS: usize = 2048;
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const OPENAI_WEBSOCKET_IDLE_MAX: Duration = Duration::from_secs(60);
+const OPENAI_WEBSOCKET_IO_TIMEOUT: Duration = Duration::from_secs(300);
 const OPENAI_WEBSOCKET_STREAM_RETRIES: usize = 1;
+const OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct OpenAI {
@@ -180,6 +182,7 @@ impl OpenAIBuilder {
 #[derive(Debug, Default)]
 struct OpenAIWebsocketState {
     disabled: bool,
+    consecutive_failures: usize,
     connection: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     last_used_at: Option<Instant>,
     last_request: Option<OpenAIRequestSnapshot>,
@@ -201,10 +204,28 @@ impl OpenAIWebsocketState {
 
     fn disable(&mut self) {
         self.disabled = true;
+        self.consecutive_failures = 0;
         self.connection = None;
         self.last_used_at = None;
         self.last_request = None;
         self.last_response = None;
+    }
+
+    fn record_failure(&mut self) -> bool {
+        self.clear_connection();
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.consecutive_failures < OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK {
+            return false;
+        }
+
+        self.disabled = true;
+        self.last_request = None;
+        self.last_response = None;
+        true
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
     }
 }
 
@@ -537,7 +558,7 @@ impl OpenAI {
 
         let mut request_text = serde_json::to_string(&sent_request_body)
             .map_err(|err| Error::Provider(format!("failed to encode websocket request: {err}")))?;
-        if let Err(err) = ws.send(WsMessage::Text(request_text.clone())).await {
+        if let Err(err) = send_openai_websocket_text(&mut ws, request_text.clone()).await {
             if !reused_connection {
                 return Err(Error::Provider(format!("websocket send failed: {err}")));
             }
@@ -552,10 +573,7 @@ impl OpenAI {
             request_text = serde_json::to_string(&sent_request_body).map_err(|err| {
                 Error::Provider(format!("failed to encode websocket request: {err}"))
             })?;
-            fresh_ws
-                .send(WsMessage::Text(request_text.clone()))
-                .await
-                .map_err(|err| Error::Provider(format!("websocket send failed: {err}")))?;
+            send_openai_websocket_text(&mut fresh_ws, request_text.clone()).await?;
             ws = fresh_ws;
         }
 
@@ -583,8 +601,16 @@ impl OpenAI {
                 let mut progress = WebsocketStreamProgress::default();
 
                 let failure = loop {
-                    match ws.next().await {
-                        Some(Ok(WsMessage::Text(text))) => {
+                    let next_message =
+                        tokio::time::timeout(OPENAI_WEBSOCKET_IO_TIMEOUT, ws.next()).await;
+                    match next_message {
+                        Err(_) => {
+                            break format!(
+                                "websocket idle timeout after {} seconds",
+                                OPENAI_WEBSOCKET_IO_TIMEOUT.as_secs()
+                            );
+                        }
+                        Ok(Some(Ok(WsMessage::Text(text)))) => {
                             collect_websocket_response_state(
                                 &text,
                                 &mut response_id,
@@ -607,8 +633,9 @@ impl OpenAI {
                                     return;
                                 }
                                 if is_completed {
+                                    let mut state = websocket_state.lock().await;
+                                    state.record_success();
                                     if let Some(response_id) = response_id {
-                                        let mut state = websocket_state.lock().await;
                                         state.connection = Some(ws);
                                         state.last_used_at = Some(Instant::now());
                                         state.last_request = Some(request_snapshot.clone());
@@ -625,15 +652,15 @@ impl OpenAI {
                                 }
                             }
                         }
-                        Some(Ok(WsMessage::Ping(_))) | Some(Ok(WsMessage::Pong(_))) => {}
-                        Some(Ok(WsMessage::Close(_))) => {
+                        Ok(Some(Ok(WsMessage::Ping(_)))) | Ok(Some(Ok(WsMessage::Pong(_)))) => {}
+                        Ok(Some(Ok(WsMessage::Close(_)))) => {
                             break "websocket closed before response.completed".to_string();
                         }
-                        Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Frame(_))) => {}
-                        Some(Err(err)) => {
+                        Ok(Some(Ok(WsMessage::Binary(_)))) | Ok(Some(Ok(WsMessage::Frame(_)))) => {}
+                        Ok(Some(Err(err))) => {
                             break format!("websocket stream error: {}", err);
                         }
-                        None => {
+                        Ok(None) => {
                             break "websocket stream ended before response.completed".to_string();
                         }
                     }
@@ -663,14 +690,16 @@ impl OpenAI {
                     {
                         Ok(ws) => ws,
                         Err(err) => {
-                            websocket_state.lock().await.disable();
+                            let fallback_to_http = websocket_state.lock().await.record_failure();
                             let disconnected = stream_disconnected_before_completion(&format!(
                                 "{}; websocket retry connect failed: {}",
                                 failure, err
                             ));
-                            let _ = tx.send(Ok(ChunkType::Warning(format!(
-                                "Falling back from WebSockets to HTTPS transport. {disconnected}"
-                            ))));
+                            if fallback_to_http {
+                                let _ = tx.send(Ok(ChunkType::Warning(format!(
+                                    "Falling back from WebSockets to HTTPS transport. {disconnected}"
+                                ))));
+                            }
                             let _ = tx.send(Ok(ChunkType::RetryableFailure(
                                 RetryError::from_message(disconnected),
                             )));
@@ -698,15 +727,19 @@ impl OpenAI {
                         }
                     };
 
-                    if let Err(err) = fresh_ws.send(WsMessage::Text(retry_request_text)).await {
-                        websocket_state.lock().await.disable();
+                    if let Err(err) =
+                        send_openai_websocket_text(&mut fresh_ws, retry_request_text).await
+                    {
+                        let fallback_to_http = websocket_state.lock().await.record_failure();
                         let disconnected = stream_disconnected_before_completion(&format!(
                             "{}; websocket retry send failed: {}",
                             failure, err
                         ));
-                        let _ = tx.send(Ok(ChunkType::Warning(format!(
-                            "Falling back from WebSockets to HTTPS transport. {disconnected}"
-                        ))));
+                        if fallback_to_http {
+                            let _ = tx.send(Ok(ChunkType::Warning(format!(
+                                "Falling back from WebSockets to HTTPS transport. {disconnected}"
+                            ))));
+                        }
                         let _ = tx.send(Ok(ChunkType::RetryableFailure(RetryError::from_message(
                             disconnected,
                         ))));
@@ -717,21 +750,16 @@ impl OpenAI {
                     continue;
                 }
 
-                if progress.can_retry_without_duplicate_output() {
-                    websocket_state.lock().await.disable();
-                    let disconnected = stream_disconnected_before_completion(&failure);
+                let fallback_to_http = websocket_state.lock().await.record_failure();
+                let disconnected = stream_disconnected_before_completion(&failure);
+                if fallback_to_http {
                     let _ = tx.send(Ok(ChunkType::Warning(format!(
                         "Falling back from WebSockets to HTTPS transport. {disconnected}"
                     ))));
-                    let _ = tx.send(Ok(ChunkType::RetryableFailure(RetryError::from_message(
-                        disconnected,
-                    ))));
-                    return;
                 }
-
-                let _ = tx.send(Ok(ChunkType::Failed(
-                    stream_disconnected_before_completion(&failure),
-                )));
+                let _ = tx.send(Ok(ChunkType::RetryableFailure(RetryError::from_message(
+                    disconnected,
+                ))));
                 return;
             }
         });
@@ -777,10 +805,34 @@ async fn connect_openai_websocket(
             .map_err(|err| Error::Provider(format!("invalid websocket beta header: {err}")))?,
     );
 
-    connect_async(request)
+    tokio::time::timeout(
+        Duration::from_secs(OPENAI_STREAM_CONNECT_TIMEOUT_SECS),
+        connect_async(request),
+    )
+    .await
+    .map_err(|_| {
+        Error::Provider(format!(
+            "websocket connect timed out after {} seconds",
+            OPENAI_STREAM_CONNECT_TIMEOUT_SECS
+        ))
+    })?
+    .map(|(ws, _)| ws)
+    .map_err(|err| Error::Provider(format!("websocket connect failed: {err}")))
+}
+
+async fn send_openai_websocket_text(
+    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    text: String,
+) -> Result<()> {
+    tokio::time::timeout(OPENAI_WEBSOCKET_IO_TIMEOUT, ws.send(WsMessage::Text(text)))
         .await
-        .map(|(ws, _)| ws)
-        .map_err(|err| Error::Provider(format!("websocket connect failed: {err}")))
+        .map_err(|_| {
+            Error::Provider(format!(
+                "websocket send timed out after {} seconds",
+                OPENAI_WEBSOCKET_IO_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|err| Error::Provider(format!("websocket send failed: {err}")))
 }
 
 fn websocket_url(base_url: &str, responses_path: &str) -> Result<reqwest::Url> {
@@ -1657,7 +1709,9 @@ fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_
                         "arguments": t.arguments,
                     });
                     if let Some(item_id) = &t.item_id {
-                        item["id"] = serde_json::Value::String(item_id.clone());
+                        if is_prefixed_response_item_id(item_id) {
+                            item["id"] = serde_json::Value::String(item_id.clone());
+                        }
                     }
                     Some(item)
                 }
@@ -1721,7 +1775,8 @@ mod tests {
         responses_function_call_chunk, websocket_connection_is_idle,
         websocket_continuation_mode_after_idle_policy, websocket_continuation_mode_from_state,
         OpenAI, OpenAIResponseSnapshot, OpenAIWebsocketState, WebsocketContinuationMode,
-        WebsocketStreamProgress, OPENAI_WEBSOCKET_IDLE_MAX,
+        WebsocketStreamProgress, OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK,
+        OPENAI_WEBSOCKET_IDLE_MAX,
     };
     use crate::chunk::{ChunkType, MessagePhase};
     use crate::message::Message;
@@ -1739,6 +1794,45 @@ mod tests {
             .expect("api key should be optional");
 
         assert!(provider.api_key.is_empty());
+    }
+
+    #[test]
+    fn openai_messages_strip_unprefixed_response_item_ids() {
+        let messages = vec![
+            Message::tool_call_with_item_id("index:0", "call_1", "read", "{}"),
+            Message::tool_call_with_item_id("fc_valid", "call_2", "read", "{}"),
+            Message::tool_call_with_item_id("future_valid", "call_3", "read", "{}"),
+        ];
+
+        let input = build_openai_messages(&messages, false);
+
+        assert!(input[0].get("id").is_none());
+        assert_eq!(input[1]["id"], "fc_valid");
+        assert_eq!(input[2]["id"], "future_valid");
+    }
+
+    #[test]
+    fn websocket_falls_back_after_consecutive_failures() {
+        let mut state = OpenAIWebsocketState::default();
+
+        for _ in 1..OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK {
+            assert!(!state.record_failure());
+            assert!(!state.disabled);
+        }
+
+        assert!(state.record_failure());
+        assert!(state.disabled);
+    }
+
+    #[test]
+    fn websocket_success_resets_failure_budget() {
+        let mut state = OpenAIWebsocketState::default();
+
+        assert!(!state.record_failure());
+        state.record_success();
+
+        assert_eq!(state.consecutive_failures, 0);
+        assert!(!state.disabled);
     }
 
     #[test]

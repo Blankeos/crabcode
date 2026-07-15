@@ -169,6 +169,15 @@ pub async fn run_subagent(
                     let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
                 }
             }
+            ChunkType::StreamRollback { text, reasoning } => {
+                if collected_text.ends_with(&text) {
+                    collected_text.truncate(collected_text.len() - text.len());
+                }
+                if let Some(sender) = sender.as_ref() {
+                    let _ =
+                        sender.send(crate::llm::ChunkMessage::StreamRollback { text, reasoning });
+                }
+            }
             ChunkType::Warning(message) => {
                 if let Some(sender) = sender.as_ref() {
                     let _ = sender.send(crate::llm::ChunkMessage::Warning(message));
@@ -251,6 +260,15 @@ pub async fn run_subagent(
                 ChunkType::Retry(status) => {
                     if let Some(sender) = sender.as_ref() {
                         let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
+                    }
+                }
+                ChunkType::StreamRollback { text, reasoning } => {
+                    if collected_text.ends_with(&text) {
+                        collected_text.truncate(collected_text.len() - text.len());
+                    }
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender
+                            .send(crate::llm::ChunkMessage::StreamRollback { text, reasoning });
                     }
                 }
                 ChunkType::Warning(message) => {

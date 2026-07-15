@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+pub(crate) fn is_prefixed_response_item_id(id: &str) -> bool {
+    id.split_once('_')
+        .is_some_and(|(prefix, suffix)| !prefix.is_empty() && !suffix.is_empty())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role")]
 pub enum Message {

@@ -17,3 +17,5 @@ remote-client/dist/server/
 .devrefs/references
 .benchmarks/
 benchmark-reports/
+
+bridges/**/*.mjs

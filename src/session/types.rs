@@ -315,6 +315,22 @@ impl Message {
         }
     }
 
+    pub fn rollback_streamed_output(&mut self, text: &str, reasoning: &str) -> bool {
+        if !parts_end_with(&self.parts, "text", text)
+            || !parts_end_with(&self.parts, "reasoning", reasoning)
+        {
+            return false;
+        }
+
+        remove_part_suffix(&mut self.parts, "text", text.len());
+        remove_part_suffix(&mut self.parts, "reasoning", reasoning.len());
+
+        self.content = part_texts(&self.parts, "text").join("\n\n");
+        let reasoning = part_texts(&self.parts, "reasoning").concat();
+        self.reasoning = (!reasoning.is_empty()).then_some(reasoning);
+        true
+    }
+
     pub fn add_tool_call_part(
         &mut self,
         id: impl Into<String>,
@@ -434,6 +450,47 @@ impl Message {
     pub fn mark_interrupted(&mut self) {
         self.was_interrupted = true;
     }
+}
+
+fn part_texts<'a>(parts: &'a [MessagePart], part_type: &str) -> Vec<&'a str> {
+    parts
+        .iter()
+        .filter(|part| part.part_type == part_type)
+        .filter_map(|part| part.data.get("text").and_then(JsonValue::as_str))
+        .filter(|text| !text.is_empty())
+        .collect()
+}
+
+fn parts_end_with(parts: &[MessagePart], part_type: &str, suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return true;
+    }
+    part_texts(parts, part_type).concat().ends_with(suffix)
+}
+
+fn remove_part_suffix(parts: &mut Vec<MessagePart>, part_type: &str, mut bytes: usize) {
+    for part in parts.iter_mut().rev() {
+        if bytes == 0 {
+            break;
+        }
+        if part.part_type != part_type {
+            continue;
+        }
+        let Some(JsonValue::String(text)) = part.data.get_mut("text") else {
+            continue;
+        };
+        let remove = bytes.min(text.len());
+        text.truncate(text.len() - remove);
+        bytes -= remove;
+    }
+    parts.retain(|part| {
+        part.part_type != part_type
+            || part
+                .data
+                .get("text")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|text| !text.is_empty())
+    });
 }
 
 pub fn logical_message_block_start(messages: &[Message], idx: usize) -> Option<usize> {
@@ -652,6 +709,27 @@ mod tests {
         assert_eq!(msg.role, MessageRole::Assistant);
         assert_eq!(msg.content, "partial");
         assert!(!msg.is_complete);
+    }
+
+    #[test]
+    fn message_rolls_back_only_current_streamed_suffix() {
+        let mut message = Message::incomplete("before");
+        message.add_tool_call_part("call_1", "read", serde_json::json!({}));
+        message.append("partial");
+        message.append_reasoning("thinking");
+        message.append(" tail");
+
+        assert!(message.rollback_streamed_output("partial tail", "thinking"));
+        assert_eq!(message.content, "before");
+        assert_eq!(message.reasoning, None);
+        assert_eq!(
+            message
+                .parts
+                .iter()
+                .filter(|part| part.part_type == "tool_call")
+                .count(),
+            1
+        );
     }
 
     #[test]

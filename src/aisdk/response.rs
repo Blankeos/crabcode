@@ -254,8 +254,22 @@ pub async fn stream_with_tools<P: Provider>(
                     Ok(ChunkType::Retry(status)) => {
                         let _ = tx_loop.send(ChunkType::Retry(status));
                     }
+                    Ok(ChunkType::StreamRollback { .. }) => {}
                     Ok(ChunkType::RetryableFailure(retry_error)) => {
-                        if !emitted_non_replayable_output && attempt <= PROVIDER_STEP_MAX_RETRIES {
+                        if attempt <= PROVIDER_STEP_MAX_RETRIES {
+                            rollback_provider_attempt(
+                                &tx_loop,
+                                &mut accumulated_text,
+                                &mut accumulated_reasoning,
+                                &mut has_tool_call,
+                                &mut tool_call_accumulator,
+                                &mut saw_terminal_event,
+                                &mut response_end_turn,
+                                &mut provider_finish_reason,
+                                &mut last_assistant_message_phase,
+                                &mut current_assistant_message_phase,
+                                &mut emitted_non_replayable_output,
+                            );
                             if !emit_retry_and_sleep(
                                 &tx_loop,
                                 step_idx,
@@ -300,17 +314,10 @@ pub async fn stream_with_tools<P: Provider>(
                             continue;
                         }
 
-                        let err = if emitted_non_replayable_output {
-                            format!(
-                                "Provider stream failed after emitting output; not retrying to avoid duplicate output: {}",
-                                retry_error.message
-                            )
-                        } else {
-                            format!(
-                                "Provider stream failed after {} retries: {}",
-                                PROVIDER_STEP_MAX_RETRIES, retry_error.message
-                            )
-                        };
+                        let err = format!(
+                            "Provider stream failed after {} retries: {}",
+                            PROVIDER_STEP_MAX_RETRIES, retry_error.message
+                        );
                         let _ = tx_loop.send(ChunkType::Failed(err.clone()));
                         *stop_reason_arc.lock().await = Some(StopReason::Error(err));
                         return;
@@ -323,10 +330,22 @@ pub async fn stream_with_tools<P: Provider>(
                     }
                     Ok(ChunkType::Failed(err)) => {
                         let retry_error = RetryError::from_message(err.clone());
-                        if !emitted_non_replayable_output
-                            && crate::retry::retryable(&retry_error)
+                        if crate::retry::retryable(&retry_error)
                             && attempt <= PROVIDER_STEP_MAX_RETRIES
                         {
+                            rollback_provider_attempt(
+                                &tx_loop,
+                                &mut accumulated_text,
+                                &mut accumulated_reasoning,
+                                &mut has_tool_call,
+                                &mut tool_call_accumulator,
+                                &mut saw_terminal_event,
+                                &mut response_end_turn,
+                                &mut provider_finish_reason,
+                                &mut last_assistant_message_phase,
+                                &mut current_assistant_message_phase,
+                                &mut emitted_non_replayable_output,
+                            );
                             if !emit_retry_and_sleep(
                                 &tx_loop,
                                 step_idx,
@@ -381,78 +400,80 @@ pub async fn stream_with_tools<P: Provider>(
                     Ok(ChunkType::NotSupported(msg)) => {
                         let _ = tx_loop.send(ChunkType::NotSupported(msg));
                     }
-                    Err(e) => {
-                        if !emitted_non_replayable_output {
-                            match retry_error_from_provider_error(e) {
-                                Ok(retry_error) if attempt <= PROVIDER_STEP_MAX_RETRIES => {
-                                    if !emit_retry_and_sleep(
-                                        &tx_loop,
+                    Err(e) => match retry_error_from_provider_error(e) {
+                        Ok(retry_error) if attempt <= PROVIDER_STEP_MAX_RETRIES => {
+                            rollback_provider_attempt(
+                                &tx_loop,
+                                &mut accumulated_text,
+                                &mut accumulated_reasoning,
+                                &mut has_tool_call,
+                                &mut tool_call_accumulator,
+                                &mut saw_terminal_event,
+                                &mut response_end_turn,
+                                &mut provider_finish_reason,
+                                &mut last_assistant_message_phase,
+                                &mut current_assistant_message_phase,
+                                &mut emitted_non_replayable_output,
+                            );
+                            if !emit_retry_and_sleep(
+                                &tx_loop,
+                                step_idx,
+                                attempt,
+                                &retry_error,
+                                cancel_token.as_ref(),
+                            )
+                            .await
+                            {
+                                let err = "Streaming cancelled by user".to_string();
+                                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                return;
+                            }
+                            attempt += 1;
+                            stream = match open_provider_stream_with_retries(
+                                &provider_clone,
+                                &current_messages,
+                                &tools,
+                                &headers,
+                                &tx_loop,
+                                step_idx,
+                                &mut attempt,
+                                cancel_token.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(stream) => stream,
+                                Err(error) => {
+                                    let err = provider_step_error_message(
                                         step_idx,
-                                        attempt,
-                                        &retry_error,
-                                        cancel_token.as_ref(),
-                                    )
-                                    .await
-                                    {
-                                        let err = "Streaming cancelled by user".to_string();
-                                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                                        *stop_reason_arc.lock().await =
-                                            Some(StopReason::Error(err));
-                                        return;
-                                    }
-                                    attempt += 1;
-                                    stream = match open_provider_stream_with_retries(
-                                        &provider_clone,
-                                        &current_messages,
-                                        &tools,
-                                        &headers,
-                                        &tx_loop,
-                                        step_idx,
-                                        &mut attempt,
-                                        cancel_token.as_ref(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(stream) => stream,
-                                        Err(error) => {
-                                            let err = provider_step_error_message(
-                                                step_idx,
-                                                current_messages.len(),
-                                                tools.len(),
-                                                &step_summary,
-                                                error,
-                                            );
-                                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                                            *stop_reason_arc.lock().await =
-                                                Some(StopReason::Error(err));
-                                            return;
-                                        }
-                                    };
-                                    continue;
-                                }
-                                Ok(retry_error) => {
-                                    let err = format!(
-                                        "Provider stream failed after {} retries: {}",
-                                        PROVIDER_STEP_MAX_RETRIES, retry_error.message
+                                        current_messages.len(),
+                                        tools.len(),
+                                        &step_summary,
+                                        error,
                                     );
                                     let _ = tx_loop.send(ChunkType::Failed(err.clone()));
                                     *stop_reason_arc.lock().await = Some(StopReason::Error(err));
                                     return;
                                 }
-                                Err(error) => {
-                                    let err = error.to_string();
-                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                                    return;
-                                }
-                            }
+                            };
+                            continue;
                         }
-
-                        let err = e.to_string();
-                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                        *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                        return;
-                    }
+                        Ok(retry_error) => {
+                            let err = format!(
+                                "Provider stream failed after {} retries: {}",
+                                PROVIDER_STEP_MAX_RETRIES, retry_error.message
+                            );
+                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                            *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                            return;
+                        }
+                        Err(error) => {
+                            let err = error.to_string();
+                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                            *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                            return;
+                        }
+                    },
                 }
             }
 
@@ -702,6 +723,39 @@ pub async fn stream_with_tools<P: Provider>(
 
     response.add_handle(handle);
     Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rollback_provider_attempt(
+    tx: &mpsc::UnboundedSender<ChunkType>,
+    accumulated_text: &mut String,
+    accumulated_reasoning: &mut String,
+    has_tool_call: &mut bool,
+    tool_call_accumulator: &mut ToolCallAccumulator,
+    saw_terminal_event: &mut bool,
+    response_end_turn: &mut Option<bool>,
+    provider_finish_reason: &mut Option<FinishReason>,
+    last_assistant_message_phase: &mut Option<MessagePhase>,
+    current_assistant_message_phase: &mut Option<MessagePhase>,
+    emitted_non_replayable_output: &mut bool,
+) {
+    if !accumulated_text.is_empty() || !accumulated_reasoning.is_empty() {
+        let _ = tx.send(ChunkType::StreamRollback {
+            text: std::mem::take(accumulated_text),
+            reasoning: std::mem::take(accumulated_reasoning),
+        });
+    } else {
+        accumulated_text.clear();
+        accumulated_reasoning.clear();
+    }
+    *has_tool_call = false;
+    *tool_call_accumulator = ToolCallAccumulator::default();
+    *saw_terminal_event = false;
+    *response_end_turn = None;
+    *provider_finish_reason = None;
+    *last_assistant_message_phase = None;
+    *current_assistant_message_phase = None;
+    *emitted_non_replayable_output = false;
 }
 
 #[derive(Debug, Default)]
@@ -1408,6 +1462,11 @@ mod tests {
         requests: Arc<AtomicUsize>,
     }
 
+    #[derive(Debug, Clone)]
+    struct RecoveringPartialStreamProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
     #[async_trait]
     impl Provider for RecoveringRateLimitProvider {
         fn name(&self) -> &str {
@@ -1433,6 +1492,45 @@ mod tests {
                     replay_safe: true,
                 };
                 return Err(crate::error::Error::RetryableProvider(retry_error));
+            }
+
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ChunkType::Text("recovered".to_string())),
+                Ok(ChunkType::End {
+                    reason: Some(FinishReason::Stop),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RecoveringPartialStreamProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            if request == 0 {
+                return Ok(Box::pin(futures::stream::iter(vec![
+                    Ok(ChunkType::Text("partial".to_string())),
+                    Ok(ChunkType::Reasoning("thinking".to_string())),
+                    Ok(ChunkType::RetryableFailure(crate::retry::RetryError {
+                        message: "websocket closed before response.completed".to_string(),
+                        status: None,
+                        headers: HashMap::from([("retry-after-ms".to_string(), "0".to_string())]),
+                        replay_safe: true,
+                    })),
+                ])));
             }
 
             Ok(Box::pin(futures::stream::iter(vec![
@@ -1784,6 +1882,56 @@ mod tests {
         assert!(saw_retry);
         assert_eq!(text, "recovered");
         assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn rolls_back_partial_output_before_retrying_stream() {
+        let provider = RecoveringPartialStreamProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("hello")],
+            Vec::new(),
+            None,
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut visible_text = String::new();
+        let mut visible_reasoning = String::new();
+        let mut saw_rollback = false;
+        let mut saw_retry = false;
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::Text(text) => visible_text.push_str(&text),
+                ChunkType::Reasoning(reasoning) => visible_reasoning.push_str(&reasoning),
+                ChunkType::StreamRollback { text, reasoning } => {
+                    saw_rollback = true;
+                    assert!(visible_text.ends_with(&text));
+                    assert!(visible_reasoning.ends_with(&reasoning));
+                    visible_text.truncate(visible_text.len() - text.len());
+                    visible_reasoning.truncate(visible_reasoning.len() - reasoning.len());
+                }
+                ChunkType::Retry(_) => saw_retry = true,
+                _ => {}
+            }
+        }
+
+        assert!(saw_rollback);
+        assert!(saw_retry);
+        assert_eq!(visible_text, "recovered");
+        assert!(visible_reasoning.is_empty());
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+
+        let messages = response.messages().await;
+        assert!(matches!(
+            messages.last(),
+            Some(Message::Assistant(message)) if message.content == "recovered"
+        ));
     }
 
     #[tokio::test]
