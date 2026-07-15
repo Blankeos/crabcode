@@ -811,6 +811,7 @@ pub struct App {
     compaction_pending: Option<CompactionPending>,
     storage_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<StorageTaskMessage>>,
     models_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<ModelsTaskMessage>>,
+    models_dialog_provider_ids: Option<Vec<String>>,
     title_generation_receiver:
         Option<tokio::sync::mpsc::UnboundedReceiver<TitleGenerationTaskMessage>>,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
@@ -1119,6 +1120,7 @@ impl App {
             compaction_pending: None,
             storage_receiver: None,
             models_receiver: None,
+            models_dialog_provider_ids: None,
             title_generation_receiver: None,
             prefs_dao,
             agent,
@@ -6979,6 +6981,36 @@ impl App {
             return true;
         }
 
+        let connected_provider_ids = crate::persistence::AuthDAO::new()
+            .and_then(|dao| dao.load())
+            .map(|providers| {
+                let mut ids = providers.into_keys().collect::<Vec<_>>();
+                ids.sort();
+                ids
+            })
+            .ok();
+
+        if kind == ModelsTaskKind::Load
+            && parsed.args.is_empty()
+            && !self.models_dialog_state.dialog.items.is_empty()
+            && self.models_dialog_provider_ids == connected_provider_ids
+        {
+            let mut items = self.models_dialog_state.dialog.items.clone();
+            for item in &mut items {
+                item.active = item.id == self.model && item.provider_id == self.provider_name;
+            }
+            self.models_dialog_state
+                .dialog
+                .update_items_in_place(items);
+            self.models_dialog_state.dialog.show();
+            let _ = self
+                .models_dialog_state
+                .dialog
+                .select_item_by_key(&self.model, &self.provider_name);
+            self.overlay_focus = OverlayFocus::ModelsDialog;
+            return true;
+        }
+
         parsed.prefs_data = self
             .prefs_dao
             .as_ref()
@@ -7964,6 +7996,14 @@ impl App {
                         })
                         .collect();
                     self.models_dialog_state.finish_loading();
+                    self.models_dialog_provider_ids = crate::persistence::AuthDAO::new()
+                        .and_then(|dao| dao.load())
+                        .map(|providers| {
+                            let mut ids = providers.into_keys().collect::<Vec<_>>();
+                            ids.sort();
+                            ids
+                        })
+                        .ok();
                     if self.overlay_focus == OverlayFocus::ModelsDialog {
                         self.show_models_dialog(title, dialog_items);
                     }
@@ -7981,6 +8021,8 @@ impl App {
                     ));
                 }
                 (ModelsTaskKind::Refresh, _) => {
+                    self.models_dialog_state = init_models_dialog("Available Models", Vec::new());
+                    self.models_dialog_provider_ids = None;
                     if self.overlay_focus == OverlayFocus::RefreshModelsDialog {
                         self.overlay_focus = OverlayFocus::None;
                     }
@@ -10582,6 +10624,7 @@ mod tests {
             compaction_pending: None,
             storage_receiver: None,
             models_receiver: None,
+            models_dialog_provider_ids: None,
             title_generation_receiver: None,
             prefs_dao: None,
             agent: "Build".to_string(),
@@ -11634,8 +11677,60 @@ mod tests {
     }
 
     #[test]
+    fn loaded_models_reopen_without_starting_another_task() {
+        let mut app = test_app();
+        app.show_models_dialog(
+            "Available Models",
+            vec![crate::ui::components::dialog::DialogItem {
+                id: "test-model".to_string(),
+                name: "Test Model".to_string(),
+                group: "Test".to_string(),
+                description: String::new(),
+                tip: None,
+                provider_id: "test-provider".to_string(),
+                active: false,
+            }],
+        );
+        // Match the connected-provider snapshot used by the reopen cache check.
+        app.models_dialog_provider_ids = crate::persistence::AuthDAO::new()
+            .and_then(|dao| dao.load())
+            .map(|providers| {
+                let mut ids = providers.into_keys().collect::<Vec<_>>();
+                ids.sort();
+                ids
+            })
+            .ok();
+        app.models_dialog_state.dialog.hide();
+        app.overlay_focus = OverlayFocus::None;
+
+        let mut parsed = match parse_input("/models") {
+            crate::command::parser::InputType::Command(parsed) => parsed,
+            other => panic!("expected models command, got {other:?}"),
+        };
+
+        assert!(app.start_models_command(&mut parsed));
+        assert!(app.models_receiver.is_none());
+        assert_eq!(app.overlay_focus, OverlayFocus::ModelsDialog);
+        assert!(app.models_dialog_state.dialog.is_visible());
+        assert!(!app.models_dialog_state.is_loading());
+        assert!(app.models_dialog_state.dialog.items[0].active);
+    }
+
+    #[test]
     fn refresh_completion_closes_compact_dialog() {
         let mut app = test_app();
+        app.show_models_dialog(
+            "Available Models",
+            vec![crate::ui::components::dialog::DialogItem {
+                id: "stale-model".to_string(),
+                name: "Stale Model".to_string(),
+                group: "Test".to_string(),
+                description: String::new(),
+                tip: None,
+                provider_id: "test-provider".to_string(),
+                active: false,
+            }],
+        );
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         sender
             .send(ModelsTaskMessage {
@@ -11650,6 +11745,7 @@ mod tests {
 
         assert!(app.models_receiver.is_none());
         assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert!(app.models_dialog_state.dialog.items.is_empty());
     }
 
     #[test]
