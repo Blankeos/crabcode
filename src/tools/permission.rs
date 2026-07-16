@@ -22,6 +22,16 @@ pub enum PermissionAction {
     Unknown,
 }
 
+fn is_safe_workspace_read_like_action(action: PermissionAction) -> bool {
+    matches!(
+        action,
+        PermissionAction::Read
+            | PermissionAction::List
+            | PermissionAction::Glob
+            | PermissionAction::Grep
+    )
+}
+
 impl PermissionAction {
     pub fn from_tool_id(tool_id: &str) -> Self {
         match tool_id {
@@ -364,7 +374,13 @@ impl ToolPermissions {
                 .await;
         }
 
-        if let Some(reason_kind) = self.evaluate_doom_loop(tool_id, params).await {
+        let doom_loop_reason = if is_safe_workspace_read_like_action(action) {
+            None
+        } else {
+            self.evaluate_doom_loop(tool_id, params).await
+        };
+
+        if let Some(reason_kind) = doom_loop_reason {
             match self.evaluate_guard_decision(
                 agent_mode,
                 tool_id,
@@ -1634,6 +1650,22 @@ mod tests {
         let _ = prompt.response_tx.send(PermissionResponse::Deny);
         let result = pending.await.expect("preflight task should complete");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn repeated_workspace_reads_do_not_prompt_for_doom_loop() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({ "file_path": "/tmp/workspace/src/main.rs" });
+
+        for _ in 0..4 {
+            assert!(perms
+                .preflight("build", "read", &params, Some(&tx))
+                .await
+                .is_ok());
+        }
+
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

@@ -6999,9 +6999,7 @@ impl App {
             for item in &mut items {
                 item.active = item.id == self.model && item.provider_id == self.provider_name;
             }
-            self.models_dialog_state
-                .dialog
-                .update_items_in_place(items);
+            self.models_dialog_state.dialog.update_items_in_place(items);
             self.models_dialog_state.dialog.show();
             let _ = self
                 .models_dialog_state
