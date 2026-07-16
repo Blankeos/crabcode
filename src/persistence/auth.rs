@@ -129,13 +129,15 @@ impl AuthDAO {
     pub fn set_provider(&self, name: String, config: AuthConfig) -> Result<()> {
         let mut providers = self.load()?;
         providers.insert(name, config);
-        self.save(&providers)
+        self.save(&providers)?;
+        crate::model::effective_catalog::reconcile_after_provider_change()
     }
 
     pub fn remove_provider(&self, name: &str) -> Result<()> {
         let mut providers = self.load()?;
         providers.remove(name);
-        self.save(&providers)
+        self.save(&providers)?;
+        crate::model::effective_catalog::reconcile_after_provider_change()
     }
 
     pub fn get_api_key(&self, name: &str) -> Result<Option<String>> {

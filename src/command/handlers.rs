@@ -302,8 +302,13 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
         }) || provider_filter.is_none()
             || provider_filter_matches_unauthenticated_free;
 
+        let snapshot_models = crate::model::effective_catalog::models_for_dialog()
+            .ok()
+            .flatten();
         let discovery = Discovery::new();
-        let mut models: Vec<ModelType> = if has_persistent {
+        let mut models: Vec<ModelType> = if let Some(models) = snapshot_models.as_ref() {
+            models.clone()
+        } else if has_persistent {
             match discovery {
                 Ok(d) => match d.fetch_models().await {
                     Ok(models) => models
@@ -348,11 +353,23 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
         };
 
         let mut runtime_errors = Vec::new();
-        if has_runtime {
+        if snapshot_models.is_none() && has_runtime {
             let runtime_result =
                 crate::model::extensions::ModelExtensions::runtime_models_for_dialog_cached().await;
             models.extend(runtime_result.models);
             runtime_errors = runtime_result.errors;
+        }
+
+        if snapshot_models.is_none() && !models.is_empty() {
+            if let Err(err) =
+                crate::model::effective_catalog::publish_refreshed_models(models.clone())
+            {
+                push_toast(Toast::new(
+                    format!("Failed to seed model catalog cache: {}", err),
+                    ToastLevel::Warning,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+            }
         }
 
         let prefs = prefs_data;
@@ -780,6 +797,38 @@ pub async fn refresh_models() -> CommandResult {
             .map(|p| p.models.len())
             .sum::<usize>()
             + runtime_model_count;
+
+        let models = match crate::model::discovery::Discovery::new() {
+            Ok(discovery) => match discovery.fetch_models().await {
+                Ok(models) => models,
+                Err(err) => {
+                    push_toast(Toast::new(
+                        format!("Failed to publish refreshed model catalog: {}", err),
+                        ToastLevel::Warning,
+                        Some(std::time::Duration::from_secs(3)),
+                    ));
+                    Vec::new()
+                }
+            },
+            Err(err) => {
+                push_toast(Toast::new(
+                    format!("Failed to initialize model catalog: {}", err),
+                    ToastLevel::Warning,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+                Vec::new()
+            }
+        };
+
+        if !models.is_empty() {
+            if let Err(err) = crate::model::effective_catalog::publish_refreshed_models(models) {
+                push_toast(Toast::new(
+                    format!("Failed to publish refreshed model catalog: {}", err),
+                    ToastLevel::Warning,
+                    Some(std::time::Duration::from_secs(3)),
+                ));
+            }
+        }
 
         push_toast(Toast::new(
             format!(
