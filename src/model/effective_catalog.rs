@@ -67,8 +67,15 @@ impl From<SnapshotModel> for Model {
 struct Snapshot {
     schema_version: u32,
     revision: u64,
+    #[serde(default, alias = "built_at")]
     updated_at: u64,
     models: Vec<SnapshotModel>,
+}
+
+#[derive(Deserialize)]
+struct SnapshotHeader {
+    #[serde(default)]
+    schema_version: u32,
 }
 
 fn snapshot_path() -> Result<PathBuf> {
@@ -89,11 +96,17 @@ fn load_snapshot() -> Result<Option<Snapshot>> {
         return Ok(None);
     }
 
-    let snapshot: Snapshot =
-        serde_json::from_str(&fs::read_to_string(path).context("read effective model catalog")?)
-            .context("parse effective model catalog")?;
+    let contents = fs::read_to_string(path).context("read effective model catalog")?;
+    let header: SnapshotHeader =
+        serde_json::from_str(&contents).context("parse effective model catalog")?;
+    if header.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        return Ok(None);
+    }
 
-    Ok((snapshot.schema_version == SNAPSHOT_SCHEMA_VERSION).then_some(snapshot))
+    let snapshot: Snapshot =
+        serde_json::from_str(&contents).context("parse effective model catalog")?;
+
+    Ok(Some(snapshot))
 }
 
 fn write_snapshot(snapshot: &Snapshot) -> Result<()> {
