@@ -4035,8 +4035,28 @@ impl App {
         let Some(area) = self.current_selection_action_bar_area() else {
             return false;
         };
-
         let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+
+        // A terminal cannot report a mouse-up that happens outside its surface.
+        // Selection actions are therefore shown as soon as a drag selects text.
+        // A subsequent click on the bar proves that the original button was
+        // released, so finalize that stale drag before handling the click.
+        let selection_is_dragging = match state.target {
+            SelectionActionTarget::Chat => self.chat_state.chat.selection.is_dragging,
+            SelectionActionTarget::Input => self.input.is_selection_dragging(),
+        };
+        if selection_is_dragging {
+            if area.contains(point) && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            {
+                match state.target {
+                    SelectionActionTarget::Chat => self.chat_state.chat.finish_selection_drag(),
+                    SelectionActionTarget::Input => self.input.finish_selection_drag(),
+                }
+            } else {
+                return false;
+            }
+        }
+
         if !area.contains(point) {
             return false;
         }
@@ -4083,6 +4103,13 @@ impl App {
             }
 
             return false;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+            && self.input.has_selection()
+            && !self.input.get_selected_text().is_empty()
+        {
+            self.show_selection_action_bar_for(SelectionActionTarget::Input);
         }
 
         if matches!(
@@ -4682,7 +4709,6 @@ impl App {
                     _ => {}
                 }
 
-                let had_selection = self.chat_state.chat.has_selection();
                 let was_dragging = self.chat_state.chat.selection.is_dragging;
                 let released_pending_message =
                     if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
@@ -4718,9 +4744,14 @@ impl App {
                         self.pending_chat_message_click = None;
                     }
 
-                    // Show copy/add-to-prompt actions when selection is finalized (mouse up after drag)
-                    if !had_selection && self.chat_state.chat.has_selection() {
-                        // New selection just started, don't show actions yet
+                    // Show actions as soon as a drag creates a non-empty selection. Terminal mouse
+                    // protocols do not send us mouse-up when the pointer is released outside the
+                    // terminal, so waiting only for release can leave the selection without actions.
+                    if was_dragging
+                        && self.chat_state.chat.selection.is_dragging
+                        && matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+                    {
+                        self.show_selection_action_bar_for(SelectionActionTarget::Chat);
                     } else if was_dragging && !self.chat_state.chat.selection.is_dragging {
                         self.show_selection_action_bar_for(SelectionActionTarget::Chat);
                     }
@@ -10296,7 +10327,16 @@ fn input_selection_action_bar_area(frame_area: Rect, input_area: Rect) -> Rect {
     let x = input_area.x.saturating_add(1);
     clamp_action_bar_area(
         frame_area,
-        Rect::new(x, y, SELECTION_ACTION_BAR_WIDTH.min(frame_area.width), 1),
+        Rect::new(
+            x,
+            y,
+            selection_action_bar_width(SelectionActionBarState {
+                target: SelectionActionTarget::Input,
+                can_open_in_editor: false,
+            })
+            .min(frame_area.width),
+            1,
+        ),
     )
 }
 
@@ -10304,7 +10344,7 @@ fn selection_action_bar_width(state: SelectionActionBarState) -> u16 {
     match state.target {
         SelectionActionTarget::Chat if state.can_open_in_editor => SELECTION_ACTION_BAR_WIDTH,
         SelectionActionTarget::Chat => CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR as u16 + 4,
-        SelectionActionTarget::Input => INPUT_SELECTION_ACTION_ESC_COL as u16 + 5,
+        SelectionActionTarget::Input => INPUT_SELECTION_ACTION_ESC_COL as u16 + 4,
     }
 }
 
@@ -10362,12 +10402,10 @@ fn render_selection_action_bar(
     }
 
     f.render_widget(Clear, area);
-    let bg = colors.dialog_background;
-    let key_style = Style::default()
-        .fg(colors.text_strong)
-        .bg(bg)
-        .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(colors.text_weak).bg(bg);
+    let bg = colors.info;
+    let fg = theme::contrast_text(bg);
+    let key_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(fg).bg(bg);
     let line = if state.target == SelectionActionTarget::Chat {
         let mut spans = vec![
             Span::raw(" "),
@@ -11267,6 +11305,38 @@ mod tests {
         )));
         assert!(app.input.has_selection());
         assert_eq!(app.input.get_selected_text(), "alpha");
+        assert_eq!(
+            app.selection_action_bar.map(|state| state.target),
+            Some(SelectionActionTarget::Input)
+        );
+        assert_eq!(app.current_selection_action_bar_area().unwrap().width, 12);
+
+        let action_area = app.current_selection_action_bar_area().unwrap();
+        app.handle_mouse_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            action_area.x,
+            action_area.y,
+        ));
+        assert!(!app.input.is_selection_dragging());
+        app.handle_mouse_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            action_area.x,
+            action_area.y,
+        ));
+        assert!(app.selection_action_bar.is_none());
+        assert!(!app.input.has_selection());
+
+        // Recreate a selection to retain coverage for a normal release outside the input.
+        assert!(app.handle_input_mouse_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            20
+        )));
+        assert!(app.handle_input_mouse_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            7,
+            20
+        )));
 
         assert!(app.handle_input_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), 7, 19)));
 
@@ -11274,6 +11344,42 @@ mod tests {
             app.selection_action_bar.map(|state| state.target),
             Some(SelectionActionTarget::Input)
         );
+    }
+
+    #[test]
+    fn chat_selection_action_bar_shows_before_mouse_up() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant("alpha beta"));
+        app.chat_state.chat.selection.start(0, 0);
+        app.chat_state.chat.selection.extend(0, "alpha".len());
+
+        app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 0));
+
+        assert!(app.chat_state.chat.selection.is_dragging);
+        assert_eq!(
+            app.selection_action_bar.map(|state| state.target),
+            Some(SelectionActionTarget::Chat)
+        );
+
+        let action_area = app.current_selection_action_bar_area().unwrap();
+        app.handle_mouse_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            action_area.x,
+            action_area.y,
+        ));
+        assert!(!app.chat_state.chat.selection.is_dragging);
+        app.handle_mouse_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            action_area.x,
+            action_area.y,
+        ));
+
+        assert!(app.selection_action_bar.is_none());
+        assert!(!app.chat_state.chat.has_selection());
     }
 
     #[test]

@@ -2720,6 +2720,12 @@ impl Chat {
         self.highlighted_message_index = None;
     }
 
+    pub fn finish_selection_drag(&mut self) {
+        self.selection.finish();
+        self.clear_selection_edge_scroll();
+        self.pending_click_anchor = None;
+    }
+
     fn content_area_for(area: Rect) -> Rect {
         Rect {
             x: area.x,
@@ -3148,9 +3154,7 @@ impl Chat {
                     }
 
                     // Finalize text selection
-                    self.selection.finish();
-                    self.clear_selection_edge_scroll();
-                    self.pending_click_anchor = None;
+                    self.finish_selection_drag();
                     // If selection is zero-width (click without drag), clear it
                     let ((s_line, s_col), (e_line, e_col)) = self.selection.range();
                     if s_line == e_line && s_col == e_col {

@@ -300,6 +300,14 @@ impl Input {
         self.selection_edge_scroll.is_some()
     }
 
+    pub fn is_selection_dragging(&self) -> bool {
+        self.selection_drag_active
+    }
+
+    pub fn finish_selection_drag(&mut self) {
+        self.finalize_selection_drag();
+    }
+
     pub fn tick_selection_edge_scroll(&mut self) -> bool {
         let Some(edge_scroll) = self.selection_edge_scroll else {
             return false;

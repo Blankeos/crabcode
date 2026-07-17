@@ -423,6 +423,6 @@ I think this is how the TUI works already anyway right?
 - [x] In all dialogs with scrolls (i.e. /themes, etc.).. Dont move the "current selection/cursor" when I scroll.
 - [x] I improved search a bit for /models and /sessions recently.. But I don't think I applied that same improvements in other searchable dialgos i.e. /connect and /themes, ctrl-p command dialog, etc. The motivations from changing search in /models and /sessions were that when I search, it doesn't actually focus the most relevant search item because it tries to maintain the cursor in the item order to prevent it from jumping around, but models and sessions currently have the perfect behavior I htink.
 
-- [ ] Give a way to still show the 'copy' tool tip on select even if my mouse moves outside the terminal for the mouseup event.
+- [x] Give a way to still show the 'copy' tool tip on select even if my mouse moves outside the terminal for the mouseup event.
 
 - [x] Some permission requests are annoying, might have missed allowing them... subagents requesting permission to read stuff inside of the same current workspace. Also sometimes the parent agent requesting permission to read a file inside the same current workspace.
