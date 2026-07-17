@@ -1124,6 +1124,10 @@ pub fn is_sensitive_path(path: &Path) -> bool {
     };
 
     let lower = name.to_ascii_lowercase();
+    if lower == ".env.example" {
+        return false;
+    }
+
     lower == ".env"
         || lower == ".envrc"
         || lower.starts_with(".env.")
@@ -1179,6 +1183,7 @@ mod tests {
         assert!(is_sensitive_path(Path::new(".env")));
         assert!(is_sensitive_path(Path::new(".env.local")));
         assert!(is_sensitive_path(Path::new(".env.production")));
+        assert!(!is_sensitive_path(Path::new(".env.example")));
         assert!(!is_sensitive_path(Path::new("README.md")));
     }
 
@@ -1362,6 +1367,18 @@ mod tests {
         let _ = prompt.response_tx.send(PermissionResponse::Deny);
         let result = pending.await.expect("preflight task should complete");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_tool_allows_env_example_by_default() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({ "file_path": "/tmp/workspace/.env.example" });
+
+        let result = perms.preflight("build", "read", &params, Some(&tx)).await;
+
+        assert!(result.is_ok());
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
