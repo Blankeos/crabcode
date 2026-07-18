@@ -1500,6 +1500,9 @@ impl App {
 
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
             state.chat = std::mem::take(&mut self.chat_state.chat);
+            // Background sessions are not rendered; drop their rebuildable
+            // line caches so memory does not scale with every visited session.
+            state.chat.release_render_caches();
             state.find_bar = std::mem::take(&mut self.find_bar);
             state.input_draft = if is_child_session {
                 String::new()
@@ -8272,32 +8275,53 @@ impl App {
         streaming_only && self.overlay_focus != OverlayFocus::SessionsDialog
     }
 
+    /// Whether the currently viewed session is a subagent child session.
+    /// Cheap equivalent of building the full tab list and checking
+    /// `is_child_session`; used on every event-loop iteration.
+    fn current_session_is_subagent_child(&self) -> bool {
+        self.session_manager
+            .get_current_session_id()
+            .is_some_and(|id| self.session_manager.parent_id_of(id).is_some())
+    }
+
     pub fn isolated_subagent_spinner_interval(&self) -> Option<std::time::Duration> {
         if self.base_focus != BaseFocus::Chat
             || self.overlay_focus != OverlayFocus::None
             || !self.is_streaming
+            || !self.current_session_is_subagent_child()
             || self.current_session_retry_status().is_some()
             || self.compaction_receiver.is_some()
-            || !self
-                .subagent_tabs_for_current_session()
-                .is_some_and(|tabs| tabs.is_child_session)
         {
             return None;
         }
         self.chat_state.chat.tool_heavy_streaming_render_interval()
     }
 
+    /// Spinner color for the currently viewed session without materializing
+    /// the full subagent tab list on every spinner frame.
+    fn current_session_spinner_color(&self) -> Option<ratatui::style::Color> {
+        let current_id = self.session_manager.get_current_session_id()?;
+        let root_id = self.session_manager.root_session_id_for(current_id)?;
+        if *current_id == root_id {
+            return Some(crate::theme::agent_color(
+                &self.agent,
+                &self.get_current_theme_colors(),
+            ));
+        }
+        let idx = self
+            .session_manager
+            .descendant_position(&root_id, current_id)?;
+        Some(agent_color_for_tab(idx, &self.get_current_theme_colors()))
+    }
+
     pub fn render_isolated_subagent_spinner(
         &mut self,
         buffer: &mut ratatui::buffer::Buffer,
     ) -> bool {
-        let Some(tabs) = self.subagent_tabs_for_current_session() else {
+        let Some(color) = self.current_session_spinner_color() else {
             return false;
         };
-        let Some(active) = tabs.tabs.iter().find(|tab| tab.active) else {
-            return false;
-        };
-        render_subagent_spinner_only(buffer, &mut self.chat_state.wave_spinner, active.color)
+        render_subagent_spinner_only(buffer, &mut self.chat_state.wave_spinner, color)
     }
 
     fn has_active_selection_edge_scroll(&self) -> bool {

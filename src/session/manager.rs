@@ -444,6 +444,37 @@ impl SessionManager {
         }
     }
 
+    /// Position of `session_id` in the depth-first descendant order used by
+    /// `descendant_sessions`, without materializing `SessionInfo` records.
+    pub fn descendant_position(&self, parent_id: &str, session_id: &str) -> Option<usize> {
+        let mut position = 0usize;
+        self.find_descendant_position(parent_id, session_id, &mut position)
+    }
+
+    fn find_descendant_position(
+        &self,
+        parent_id: &str,
+        session_id: &str,
+        position: &mut usize,
+    ) -> Option<usize> {
+        let children = self.children_by_parent.get(parent_id)?;
+
+        for child_id in children {
+            if !self.sessions.contains_key(child_id) {
+                continue;
+            }
+            if child_id == session_id {
+                return Some(*position);
+            }
+            *position += 1;
+            if let Some(found) = self.find_descendant_position(child_id, session_id, position) {
+                return Some(found);
+            }
+        }
+
+        None
+    }
+
     pub fn child_sessions(&self, parent_id: &str) -> Vec<SessionInfo> {
         self.children_by_parent
             .get(parent_id)
@@ -939,6 +970,36 @@ mod tests {
         assert!(manager.sessions.is_empty());
         assert!(manager.current_session_id.is_none());
         assert_eq!(manager.session_counter, 0);
+    }
+
+    #[test]
+    fn descendant_position_matches_descendant_sessions_order() {
+        let mut manager = SessionManager::new();
+        let root = manager.create_session(Some("root".to_string()));
+        let child_a =
+            manager.create_child_session(root.clone(), "child-a".to_string(), "A".to_string());
+        let grandchild = manager.create_child_session(
+            child_a.clone(),
+            "grandchild".to_string(),
+            "A1".to_string(),
+        );
+        let child_b =
+            manager.create_child_session(root.clone(), "child-b".to_string(), "B".to_string());
+
+        let descendants = manager.descendant_sessions(&root);
+        for (expected_idx, info) in descendants.iter().enumerate() {
+            assert_eq!(
+                manager.descendant_position(&root, &info.id),
+                Some(expected_idx),
+                "position mismatch for {}",
+                info.id
+            );
+        }
+        assert_eq!(manager.descendant_position(&root, &grandchild), Some(1));
+        assert_eq!(manager.descendant_position(&root, &child_b), Some(2));
+        assert_eq!(manager.descendant_position(&root, "missing"), None);
+        assert_eq!(manager.descendant_position(&root, &root), None);
+        assert_eq!(manager.descendant_position(&child_a, &grandchild), Some(0));
     }
 
     #[test]

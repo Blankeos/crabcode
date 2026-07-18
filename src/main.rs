@@ -1210,15 +1210,29 @@ async fn run_event_loop(
                 && !full_render_due
             {
                 if let Some(base) = last_complete_frame.as_ref() {
-                    let base = base.clone();
                     terminal.draw(|f| {
-                        *f.buffer_mut() = base;
-                        app.render_isolated_subagent_spinner(f.buffer_mut());
+                        let buffer = f.buffer_mut();
+                        buffer.area = base.area;
+                        buffer.content.clone_from(&base.content);
+                        app.render_isolated_subagent_spinner(buffer);
                     })?;
                 }
             } else {
                 let completed = terminal.draw(|f| app.render(f))?;
-                last_complete_frame = Some(completed.buffer.clone());
+                // Keep a copy of the frame only while the isolated subagent
+                // spinner fast-path can use it; cloning the full cell grid on
+                // every frame is wasted work otherwise.
+                if isolated_spinner_interval.is_some() {
+                    match last_complete_frame.as_mut() {
+                        Some(frame) => {
+                            frame.area = completed.buffer.area;
+                            frame.content.clone_from(&completed.buffer.content);
+                        }
+                        None => last_complete_frame = Some(completed.buffer.clone()),
+                    }
+                } else {
+                    last_complete_frame = None;
+                }
                 last_full_render_at = std::time::Instant::now();
             }
             needs_redraw = false;
