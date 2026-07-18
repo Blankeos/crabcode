@@ -860,11 +860,22 @@ pub struct App {
     discovery: Option<crate::model::discovery::Discovery>,
     cached_usage_text: String,
     cached_usage_check: (usize, u64, usize),
+    cached_usage_streaming_base: Option<StreamingUsageBase>,
     terminal_title_enabled: bool,
     terminal_title_items: Vec<crate::terminal_title::TerminalTitleItem>,
     terminal_title_last: Option<String>,
     terminal_title_animation_origin: std::time::Instant,
     remote_launch_request: Option<RemoteLaunchRequest>,
+}
+
+/// Cached sum of context tokens for all completed messages of the currently
+/// viewed streaming session; only the streaming message changes per refresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StreamingUsageBase {
+    session_id: Option<String>,
+    message_count: usize,
+    streaming_idx: Option<usize>,
+    base_tokens: usize,
 }
 
 impl App {
@@ -1167,6 +1178,7 @@ impl App {
             discovery,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
+            cached_usage_streaming_base: None,
             terminal_title_enabled: crate::notify::terminal_title_supported(),
             terminal_title_items,
             terminal_title_last: None,
@@ -1500,15 +1512,38 @@ impl App {
 
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
             state.chat = std::mem::take(&mut self.chat_state.chat);
-            // Background sessions are not rendered; drop their rebuildable
-            // line caches so memory does not scale with every visited session.
-            state.chat.release_render_caches();
             state.find_bar = std::mem::take(&mut self.find_bar);
             state.input_draft = if is_child_session {
                 String::new()
             } else {
                 self.input.submission_text()
             };
+        }
+    }
+
+    /// Free the rebuildable render caches of background chats that are not
+    /// part of the current session family (shared root session). Chats inside
+    /// the family keep their caches so cycling between subagent tabs stays a
+    /// warm-cache render, while memory does not scale with every session
+    /// visited during a run.
+    fn release_render_caches_outside_current_family(&mut self) {
+        let current_root = self
+            .session_manager
+            .get_current_session_id()
+            .and_then(|id| self.session_manager.root_session_id_for(id));
+        let current_id = self.session_manager.get_current_session_id().cloned();
+        let manager = &self.session_manager;
+
+        for (id, state) in self.session_view_states.iter_mut() {
+            if current_id.as_deref() == Some(id.as_str()) {
+                continue;
+            }
+            let in_family = current_root
+                .as_deref()
+                .is_some_and(|root| manager.root_session_id_for(id).as_deref() == Some(root));
+            if !in_family {
+                state.chat.release_render_caches();
+            }
         }
     }
 
@@ -1544,6 +1579,7 @@ impl App {
         self.session_manager.switch_session(session_id);
         self.pending_session_title = None;
         self.load_session_view_state(session_id);
+        self.release_render_caches_outside_current_family();
         let is_child_session = self.session_manager.parent_id_of(session_id).is_some();
         self.base_focus = if !is_child_session
             && self.chat_state.chat.messages.is_empty()
@@ -2168,13 +2204,13 @@ impl App {
         format!("Ask anything... \"{}\"", suggestions[index])
     }
 
-    fn session_usage_text(&self) -> String {
-        let messages = &self.chat_state.chat.messages;
+    fn session_usage_text(&mut self) -> String {
         let total_tokens = if self.is_streaming {
-            Self::streaming_context_tokens(messages, self.chat_state.chat.streaming_token_count())
+            self.streaming_context_tokens_cached()
         } else {
-            crate::session::compaction::total_context_tokens(messages)
+            crate::session::compaction::total_context_tokens(&self.chat_state.chat.messages)
         };
+        let messages = &self.chat_state.chat.messages;
 
         let mut text = if total_tokens == 0 {
             String::new()
@@ -2227,25 +2263,55 @@ impl App {
         text
     }
 
-    fn streaming_context_tokens(
-        messages: &[crate::session::types::Message],
-        streaming_token_count: usize,
-    ) -> usize {
+    /// Streaming variant of the usage token count with a cached base.
+    ///
+    /// `message_context_tokens` re-serializes tool args and re-parses tool
+    /// payloads, so walking the whole transcript on every streaming layout
+    /// refresh is O(transcript bytes). Completed messages cannot change while
+    /// their count and the streaming index stay the same, so only the actively
+    /// streaming message (already tracked by the chat's token counter) needs
+    /// per-refresh accounting.
+    fn streaming_context_tokens_cached(&mut self) -> usize {
+        let session_id = self.session_manager.get_current_session_id().cloned();
+        let messages = &self.chat_state.chat.messages;
+        let message_count = messages.len();
         let streaming_idx = messages.iter().rposition(|message| {
             message.role == crate::session::types::MessageRole::Assistant && !message.is_complete
         });
 
-        messages
-            .iter()
-            .enumerate()
-            .map(|(idx, message)| {
-                if Some(idx) == streaming_idx {
-                    streaming_token_count
-                } else {
-                    crate::session::compaction::message_context_tokens(message)
-                }
-            })
-            .sum()
+        let cache_valid = self
+            .cached_usage_streaming_base
+            .as_ref()
+            .is_some_and(|base| {
+                base.session_id == session_id
+                    && base.message_count == message_count
+                    && base.streaming_idx == streaming_idx
+            });
+        if !cache_valid {
+            let base_tokens = messages
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| Some(*idx) != streaming_idx)
+                .map(|(_, message)| crate::session::compaction::message_context_tokens(message))
+                .sum();
+            self.cached_usage_streaming_base = Some(StreamingUsageBase {
+                session_id,
+                message_count,
+                streaming_idx,
+                base_tokens,
+            });
+        }
+
+        let base_tokens = self
+            .cached_usage_streaming_base
+            .as_ref()
+            .map(|base| base.base_tokens)
+            .unwrap_or(0);
+        if streaming_idx.is_some() {
+            base_tokens.saturating_add(self.chat_state.chat.streaming_token_count())
+        } else {
+            base_tokens
+        }
     }
 
     fn reasoning_capability_for_model(
@@ -10744,6 +10810,7 @@ mod tests {
             discovery: None,
             cached_usage_text: String::new(),
             cached_usage_check: (0, 0, 0),
+            cached_usage_streaming_base: None,
             terminal_title_enabled: false,
             terminal_title_items: crate::terminal_title::default_items(),
             terminal_title_last: None,
@@ -13210,6 +13277,114 @@ mod tests {
             app.session_usage_text(),
             "360 \u{00b7} last compact saved 97%"
         );
+    }
+
+    #[test]
+    fn streaming_usage_base_caches_completed_messages_and_tracks_appends() {
+        let mut app = test_app();
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::user("hello there"));
+        let mut done = crate::session::types::Message::assistant("finished answer");
+        done.token_count = Some(100);
+        app.chat_state.chat.add_message(done);
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("streaming..."));
+
+        let fresh = |app: &App| -> usize {
+            let messages = &app.chat_state.chat.messages;
+            let streaming_idx = messages.iter().rposition(|message| {
+                message.role == crate::session::types::MessageRole::Assistant
+                    && !message.is_complete
+            });
+            messages
+                .iter()
+                .enumerate()
+                .map(|(idx, message)| {
+                    if Some(idx) == streaming_idx {
+                        app.chat_state.chat.streaming_token_count()
+                    } else {
+                        crate::session::compaction::message_context_tokens(message)
+                    }
+                })
+                .sum()
+        };
+
+        let expected = fresh(&app);
+        assert_eq!(app.streaming_context_tokens_cached(), expected);
+        // Cached path must agree with a fresh walk on repeat calls.
+        assert_eq!(app.streaming_context_tokens_cached(), expected);
+        let cached_base = app
+            .cached_usage_streaming_base
+            .clone()
+            .expect("base cached");
+
+        // Appending a message invalidates the cached base.
+        let mut extra = crate::session::types::Message::assistant("more context");
+        extra.token_count = Some(40);
+        let last_idx = app.chat_state.chat.messages.len() - 1;
+        app.chat_state.chat.messages.insert(last_idx, extra);
+        let expected_after = fresh(&app);
+        assert_eq!(app.streaming_context_tokens_cached(), expected_after);
+        assert_ne!(
+            app.cached_usage_streaming_base,
+            Some(cached_base),
+            "cache should refresh when the message count changes"
+        );
+        assert!(expected_after > expected);
+    }
+
+    #[test]
+    fn switching_sessions_keeps_family_render_caches_and_releases_others() {
+        let mut app = test_app();
+        let colors = app.get_current_theme_colors();
+
+        let other = app.create_new_session(Some("Other".to_string()));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::user("other session"));
+        app.chat_state
+            .chat
+            .ensure_render_cache(80, "model", &colors);
+        assert!(app.chat_state.chat.has_render_cache());
+
+        let root = app.create_new_session(Some("Root".to_string()));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::user("root session"));
+        let child_a = app.session_manager.create_child_session(
+            root.clone(),
+            "child-a".to_string(),
+            "Subagent A".to_string(),
+        );
+        let child_b = app.session_manager.create_child_session(
+            root.clone(),
+            "child-b".to_string(),
+            "Subagent B".to_string(),
+        );
+        app.session_manager.switch_session(&root);
+
+        // Warm the render cache of child A, then switch to child B.
+        assert!(app.switch_to_session(&child_a));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::user("child a transcript"));
+        app.chat_state
+            .chat
+            .ensure_render_cache(80, "model", &colors);
+        assert!(app.switch_to_session(&child_b));
+
+        // Child A shares the current root: its caches must stay warm.
+        assert!(app
+            .session_view_states
+            .get(&child_a)
+            .is_some_and(|state| state.chat.has_render_cache()));
+        // The unrelated session's caches must be released.
+        assert!(app
+            .session_view_states
+            .get(&other)
+            .is_some_and(|state| !state.chat.has_render_cache()));
     }
 
     #[test]

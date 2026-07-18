@@ -201,25 +201,41 @@ fn tool_part_row_hash(message: &Message, part: &crate::session::types::MessagePa
     h.finish()
 }
 
-fn path_mention_score(path: &std::path::Path, text: &str) -> Option<usize> {
-    let path_text = path.to_string_lossy();
-    let candidates = [
-        path_text.into_owned(),
-        display_path(&path.to_string_lossy(), false),
-        display_path(&path.to_string_lossy(), true),
-    ];
-
-    candidates
-        .iter()
-        .filter(|candidate| !candidate.is_empty() && text.contains(candidate.as_str()))
-        .map(|candidate| candidate.len())
-        .max()
+/// A tool path candidate with its precomputed display variants, so per-line
+/// mention checks are plain substring searches without new allocations.
+struct PathMentionCandidate {
+    path: std::path::PathBuf,
+    needles: [String; 3],
 }
 
-fn mentioned_path(candidates: &[std::path::PathBuf], text: &str) -> Option<std::path::PathBuf> {
+impl PathMentionCandidate {
+    fn new(path: std::path::PathBuf) -> Self {
+        let path_text = path.to_string_lossy();
+        let needles = [
+            display_path(&path_text, false),
+            display_path(&path_text, true),
+            path_text.into_owned(),
+        ];
+        Self { path, needles }
+    }
+
+    fn mention_score(&self, text: &str) -> Option<usize> {
+        self.needles
+            .iter()
+            .filter(|needle| !needle.is_empty() && text.contains(needle.as_str()))
+            .map(|needle| needle.len())
+            .max()
+    }
+}
+
+fn mentioned_path(candidates: &[PathMentionCandidate], text: &str) -> Option<std::path::PathBuf> {
     candidates
         .iter()
-        .filter_map(|path| path_mention_score(path, text).map(|score| (path, score)))
+        .filter_map(|candidate| {
+            candidate
+                .mention_score(text)
+                .map(|score| (&candidate.path, score))
+        })
         .max_by_key(|(_, score)| *score)
         .map(|(path, _)| path.clone())
 }
@@ -1047,8 +1063,13 @@ fn push_terminal_preview<'a>(
     }
 }
 
-fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
-    let mut candidates = Vec::new();
+fn push_tool_path_refs(
+    name: &str,
+    args_obj: Option<&serde_json::Map<String, JsonValue>>,
+    metadata_obj: Option<&serde_json::Map<String, JsonValue>>,
+    title: Option<&str>,
+    candidates: &mut Vec<std::path::PathBuf>,
+) {
     let mut push_candidate = |value: Option<&str>| {
         if let Some(path) = value.and_then(path_candidate_from_value) {
             if !candidates.iter().any(|candidate| candidate == &path) {
@@ -1057,46 +1078,52 @@ fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
         }
     };
 
-    let mut push_tool_info = |info: ParsedToolMessage| {
-        let args_obj = info.args.as_ref().and_then(|value| value.as_object());
-        let metadata_obj = info.metadata.as_ref().and_then(|value| value.as_object());
-        for key in ["path", "file_path", "filePath"] {
-            push_candidate(arg_string(args_obj, &[key]));
-            push_candidate(arg_string(metadata_obj, &[key]));
-        }
+    for key in ["path", "file_path", "filePath"] {
+        push_candidate(arg_string(args_obj, &[key]));
+        push_candidate(arg_string(metadata_obj, &[key]));
+    }
 
-        if info.name == "apply_patch" {
-            if let Some(patch) = arg_string(args_obj, &["patch"]) {
-                for path in crate::tools::patch::extract_patch_paths(patch) {
-                    push_candidate(Some(&path));
-                }
+    if name == "apply_patch" {
+        if let Some(patch) = arg_string(args_obj, &["patch"]) {
+            for path in crate::tools::patch::extract_patch_paths(patch) {
+                push_candidate(Some(&path));
             }
         }
+    }
 
-        if info.name == "write_files" {
-            if let Some(files) = args_obj
-                .and_then(|obj| obj.get("files"))
-                .and_then(|value| value.as_array())
-            {
-                for file in files {
-                    let path = file.as_object().and_then(|obj| {
-                        obj.get("file_path")
-                            .or_else(|| obj.get("filePath"))
-                            .and_then(|value| value.as_str())
-                    });
-                    push_candidate(path);
-                }
+    if name == "write_files" {
+        if let Some(files) = args_obj
+            .and_then(|obj| obj.get("files"))
+            .and_then(|value| value.as_array())
+        {
+            for file in files {
+                let path = file.as_object().and_then(|obj| {
+                    obj.get("file_path")
+                        .or_else(|| obj.get("filePath"))
+                        .and_then(|value| value.as_str())
+                });
+                push_candidate(path);
             }
         }
+    }
 
-        if let Some(title) = info.title.as_deref() {
-            push_candidate(title.split_once(':').map(|(_, path)| path.trim()));
-        }
-    };
+    if let Some(title) = title {
+        push_candidate(title.split_once(':').map(|(_, path)| path.trim()));
+    }
+}
+
+fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
 
     if message.role == MessageRole::Tool {
         if let Some(info) = parse_tool_message(&message.content) {
-            push_tool_info(info);
+            push_tool_path_refs(
+                &info.name,
+                info.args.as_ref().and_then(|value| value.as_object()),
+                info.metadata.as_ref().and_then(|value| value.as_object()),
+                info.title.as_deref(),
+                &mut candidates,
+            );
         }
     } else if message.role == MessageRole::Assistant {
         let result_ids = assistant_tool_result_ids(message);
@@ -1104,9 +1131,39 @@ fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
             if !matches!(part.part_type.as_str(), "tool_call" | "tool_result") {
                 continue;
             }
-            if let Some(info) = assistant_tool_part_info(message, part, &result_ids) {
-                push_tool_info(info);
+            // Same visibility rules as assistant_tool_part_info, but reading
+            // the payload by reference: cloning args deep-copies entire file
+            // bodies for edit/write tools and this runs on every streaming
+            // layout refresh of the message.
+            if part.data.as_object().is_none() {
+                continue;
             }
+            if part.part_type == "tool_call"
+                && part.tool_id().is_none_or(|id| result_ids.contains(id))
+            {
+                continue;
+            }
+
+            let args = match part.data.get("args") {
+                Some(args) => Some(args),
+                None if part.part_type == "tool_result" => part
+                    .tool_id()
+                    .and_then(|id| message.tool_call_part_data(id))
+                    .and_then(|call| call.get("args")),
+                None => None,
+            };
+            push_tool_path_refs(
+                part.data
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("tool"),
+                args.and_then(|value| value.as_object()),
+                part.data
+                    .get("metadata")
+                    .and_then(|value| value.as_object()),
+                part.data.get("title").and_then(|value| value.as_str()),
+                &mut candidates,
+            );
         }
     }
 
@@ -1935,6 +1992,11 @@ impl Chat {
         if !cache.is_empty() {
             *cache = std::collections::HashMap::new();
         }
+    }
+
+    /// Whether the wrapped-line render cache is currently materialized.
+    pub fn has_render_cache(&self) -> bool {
+        !self.cached_lines.is_empty()
     }
 
     /// Drop rebuildable render caches to reclaim memory. Used when this chat
@@ -3316,7 +3378,12 @@ impl Chat {
         self.update_scrollbar();
     }
 
-    fn ensure_render_cache(&mut self, max_width: usize, model: &str, colors: &ThemeColors) {
+    pub(crate) fn ensure_render_cache(
+        &mut self,
+        max_width: usize,
+        model: &str,
+        colors: &ThemeColors,
+    ) {
         self.update_streaming_renderer(max_width.max(1), colors);
 
         let colors_hash = Self::cache_colors_hash(colors);
@@ -6118,10 +6185,17 @@ fn apply_byte_range_style_to_line<'a>(line: &mut Line<'a>, start: usize, end: us
 
 fn plain_line_text(line: &Line<'_>) -> String {
     let mut text = String::new();
+    plain_line_text_into(line, &mut text);
+    text
+}
+
+/// Collect a line's plain text into a reusable buffer to avoid one String
+/// allocation per line in per-refresh scans.
+fn plain_line_text_into(line: &Line<'_>, text: &mut String) {
+    text.clear();
     for span in &line.spans {
         text.push_str(span.content.as_ref());
     }
-    text
 }
 
 fn lowercase_with_original_byte_map(text: &str) -> (String, Vec<usize>) {
@@ -6213,23 +6287,28 @@ fn infer_editor_locations_for_lines(
     lines: &[Line<'_>],
 ) -> Vec<Option<EditorLocation>> {
     let mut locations = vec![None; lines.len()];
+    let mut probe = String::new();
     let has_diff_content = lines.iter().any(|line| {
-        let text = plain_line_text(line);
-        parse_rendered_diff_line(&text).is_some()
-            || parse_sign_only_rendered_diff_line(&text).is_some()
+        plain_line_text_into(line, &mut probe);
+        parse_rendered_diff_line(&probe).is_some()
+            || parse_sign_only_rendered_diff_line(&probe).is_some()
     });
     if !has_diff_content {
         return locations;
     }
 
-    let candidates = tool_path_candidates(message);
+    let candidates = tool_path_candidates(message)
+        .into_iter()
+        .map(PathMentionCandidate::new)
+        .collect::<Vec<_>>();
     if candidates.is_empty() {
         return locations;
     }
 
     let mut active: Option<RenderedDiffLocationState> = None;
+    let mut text = String::new();
     for (idx, line) in lines.iter().enumerate() {
-        let text = plain_line_text(line);
+        plain_line_text_into(line, &mut text);
         let direct_parsed = parse_rendered_diff_line(&text);
         if direct_parsed.is_none() {
             if let Some(path) = mentioned_path(&candidates, &text) {
@@ -6276,7 +6355,7 @@ fn infer_editor_locations_for_lines(
                 continue;
             }
             active = Some(RenderedDiffLocationState {
-                path: candidates[0].clone(),
+                path: candidates[0].path.clone(),
                 line: 0,
                 content_start_col: 0,
                 next_content_col: 0,
