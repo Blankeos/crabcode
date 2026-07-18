@@ -8,6 +8,8 @@ use crate::session::types::{
 
 impl From<SessionMessage> for Message {
     fn from(msg: SessionMessage) -> Self {
+        // Move the owned parts instead of cloning them: this conversion runs
+        // for the whole transcript on every streaming snapshot.
         let mut parts: Vec<PersistenceMessagePart> = if msg.parts.is_empty() {
             let mut parts = Vec::new();
             if !msg.content.is_empty() {
@@ -19,10 +21,10 @@ impl From<SessionMessage> for Message {
             parts
         } else {
             msg.parts
-                .iter()
+                .into_iter()
                 .map(|part| PersistenceMessagePart {
-                    part_type: part.part_type.clone(),
-                    data: part.data.clone(),
+                    part_type: part.part_type,
+                    data: part.data,
                 })
                 .collect()
         };
