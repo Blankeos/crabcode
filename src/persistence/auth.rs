@@ -29,6 +29,24 @@ pub enum AuthConfig {
     },
 }
 
+fn parse_auth_configs(content: &str) -> Result<HashMap<String, AuthConfig>> {
+    let entries: HashMap<String, serde_json::Value> = serde_json::from_str(content)?;
+    let mut providers = HashMap::with_capacity(entries.len());
+
+    for (name, value) in entries {
+        match serde_json::from_value(value) {
+            Ok(config) => {
+                providers.insert(name, config);
+            }
+            Err(_) => {
+                crate::emit_log!("Ignoring invalid auth config for provider '{}'", name);
+            }
+        }
+    }
+
+    Ok(providers)
+}
+
 pub struct AuthDAO {
     auth_path: PathBuf,
 }
@@ -115,7 +133,7 @@ impl AuthDAO {
             return Ok(HashMap::new());
         }
         let content = std::fs::read_to_string(&self.auth_path)?;
-        Ok(serde_json::from_str(&content)?)
+        parse_auth_configs(&content)
     }
 
     pub fn save(&self, providers: &HashMap<String, AuthConfig>) -> Result<()> {
@@ -152,6 +170,45 @@ impl AuthDAO {
     pub fn get_provider(&self, name: &str) -> Result<Option<AuthConfig>> {
         let providers = self.load()?;
         Ok(providers.get(name).cloned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_auth_configs_ignores_invalid_provider_entries() {
+        let providers = parse_auth_configs(
+            r#"{
+                "anthropic": { "type": "api", "key": "valid-key" },
+                "ollama": { "type": "local" },
+                "missing-key": { "type": "api" },
+                "unknown-type": { "type": "magic", "key": "ignored" },
+                "wrong-shape": "not-an-auth-config"
+            }"#,
+        )
+        .expect("top-level auth JSON should parse");
+
+        assert_eq!(providers.len(), 2);
+        assert!(matches!(
+            providers.get("anthropic"),
+            Some(AuthConfig::Api { key }) if key == "valid-key"
+        ));
+        assert!(matches!(providers.get("ollama"), Some(AuthConfig::Local)));
+        assert!(!providers.contains_key("missing-key"));
+        assert!(!providers.contains_key("unknown-type"));
+        assert!(!providers.contains_key("wrong-shape"));
+    }
+
+    #[test]
+    fn parse_auth_configs_rejects_malformed_json() {
+        assert!(parse_auth_configs(r#"{ "anthropic": "#).is_err());
+    }
+
+    #[test]
+    fn parse_auth_configs_rejects_non_object_top_level() {
+        assert!(parse_auth_configs(r#"[{ "type": "local" }]"#).is_err());
     }
 }
 
