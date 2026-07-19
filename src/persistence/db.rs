@@ -12,6 +12,8 @@ fn init_db_conn() -> Result<DbConn> {
 
     let mut conn = Connection::open(&db_path)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    let _ = conn.pragma_update(None, "synchronous", "NORMAL");
     run_migrations(&mut conn)?;
 
     Ok(Arc::new(Mutex::new(conn)))

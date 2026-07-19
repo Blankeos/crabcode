@@ -78,6 +78,11 @@ impl HistoryDAO {
         let db_path = data_dir.join("data.db");
 
         let mut conn = Connection::open(&db_path)?;
+        // WAL keeps readers non-blocking and turns the frequent streaming
+        // snapshot writes into cheap log appends instead of full journal
+        // rewrites with an fsync per statement.
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         run_migrations(&mut conn)?;
 
         // Ensure session_identifier column exists on pre-existing databases
@@ -452,7 +457,13 @@ impl HistoryDAO {
     }
 
     pub fn replace_messages(&self, session_id: i64, messages: &[Message]) -> Result<()> {
-        self.conn.execute(
+        // A single transaction turns the delete + N inserts into one commit.
+        // This runs on the UI thread every streaming snapshot, so per-statement
+        // autocommits (each with their own fsync) caused visible lag on long
+        // transcripts.
+        let tx = self.conn.unchecked_transaction()?;
+
+        tx.execute(
             "DELETE FROM messages WHERE session_id = ?1",
             params![session_id],
         )?;
@@ -460,18 +471,21 @@ impl HistoryDAO {
         let mut total_tokens: i64 = 0;
         let mut updated_at = chrono::Utc::now().timestamp();
 
-        for msg in messages {
-            let parts_json = serde_json::to_string(&msg.parts)?;
-            total_tokens += msg.tokens_used as i64;
-            updated_at = msg.timestamp;
-
-            self.conn.execute(
+        {
+            let mut insert = tx.prepare_cached(
                 "INSERT INTO messages (
                      id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
                      t0_ms, t1_ms, tn_ms, output_tokens
                  )
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                params![
+            )?;
+
+            for msg in messages {
+                let parts_json = serde_json::to_string(&msg.parts)?;
+                total_tokens += msg.tokens_used as i64;
+                updated_at = msg.timestamp;
+
+                insert.execute(params![
                     &msg.id,
                     session_id,
                     &msg.role,
@@ -486,8 +500,8 @@ impl HistoryDAO {
                     msg.t1_ms,
                     msg.tn_ms,
                     msg.output_tokens,
-                ],
-            )?;
+                ])?;
+            }
         }
 
         let session = self.get_session(session_id)?;
@@ -501,7 +515,7 @@ impl HistoryDAO {
             0.0
         };
 
-        self.conn.execute(
+        tx.execute(
             "UPDATE sessions
              SET total_tokens = ?1,
                  total_cost = 0,
@@ -517,6 +531,8 @@ impl HistoryDAO {
                 session_id
             ],
         )?;
+
+        tx.commit()?;
 
         Ok(())
     }

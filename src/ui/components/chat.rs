@@ -128,25 +128,114 @@ struct CachedMarkdownPart {
     lines: Vec<Line<'static>>,
 }
 
-fn path_mention_score(path: &std::path::Path, text: &str) -> Option<usize> {
-    let path_text = path.to_string_lossy();
-    let candidates = [
-        path_text.into_owned(),
-        display_path(&path.to_string_lossy(), false),
-        display_path(&path.to_string_lossy(), true),
-    ];
-
-    candidates
-        .iter()
-        .filter(|candidate| !candidate.is_empty() && text.contains(candidate.as_str()))
-        .map(|candidate| candidate.len())
-        .max()
+/// Rendered lines for a single tool part of the actively streaming assistant
+/// message, keyed by a structural hash of the part payload. Avoids re-running
+/// the JSON clone + serialize + parse + format (and syntect diff highlighting)
+/// pipeline for every unchanged tool row on each streaming layout refresh.
+#[derive(Debug, Clone)]
+struct CachedToolRow {
+    data_hash: u64,
+    width: usize,
+    colors_hash: u64,
+    lines: Vec<Line<'static>>,
 }
 
-fn mentioned_path(candidates: &[std::path::PathBuf], text: &str) -> Option<std::path::PathBuf> {
+fn hash_json_value(value: &JsonValue, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+
+    match value {
+        JsonValue::Null => 0u8.hash(h),
+        JsonValue::Bool(b) => {
+            1u8.hash(h);
+            b.hash(h);
+        }
+        JsonValue::Number(n) => {
+            2u8.hash(h);
+            if let Some(i) = n.as_i64() {
+                i.hash(h);
+            } else if let Some(u) = n.as_u64() {
+                u.hash(h);
+            } else {
+                n.as_f64().unwrap_or(0.0).to_bits().hash(h);
+            }
+        }
+        JsonValue::String(s) => {
+            3u8.hash(h);
+            s.hash(h);
+        }
+        JsonValue::Array(items) => {
+            4u8.hash(h);
+            items.len().hash(h);
+            for item in items {
+                hash_json_value(item, h);
+            }
+        }
+        JsonValue::Object(map) => {
+            5u8.hash(h);
+            map.len().hash(h);
+            for (key, item) in map {
+                key.hash(h);
+                hash_json_value(item, h);
+            }
+        }
+    }
+}
+
+/// Structural hash of everything that feeds a rendered tool row.
+fn tool_part_row_hash(message: &Message, part: &crate::session::types::MessagePart) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    part.part_type.hash(&mut h);
+    hash_json_value(&part.data, &mut h);
+    // A tool_result without args borrows them from the matching tool_call.
+    if part.part_type == "tool_result" && part.data.get("args").is_none() {
+        if let Some(args) = part
+            .tool_id()
+            .and_then(|id| message.tool_call_part_data(id))
+            .and_then(|call| call.get("args"))
+        {
+            hash_json_value(args, &mut h);
+        }
+    }
+    h.finish()
+}
+
+/// A tool path candidate with its precomputed display variants, so per-line
+/// mention checks are plain substring searches without new allocations.
+struct PathMentionCandidate {
+    path: std::path::PathBuf,
+    needles: [String; 3],
+}
+
+impl PathMentionCandidate {
+    fn new(path: std::path::PathBuf) -> Self {
+        let path_text = path.to_string_lossy();
+        let needles = [
+            display_path(&path_text, false),
+            display_path(&path_text, true),
+            path_text.into_owned(),
+        ];
+        Self { path, needles }
+    }
+
+    fn mention_score(&self, text: &str) -> Option<usize> {
+        self.needles
+            .iter()
+            .filter(|needle| !needle.is_empty() && text.contains(needle.as_str()))
+            .map(|needle| needle.len())
+            .max()
+    }
+}
+
+fn mentioned_path(candidates: &[PathMentionCandidate], text: &str) -> Option<std::path::PathBuf> {
     candidates
         .iter()
-        .filter_map(|path| path_mention_score(path, text).map(|score| (path, score)))
+        .filter_map(|candidate| {
+            candidate
+                .mention_score(text)
+                .map(|score| (&candidate.path, score))
+        })
         .max_by_key(|(_, score)| *score)
         .map(|(path, _)| path.clone())
 }
@@ -198,6 +287,10 @@ pub struct Chat {
         std::cell::RefCell<std::collections::HashMap<(usize, usize), CachedMarkdownPart>>,
     /// Stable formatted tool prefix before the actively streaming final text part.
     ordered_tool_prefix_cache: std::cell::RefCell<Option<CachedOrderedToolPrefix>>,
+    /// Rendered tool rows of the actively streaming assistant message,
+    /// keyed by (message_idx, part_idx) and validated by a payload hash.
+    ordered_tool_row_cache:
+        std::cell::RefCell<std::collections::HashMap<(usize, usize), CachedToolRow>>,
     /// Earliest streaming assistant index with text appended since the last markdown/layout refresh.
     pending_streaming_render_dirty_from: Option<usize>,
     /// Whether pending streaming changes include message content that must wait for markdown refresh.
@@ -970,8 +1063,13 @@ fn push_terminal_preview<'a>(
     }
 }
 
-fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
-    let mut candidates = Vec::new();
+fn push_tool_path_refs(
+    name: &str,
+    args_obj: Option<&serde_json::Map<String, JsonValue>>,
+    metadata_obj: Option<&serde_json::Map<String, JsonValue>>,
+    title: Option<&str>,
+    candidates: &mut Vec<std::path::PathBuf>,
+) {
     let mut push_candidate = |value: Option<&str>| {
         if let Some(path) = value.and_then(path_candidate_from_value) {
             if !candidates.iter().any(|candidate| candidate == &path) {
@@ -980,46 +1078,52 @@ fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
         }
     };
 
-    let mut push_tool_info = |info: ParsedToolMessage| {
-        let args_obj = info.args.as_ref().and_then(|value| value.as_object());
-        let metadata_obj = info.metadata.as_ref().and_then(|value| value.as_object());
-        for key in ["path", "file_path", "filePath"] {
-            push_candidate(arg_string(args_obj, &[key]));
-            push_candidate(arg_string(metadata_obj, &[key]));
-        }
+    for key in ["path", "file_path", "filePath"] {
+        push_candidate(arg_string(args_obj, &[key]));
+        push_candidate(arg_string(metadata_obj, &[key]));
+    }
 
-        if info.name == "apply_patch" {
-            if let Some(patch) = arg_string(args_obj, &["patch"]) {
-                for path in crate::tools::patch::extract_patch_paths(patch) {
-                    push_candidate(Some(&path));
-                }
+    if name == "apply_patch" {
+        if let Some(patch) = arg_string(args_obj, &["patch"]) {
+            for path in crate::tools::patch::extract_patch_paths(patch) {
+                push_candidate(Some(&path));
             }
         }
+    }
 
-        if info.name == "write_files" {
-            if let Some(files) = args_obj
-                .and_then(|obj| obj.get("files"))
-                .and_then(|value| value.as_array())
-            {
-                for file in files {
-                    let path = file.as_object().and_then(|obj| {
-                        obj.get("file_path")
-                            .or_else(|| obj.get("filePath"))
-                            .and_then(|value| value.as_str())
-                    });
-                    push_candidate(path);
-                }
+    if name == "write_files" {
+        if let Some(files) = args_obj
+            .and_then(|obj| obj.get("files"))
+            .and_then(|value| value.as_array())
+        {
+            for file in files {
+                let path = file.as_object().and_then(|obj| {
+                    obj.get("file_path")
+                        .or_else(|| obj.get("filePath"))
+                        .and_then(|value| value.as_str())
+                });
+                push_candidate(path);
             }
         }
+    }
 
-        if let Some(title) = info.title.as_deref() {
-            push_candidate(title.split_once(':').map(|(_, path)| path.trim()));
-        }
-    };
+    if let Some(title) = title {
+        push_candidate(title.split_once(':').map(|(_, path)| path.trim()));
+    }
+}
+
+fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
 
     if message.role == MessageRole::Tool {
         if let Some(info) = parse_tool_message(&message.content) {
-            push_tool_info(info);
+            push_tool_path_refs(
+                &info.name,
+                info.args.as_ref().and_then(|value| value.as_object()),
+                info.metadata.as_ref().and_then(|value| value.as_object()),
+                info.title.as_deref(),
+                &mut candidates,
+            );
         }
     } else if message.role == MessageRole::Assistant {
         let result_ids = assistant_tool_result_ids(message);
@@ -1027,9 +1131,39 @@ fn tool_path_candidates(message: &Message) -> Vec<std::path::PathBuf> {
             if !matches!(part.part_type.as_str(), "tool_call" | "tool_result") {
                 continue;
             }
-            if let Some(info) = assistant_tool_part_info(message, part, &result_ids) {
-                push_tool_info(info);
+            // Same visibility rules as assistant_tool_part_info, but reading
+            // the payload by reference: cloning args deep-copies entire file
+            // bodies for edit/write tools and this runs on every streaming
+            // layout refresh of the message.
+            if part.data.as_object().is_none() {
+                continue;
             }
+            if part.part_type == "tool_call"
+                && part.tool_id().is_none_or(|id| result_ids.contains(id))
+            {
+                continue;
+            }
+
+            let args = match part.data.get("args") {
+                Some(args) => Some(args),
+                None if part.part_type == "tool_result" => part
+                    .tool_id()
+                    .and_then(|id| message.tool_call_part_data(id))
+                    .and_then(|call| call.get("args")),
+                None => None,
+            };
+            push_tool_path_refs(
+                part.data
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("tool"),
+                args.and_then(|value| value.as_object()),
+                part.data
+                    .get("metadata")
+                    .and_then(|value| value.as_object()),
+                part.data.get("title").and_then(|value| value.as_str()),
+                &mut candidates,
+            );
         }
     }
 
@@ -1472,6 +1606,7 @@ impl Chat {
             streaming_reasoning_renderer_content_len: 0,
             ordered_markdown_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             ordered_tool_prefix_cache: std::cell::RefCell::new(None),
+            ordered_tool_row_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             pending_streaming_render_dirty_from: None,
             pending_streaming_content_dirty: false,
             last_streaming_cache_refresh_at: None,
@@ -1535,6 +1670,7 @@ impl Chat {
             streaming_reasoning_renderer_content_len: 0,
             ordered_markdown_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             ordered_tool_prefix_cache: std::cell::RefCell::new(None),
+            ordered_tool_row_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             pending_streaming_render_dirty_from: None,
             pending_streaming_content_dirty: false,
             last_streaming_cache_refresh_at: None,
@@ -1820,6 +1956,8 @@ impl Chat {
         self.cached_active_tools_revision.set(0);
         self.cached_has_active_tools.set(false);
         *self.ordered_tool_prefix_cache.borrow_mut() = None;
+        self.ordered_markdown_cache.borrow_mut().clear();
+        self.ordered_tool_row_cache.borrow_mut().clear();
         self.streaming_renderer_content_len = 0;
         self.streaming_reasoning_renderer = None;
         self.streaming_reasoning_message_idx = None;
@@ -1847,6 +1985,37 @@ impl Chat {
         self.cached_fingerprint = 0;
         self.cached_active_tools_revision.set(0);
         *self.ordered_tool_prefix_cache.borrow_mut() = None;
+    }
+
+    fn drop_ordered_tool_row_cache(&self) {
+        let mut cache = self.ordered_tool_row_cache.borrow_mut();
+        if !cache.is_empty() {
+            *cache = std::collections::HashMap::new();
+        }
+    }
+
+    /// Whether the wrapped-line render cache is currently materialized.
+    pub fn has_render_cache(&self) -> bool {
+        !self.cached_lines.is_empty()
+    }
+
+    /// Drop rebuildable render caches to reclaim memory. Used when this chat
+    /// is stored away as a background session view; everything is rebuilt on
+    /// the next render.
+    pub fn release_render_caches(&mut self) {
+        self.cached_lines = Vec::new();
+        self.cached_editor_locations = Vec::new();
+        self.cached_positions = Vec::new();
+        self.message_line_positions = Vec::new();
+        self.cached_revision = 0;
+        self.cached_width = 0;
+        self.cached_colors_hash = 0;
+        self.render_dirty_from = 0;
+        self.search_cached_revision = 0;
+        self.search_matches = Vec::new();
+        *self.ordered_tool_prefix_cache.borrow_mut() = None;
+        self.ordered_markdown_cache.borrow_mut().clear();
+        self.drop_ordered_tool_row_cache();
     }
 
     fn clear_ordered_tool_prefix_cache_from(&self, message_idx: usize) {
@@ -2130,7 +2299,7 @@ impl Chat {
         (now_epoch_ms() / 500) % 2 == 1
     }
 
-    fn apply_active_tool_marker_blink(lines: &mut [Line<'static>]) {
+    fn apply_active_tool_marker_blink(lines: &mut [Line<'_>]) {
         if !Self::current_tool_marker_animation_phase() {
             return;
         }
@@ -2236,6 +2405,7 @@ impl Chat {
             self.streaming_reasoning_renderer = None;
             self.streaming_reasoning_message_idx = None;
             self.streaming_reasoning_renderer_content_len = 0;
+            self.drop_ordered_tool_row_cache();
             return;
         }
 
@@ -2247,6 +2417,7 @@ impl Chat {
             self.streaming_reasoning_renderer = None;
             self.streaming_reasoning_message_idx = None;
             self.streaming_reasoning_renderer_content_len = 0;
+            self.drop_ordered_tool_row_cache();
             return;
         };
 
@@ -2257,6 +2428,7 @@ impl Chat {
                 self.streaming_renderer = Some(SimpleStreamingRenderer::new());
                 self.streaming_message_idx = Some(last_idx);
                 self.streaming_renderer_content_len = 0;
+                self.drop_ordered_tool_row_cache();
             }
         } else {
             // No renderer yet, create one
@@ -2974,6 +3146,9 @@ impl Chat {
         }
 
         let ((start_line, start_col), (end_line, _)) = self.selection.range();
+        // Bound the scan by the cached location table: lines beyond it have no
+        // locations, and an unclamped selection can extend to usize::MAX.
+        let end_line = end_line.min(self.cached_editor_locations.len().saturating_sub(1));
         for line_idx in start_line..=end_line {
             let Some(Some(location)) = self.cached_editor_locations.get(line_idx) else {
                 continue;
@@ -3203,7 +3378,12 @@ impl Chat {
         self.update_scrollbar();
     }
 
-    fn ensure_render_cache(&mut self, max_width: usize, model: &str, colors: &ThemeColors) {
+    pub(crate) fn ensure_render_cache(
+        &mut self,
+        max_width: usize,
+        model: &str,
+        colors: &ThemeColors,
+    ) {
         self.update_streaming_renderer(max_width.max(1), colors);
 
         let colors_hash = Self::cache_colors_hash(colors);
@@ -3390,7 +3570,12 @@ impl Chat {
             .map(|message| timeline_highlight_bg(message, colors))
             .unwrap_or(colors.interactive);
 
-        let mut content_lines: Vec<Line<'static>> = all_lines[visible_start..visible_end].to_vec();
+        // Borrow the visible lines from the cache instead of deep-cloning
+        // their span strings on every frame.
+        let mut content_lines: Vec<Line<'_>> = all_lines[visible_start..visible_end]
+            .iter()
+            .map(borrowed_line)
+            .collect();
         Self::apply_active_tool_marker_blink(&mut content_lines);
         apply_timeline_highlight_to_lines(
             &mut content_lines,
@@ -4263,36 +4448,57 @@ impl Chat {
                                 lines.push(Line::from(""));
                             }
                             "tool_call" | "tool_result" => {
-                                let Some(parsed) =
-                                    assistant_tool_part_info(message, part, &result_ids)
-                                else {
+                                // Same skip conditions as assistant_tool_part_info:
+                                // superseded/id-less calls and non-object payloads
+                                // render nothing.
+                                if part.data.as_object().is_none() {
                                     continue;
-                                };
-
-                                if let Some(item) = exploration_tool_item(&parsed) {
-                                    flush_pending_tasks(
-                                        self,
-                                        &mut pending_tasks,
-                                        &mut lines,
-                                        max_width,
-                                        colors,
-                                        &mut emitted_anything,
-                                    );
-                                    pending_exploration.push(item);
+                                }
+                                if part.part_type == "tool_call"
+                                    && part.tool_id().is_none_or(|id| result_ids.contains(id))
+                                {
                                     continue;
                                 }
 
-                                if let Some(item) = task_tool_item(&parsed) {
-                                    flush_pending_exploration(
-                                        self,
-                                        &mut pending_exploration,
-                                        &mut lines,
-                                        max_width,
-                                        colors,
-                                        &mut emitted_anything,
-                                    );
-                                    pending_tasks.push(item);
-                                    continue;
+                                // Only these tool names can join exploration/task
+                                // groups; for every other tool skip building the
+                                // parsed info (it deep-clones args/metadata JSON).
+                                let group_candidate = matches!(
+                                    part.data.get("name").and_then(JsonValue::as_str),
+                                    Some("read" | "list" | "glob" | "grep" | "task")
+                                );
+                                if group_candidate {
+                                    let Some(parsed) =
+                                        assistant_tool_part_info(message, part, &result_ids)
+                                    else {
+                                        continue;
+                                    };
+
+                                    if let Some(item) = exploration_tool_item(&parsed) {
+                                        flush_pending_tasks(
+                                            self,
+                                            &mut pending_tasks,
+                                            &mut lines,
+                                            max_width,
+                                            colors,
+                                            &mut emitted_anything,
+                                        );
+                                        pending_exploration.push(item);
+                                        continue;
+                                    }
+
+                                    if let Some(item) = task_tool_item(&parsed) {
+                                        flush_pending_exploration(
+                                            self,
+                                            &mut pending_exploration,
+                                            &mut lines,
+                                            max_width,
+                                            colors,
+                                            &mut emitted_anything,
+                                        );
+                                        pending_tasks.push(item);
+                                        continue;
+                                    }
                                 }
 
                                 flush_pending_tool_groups(
@@ -4305,17 +4511,48 @@ impl Chat {
                                     &mut emitted_anything,
                                 );
                                 emitted_anything = true;
+
+                                let row_key = (idx, part_idx);
+                                let row_hash = tool_part_row_hash(message, part);
+                                let cached_row = self
+                                    .ordered_tool_row_cache
+                                    .borrow()
+                                    .get(&row_key)
+                                    .filter(|cached| {
+                                        cached.data_hash == row_hash
+                                            && cached.width == max_width
+                                            && cached.colors_hash == colors_hash
+                                    })
+                                    .map(|cached| cached.lines.clone());
+                                if let Some(row_lines) = cached_row {
+                                    lines.extend(row_lines);
+                                    lines.push(Line::from(""));
+                                    continue;
+                                }
+
                                 let Some(content) =
                                     assistant_tool_part_content(message, part, &result_ids)
                                 else {
                                     continue;
                                 };
                                 let tool_message = Message::tool(content);
-                                let tool_lines =
-                                    self.format_tool_row(&tool_message, max_width, colors, true);
-                                for line in tool_lines.into_iter().map(line_to_static) {
-                                    lines.push(line);
+                                let tool_lines: Vec<Line<'static>> = self
+                                    .format_tool_row(&tool_message, max_width, colors, true)
+                                    .into_iter()
+                                    .map(line_to_static)
+                                    .collect();
+                                if is_streaming {
+                                    self.ordered_tool_row_cache.borrow_mut().insert(
+                                        row_key,
+                                        CachedToolRow {
+                                            data_hash: row_hash,
+                                            width: max_width,
+                                            colors_hash,
+                                            lines: tool_lines.clone(),
+                                        },
+                                    );
                                 }
+                                lines.extend(tool_lines);
                                 lines.push(Line::from(""));
                             }
                             _ => {}
@@ -5828,7 +6065,7 @@ fn render_line_backgrounds(
 }
 
 fn apply_timeline_highlight_to_lines(
-    lines: &mut [Line<'static>],
+    lines: &mut [Line<'_>],
     highlight_range: Option<(usize, usize)>,
     visible_start: usize,
     bg: Color,
@@ -5853,7 +6090,7 @@ fn apply_timeline_highlight_to_lines(
 }
 
 fn apply_search_highlights_to_lines(
-    lines: &mut [Line<'static>],
+    lines: &mut [Line<'_>],
     matches: &[ChatSearchMatch],
     active_match: Option<usize>,
     visible_start: usize,
@@ -5891,21 +6128,26 @@ fn apply_search_highlights_to_lines(
     }
 }
 
-fn apply_byte_range_style_to_line(
-    line: &mut Line<'static>,
-    start: usize,
-    end: usize,
-    style: Style,
-) {
+fn apply_byte_range_style_to_line<'a>(line: &mut Line<'a>, start: usize, end: usize, style: Style) {
     if start >= end {
         return;
+    }
+
+    fn cow_slice<'a>(
+        content: &std::borrow::Cow<'a, str>,
+        range: std::ops::Range<usize>,
+    ) -> std::borrow::Cow<'a, str> {
+        match content {
+            std::borrow::Cow::Borrowed(s) => std::borrow::Cow::Borrowed(&s[range]),
+            std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s[range].to_string()),
+        }
     }
 
     let mut new_spans = Vec::with_capacity(line.spans.len().saturating_add(2));
     let mut line_offset = 0usize;
 
     for span in std::mem::take(&mut line.spans) {
-        let content = span.content.into_owned();
+        let content = span.content;
         let span_start = line_offset;
         let span_end = span_start.saturating_add(content.len());
         line_offset = span_end;
@@ -5919,16 +6161,22 @@ fn apply_byte_range_style_to_line(
         let local_end = end.saturating_sub(span_start).min(content.len());
 
         if local_start > 0 {
-            new_spans.push(Span::styled(content[..local_start].to_string(), span.style));
+            new_spans.push(Span::styled(
+                cow_slice(&content, 0..local_start),
+                span.style,
+            ));
         }
         if local_end > local_start {
             new_spans.push(Span::styled(
-                content[local_start..local_end].to_string(),
+                cow_slice(&content, local_start..local_end),
                 span.style.patch(style),
             ));
         }
         if local_end < content.len() {
-            new_spans.push(Span::styled(content[local_end..].to_string(), span.style));
+            new_spans.push(Span::styled(
+                cow_slice(&content, local_end..content.len()),
+                span.style,
+            ));
         }
     }
 
@@ -5937,10 +6185,17 @@ fn apply_byte_range_style_to_line(
 
 fn plain_line_text(line: &Line<'_>) -> String {
     let mut text = String::new();
+    plain_line_text_into(line, &mut text);
+    text
+}
+
+/// Collect a line's plain text into a reusable buffer to avoid one String
+/// allocation per line in per-refresh scans.
+fn plain_line_text_into(line: &Line<'_>, text: &mut String) {
+    text.clear();
     for span in &line.spans {
         text.push_str(span.content.as_ref());
     }
-    text
 }
 
 fn lowercase_with_original_byte_map(text: &str) -> (String, Vec<usize>) {
@@ -6032,23 +6287,28 @@ fn infer_editor_locations_for_lines(
     lines: &[Line<'_>],
 ) -> Vec<Option<EditorLocation>> {
     let mut locations = vec![None; lines.len()];
+    let mut probe = String::new();
     let has_diff_content = lines.iter().any(|line| {
-        let text = plain_line_text(line);
-        parse_rendered_diff_line(&text).is_some()
-            || parse_sign_only_rendered_diff_line(&text).is_some()
+        plain_line_text_into(line, &mut probe);
+        parse_rendered_diff_line(&probe).is_some()
+            || parse_sign_only_rendered_diff_line(&probe).is_some()
     });
     if !has_diff_content {
         return locations;
     }
 
-    let candidates = tool_path_candidates(message);
+    let candidates = tool_path_candidates(message)
+        .into_iter()
+        .map(PathMentionCandidate::new)
+        .collect::<Vec<_>>();
     if candidates.is_empty() {
         return locations;
     }
 
     let mut active: Option<RenderedDiffLocationState> = None;
+    let mut text = String::new();
     for (idx, line) in lines.iter().enumerate() {
-        let text = plain_line_text(line);
+        plain_line_text_into(line, &mut text);
         let direct_parsed = parse_rendered_diff_line(&text);
         if direct_parsed.is_none() {
             if let Some(path) = mentioned_path(&candidates, &text) {
@@ -6095,7 +6355,7 @@ fn infer_editor_locations_for_lines(
                 continue;
             }
             active = Some(RenderedDiffLocationState {
-                path: candidates[0].clone(),
+                path: candidates[0].path.clone(),
                 line: 0,
                 content_start_col: 0,
                 next_content_col: 0,
@@ -6372,6 +6632,23 @@ fn image_index_from_placeholder(placeholder: &str) -> Option<usize> {
     one_based.checked_sub(1)
 }
 
+/// Shallow copy of a cached line whose spans borrow the original string data.
+/// Used for per-frame viewport rendering to avoid deep-cloning span contents.
+fn borrowed_line<'a>(line: &'a Line<'_>) -> Line<'a> {
+    Line {
+        style: line.style,
+        alignment: line.alignment,
+        spans: line
+            .spans
+            .iter()
+            .map(|span| Span {
+                content: std::borrow::Cow::Borrowed(span.content.as_ref()),
+                style: span.style,
+            })
+            .collect(),
+    }
+}
+
 fn line_to_static(line: Line<'_>) -> Line<'static> {
     Line {
         spans: line
@@ -6483,6 +6760,115 @@ mod tests {
         let chat = Chat::new();
         assert!(chat.messages.is_empty());
         assert_eq!(chat.scroll_offset, 0);
+    }
+
+    #[test]
+    fn editor_location_for_selection_terminates_on_unclamped_selection() {
+        let mut chat = Chat::new();
+        chat.add_message(Message::assistant("alpha beta"));
+        // Selection extending far past the cached location table (e.g. before
+        // the first render clamps it) must not scan the whole range.
+        chat.selection.active = true;
+        chat.selection.start_line = 0;
+        chat.selection.end_line = usize::MAX;
+
+        assert!(chat.editor_location_for_selection().is_none());
+    }
+
+    #[test]
+    fn streaming_tool_rows_are_cached_and_invalidated_by_payload_changes() {
+        let mut chat = Chat::new();
+        let mut msg = Message::incomplete("");
+        msg.add_tool_call_part("call_1", "bash", serde_json::json!({ "cmd": "ls" }));
+        chat.messages.push(msg);
+        let colors = test_colors();
+
+        let first = chat
+            .build_all_lines(80, "model", &colors)
+            .iter()
+            .map(trimmed_line_text)
+            .collect::<Vec<_>>();
+        assert!(
+            chat.ordered_tool_row_cache.borrow().contains_key(&(0, 0)),
+            "streaming tool row should be cached"
+        );
+
+        // Warm-cache rebuild must produce identical output.
+        let second = chat
+            .build_all_lines(80, "model", &colors)
+            .iter()
+            .map(trimmed_line_text)
+            .collect::<Vec<_>>();
+        assert_eq!(first, second);
+        assert!(first
+            .iter()
+            .any(|line| line.starts_with(TOOL_MARKER_ACTIVE)));
+
+        // A tool result supersedes the call; the row must re-render.
+        chat.messages[0].add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_1",
+            "name": "bash",
+            "status": "ok",
+            "args": { "cmd": "ls" },
+            "output_preview": "file.txt",
+        }));
+        let third = chat
+            .build_all_lines(80, "model", &colors)
+            .iter()
+            .map(trimmed_line_text)
+            .collect::<Vec<_>>();
+        assert_ne!(first, third);
+        assert!(third.iter().any(|line| line.starts_with(TOOL_MARKER_DONE)));
+        assert!(third.iter().any(|line| line.contains("file.txt")));
+    }
+
+    #[test]
+    fn completed_messages_do_not_populate_tool_row_cache() {
+        let mut chat = Chat::new();
+        let mut msg = Message::assistant("");
+        msg.add_tool_call_part("call_1", "bash", serde_json::json!({ "cmd": "ls" }));
+        msg.add_or_update_tool_result_part(serde_json::json!({
+            "id": "call_1",
+            "name": "bash",
+            "status": "ok",
+            "output_preview": "file.txt",
+        }));
+        msg.mark_complete();
+        chat.messages.push(msg);
+        let colors = test_colors();
+
+        let _ = chat.build_all_lines(80, "model", &colors);
+        assert!(chat.ordered_tool_row_cache.borrow().is_empty());
+    }
+
+    #[test]
+    fn release_render_caches_forces_full_rebuild_with_identical_output() {
+        let mut chat = Chat::new();
+        chat.add_message(Message::user("hello"));
+        chat.add_message(Message::assistant("world **bold**"));
+        let colors = test_colors();
+
+        chat.ensure_render_cache(80, "model", &colors);
+        let before = chat
+            .cached_lines
+            .iter()
+            .map(trimmed_line_text)
+            .collect::<Vec<_>>();
+        let positions_before = chat.cached_positions.clone();
+        assert!(!before.is_empty());
+
+        chat.release_render_caches();
+        assert!(chat.cached_lines.is_empty());
+        assert!(chat.cached_positions.is_empty());
+
+        chat.ensure_render_cache(80, "model", &colors);
+        let after = chat
+            .cached_lines
+            .iter()
+            .map(trimmed_line_text)
+            .collect::<Vec<_>>();
+        assert_eq!(before, after);
+        assert_eq!(positions_before, chat.cached_positions);
     }
 
     #[test]
