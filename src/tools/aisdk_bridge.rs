@@ -124,7 +124,7 @@ pub async fn convert_to_aisdk_tools(
                 };
 
                 if let Err(e) = handler.validate(&input) {
-                    let err = format!("Validation error: {}", e);
+                    let err = e.to_string();
                     send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
                     crate::emit_log!(
                         "[AISDK_TOOL] error tool={} call_id={} session_id={} message_id={} agent_mode={} duration_ms={} error={}",
@@ -164,12 +164,13 @@ pub async fn convert_to_aisdk_tools(
                     agent_mode.clone(),
                     cancel_token.clone(),
                 )
-                .with_call_id(call_id.clone());
+                .with_call_id(call_id.clone())
+                .with_workdir(permissions.workdir().to_path_buf());
 
                 let tool_result = handler
                     .execute(input, &ctx)
                     .await
-                    .map_err(|e| format!("Execution error: {}", e));
+                    .map_err(|e| e.to_string());
                 let tool_result = match tool_result {
                     Ok(tool_result) => tool_result,
                     Err(err) => {

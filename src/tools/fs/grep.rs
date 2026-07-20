@@ -4,7 +4,7 @@ use crate::tools::{
 };
 use async_trait::async_trait;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const BINARY_CHECK_SIZE: usize = 8192;
 const RESULT_LIMIT: usize = 200;
@@ -30,6 +30,14 @@ impl GrepTool {
     }
 }
 
+fn no_matches_result(pattern: &str) -> ToolResult {
+    ToolResult::new(format!("Grep: {}", pattern), "No matches found.")
+        .with_metadata("match_count", serde_json::json!(0))
+        .with_metadata("file_count", serde_json::json!(0))
+        .with_metadata("truncated", serde_json::json!(false))
+        .with_metadata("limit", serde_json::json!(RESULT_LIMIT))
+}
+
 #[async_trait]
 impl ToolHandler for GrepTool {
     fn definition(&self) -> Tool {
@@ -45,8 +53,9 @@ impl ToolHandler for GrepTool {
                 },
                 ParameterSchema {
                     name: "path".to_string(),
-                    description: "Directory or file to search (default: current directory)"
-                        .to_string(),
+                    description:
+                        "Directory or file to search (default: current workspace; blank also uses it)"
+                            .to_string(),
                     required: false,
                     param_type: ParameterType::String,
                 },
@@ -66,18 +75,18 @@ impl ToolHandler for GrepTool {
         validate_required(params, &["pattern"])
     }
 
-    async fn execute(&self, params: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let pattern = get_string_param(&params, "pattern")
             .ok_or_else(|| ToolError::Validation("pattern is required".to_string()))?;
-        let path_str = get_string_param(&params, "path").unwrap_or_else(|| ".".to_string());
+        let path_str = get_string_param(&params, "path");
         let include = get_string_param(&params, "include");
 
         let regex = regex::Regex::new(&pattern)
             .map_err(|e| ToolError::Validation(format!("Invalid regex pattern: {}", e)))?;
 
-        let base = PathBuf::from(&path_str);
+        let base = super::resolve_path(path_str.as_deref(), ctx);
         if !base.exists() {
-            return Err(ToolError::NotFound(format!("Path not found: {}", path_str)));
+            return Ok(no_matches_result(&pattern));
         }
 
         let include_pattern = if let Some(ref include_glob) = include {
@@ -196,5 +205,59 @@ impl ToolHandler for GrepTool {
             .with_metadata("file_count", serde_json::json!(matched_files))
             .with_metadata("truncated", serde_json::json!(truncated))
             .with_metadata("limit", serde_json::json!(RESULT_LIMIT)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GrepTool;
+    use crate::tools::{ToolContext, ToolHandler};
+    use serde_json::json;
+    use std::path::Path;
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be monotonic enough for tests")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{}_{}", prefix, nanos))
+    }
+
+    fn tool_context_in(path: &Path) -> ToolContext {
+        let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
+        ToolContext::new("session", "message", "Plan", abort_rx).with_workdir(path)
+    }
+
+    #[test]
+    fn grep_blank_path_uses_workspace() {
+        let dir = unique_temp_dir("crabcode_grep_tool_blank_path_test");
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        std::fs::write(dir.join("job.rs"), "const LIMIT: usize = 100;")
+            .expect("test file should be written");
+
+        let result = tokio_test::block_on(GrepTool::new().execute(
+            json!({ "path": "", "pattern": "LIMIT", "include": "*.rs" }),
+            &tool_context_in(&dir),
+        ))
+        .expect("blank path should search the workspace");
+
+        assert!(result.output.contains("job.rs:1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grep_missing_root_returns_no_matches() {
+        let dir = unique_temp_dir("crabcode_grep_tool_missing_path_test");
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+
+        let result = tokio_test::block_on(GrepTool::new().execute(
+            json!({ "path": "missing", "pattern": "LIMIT" }),
+            &tool_context_in(&dir),
+        ))
+        .expect("speculative missing roots should not fail discovery");
+
+        assert_eq!(result.output, "No matches found.");
+        assert_eq!(result.metadata["match_count"], 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
