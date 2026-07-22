@@ -1,7 +1,7 @@
 pub mod configuration;
 
 pub use configuration::{
-    ConfigLoader, ImageOpenCommandConfig, ImageOpenWith, ImagesConfig, McpConfig, McpServerConfig,
+    ConfigLoader, CustomModelConfig, CustomProviderConfig, ImageOpenCommandConfig, ImageOpenWith, ImagesConfig, McpConfig, McpServerConfig,
     NotificationEventConfig, NotificationsConfig, ProviderTimeout, TerminalNotificationCondition,
     TerminalNotificationMode,
 };

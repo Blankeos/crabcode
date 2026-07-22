@@ -150,10 +150,20 @@ struct CacheEntry {
 pub struct Discovery {
     client: Client,
     cache_path: PathBuf,
+    custom_providers: Option<std::collections::HashMap<String, crate::config::CustomProviderConfig>>,
 }
-
 impl Discovery {
     pub fn new() -> Result<Self> {
+        // Try to load custom providers from config file
+        let custom_providers = crate::config::ConfigLoader::load()
+            .map(|loaded| loaded.merged_config.custom_providers)
+            .ok();
+        Self::new_with_custom(custom_providers)
+    }
+
+    pub fn new_with_custom(
+        custom_providers: Option<std::collections::HashMap<String, crate::config::CustomProviderConfig>>,
+    ) -> Result<Self> {
         if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
             let cache_dir = PathBuf::from("/tmp/crabcode_test_cache");
             fs::create_dir_all(&cache_dir).context("Failed to create test cache directory")?;
@@ -163,6 +173,7 @@ impl Discovery {
             Ok(Self {
                 client: shared_http_client()?,
                 cache_path,
+                custom_providers,
             })
         } else {
             crate::persistence::ensure_cache_dir().context("Failed to create cache directory")?;
@@ -173,6 +184,7 @@ impl Discovery {
             Ok(Self {
                 client: shared_http_client()?,
                 cache_path,
+                custom_providers,
             })
         }
     }
@@ -360,6 +372,67 @@ impl Discovery {
         };
 
         crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
+        // Apply custom providers from config as final overlay
+        if let Some(custom) = &self.custom_providers {
+            for (id, custom_provider) in custom {
+                let provider = providers.entry(id.clone()).or_insert_with(|| -> Provider {
+                    Provider {
+                        id: id.clone(),
+                        name: custom_provider.name.clone(),
+                        api: String::new(),
+                        doc: String::new(),
+                        env: Vec::new(),
+                        npm: String::new(),
+                        models: HashMap::new(),
+                    }
+                });
+                
+                // Override with custom values if present
+                if !custom_provider.name.is_empty() {
+                    provider.name = custom_provider.name.clone();
+                }
+                if !custom_provider.base_url.is_empty() {
+                    provider.api = custom_provider.base_url.clone();
+                }
+                if !custom_provider.npm.is_empty() {
+                    provider.npm = custom_provider.npm.clone();
+                }
+                
+                // Add/override models
+                for (model_id, model_cfg) in &custom_provider.models {
+                    let model = crate::model::discovery::Model {
+                        id: String::from(model_id),
+                        name: String::from(&model_cfg.name),
+                        family: String::new(),
+                        attachment: false,
+                        reasoning: false,
+                        reasoning_options: Vec::new(),
+                        tool_call: false,
+                        structured_output: false,
+                        temperature: false,
+                        knowledge: String::new(),
+                        release_date: String::new(),
+                        last_updated: String::new(),
+                        status: None,
+                        modalities: Some(crate::model::discovery::Modalities {
+                            input: vec!["text".to_string()],
+                            output: vec!["text".to_string()],
+                        }),
+                        open_weights: false,
+                        cost: None,
+                        limit: model_cfg.context_window.map(|cw| crate::model::discovery::Limit {
+                            context: cw,
+                            output: model_cfg.max_tokens.unwrap_or(cw),
+                        }),
+                        provider: Some(crate::model::discovery::ModelProvider {
+                            npm: if custom_provider.npm.is_empty() { None } else { Some(custom_provider.npm.clone()) },
+                            api: if custom_provider.base_url.is_empty() { None } else { Some(custom_provider.base_url.clone()) },
+                        }),
+                    };
+                    provider.models.insert(String::from(model_id), model);
+                }
+            }
+        }
 
         Ok(providers)
     }

@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// Re-export json5 for use in load_config_value
+use json5;
+
 pub fn discover_themes(
     xdg_config_home: &Path,
     project_root: &Path,
@@ -377,10 +380,27 @@ pub struct MergedConfig {
     pub agent_permission_rules: HashMap<String, PermissionRules>,
     pub agent_steps: HashMap<String, usize>,
     pub provider_timeouts: HashMap<String, ProviderTimeout>,
+    pub custom_providers: HashMap<String, CustomProviderConfig>,
     pub notifications: NotificationsConfig,
     pub images: ImagesConfig,
     pub websearch: WebsearchConfig,
     pub mcp: McpConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct CustomModelConfig {
+    pub name: String,
+    pub context_window: Option<u32>,
+    pub max_tokens: Option<u32>,
+    pub launch: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CustomProviderConfig {
+    pub name: String,
+    pub npm: String,
+    pub base_url: String,
+    pub models: HashMap<String, CustomModelConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -824,20 +844,11 @@ fn load_config_value(path: &Path) -> Result<Value> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file {}", path.display()))?;
 
-    match path.extension().and_then(|s| s.to_str()) {
-        Some(ext) if ext.eq_ignore_ascii_case("jsonc") => {
-            let v: Value = json5::from_str(&content)
-                .with_context(|| format!("Invalid JSONC in {}", path.display()))?;
-            Ok(v)
-        }
-        _ => {
-            let v: Value = serde_json::from_str(&content)
-                .with_context(|| format!("Invalid JSON in {}", path.display()))?;
-            Ok(v)
-        }
-    }
+    // Use json5 for lenient parsing (handles trailing commas, comments, etc.)
+    let v: Value = json5::from_str(&content)
+        .with_context(|| format!("Invalid JSON/JSONC in {}", path.display()))?;
+    Ok(v)
 }
-
 fn filter_top_level(value: Value, kind: SourceKind) -> Value {
     let mut map = match value {
         Value::Object(m) => m,
@@ -1155,6 +1166,7 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     );
     out.sync_agent_derived_fields();
     out.provider_timeouts = parse_provider_timeouts(obj.get("provider"), diagnostics);
+    out.custom_providers = parse_custom_providers(obj.get("provider"), diagnostics);
 
     let mut notifications = NotificationsConfig::default();
     apply_notifications(obj.get("notifications"), &mut notifications, diagnostics);
@@ -1781,6 +1793,95 @@ fn parse_provider_timeouts(
         };
 
         out.insert(provider_id.trim().to_ascii_lowercase(), timeout);
+    }
+
+    out
+}
+fn parse_custom_providers(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+) -> HashMap<String, CustomProviderConfig> {
+    let mut out = HashMap::new();
+    let Some(Value::Object(providers)) = value else {
+        return out;
+    };
+
+    for (provider_id, provider_val) in providers {
+        let Some(provider_obj) = provider_val.as_object() else {
+            continue;
+        };
+
+        let name = provider_obj
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| provider_id.clone());
+
+        let npm = provider_obj
+            .get("npm")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        let base_url = provider_obj
+            .get("options")
+            .and_then(Value::as_object)
+            .and_then(|opts| opts.get("baseURL"))
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        let mut models = HashMap::new();
+        if let Some(models_val) = provider_obj.get("models") {
+            if let Value::Object(model_map) = models_val {
+                for (model_id, model_val) in model_map {
+                    let Some(model_obj) = model_val.as_object() else {
+                        continue;
+                    };
+
+                    let model_name = model_obj
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| model_id.clone());
+
+                    let context_window = model_obj
+                        .get("contextWindow")
+                        .and_then(Value::as_u64)
+                        .map(|v| v as u32);
+
+                    let max_tokens = model_obj
+                        .get("maxTokens")
+                        .and_then(Value::as_u64)
+                        .map(|v| v as u32);
+
+                    let launch = model_obj
+                        .get("_launch")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+
+                    models.insert(
+                        model_id.clone(),
+                        CustomModelConfig {
+                            name: model_name,
+                            context_window,
+                            max_tokens,
+                            launch,
+                        },
+                    );
+                }
+            }
+        }
+
+        out.insert(
+            provider_id.trim().to_ascii_lowercase(),
+            CustomProviderConfig {
+                name,
+                npm,
+                base_url,
+                models,
+            },
+        );
     }
 
     out
