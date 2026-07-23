@@ -86,6 +86,8 @@ jobs:
         run: |
           set -euo pipefail
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header 'Accept: application/json' \
+            --user-agent 'crabcode-release-workflow (https://github.com/Blankeos/crabcode)' \
             "https://crates.io/api/v1/crates/crabcode/${{ needs.prepare.outputs.version }}")"
 
           case "$status" in
