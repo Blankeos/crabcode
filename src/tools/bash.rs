@@ -31,11 +31,6 @@ fn kill_process_group(child: &tokio::process::Child) {
     }
 }
 
-#[cfg(not(unix))]
-fn kill_process_group(child: &tokio::process::Child) {
-    let _ = child.start_kill();
-}
-
 #[cfg(unix)]
 async fn terminate_child(child: &mut tokio::process::Child) {
     kill_process_group(child);
