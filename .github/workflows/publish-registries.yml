@@ -43,6 +43,14 @@ jobs:
             exit 1
           fi
 
+          git fetch --no-tags origin main
+          release_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "Release tag $RELEASE_TAG points to a commit that is not on main"
+            exit 1
+          fi
+
           cargo_version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
           npm_version="$(node -p 'require("./npm/package.json").version')"
 
