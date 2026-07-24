@@ -336,6 +336,22 @@ export default function RemoteClient() {
     () => state()?.status.workspace || basename(projectPath()) || "Project"
   )
   const projects = createMemo(() => projectsFromState(state()))
+  const recentWorkspaceSessions = createMemo(() => {
+    const cwd = projectPath().trim()
+    const workspace = projectName()
+    return (state()?.sessions ?? [])
+      .filter((session) => !session.parent_id)
+      .filter((session) => {
+        const path = (session.workspace_path || "").trim()
+        if (cwd && path) {
+          return path === cwd || cwd.endsWith(`/${path}`) || path.endsWith(`/${cwd}`) || path.endsWith(cwd)
+        }
+        if (cwd && !path) return (session.workspace || "") === workspace
+        return (session.workspace || "") === workspace
+      })
+      .sort((a, b) => b.updated_at - a.updated_at)
+      .slice(0, 3)
+  })
   const pickerProjects = createMemo(() => projectsForPicker(state()))
   const activeServerUrl = createMemo(() => state()?.status.browser_url || browserOrigin())
   const servers = createMemo(() => {
@@ -1646,6 +1662,8 @@ export default function RemoteClient() {
       threadItems,
       projectName,
       mascotFrame: () => MASCOT_FRAMES[mascotFrame()] ?? "",
+      recentSessions: recentWorkspaceSessions,
+      onSwitchSession: switchSession,
       status: () => state()?.status ?? null,
       token,
       onPreviewImage: openImagePreview,

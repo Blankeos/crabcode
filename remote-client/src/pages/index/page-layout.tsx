@@ -970,13 +970,15 @@ function ThreadViewport(props: { thread: ThreadController }) {
               : "pb-52 max-[900px]:pb-4 max-[900px]:pt-2"
         )}
       >
-        <div ref={thread.setContentRef} class={cx("mx-auto w-[min(100%,64rem)]", thread.isEmptyChat() && "grid h-full")}>
+        <div ref={thread.setContentRef} class={cx("mx-auto w-[min(100%,64rem)] min-w-0 max-w-full", thread.isEmptyChat() && "grid h-full")}>
           <Show
             when={thread.visibleMessages().length > 0}
             fallback={
               <EmptyThread
                 projectName={thread.projectName()}
                 mascotFrame={thread.mascotFrame()}
+                recentSessions={thread.recentSessions}
+                onSwitchSession={thread.onSwitchSession}
               />
             }
           >

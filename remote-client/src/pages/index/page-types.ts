@@ -7,6 +7,7 @@ import type {
   RemoteModel,
   RemotePendingPermission,
   RemotePendingQuestion,
+  RemoteSession,
   RemoteSkill,
   RemoteMcpServer,
   RemoteState,
@@ -277,6 +278,8 @@ export type ThreadController = {
   threadItems: Accessor<ThreadItem[]>
   projectName: Accessor<string>
   mascotFrame: Accessor<string>
+  recentSessions: Accessor<RemoteSession[]>
+  onSwitchSession: (id: string) => void | Promise<void>
   status: Accessor<RemoteStatus | null>
   token: Accessor<string>
   onPreviewImage: (attachment: AttachmentData) => void
