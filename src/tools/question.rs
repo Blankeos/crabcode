@@ -401,8 +401,8 @@ impl ToolHandler for QuestionTool {
             .unwrap_or_else(|_| serde_json::Value::String("No response from user".to_string()));
 
         let model_output = question_tool_model_output(&questions, &response);
-        let output = serde_json::to_string_pretty(&model_output)
-            .unwrap_or_else(|_| model_output.to_string());
+        let output =
+            serde_json::to_string(&model_output).unwrap_or_else(|_| model_output.to_string());
 
         Ok(ToolResult::new("Question answered", output)
             .with_metadata("questions", questions)

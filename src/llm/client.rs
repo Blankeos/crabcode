@@ -30,7 +30,7 @@ Response must include:
 
 Any attempt to use tools is a critical violation. Respond with text ONLY."#;
 
-const TOOL_HISTORY_ARGUMENTS_MAX_CHARS: usize = 60_000;
+const TOOL_HISTORY_ARGUMENTS_MAX_CHARS: usize = 4_000;
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -2001,7 +2001,7 @@ fn tool_message_observation(content: &str) -> String {
 fn push_tool_arguments_for_observation(out: &mut String, args: &serde_json::Value) {
     out.push_str("\n\nTool call arguments:\n```json\n");
     out.push_str(&truncate_for_tool_observation(
-        &serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string()),
+        &serde_json::to_string(args).unwrap_or_else(|_| args.to_string()),
         TOOL_HISTORY_ARGUMENTS_MAX_CHARS,
     ));
     out.push_str("\n```");
