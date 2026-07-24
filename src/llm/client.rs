@@ -1151,15 +1151,17 @@ async fn maybe_apply_xai_oauth_overrides(
         }
     }
 
-    request_config.api_key = Some(oauth_access);
-    request_config.base_url = "https://api.x.ai".to_string();
+    let overrides = super::xai_build::request_overrides(oauth_access).await;
+    request_config.api_key = Some(overrides.api_key);
+    request_config.base_url = overrides.base_url.to_string();
+    request_config.model_name = overrides.model.to_string();
     request_config.openai_options.force_store_false = true;
-    request_config.openai_options.additional_headers.insert(
-        "User-Agent".to_string(),
-        crate::auth::xai_oauth::build_user_agent(),
-    );
+    request_config
+        .openai_options
+        .additional_headers
+        .extend(overrides.headers);
 
-    crate::emit_log!("Configured xAI OAuth transport");
+    crate::emit_log!("Configured xAI Grok Build OAuth transport");
 }
 
 fn send_warning(sender: &crate::llm::ChunkSender, warning: impl Into<String>) {
@@ -1263,6 +1265,11 @@ async fn stream_provider_request(
             }
             if !config.openai_options.additional_headers.is_empty() {
                 builder = builder.headers(config.openai_options.additional_headers.clone());
+            }
+            if let Some(policy) =
+                super::xai_build::retry_policy_for(&config.openai_options.additional_headers)
+            {
+                builder = builder.response_retry_policy(policy);
             }
 
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
