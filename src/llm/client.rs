@@ -384,10 +384,6 @@ pub async fn stream_llm_with_cancellation(
     let mut request_config = request_config;
     // Sticky prompt-cache routing: same key for every tool step in this session.
     request_config.openai_options.prompt_cache_key = Some(session_id.clone());
-    if provider_name == "xai" {
-        // Match Grok Build / ZDR: do not persist Responses server-side.
-        request_config.openai_options.force_store_false = true;
-    }
 
     let tool_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
         Some(sender.clone()),
@@ -800,6 +796,7 @@ async fn prepare_request_config(
         reasoning_effort,
         supports_image_input,
     );
+    apply_provider_request_defaults(provider_name, &mut request_config);
 
     maybe_apply_openai_oauth_overrides(
         provider_name,
@@ -850,6 +847,16 @@ async fn prepare_request_config(
     );
 
     Ok(request_config)
+}
+
+fn apply_provider_request_defaults(
+    provider_name: &str,
+    request_config: &mut ProviderRequestConfig,
+) {
+    if provider_name == "xai" {
+        // Ask xAI not to persist Responses, including subagent requests.
+        request_config.openai_options.force_store_false = true;
+    }
 }
 
 fn maybe_apply_unauthenticated_free_provider_key(
@@ -2081,10 +2088,11 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        convert_messages, convert_messages_for_model, is_openai_oauth_model_allowed,
-        maybe_apply_unauthenticated_free_provider_key, model_supports_image_input,
-        openai_request_instructions, resolve_model_route, vlm_agent_has_model, AisdkMessage,
-        OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
+        apply_provider_request_defaults, convert_messages, convert_messages_for_model,
+        is_openai_oauth_model_allowed, maybe_apply_unauthenticated_free_provider_key,
+        model_supports_image_input, openai_request_instructions, resolve_model_route,
+        vlm_agent_has_model, AisdkMessage, OpenAIRequestOptions, ProviderKind,
+        ProviderRequestConfig,
     };
 
     #[test]
@@ -2262,6 +2270,24 @@ mod tests {
         maybe_apply_unauthenticated_free_provider_key("opencode", Some(&model), &mut config);
 
         assert_eq!(config.api_key.as_deref(), Some("real-key"));
+    }
+
+    #[test]
+    fn xai_request_defaults_disable_server_storage() {
+        let mut config = test_request_config(Some("xai-key".to_string()));
+
+        apply_provider_request_defaults("xai", &mut config);
+
+        assert!(config.openai_options.force_store_false);
+    }
+
+    #[test]
+    fn non_xai_request_defaults_leave_storage_unchanged() {
+        let mut config = test_request_config(Some("other-key".to_string()));
+
+        apply_provider_request_defaults("openai", &mut config);
+
+        assert!(!config.openai_options.force_store_false);
     }
 
     fn test_request_config(api_key: Option<String>) -> ProviderRequestConfig {
