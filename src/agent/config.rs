@@ -10,6 +10,9 @@ pub struct OpenAIRequestOptions {
     pub default_instructions: Option<String>,
     pub disallow_system_messages: bool,
     pub force_tool_strict_false: bool,
+    /// Sticky prompt-cache routing key (Responses / chat-completions).
+    /// Typically the crabcode session id.
+    pub prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +86,8 @@ pub struct LlmSessionConfig {
     pub reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     pub supports_image_input: bool,
     pub openai_options: OpenAIRequestOptions,
+    /// Sticky prompt-cache key for this session (OpenAI/xAI/compatible).
+    pub prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +136,7 @@ mod tests {
             reasoning_effort: None,
             supports_image_input: false,
             openai_options: OpenAIRequestOptions::default(),
+            prompt_cache_key: None,
         }
     }
 

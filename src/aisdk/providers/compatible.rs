@@ -18,6 +18,7 @@ pub struct OpenAICompatible {
     model_name: String,
     provider_name: String,
     reasoning_effort: Option<String>,
+    prompt_cache_key: Option<String>,
 }
 
 impl OpenAICompatible {
@@ -33,6 +34,7 @@ pub struct OpenAICompatibleBuilder {
     model_name: Option<String>,
     provider_name: Option<String>,
     reasoning_effort: Option<String>,
+    prompt_cache_key: Option<String>,
 }
 
 impl OpenAICompatibleBuilder {
@@ -61,6 +63,11 @@ impl OpenAICompatibleBuilder {
         self
     }
 
+    pub fn prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.prompt_cache_key = Some(key.into());
+        self
+    }
+
     pub fn build(self) -> Result<OpenAICompatible> {
         Ok(OpenAICompatible {
             base_url: self
@@ -74,6 +81,7 @@ impl OpenAICompatibleBuilder {
                 .provider_name
                 .unwrap_or_else(|| "openai-compatible".to_string()),
             reasoning_effort: self.reasoning_effort,
+            prompt_cache_key: self.prompt_cache_key,
         })
     }
 }
@@ -132,6 +140,12 @@ impl Provider for OpenAICompatible {
 
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning_effort"] = serde_json::Value::String(effort.clone());
+        }
+
+        if let Some(key) = &self.prompt_cache_key {
+            if !key.is_empty() {
+                body["prompt_cache_key"] = serde_json::Value::String(key.clone());
+            }
         }
 
         let mut request_headers = reqwest::header::HeaderMap::new();

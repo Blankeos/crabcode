@@ -10,7 +10,9 @@ use tokio_util::sync::CancellationToken;
 use crate::llm::ChunkSender;
 
 const TOOL_UI_PREVIEW_LIMIT: usize = 4_000;
-const TOOL_MODEL_OUTPUT_LIMIT: usize = 60_000;
+/// Generic model-facing tool output cap (non-bash tools). Matches Grok Build's
+/// 40KiB default; OpenCode uses 50KiB.
+const TOOL_MODEL_OUTPUT_LIMIT: usize = 40_000;
 
 static TOOL_CALL_SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -398,17 +400,17 @@ mod tests {
     fn truncate_tool_output_bounds_large_results() {
         let output = "a".repeat(70_000);
 
-        let truncated = truncate_tool_output(&output, 60_000);
+        let truncated = truncate_tool_output(&output, 40_000);
 
         assert!(truncated.len() < output.len());
-        assert!(truncated.contains("tool output truncated to 60000 bytes"));
+        assert!(truncated.contains("tool output truncated to 40000 bytes"));
     }
 
     #[test]
     fn truncate_tool_output_preserves_small_results() {
         let output = "small result";
 
-        assert_eq!(truncate_tool_output(output, 60_000), output);
+        assert_eq!(truncate_tool_output(output, 40_000), output);
     }
 
     #[test]

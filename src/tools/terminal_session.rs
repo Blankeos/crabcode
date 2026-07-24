@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 pub const DEFAULT_TERMINAL_ROWS: u16 = 24;
 pub const DEFAULT_TERMINAL_COLS: u16 = 80;
 pub const MAX_TRANSCRIPT_BYTES: usize = 51_200;
-pub const MAX_MODEL_OUTPUT_BYTES: usize = 60_000;
+pub const MAX_MODEL_OUTPUT_BYTES: usize = 20_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalSessionStart {

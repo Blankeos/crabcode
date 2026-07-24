@@ -299,26 +299,26 @@ Your output will be displayed on a command line interface. Your responses should
     }
 
     async fn get_tools_context(&self, registry: &ToolRegistry) -> String {
-        let schemas = registry.list_schemas().await;
-
-        if schemas.is_empty() {
+        // Match OpenCode / Codex / Grok Build: keep tool schemas on the API
+        // `tools` field only. Dumping pretty-printed JSON schemas into the
+        // system prompt doubles prefix tokens on every step.
+        let tools = registry.list().await;
+        if tools.is_empty() {
             return String::new();
         }
 
-        let tools_json =
-            serde_json::to_string_pretty(&schemas).unwrap_or_else(|_| "[]".to_string());
+        let names = tools
+            .iter()
+            .map(|tool| tool.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
 
         format!(
-            r#"You have access to the following tools (JSON schema):
-
-{}
-
-Tool use:
+            r#"Tool use:
 - Use the model's built-in tool/function calling mechanism (do not print tool calls as text).
-- If you need file contents, directory listings, running commands, or edits, call the appropriate tool.
+- Prefer specialized tools over bash when possible (available: {names}).
 - After tool results are returned, use them to answer.
-"#,
-            tools_json
+"#
         )
     }
 

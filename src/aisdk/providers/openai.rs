@@ -42,6 +42,7 @@ pub struct OpenAI {
     default_instructions: Option<String>,
     reasoning_effort: Option<String>,
     responses_websocket: bool,
+    prompt_cache_key: Option<String>,
     websocket_state: Arc<Mutex<OpenAIWebsocketState>>,
 }
 
@@ -77,6 +78,7 @@ pub struct OpenAIBuilder {
     default_instructions: Option<String>,
     reasoning_effort: Option<String>,
     responses_websocket: bool,
+    prompt_cache_key: Option<String>,
 }
 
 impl OpenAIBuilder {
@@ -140,6 +142,11 @@ impl OpenAIBuilder {
         self
     }
 
+    pub fn prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.prompt_cache_key = Some(key.into());
+        self
+    }
+
     pub fn build(self) -> Result<OpenAI> {
         let base_url = self
             .base_url
@@ -174,6 +181,7 @@ impl OpenAIBuilder {
             default_instructions: self.default_instructions,
             reasoning_effort: self.reasoning_effort,
             responses_websocket: self.responses_websocket,
+            prompt_cache_key: self.prompt_cache_key,
             websocket_state: Arc::new(Mutex::new(OpenAIWebsocketState::default())),
         })
     }
@@ -528,6 +536,12 @@ impl OpenAI {
 
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning"] = serde_json::json!({ "effort": effort });
+        }
+
+        if let Some(key) = &self.prompt_cache_key {
+            if !key.is_empty() {
+                body["prompt_cache_key"] = serde_json::Value::String(key.clone());
+            }
         }
 
         body
@@ -2100,6 +2114,27 @@ mod tests {
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn responses_body_includes_prompt_cache_key_and_store_false() {
+        let provider = OpenAI::builder()
+            .base_url("https://api.x.ai")
+            .api_key("test-key")
+            .model_name("grok-composer-2.5-fast")
+            .prompt_cache_key("session-abc")
+            .store_override(false)
+            .build()
+            .unwrap();
+
+        let body = provider.build_responses_body(
+            vec![serde_json::json!({"role": "user", "content": "hi"})],
+            &[],
+        );
+
+        assert_eq!(body["prompt_cache_key"], "session-abc");
+        assert_eq!(body["store"], false);
     }
 
     #[test]
