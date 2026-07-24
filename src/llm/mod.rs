@@ -1,6 +1,7 @@
 pub mod client;
 pub mod provider;
 pub mod tool_calls;
+pub(crate) mod xai_build;
 
 pub use tool_calls::{FunctionCall, ToolCall, ToolCallResult};
 

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-const DEFAULT_MAX_RULE_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_RULE_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
 struct RuleFile {

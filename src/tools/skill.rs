@@ -13,35 +13,15 @@ impl SkillTool {
     }
 
     fn build_description() -> String {
-        let mut desc = String::from(
+        // Keep the catalog in the system prompt only (OpenCode-style). Embedding
+        // <available_skills> here would resend the full list on every tool step.
+        String::from(
             "Load a specialized skill that provides domain-specific instructions and workflows.\n\n\
-             Use this tool to inject the skill's instructions and resources into current conversation. \
+             Use this tool to inject the skill's instructions and resources into the current conversation. \
              The output may contain detailed workflow guidance as well as references to scripts, files, \
              etc in the same directory as the skill.\n\n\
-             The skill name must match one of the skills listed in your system prompt.",
-        );
-
-        if let Some(store) = crate::skill::get_skill_store() {
-            let skills = store.all();
-            if !skills.is_empty() {
-                desc.push_str("\n\n<available_skills>\n");
-                for skill in &skills {
-                    desc.push_str(&format!("  <skill>\n"));
-                    desc.push_str(&format!("    <name>{}</name>\n", skill.name));
-                    if let Some(ref desc_text) = skill.description {
-                        desc.push_str(&format!("    <description>{}</description>\n", desc_text));
-                    }
-                    desc.push_str(&format!(
-                        "    <location>file://{}</location>\n",
-                        skill.location.display()
-                    ));
-                    desc.push_str(&format!("  </skill>\n"));
-                }
-                desc.push_str("</available_skills>");
-            }
-        }
-
-        desc
+             The skill name must match one of the skills listed under <available_skills> in your system prompt.",
+        )
     }
 }
 

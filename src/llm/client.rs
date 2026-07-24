@@ -30,7 +30,7 @@ Response must include:
 
 Any attempt to use tools is a critical violation. Respond with text ONLY."#;
 
-const TOOL_HISTORY_ARGUMENTS_MAX_CHARS: usize = 60_000;
+const TOOL_HISTORY_ARGUMENTS_MAX_CHARS: usize = 4_000;
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -381,6 +381,13 @@ pub async fn stream_llm_with_cancellation(
     );
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &sender).await?;
+    let mut request_config = request_config;
+    // Sticky prompt-cache routing: same key for every tool step in this session.
+    request_config.openai_options.prompt_cache_key = Some(session_id.clone());
+    if provider_name == "xai" {
+        // Match Grok Build / ZDR: do not persist Responses server-side.
+        request_config.openai_options.force_store_false = true;
+    }
 
     let tool_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
         Some(sender.clone()),
@@ -407,6 +414,7 @@ pub async fn stream_llm_with_cancellation(
         reasoning_effort: request_config.reasoning_effort,
         supports_image_input: request_config.supports_image_input,
         openai_options: request_config.openai_options.clone(),
+        prompt_cache_key: Some(session_id.clone()),
     };
     crate::agent::config::set_llm_session(llm_session.clone());
     let session_registration =
@@ -623,6 +631,7 @@ pub async fn build_subagent_llm_session(
         reasoning_effort: request_config.reasoning_effort,
         supports_image_input: request_config.supports_image_input,
         openai_options: request_config.openai_options,
+        prompt_cache_key: None,
     })
 }
 
@@ -1142,14 +1151,17 @@ async fn maybe_apply_xai_oauth_overrides(
         }
     }
 
-    request_config.api_key = Some(oauth_access);
-    request_config.base_url = "https://api.x.ai".to_string();
-    request_config.openai_options.additional_headers.insert(
-        "User-Agent".to_string(),
-        crate::auth::xai_oauth::build_user_agent(),
-    );
+    let overrides = super::xai_build::request_overrides(oauth_access).await;
+    request_config.api_key = Some(overrides.api_key);
+    request_config.base_url = overrides.base_url.to_string();
+    request_config.model_name = overrides.model.to_string();
+    request_config.openai_options.force_store_false = true;
+    request_config
+        .openai_options
+        .additional_headers
+        .extend(overrides.headers);
 
-    crate::emit_log!("Configured xAI OAuth transport");
+    crate::emit_log!("Configured xAI Grok Build OAuth transport");
 }
 
 fn send_warning(sender: &crate::llm::ChunkSender, warning: impl Into<String>) {
@@ -1175,6 +1187,9 @@ async fn stream_provider_request(
             }
             if let Some(key) = config.api_key.as_deref() {
                 builder = builder.api_key(key);
+            }
+            if let Some(cache_key) = config.openai_options.prompt_cache_key.as_deref() {
+                builder = builder.prompt_cache_key(cache_key);
             }
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
             stream_with_tools(
@@ -1245,8 +1260,16 @@ async fn stream_provider_request(
             if config.openai_options.disallow_system_messages {
                 builder = builder.responses_websocket(true);
             }
+            if let Some(cache_key) = config.openai_options.prompt_cache_key.as_deref() {
+                builder = builder.prompt_cache_key(cache_key);
+            }
             if !config.openai_options.additional_headers.is_empty() {
                 builder = builder.headers(config.openai_options.additional_headers.clone());
+            }
+            if let Some(policy) =
+                super::xai_build::retry_policy_for(&config.openai_options.additional_headers)
+            {
+                builder = builder.response_retry_policy(policy);
             }
 
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
@@ -1311,11 +1334,16 @@ fn log_stream_request(context: StreamLogContext<'_>, config: &ProviderRequestCon
         .collect::<Vec<_>>();
     header_names.sort_unstable();
     crate::emit_log!(
-        "[STREAM_REQUEST] {} reasoning_effort={} responses_path={:?} force_store_false={} disallow_system_messages={} force_tool_strict_false={} extra_header_names=[{}]",
+        "[STREAM_REQUEST] {} reasoning_effort={} responses_path={:?} force_store_false={} prompt_cache_key={} disallow_system_messages={} force_tool_strict_false={} extra_header_names=[{}]",
         context.describe(),
         reasoning_effort,
         config.openai_options.response_path,
         config.openai_options.force_store_false,
+        config
+            .openai_options
+            .prompt_cache_key
+            .as_deref()
+            .unwrap_or("-"),
         config.openai_options.disallow_system_messages,
         config.openai_options.force_tool_strict_false,
         header_names.join(","),
@@ -1980,7 +2008,7 @@ fn tool_message_observation(content: &str) -> String {
 fn push_tool_arguments_for_observation(out: &mut String, args: &serde_json::Value) {
     out.push_str("\n\nTool call arguments:\n```json\n");
     out.push_str(&truncate_for_tool_observation(
-        &serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string()),
+        &serde_json::to_string(args).unwrap_or_else(|_| args.to_string()),
         TOOL_HISTORY_ARGUMENTS_MAX_CHARS,
     ));
     out.push_str("\n```");

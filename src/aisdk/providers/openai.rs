@@ -28,6 +28,14 @@ const OPENAI_WEBSOCKET_IO_TIMEOUT: Duration = Duration::from_secs(300);
 const OPENAI_WEBSOCKET_STREAM_RETRIES: usize = 1;
 const OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK: usize = 5;
 
+#[async_trait]
+pub trait HttpResponseRetryPolicy: Send + Sync + std::fmt::Debug {
+    async fn retry_headers(
+        &self,
+        status: reqwest::StatusCode,
+    ) -> Option<reqwest::header::HeaderMap>;
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenAI {
     base_url: String,
@@ -42,6 +50,8 @@ pub struct OpenAI {
     default_instructions: Option<String>,
     reasoning_effort: Option<String>,
     responses_websocket: bool,
+    prompt_cache_key: Option<String>,
+    response_retry_policy: Option<Arc<dyn HttpResponseRetryPolicy>>,
     websocket_state: Arc<Mutex<OpenAIWebsocketState>>,
 }
 
@@ -77,6 +87,8 @@ pub struct OpenAIBuilder {
     default_instructions: Option<String>,
     reasoning_effort: Option<String>,
     responses_websocket: bool,
+    prompt_cache_key: Option<String>,
+    response_retry_policy: Option<Arc<dyn HttpResponseRetryPolicy>>,
 }
 
 impl OpenAIBuilder {
@@ -140,6 +152,16 @@ impl OpenAIBuilder {
         self
     }
 
+    pub fn prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.prompt_cache_key = Some(key.into());
+        self
+    }
+
+    pub fn response_retry_policy(mut self, policy: Arc<dyn HttpResponseRetryPolicy>) -> Self {
+        self.response_retry_policy = Some(policy);
+        self
+    }
+
     pub fn build(self) -> Result<OpenAI> {
         let base_url = self
             .base_url
@@ -174,6 +196,8 @@ impl OpenAIBuilder {
             default_instructions: self.default_instructions,
             reasoning_effort: self.reasoning_effort,
             responses_websocket: self.responses_websocket,
+            prompt_cache_key: self.prompt_cache_key,
+            response_retry_policy: self.response_retry_policy,
             websocket_state: Arc::new(Mutex::new(OpenAIWebsocketState::default())),
         })
     }
@@ -364,9 +388,9 @@ impl Provider for OpenAI {
             ))
             .build()
             .map_err(|e| Error::Provider(format!("Failed to build client: {}", e)))?;
-        let response = client
+        let mut response = client
             .post(&url)
-            .headers(request_headers)
+            .headers(request_headers.clone())
             .json(&body)
             .send()
             .await
@@ -378,6 +402,28 @@ impl Provider for OpenAI {
                     Some(&request_diagnostics),
                 )))
             })?;
+
+        if let Some(policy) = &self.response_retry_policy {
+            if let Some(retry_headers) = policy.retry_headers(response.status()).await {
+                request_headers.extend(retry_headers);
+                response = client
+                    .post(&url)
+                    .headers(request_headers)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|err| {
+                        Error::RetryableProvider(RetryError::from_message(
+                            format_openai_request_error(
+                                "send_after_response_retry_policy",
+                                &url,
+                                &err,
+                                Some(&request_diagnostics),
+                            ),
+                        ))
+                    })?;
+            }
+        }
 
         if !response.status().is_success() {
             let status = response.status();
@@ -528,6 +574,12 @@ impl OpenAI {
 
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning"] = serde_json::json!({ "effort": effort });
+        }
+
+        if let Some(key) = &self.prompt_cache_key {
+            if !key.is_empty() {
+                body["prompt_cache_key"] = serde_json::Value::String(key.clone());
+            }
         }
 
         body
@@ -2100,6 +2152,27 @@ mod tests {
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn responses_body_includes_prompt_cache_key_and_store_false() {
+        let provider = OpenAI::builder()
+            .base_url("https://api.x.ai")
+            .api_key("test-key")
+            .model_name("grok-composer-2.5-fast")
+            .prompt_cache_key("session-abc")
+            .store_override(false)
+            .build()
+            .unwrap();
+
+        let body = provider.build_responses_body(
+            vec![serde_json::json!({"role": "user", "content": "hi"})],
+            &[],
+        );
+
+        assert_eq!(body["prompt_cache_key"], "session-abc");
+        assert_eq!(body["store"], false);
     }
 
     #[test]

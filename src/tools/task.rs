@@ -130,6 +130,7 @@ mod tests {
                 reasoning_effort: None,
                 supports_image_input: false,
                 openai_options: crate::agent::config::OpenAIRequestOptions::default(),
+                prompt_cache_key: None,
             },
         );
 
@@ -207,6 +208,7 @@ mod tests {
             reasoning_effort: None,
             supports_image_input: false,
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
+            prompt_cache_key: None,
         };
 
         let mut warnings = Vec::new();
@@ -244,6 +246,7 @@ mod tests {
             reasoning_effort: None,
             supports_image_input: false,
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
+            prompt_cache_key: None,
         };
         let mut warnings = Vec::new();
         let defs = crate::agent::definition::parse_agent_definitions_from_config(

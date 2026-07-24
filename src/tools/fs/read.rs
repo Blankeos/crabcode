@@ -8,7 +8,7 @@ use std::path::Path;
 
 const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50MB
 const BINARY_CHECK_SIZE: usize = 8192; // 8KB
-const DEFAULT_LIMIT: usize = 2000;
+const DEFAULT_LIMIT: usize = 1000;
 
 pub struct ReadTool;
 
@@ -104,7 +104,7 @@ impl ToolHandler for ReadTool {
                 },
                 ParameterSchema {
                     name: "limit".to_string(),
-                    description: "Maximum number of lines to read (default: 2000)".to_string(),
+                    description: "Maximum number of lines to read (default: 1000)".to_string(),
                     required: false,
                     param_type: ParameterType::Integer,
                 },
