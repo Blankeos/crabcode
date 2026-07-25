@@ -4,6 +4,8 @@ Internal planning note. This is not public user guidance yet, and it should stay
 
 Last updated: 2026-05-31.
 
+> **Architecture update:** [`OPTION4_DAEMON_BACKEND.md`](./OPTION4_DAEMON_BACKEND.md) is the chosen implementation path and supersedes older lifecycle language in this document. Normal `crabcode` now means local daemon `ensure` + TUI attach; `crabcode serve` explicitly runs that same daemon headlessly/foreground; `crabcode stop` stops the discovered local daemon; and `crabcode attach <url>` targets an explicit host. This document remains useful for remote product UX and safety guidance.
+
 ## Product Goal
 
 Make crabcode usable when the machine that owns the workspace is not the machine in the user's hands.
@@ -43,7 +45,7 @@ crabcode attach <url>
 crabcode -p --attach <url> "continue the refactor"
 ```
 
-`crabcode serve` is the primitive. It owns the workspace, credentials, session history, active generations, permission prompts, and pairing. Browser access, `crabcode attach`, and `crabcode -p --attach` are clients of the same service protocol.
+The machine-wide daemon is the primitive. Normal `crabcode` ensures it and attaches a local TUI. `crabcode serve` explicitly runs the same daemon headlessly in the foreground, while `crabcode stop` ends the discovered local daemon. The daemon owns workspaces, credentials, session history, active generations, permission prompts, and pairing. Browser access, `crabcode attach`, and `crabcode -p --attach` are clients of the same service protocol.
 
 Support what already works first: SSH into the remote machine, run `crabcode` inside `tmux` or `zellij`, and document Tailscale as the preferred private network path. But the target product should not stop at SSH. The ten-out-of-ten version is a host URL that can be used from a phone browser, a remote terminal client, or a non-interactive CLI prompt.
 
@@ -125,7 +127,7 @@ Immediate polish work for this mode:
 
 This is the real product foundation.
 
-`crabcode serve` starts the host runtime for the current workspace. The host owns active generations, persists events, serves the phone UI, accepts terminal attaches, and lets clients disconnect/reconnect without killing work.
+`crabcode serve` explicitly starts the machine-wide daemon headlessly in the foreground. The host manages all local workspaces, owns active generations, persists events, serves the phone UI when published, accepts terminal attaches, and lets clients disconnect/reconnect without killing work. Normal `crabcode` starts the same implementation as a detached service when local discovery finds no healthy daemon.
 
 Expected workflow:
 
@@ -150,8 +152,8 @@ Expected shape:
 
 - Runtime socket under the crabcode state dir for local clients, such as `~/.local/state/crabcode/runtime.sock`.
 - HTTP API and event stream for browser/remote clients.
-- Host starts explicitly with `crabcode serve`; a later local daemon can also start on demand when normal `crabcode` runs.
-- Host exits only when explicitly stopped, or after a configured idle timeout if daemon mode is added later.
+- Host starts explicitly in the foreground with `crabcode serve`, or on demand as a detached service when normal `crabcode` runs.
+- Host exits only through `crabcode stop`, foreground `Ctrl-C`, machine shutdown, or failure. V1 has no idle/last-client timeout.
 - Host keeps provider credentials on the machine running crabcode.
 - Host exposes no general-purpose terminal and no arbitrary port proxy.
 - Host emits durable session events and status snapshots so clients can replay state after reconnecting.
@@ -384,7 +386,7 @@ Remote crabcode is write-capable by design, so defaults must be conservative.
 - Log remote approvals and denials into the session event stream.
 - Allow multiple controlling devices for the same session, but make state-changing operations idempotent and auditable.
 - Show presence/activity for connected controlling devices.
-- If daemon mode is enabled later, shut the backend down after an idle timeout when there are no clients and no active generations.
+- Keep the daemon alive after clients detach. Shut it down explicitly with `crabcode stop` (or foreground `Ctrl-C` for `crabcode serve`).
 - Treat public internet sharing as a non-goal for now. A private overlay network is acceptable; a public URL to a write-capable coding agent is not the default shape.
 
 ## Private Network Position
@@ -520,15 +522,17 @@ crabcode attach devbox
 - Preserve local UI state on the attaching machine where appropriate, but keep canonical session/generation state on the host.
 - Handle reconnects after SSH drops, laptop sleep, or network changes by replaying from the last seen event `seq`.
 
-### Phase 7: Local daemon mode
+### Chosen foundation: Local daemon mode
 
-Once the explicit host/client shape works, consider making normal local `crabcode` attach to an on-demand local backend too.
+This is no longer a later consideration; `OPTION4_DAEMON_BACKEND.md` makes it the starting architecture.
 
-- Start or connect to a local backend on normal `crabcode` runs.
-- Use a runtime socket under the crabcode state dir, such as `~/.local/state/crabcode/runtime.sock`.
+- Normal `crabcode` discovers or starts the machine-wide local backend, then attaches.
+- `crabcode serve` explicitly runs the same backend headlessly in the foreground.
+- `crabcode stop` stops the discovered local backend.
+- `crabcode attach <url>` targets an explicit local or remote host and does not run local ensure.
+- Use registered local service identity/health under the crabcode state dir.
 - Let local TUI clients detach/reconnect without killing active generations.
-- Exit the daemon after an idle timeout when there are no clients and no active generations.
-- Keep this as an evolution of `crabcode serve`, not a separate architecture.
+- Keep the daemon alive until explicit stop; v1 has no idle/last-client timeout.
 
 ### Phase 8: Revisit native app
 
@@ -558,7 +562,6 @@ The plan is only a 10/10 if the first complete remote story feels like this:
 - Do remote approvals need a stricter permission mode than local approvals?
 - Which client roles should be available in v1, and should browser clients default to `phone` rather than full control?
 - Should remote browser clients be allowed to run every slash command, or should some commands stay attach/SSH-only at first?
-- What idle timeout should daemon mode use, if explicit `crabcode serve` does not auto-exit?
 - What is the smallest complete mobile command surface after sessions, prompt input, cancel, approvals, questions, and transcript?
 - Should crabcode auto-detect dev-server URLs from terminal output, or only let users manually add/pin them?
 - Should event streaming use SSE first, WebSocket first, or both behind the same internal event API?
