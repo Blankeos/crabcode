@@ -238,6 +238,21 @@ export function isMobileViewport() {
   return window.matchMedia(`(max-width: ${MOBILE_MAX_WIDTH}px)`).matches
 }
 
+/** Reactive `max-width: 900px` match — use to mount only one layout branch. */
+export function useIsMobileViewport() {
+  const [mobile, setMobile] = createSignal(isMobileViewport())
+
+  onMount(() => {
+    const mql = window.matchMedia(`(max-width: ${MOBILE_MAX_WIDTH}px)`)
+    const onChange = () => setMobile(mql.matches)
+    onChange()
+    mql.addEventListener("change", onChange)
+    onCleanup(() => mql.removeEventListener("change", onChange))
+  })
+
+  return mobile
+}
+
 export function resetMobileViewportScroll() {
   if (typeof document === "undefined" || !isMobileViewport()) return
   const vv = window.visualViewport

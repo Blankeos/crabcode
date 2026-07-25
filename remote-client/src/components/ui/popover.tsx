@@ -17,10 +17,17 @@ type PopoverContentProps<T extends ValidComponent = "div"> =
 const PopoverContent = <T extends ValidComponent = "div">(
   props: PolymorphicProps<T, PopoverContentProps<T>>
 ) => {
-  const [local, others] = splitProps(props as PopoverContentProps, ["class"])
+  const [local, others] = splitProps(props as PopoverContentProps, ["class", "onOpenAutoFocus"])
   return (
     <PopoverPrimitive.Portal>
-      <PopoverPrimitive.Content class={local.class} {...others} />
+      <PopoverPrimitive.Content
+        class={local.class}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          local.onOpenAutoFocus?.(event)
+        }}
+        {...others}
+      />
     </PopoverPrimitive.Portal>
   )
 }

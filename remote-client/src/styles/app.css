@@ -124,9 +124,6 @@
   }
   @media (max-width: 900px) and (max-height: 540px) {
     .remote-mobile-root .remote-empty-mascot { display: none; }
-    .remote-mobile-root .remote-empty-logo {
-      font-size: clamp(0.4rem, 1.9vw, 0.7rem) !important;
-    }
   }
   body {
     margin: 0;
