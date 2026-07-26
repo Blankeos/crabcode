@@ -626,6 +626,13 @@ pub async fn build_subagent_llm_session(
     })
 }
 
+fn resolve_api_key(
+    auth_config: Option<&crate::persistence::AuthConfig>,
+    custom_provider_api_key: Option<String>,
+) -> Option<String> {
+    configured_api_key(auth_config).or(custom_provider_api_key)
+}
+
 pub async fn summarize_for_compaction(
     provider_name: String,
     model: String,
@@ -759,12 +766,13 @@ async fn prepare_request_config(
     let auth_dao = crate::persistence::AuthDAO::new()?;
     let auth_config = auth_dao.get_provider(provider_name)?;
 
+    let discovery = crate::model::discovery::Discovery::new()?;
+    let custom_provider_api_key = discovery.custom_provider_api_key(provider_name);
     let provider = if let Some(provider) =
         crate::model::extensions::ModelExtensions::provider_for_request(provider_name)
     {
         provider
     } else {
-        let discovery = crate::model::discovery::Discovery::new()?;
         let providers = discovery.fetch_providers().await?;
 
         providers
@@ -787,7 +795,7 @@ async fn prepare_request_config(
         provider.name.clone(),
         base_url,
         model_route.model_name.clone(),
-        configured_api_key(auth_config.as_ref()),
+        resolve_api_key(auth_config.as_ref(), custom_provider_api_key),
         reasoning_effort,
         supports_image_input,
     );
@@ -2055,9 +2063,29 @@ mod tests {
     use super::{
         convert_messages, convert_messages_for_model, is_openai_oauth_model_allowed,
         maybe_apply_unauthenticated_free_provider_key, model_supports_image_input,
-        openai_request_instructions, resolve_model_route, vlm_agent_has_model, AisdkMessage,
-        OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
+        openai_request_instructions, resolve_api_key, resolve_model_route, vlm_agent_has_model,
+        AisdkMessage, OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
     };
+
+    use crate::persistence::AuthConfig;
+
+    #[test]
+    fn stored_auth_takes_precedence_over_custom_provider_api_key() {
+        assert_eq!(
+            resolve_api_key(
+                Some(&AuthConfig::Api {
+                    key: "stored-key".to_string(),
+                }),
+                Some("config-key".to_string()),
+            )
+            .as_deref(),
+            Some("stored-key")
+        );
+        assert_eq!(
+            resolve_api_key(Some(&AuthConfig::Local), Some("config-key".to_string())).as_deref(),
+            Some("config-key")
+        );
+    }
 
     #[test]
     fn openai_oauth_instructions_preserve_stripped_system_prompt() {

@@ -106,6 +106,18 @@ fn list_json_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+fn parse_string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
     OpenCode,
@@ -389,18 +401,61 @@ pub struct MergedConfig {
 
 #[derive(Debug, Clone)]
 pub struct CustomModelConfig {
-    pub name: String,
+    pub name: Option<String>,
     pub context_window: Option<u32>,
     pub max_tokens: Option<u32>,
+    pub attachment: Option<bool>,
+    pub reasoning: Option<bool>,
+    pub temperature: Option<bool>,
+    pub tool_call: Option<bool>,
+    pub modalities: Option<CustomModelModalities>,
     pub launch: bool,
 }
 
 #[derive(Debug, Clone)]
+pub struct CustomModelModalities {
+    pub input: Vec<String>,
+    pub output: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CustomProviderConfig {
-    pub name: String,
-    pub npm: String,
-    pub base_url: String,
+    pub name: Option<String>,
+    pub npm: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
     pub models: HashMap<String, CustomModelConfig>,
+}
+
+impl CustomProviderConfig {
+    pub fn resolved_api_key(&self) -> Option<String> {
+        resolve_api_key_value(self.api_key.as_deref(), |variable| {
+            std::env::var(variable).ok()
+        })
+    }
+}
+
+fn resolve_api_key_value(
+    value: Option<&str>,
+    get_env: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Some(variable) = value
+        .strip_prefix("{env:")
+        .and_then(|value| value.strip_suffix('}'))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return get_env(variable)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    }
+
+    Some(value.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1799,7 +1854,7 @@ fn parse_provider_timeouts(
 }
 fn parse_custom_providers(
     value: Option<&Value>,
-    diagnostics: &mut ConfigDiagnostics,
+    _diagnostics: &mut ConfigDiagnostics,
 ) -> HashMap<String, CustomProviderConfig> {
     let mut out = HashMap::new();
     let Some(Value::Object(providers)) = value else {
@@ -1814,22 +1869,25 @@ fn parse_custom_providers(
         let name = provider_obj
             .get("name")
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| provider_id.clone());
+            .map(str::to_string);
 
         let npm = provider_obj
             .get("npm")
             .and_then(Value::as_str)
             .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+            .filter(|s| !s.is_empty());
 
-        let base_url = provider_obj
-            .get("options")
-            .and_then(Value::as_object)
-            .and_then(|opts| opts.get("baseURL"))
+        let options = provider_obj.get("options").and_then(Value::as_object);
+        let base_url = options
+            .and_then(|options| options.get("baseURL"))
             .and_then(Value::as_str)
             .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+            .filter(|s| !s.is_empty());
+        let api_key = options
+            .and_then(|options| options.get("apiKey"))
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         let mut models = HashMap::new();
         if let Some(models_val) = provider_obj.get("models") {
@@ -1842,18 +1900,38 @@ fn parse_custom_providers(
                     let model_name = model_obj
                         .get("name")
                         .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| model_id.clone());
+                        .map(str::to_string);
+
+                    let limit = model_obj.get("limit").and_then(Value::as_object);
 
                     let context_window = model_obj
                         .get("contextWindow")
                         .and_then(Value::as_u64)
-                        .map(|v| v as u32);
+                        .or_else(|| {
+                            limit
+                                .and_then(|limit| limit.get("context"))
+                                .and_then(Value::as_u64)
+                        })
+                        .and_then(|value| u32::try_from(value).ok());
 
                     let max_tokens = model_obj
                         .get("maxTokens")
                         .and_then(Value::as_u64)
-                        .map(|v| v as u32);
+                        .or_else(|| {
+                            limit
+                                .and_then(|limit| limit.get("output"))
+                                .and_then(Value::as_u64)
+                        })
+                        .and_then(|value| u32::try_from(value).ok());
+
+                    let modalities =
+                        model_obj
+                            .get("modalities")
+                            .and_then(Value::as_object)
+                            .map(|modalities| CustomModelModalities {
+                                input: parse_string_array(modalities.get("input")),
+                                output: parse_string_array(modalities.get("output")),
+                            });
 
                     let launch = model_obj
                         .get("_launch")
@@ -1866,11 +1944,25 @@ fn parse_custom_providers(
                             name: model_name,
                             context_window,
                             max_tokens,
+                            attachment: model_obj.get("attachment").and_then(Value::as_bool),
+                            reasoning: model_obj.get("reasoning").and_then(Value::as_bool),
+                            temperature: model_obj.get("temperature").and_then(Value::as_bool),
+                            tool_call: model_obj.get("tool_call").and_then(Value::as_bool),
+                            modalities,
                             launch,
                         },
                     );
                 }
             }
+        }
+
+        if name.is_none()
+            && npm.is_none()
+            && base_url.is_none()
+            && api_key.is_none()
+            && models.is_empty()
+        {
+            continue;
         }
 
         out.insert(
@@ -1879,6 +1971,7 @@ fn parse_custom_providers(
                 name,
                 npm,
                 base_url,
+                api_key,
                 models,
             },
         );
@@ -2808,5 +2901,107 @@ mod tests {
 
         assert_eq!(config.agent_steps.get("build"), Some(&42));
         assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_standard_custom_provider_options_and_model_metadata() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "provider": {
+                    "custom": {
+                        "name": "Custom Provider",
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": {
+                            "baseURL": "https://example.com/v1",
+                            "apiKey": "{env:CUSTOM_PROVIDER_KEY}"
+                        },
+                        "models": {
+                            "vision-model": {
+                                "name": "Vision Model",
+                                "attachment": true,
+                                "reasoning": true,
+                                "temperature": true,
+                                "tool_call": true,
+                                "limit": {
+                                    "context": 128000,
+                                    "output": 8192
+                                },
+                                "modalities": {
+                                    "input": ["text", "image"],
+                                    "output": ["text"]
+                                }
+                            }
+                        }
+                    },
+                    "anthropic": {
+                        "options": {
+                            "timeout": 300000
+                        }
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        let provider = config
+            .custom_providers
+            .get("custom")
+            .expect("custom provider");
+        assert_eq!(provider.name.as_deref(), Some("Custom Provider"));
+        assert_eq!(provider.npm.as_deref(), Some("@ai-sdk/openai-compatible"));
+        assert_eq!(provider.base_url.as_deref(), Some("https://example.com/v1"));
+        assert_eq!(
+            provider.api_key.as_deref(),
+            Some("{env:CUSTOM_PROVIDER_KEY}")
+        );
+
+        let model = provider.models.get("vision-model").expect("custom model");
+        assert_eq!(model.name.as_deref(), Some("Vision Model"));
+        assert_eq!(model.context_window, Some(128000));
+        assert_eq!(model.max_tokens, Some(8192));
+        assert_eq!(model.attachment, Some(true));
+        assert_eq!(model.reasoning, Some(true));
+        assert_eq!(model.temperature, Some(true));
+        assert_eq!(model.tool_call, Some(true));
+        let modalities = model.modalities.as_ref().expect("model modalities");
+        assert_eq!(modalities.input, ["text", "image"]);
+        assert_eq!(modalities.output, ["text"]);
+
+        assert!(!config.custom_providers.contains_key("anthropic"));
+        assert_eq!(
+            config.provider_timeouts.get("anthropic"),
+            Some(&ProviderTimeout::Millis(300000))
+        );
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn resolves_literal_custom_provider_api_key() {
+        let provider = CustomProviderConfig {
+            name: None,
+            npm: None,
+            base_url: None,
+            api_key: Some(" secret-key ".to_string()),
+            models: HashMap::new(),
+        };
+
+        assert_eq!(provider.resolved_api_key().as_deref(), Some("secret-key"));
+    }
+
+    #[test]
+    fn resolves_custom_provider_api_key_from_environment_reference() {
+        assert_eq!(
+            resolve_api_key_value(Some("{env:CUSTOM_PROVIDER_KEY}"), |variable| {
+                assert_eq!(variable, "CUSTOM_PROVIDER_KEY");
+                Some(" env-secret ".to_string())
+            })
+            .as_deref(),
+            Some("env-secret")
+        );
+        assert_eq!(
+            resolve_api_key_value(Some("{env:MISSING_KEY}"), |_| None),
+            None
+        );
     }
 }

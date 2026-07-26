@@ -11,9 +11,9 @@ use rmcp::ServiceExt;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use std::process::Stdio;
 use tokio::sync::Mutex;
 
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -195,7 +195,7 @@ impl McpManager {
                         cmd.args(args);
                         cmd.current_dir(cwd);
                         cmd.envs(env);
-                    })
+                    }),
                 )
                 .stderr(Stdio::null())
                 .spawn()?;

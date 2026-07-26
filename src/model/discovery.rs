@@ -150,9 +150,17 @@ struct CacheEntry {
 pub struct Discovery {
     client: Client,
     cache_path: PathBuf,
-    custom_providers: Option<std::collections::HashMap<String, crate::config::CustomProviderConfig>>,
+    custom_providers:
+        Option<std::collections::HashMap<String, crate::config::CustomProviderConfig>>,
 }
 impl Discovery {
+    pub fn custom_provider_api_key(&self, provider_id: &str) -> Option<String> {
+        self.custom_providers
+            .as_ref()?
+            .get(&provider_id.trim().to_ascii_lowercase())?
+            .resolved_api_key()
+    }
+
     pub fn new() -> Result<Self> {
         // Try to load custom providers from config file
         let custom_providers = crate::config::ConfigLoader::load()
@@ -162,7 +170,9 @@ impl Discovery {
     }
 
     pub fn new_with_custom(
-        custom_providers: Option<std::collections::HashMap<String, crate::config::CustomProviderConfig>>,
+        custom_providers: Option<
+            std::collections::HashMap<String, crate::config::CustomProviderConfig>,
+        >,
     ) -> Result<Self> {
         if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
             let cache_dir = PathBuf::from("/tmp/crabcode_test_cache");
@@ -372,37 +382,61 @@ impl Discovery {
         };
 
         crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
-        // Apply custom providers from config as final overlay
-        if let Some(custom) = &self.custom_providers {
-            for (id, custom_provider) in custom {
-                let provider = providers.entry(id.clone()).or_insert_with(|| -> Provider {
-                    Provider {
-                        id: id.clone(),
-                        name: custom_provider.name.clone(),
-                        api: String::new(),
-                        doc: String::new(),
-                        env: Vec::new(),
-                        npm: String::new(),
-                        models: HashMap::new(),
-                    }
+        self.apply_custom_provider_overlays(&mut providers);
+
+        Ok(providers)
+    }
+
+    pub async fn refresh_cache(&self) -> Result<HashMap<String, Provider>> {
+        let cached = self.load_from_cache().ok().flatten();
+        let mut providers = self.fetch_with_internal_providers(cached.as_ref()).await?;
+        self.save_to_cache(&providers)?;
+        crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
+        self.apply_custom_provider_overlays(&mut providers);
+        Ok(providers)
+    }
+
+    fn apply_custom_provider_overlays(&self, providers: &mut HashMap<String, Provider>) {
+        let Some(custom_providers) = &self.custom_providers else {
+            return;
+        };
+
+        for (provider_id, custom_provider) in custom_providers {
+            let provider = providers
+                .entry(provider_id.clone())
+                .or_insert_with(|| Provider {
+                    id: provider_id.clone(),
+                    name: custom_provider
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| provider_id.clone()),
+                    api: String::new(),
+                    doc: String::new(),
+                    env: Vec::new(),
+                    npm: String::new(),
+                    models: HashMap::new(),
                 });
-                
-                // Override with custom values if present
-                if !custom_provider.name.is_empty() {
-                    provider.name = custom_provider.name.clone();
-                }
-                if !custom_provider.base_url.is_empty() {
-                    provider.api = custom_provider.base_url.clone();
-                }
-                if !custom_provider.npm.is_empty() {
-                    provider.npm = custom_provider.npm.clone();
-                }
-                
-                // Add/override models
-                for (model_id, model_cfg) in &custom_provider.models {
-                    let model = crate::model::discovery::Model {
-                        id: String::from(model_id),
-                        name: String::from(&model_cfg.name),
+
+            if let Some(name) = &custom_provider.name {
+                provider.name.clone_from(name);
+            }
+            if let Some(base_url) = &custom_provider.base_url {
+                provider.api.clone_from(base_url);
+            }
+            if let Some(npm) = &custom_provider.npm {
+                provider.npm.clone_from(npm);
+            }
+
+            for (model_id, custom_model) in &custom_provider.models {
+                let model = provider
+                    .models
+                    .entry(model_id.clone())
+                    .or_insert_with(|| Model {
+                        id: model_id.clone(),
+                        name: custom_model
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| model_id.clone()),
                         family: String::new(),
                         attachment: false,
                         reasoning: false,
@@ -414,35 +448,79 @@ impl Discovery {
                         release_date: String::new(),
                         last_updated: String::new(),
                         status: None,
-                        modalities: Some(crate::model::discovery::Modalities {
+                        modalities: Some(Modalities {
                             input: vec!["text".to_string()],
                             output: vec!["text".to_string()],
                         }),
                         open_weights: false,
                         cost: None,
-                        limit: model_cfg.context_window.map(|cw| crate::model::discovery::Limit {
-                            context: cw,
-                            output: model_cfg.max_tokens.unwrap_or(cw),
-                        }),
-                        provider: Some(crate::model::discovery::ModelProvider {
-                            npm: if custom_provider.npm.is_empty() { None } else { Some(custom_provider.npm.clone()) },
-                            api: if custom_provider.base_url.is_empty() { None } else { Some(custom_provider.base_url.clone()) },
-                        }),
-                    };
-                    provider.models.insert(String::from(model_id), model);
+                        limit: None,
+                        provider: None,
+                    });
+
+                if let Some(name) = &custom_model.name {
+                    model.name.clone_from(name);
+                }
+                if let Some(reasoning) = custom_model.reasoning {
+                    model.reasoning = reasoning;
+                }
+                if let Some(temperature) = custom_model.temperature {
+                    model.temperature = temperature;
+                }
+                if let Some(tool_call) = custom_model.tool_call {
+                    model.tool_call = tool_call;
+                }
+                if let Some(modalities) = &custom_model.modalities {
+                    model.modalities = Some(Modalities {
+                        input: modalities.input.clone(),
+                        output: modalities.output.clone(),
+                    });
+                    model.attachment = modalities.input.iter().any(|input| input == "image");
+                }
+                if let Some(attachment) = custom_model.attachment {
+                    model.attachment = attachment;
+                    if attachment {
+                        let modalities = model.modalities.get_or_insert_with(|| Modalities {
+                            input: vec!["text".to_string()],
+                            output: vec!["text".to_string()],
+                        });
+                        if !modalities.input.iter().any(|input| input == "image") {
+                            modalities.input.push("image".to_string());
+                        }
+                    } else if let Some(modalities) = model.modalities.as_mut() {
+                        modalities.input.retain(|input| input != "image");
+                    }
+                }
+                if custom_model.context_window.is_some() || custom_model.max_tokens.is_some() {
+                    let current = model.limit.as_ref();
+                    if let Some(context) = custom_model
+                        .context_window
+                        .or_else(|| current.map(|limit| limit.context))
+                    {
+                        model.limit = Some(Limit {
+                            context,
+                            output: custom_model
+                                .max_tokens
+                                .or_else(|| current.map(|limit| limit.output))
+                                .unwrap_or(context),
+                        });
+                    }
+                }
+
+                if custom_provider.npm.is_some() || custom_provider.base_url.is_some() {
+                    let model_provider = model.provider.get_or_insert_with(|| ModelProvider {
+                        npm: None,
+                        api: None,
+                    });
+                    if let Some(npm) = &custom_provider.npm {
+                        model_provider.npm = Some(npm.clone());
+                    }
+                    if let Some(base_url) = &custom_provider.base_url {
+                        model_provider.api = Some(base_url.clone());
+                    }
                 }
             }
         }
-
-        Ok(providers)
-    }
-
-    pub async fn refresh_cache(&self) -> Result<HashMap<String, Provider>> {
-        let cached = self.load_from_cache().ok().flatten();
-        let mut providers = self.fetch_with_internal_providers(cached.as_ref()).await?;
-        self.save_to_cache(&providers)?;
-        crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
-        Ok(providers)
     }
 
     pub async fn fetch_models(&self) -> Result<Vec<crate::model::types::Model>> {
@@ -630,6 +708,9 @@ impl Default for Discovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::configuration::{
+        CustomModelConfig, CustomModelModalities, CustomProviderConfig,
+    };
 
     fn unique_test_cache_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -648,6 +729,193 @@ mod tests {
     async fn test_discovery_creation() {
         let discovery = Discovery::new();
         assert!(discovery.is_ok());
+    }
+
+    #[test]
+    fn custom_model_overlay_preserves_unspecified_catalog_metadata() {
+        let mut providers = HashMap::from([(
+            "custom".to_string(),
+            Provider {
+                id: "custom".to_string(),
+                name: "Catalog Provider".to_string(),
+                api: "https://catalog.example/v1".to_string(),
+                doc: "https://catalog.example/docs".to_string(),
+                env: vec!["CATALOG_KEY".to_string()],
+                npm: "@ai-sdk/openai-compatible".to_string(),
+                models: HashMap::from([(
+                    "vision-model".to_string(),
+                    Model {
+                        id: "vision-model".to_string(),
+                        name: "Catalog Model".to_string(),
+                        family: "catalog-family".to_string(),
+                        attachment: true,
+                        reasoning: true,
+                        reasoning_options: Vec::new(),
+                        tool_call: true,
+                        structured_output: true,
+                        temperature: true,
+                        knowledge: "2025-01".to_string(),
+                        release_date: "2025-01-01".to_string(),
+                        last_updated: "2025-02-01".to_string(),
+                        status: None,
+                        modalities: Some(Modalities {
+                            input: vec!["text".to_string(), "image".to_string()],
+                            output: vec!["text".to_string()],
+                        }),
+                        open_weights: false,
+                        cost: None,
+                        limit: Some(Limit {
+                            context: 64000,
+                            output: 4096,
+                        }),
+                        provider: Some(ModelProvider {
+                            npm: Some("@ai-sdk/openai-compatible".to_string()),
+                            api: Some("https://catalog.example/v1".to_string()),
+                        }),
+                    },
+                )]),
+            },
+        )]);
+        let custom_providers = HashMap::from([(
+            "custom".to_string(),
+            CustomProviderConfig {
+                name: None,
+                npm: None,
+                base_url: None,
+                api_key: None,
+                models: HashMap::from([(
+                    "vision-model".to_string(),
+                    CustomModelConfig {
+                        name: Some("Configured Model".to_string()),
+                        context_window: Some(128000),
+                        max_tokens: None,
+                        attachment: None,
+                        reasoning: None,
+                        temperature: None,
+                        tool_call: None,
+                        modalities: None,
+                        launch: false,
+                    },
+                )]),
+            },
+        )]);
+        let discovery = Discovery::new_with_custom(Some(custom_providers)).expect("discovery");
+
+        discovery.apply_custom_provider_overlays(&mut providers);
+
+        let provider = providers.get("custom").expect("provider");
+        assert_eq!(provider.name, "Catalog Provider");
+        assert_eq!(provider.api, "https://catalog.example/v1");
+        assert_eq!(provider.npm, "@ai-sdk/openai-compatible");
+        let model = provider.models.get("vision-model").expect("model");
+        assert_eq!(model.name, "Configured Model");
+        assert!(model.attachment);
+        assert!(model.reasoning);
+        assert!(model.tool_call);
+        assert!(model.structured_output);
+        assert!(model.temperature);
+        assert_eq!(model.family, "catalog-family");
+        assert_eq!(
+            model
+                .modalities
+                .as_ref()
+                .map(|value| value.input.as_slice()),
+            Some(["text".to_string(), "image".to_string()].as_slice())
+        );
+        assert_eq!(
+            model.limit.as_ref().map(|limit| limit.context),
+            Some(128000)
+        );
+        assert_eq!(model.limit.as_ref().map(|limit| limit.output), Some(4096));
+    }
+
+    #[test]
+    fn custom_model_modalities_enable_image_input() {
+        let mut providers = HashMap::new();
+        let custom_providers = HashMap::from([(
+            "custom".to_string(),
+            CustomProviderConfig {
+                name: None,
+                npm: Some("@ai-sdk/openai-compatible".to_string()),
+                base_url: Some("https://example.com/v1".to_string()),
+                api_key: None,
+                models: HashMap::from([(
+                    "vision-model".to_string(),
+                    CustomModelConfig {
+                        name: None,
+                        context_window: Some(128000),
+                        max_tokens: Some(8192),
+                        attachment: None,
+                        reasoning: Some(true),
+                        temperature: Some(true),
+                        tool_call: Some(true),
+                        modalities: Some(CustomModelModalities {
+                            input: vec!["text".to_string(), "image".to_string()],
+                            output: vec!["text".to_string()],
+                        }),
+                        launch: false,
+                    },
+                )]),
+            },
+        )]);
+        let discovery = Discovery::new_with_custom(Some(custom_providers)).expect("discovery");
+
+        discovery.apply_custom_provider_overlays(&mut providers);
+
+        let model = providers["custom"]
+            .models
+            .get("vision-model")
+            .expect("model");
+        assert!(model.attachment);
+        assert!(model.reasoning);
+        assert!(model.temperature);
+        assert!(model.tool_call);
+        assert_eq!(
+            model.limit.as_ref().map(|limit| limit.context),
+            Some(128000)
+        );
+        assert_eq!(model.limit.as_ref().map(|limit| limit.output), Some(8192));
+    }
+
+    #[test]
+    fn custom_model_attachment_flag_updates_modalities() {
+        let mut providers = HashMap::new();
+        let custom_providers = HashMap::from([(
+            "custom".to_string(),
+            CustomProviderConfig {
+                name: None,
+                npm: None,
+                base_url: None,
+                api_key: None,
+                models: HashMap::from([(
+                    "vision-model".to_string(),
+                    CustomModelConfig {
+                        name: None,
+                        context_window: None,
+                        max_tokens: None,
+                        attachment: Some(true),
+                        reasoning: None,
+                        temperature: None,
+                        tool_call: None,
+                        modalities: None,
+                        launch: false,
+                    },
+                )]),
+            },
+        )]);
+        let discovery = Discovery::new_with_custom(Some(custom_providers)).expect("discovery");
+
+        discovery.apply_custom_provider_overlays(&mut providers);
+
+        let model = providers["custom"]
+            .models
+            .get("vision-model")
+            .expect("model");
+        assert!(model.attachment);
+        assert!(model
+            .modalities
+            .as_ref()
+            .is_some_and(|modalities| modalities.input.iter().any(|input| input == "image")));
     }
 
     #[tokio::test]

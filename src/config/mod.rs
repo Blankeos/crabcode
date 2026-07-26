@@ -1,13 +1,13 @@
 pub mod configuration;
 
 pub use configuration::{
-    ConfigLoader, CustomModelConfig, CustomProviderConfig, ImageOpenCommandConfig, ImageOpenWith, ImagesConfig, McpConfig, McpServerConfig,
-    NotificationEventConfig, NotificationsConfig, ProviderTimeout, TerminalNotificationCondition,
-    TerminalNotificationMode,
+    ConfigLoader, CustomProviderConfig, ImageOpenCommandConfig, ImageOpenWith, ImagesConfig,
+    McpConfig, McpServerConfig, NotificationEventConfig, NotificationsConfig, ProviderTimeout,
+    TerminalNotificationCondition, TerminalNotificationMode,
 };
 
 #[cfg(test)]
-pub use configuration::{McpLocalConfig, McpRemoteConfig};
+pub use configuration::McpLocalConfig;
 
 #[cfg(target_os = "macos")]
 pub use configuration::MacosNotificationBackend;

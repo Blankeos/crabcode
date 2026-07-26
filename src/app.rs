@@ -1081,7 +1081,10 @@ impl App {
             .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
             .with_agent_permission_rules(agent_registry.permission_rules_map());
 
-        let discovery = crate::model::discovery::Discovery::new_with_custom(Some(loaded_config.merged_config.custom_providers.clone())).ok();
+        let discovery = crate::model::discovery::Discovery::new_with_custom(Some(
+            loaded_config.merged_config.custom_providers.clone(),
+        ))
+        .ok();
         let now = std::time::Instant::now();
 
         Ok(Self {
