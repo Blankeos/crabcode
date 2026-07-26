@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.8] - 2026-07-23
+
+### Bug Fixes
+
+- Resolve workspace-aware file tool paths by @Blankeos
+- Allow `.env.example` files without permission prompts by @Blankeos
+- Tooltip for copy + input handling for it by @Blankeos
+- Failed to publish refreshed model catalog by @Blankeos
+- Skip doom-loop checks for safe read-like actions by @Blankeos
+- Preserve selection during scroll and prioritize top search match by @Blankeos
+- Prevent models dialog scroll from firing on reasoning control by @Blankeos
+- Refine refresh popup layout, copy, and footer action hint by @Blankeos
+- Preserve websocket delta continuation only on live OpenAI socket by @Blankeos
+- Harden cancellation and subagent session isolation by @Blankeos
+
+### Chores
+
+- Automated trusted-publishing after just tag. by @Blankeos
+
+### Features
+
+- More lenient auth.json parsing by @Blankeos
+- Add native effective catalog snapshot by @Blankeos
+- Add stream rollback recovery and websocket fallback hardening by @Blankeos
+- Add interactive terminal sessions with PTY and non-interactive bash hardening by @Blankeos
+- Add assistant response markdown copy action by @Blankeos
+
+### Performance
+
+- Make subagent tab switching warm-cache and fix per-refresh usage walk by @Blankeos
+- Move message parts during snapshot conversion by @Blankeos
+- Trim per-frame buffer clones and subagent tab rebuilds by @Blankeos
+- Cache streaming tool rows and stop deep-cloning viewport lines by @Blankeos
+- Batch streaming snapshots in one transaction with WAL by @Blankeos
+- Reopen /models from cache when providers unchanged by @Blankeos
+- Optimize subagent streaming and rendering cadence by @Blankeos
+- Run model discovery and refresh commands asynchronously by @Blankeos
+- Cache discovered and runtime models in-process by @Blankeos
+- Optimize streaming drain scheduling and sessions dialog refresh path by @Blankeos
+
+### Ci
+
+- Validate release refs originate from main before publishing by @Blankeos
+
 ## [0.0.7] - 2026-07-12
 
 ### Bug Fixes

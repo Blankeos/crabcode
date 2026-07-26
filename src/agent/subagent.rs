@@ -323,6 +323,13 @@ async fn start_subagent_stream(
             if let Some(effort) = session.reasoning_effort {
                 builder = builder.reasoning_effort(effort.as_str());
             }
+            if let Some(cache_key) = session
+                .prompt_cache_key
+                .as_deref()
+                .or(session.openai_options.prompt_cache_key.as_deref())
+            {
+                builder = builder.prompt_cache_key(cache_key);
+            }
             let provider = builder
                 .build()
                 .map_err(|e| format!("Failed to build OpenAICompatible provider: {}", e))?;
@@ -388,6 +395,13 @@ async fn start_subagent_stream(
             }
             if session.openai_options.force_tool_strict_false {
                 builder = builder.tool_strict_override(false);
+            }
+            if let Some(cache_key) = session
+                .prompt_cache_key
+                .as_deref()
+                .or(session.openai_options.prompt_cache_key.as_deref())
+            {
+                builder = builder.prompt_cache_key(cache_key);
             }
             if !session.openai_options.additional_headers.is_empty() {
                 builder = builder.headers(session.openai_options.additional_headers.clone());
@@ -615,6 +629,7 @@ mod tests {
             reasoning_effort,
             supports_image_input: false,
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
+            prompt_cache_key: None,
         }
     }
 }

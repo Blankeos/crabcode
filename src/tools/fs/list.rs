@@ -83,8 +83,10 @@ impl ToolHandler for ListTool {
             parameters: vec![
                 ParameterSchema {
                     name: "path".to_string(),
-                    description: "Directory path to list".to_string(),
-                    required: true,
+                    description:
+                        "Directory path to list (default: current workspace; blank also uses it)"
+                            .to_string(),
+                    required: false,
                     param_type: ParameterType::String,
                 },
                 ParameterSchema {
@@ -105,12 +107,11 @@ impl ToolHandler for ListTool {
     }
 
     fn validate(&self, params: &Value) -> Result<(), ToolError> {
-        validate_required(params, &["path"])
+        validate_required(params, &[])
     }
 
-    async fn execute(&self, params: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
-        let path_str = get_string_param(&params, "path")
-            .ok_or_else(|| ToolError::Validation("path is required".to_string()))?;
+    async fn execute(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        let path_str = get_string_param(&params, "path");
         let offset = get_integer_param(&params, "offset")
             .map(|value| value.max(0) as usize)
             .unwrap_or(0);
@@ -124,26 +125,27 @@ impl ToolHandler for ListTool {
             })
             .unwrap_or(DEFAULT_LIMIT);
 
-        let path = Path::new(&path_str);
+        let path = super::resolve_path(path_str.as_deref(), ctx);
 
         if !path.exists() {
             return Err(ToolError::NotFound(format!(
-                "Directory not found: {}",
-                path_str
+                "Directory not found: {}. Current workspace: {}",
+                path.display(),
+                ctx.workdir().display()
             )));
         }
 
         if !path.is_dir() {
             return Err(ToolError::Validation(format!(
                 "Path is not a directory: {}",
-                path_str
+                path.display()
             )));
         }
 
-        let entries = Self::list_entries(path)?;
+        let entries = Self::list_entries(&path)?;
         let end = offset.saturating_add(limit).min(entries.len());
         let truncated = end < entries.len();
-        let result_text = Self::format_entries(path, &entries, offset, limit);
+        let result_text = Self::format_entries(&path, &entries, offset, limit);
         let preview = entries
             .iter()
             .skip(offset)
@@ -153,12 +155,14 @@ impl ToolHandler for ListTool {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok(ToolResult::new(format!("List: {}", path_str), result_text)
-            .with_metadata("truncated", serde_json::json!(truncated))
-            .with_metadata("count", serde_json::json!(entries.len()))
-            .with_metadata("offset", serde_json::json!(offset))
-            .with_metadata("limit", serde_json::json!(limit))
-            .with_metadata("preview", serde_json::json!(preview)))
+        Ok(
+            ToolResult::new(format!("List: {}", path.display()), result_text)
+                .with_metadata("truncated", serde_json::json!(truncated))
+                .with_metadata("count", serde_json::json!(entries.len()))
+                .with_metadata("offset", serde_json::json!(offset))
+                .with_metadata("limit", serde_json::json!(limit))
+                .with_metadata("preview", serde_json::json!(preview)),
+        )
     }
 }
 
@@ -179,6 +183,38 @@ mod tests {
     fn tool_context() -> ToolContext {
         let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
         ToolContext::new("session", "message", "Plan", abort_rx)
+    }
+
+    fn tool_context_in(path: &std::path::Path) -> ToolContext {
+        tool_context().with_workdir(path)
+    }
+
+    #[test]
+    fn list_blank_path_uses_workspace() {
+        let dir = unique_temp_dir("crabcode_list_tool_blank_path_test");
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        std::fs::write(dir.join("workspace.txt"), "x").expect("test file should be written");
+
+        let result = tokio_test::block_on(
+            ListTool::new().execute(json!({ "path": "" }), &tool_context_in(&dir)),
+        )
+        .expect("blank path should list the workspace");
+
+        assert!(result.output.contains("workspace.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_missing_path_remains_an_error() {
+        let dir = unique_temp_dir("crabcode_list_tool_missing_path_test");
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+
+        let result = tokio_test::block_on(
+            ListTool::new().execute(json!({ "path": "missing" }), &tool_context_in(&dir)),
+        );
+
+        assert!(matches!(result, Err(crate::tools::ToolError::NotFound(_))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

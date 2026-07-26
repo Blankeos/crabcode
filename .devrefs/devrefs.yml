@@ -13,3 +13,7 @@ references:
     description: "a ratatui agent harness that we can use as reference, especially since it's by openai"
     remote: https://github.com/openai/codex.git
     branch: main
+  - id: xai-org/grok-build
+    description: "source code for xai grok"
+    remote: https://github.com/xai-org/grok-build.git
+    branch: main

@@ -11,7 +11,10 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
-const MAX_OUTPUT_BYTES: usize = 51_200;
+/// Cap bash output sent toward the model. Aligns with Grok Build's ~20k-char
+/// bash limit (OpenCode defaults to 50KiB; Codex model-facing truncates nearer
+/// ~10k tokens). Tighter caps cut SuperGrok / long-session token burn.
+const MAX_OUTPUT_BYTES: usize = 20_000;
 const READ_CHUNK_SIZE: usize = 4_096;
 
 pub struct BashTool;
@@ -29,11 +32,6 @@ fn kill_process_group(child: &tokio::process::Child) {
             let _ = libc::killpg(pid as i32, libc::SIGKILL);
         }
     }
-}
-
-#[cfg(not(unix))]
-fn kill_process_group(child: &tokio::process::Child) {
-    let _ = child.start_kill();
 }
 
 #[cfg(unix)]

@@ -96,7 +96,7 @@ impl Provider for Anthropic {
     ) -> Result<ProviderStream> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
-        let system_prompts: Vec<serde_json::Value> = messages
+        let mut system_prompts: Vec<serde_json::Value> = messages
             .iter()
             .filter_map(|m| match m {
                 Message::System(s) => Some(serde_json::json!({
@@ -106,6 +106,17 @@ impl Provider for Anthropic {
                 _ => None,
             })
             .collect();
+
+        // Anthropic prompt caching: mark the last system block ephemeral so the
+        // stable prefix can be reused across tool steps in a session.
+        if let Some(last) = system_prompts.last_mut() {
+            if let Some(obj) = last.as_object_mut() {
+                obj.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({ "type": "ephemeral" }),
+                );
+            }
+        }
 
         let user_messages: Vec<serde_json::Value> = messages
             .iter()

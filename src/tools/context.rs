@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 pub struct ToolContext {
     pub session_id: String,
     pub message_id: String,
@@ -6,6 +8,7 @@ pub struct ToolContext {
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub call_id: Option<String>,
     pub extra: Option<serde_json::Value>,
+    workdir: PathBuf,
 }
 
 impl ToolContext {
@@ -23,6 +26,7 @@ impl ToolContext {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             call_id: None,
             extra: None,
+            workdir: crate::utils::cwd::current_dir_or_dot(),
         }
     }
 
@@ -41,6 +45,7 @@ impl ToolContext {
             cancel_token,
             call_id: None,
             extra: None,
+            workdir: crate::utils::cwd::current_dir_or_dot(),
         }
     }
 
@@ -52,6 +57,15 @@ impl ToolContext {
     pub fn with_extra(mut self, extra: serde_json::Value) -> Self {
         self.extra = Some(extra);
         self
+    }
+
+    pub fn with_workdir(mut self, workdir: impl Into<PathBuf>) -> Self {
+        self.workdir = workdir.into();
+        self
+    }
+
+    pub fn workdir(&self) -> &Path {
+        &self.workdir
     }
 
     pub fn is_aborted(&self) -> bool {

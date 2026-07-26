@@ -426,3 +426,5 @@ I think this is how the TUI works already anyway right?
 - [x] Give a way to still show the 'copy' tool tip on select even if my mouse moves outside the terminal for the mouseup event.
 
 - [x] Some permission requests are annoying, might have missed allowing them... subagents requesting permission to read stuff inside of the same current workspace. Also sometimes the parent agent requesting permission to read a file inside the same current workspace.
+
+- [ ] When question dialog is there, allow me to scroll the chat still

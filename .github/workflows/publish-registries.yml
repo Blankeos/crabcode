@@ -1,0 +1,179 @@
+name: Publish registries
+
+on:
+  push:
+    tags:
+      - "**[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to publish (for example, v0.0.8)
+        required: true
+        type: string
+
+concurrency:
+  group: publish-registries-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify release tag and package versions
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+
+          if [[ "$RELEASE_TAG" != v* || -z "$version" ]]; then
+            echo "Expected a release tag like v0.0.8, got: $RELEASE_TAG"
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          release_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "Release tag $RELEASE_TAG points to a commit that is not on main"
+            exit 1
+          fi
+
+          cargo_version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          npm_version="$(node -p 'require("./npm/package.json").version')"
+
+          if [[ "$cargo_version" != "$version" || "$npm_version" != "$version" ]]; then
+            echo "Version mismatch: tag=$version cargo=$cargo_version npm=$npm_version"
+            exit 1
+          fi
+
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  publish-crate:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+      - name: Build remote client
+        working-directory: remote-client
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - name: Check crates.io
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header 'Accept: application/json' \
+            --user-agent 'crabcode-release-workflow (https://github.com/Blankeos/crabcode)' \
+            "https://crates.io/api/v1/crates/crabcode/${{ needs.prepare.outputs.version }}")"
+
+          case "$status" in
+            200) echo "published=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Unexpected crates.io response: HTTP $status"; exit 1 ;;
+          esac
+      - name: Authenticate with crates.io
+        if: steps.registry.outputs.published != 'true'
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish to crates.io
+        if: steps.registry.outputs.published != 'true'
+        run: cargo publish --package crabcode --locked --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+
+  publish-npm:
+    needs:
+      - prepare
+      - publish-crate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - name: Update npm for trusted publishing
+        run: npm install --global npm@11.5.2
+      - name: Wait for GitHub release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_assets=(
+            crabcode-aarch64-apple-darwin.tar.xz
+            crabcode-aarch64-unknown-linux-gnu.tar.xz
+            crabcode-x86_64-apple-darwin.tar.xz
+            crabcode-x86_64-unknown-linux-gnu.tar.xz
+            crabcode-x86_64-pc-windows-msvc.zip
+          )
+
+          for attempt in {1..120}; do
+            assets="$(gh release view "${{ needs.prepare.outputs.tag }}" \
+              --repo "${{ github.repository }}" \
+              --json assets \
+              --jq '.assets[].name' 2>/dev/null || true)"
+            missing=()
+
+            for asset in "${expected_assets[@]}"; do
+              if ! grep -Fxq "$asset" <<< "$assets"; then
+                missing+=("$asset")
+              fi
+            done
+
+            if (( ${#missing[@]} == 0 )); then
+              echo "All GitHub release binaries are available"
+              exit 0
+            fi
+
+            echo "Waiting for GitHub release binaries (attempt $attempt/120): ${missing[*]}"
+            sleep 30
+          done
+
+          echo "Timed out waiting for GitHub release binaries"
+          exit 1
+      - name: Check npm
+        id: registry
+        working-directory: npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          if npm view "crabcode@${{ needs.prepare.outputs.version }}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish to npm
+        if: steps.registry.outputs.published != 'true'
+        working-directory: npm
+        run: npm publish

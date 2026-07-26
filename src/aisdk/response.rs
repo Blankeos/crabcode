@@ -14,6 +14,15 @@ use tokio::sync::mpsc;
 const PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT: usize = 1;
 const PROVIDER_STEP_MAX_RETRIES: usize = 10;
 
+/// Keep the newest N tool outputs intact for the model; older ones are pruned.
+/// Matches Grok Build / OpenCode mid-session tool-result retention behavior.
+const KEEP_RECENT_TOOL_OUTPUTS: usize = 6;
+/// Soft-trim threshold for older-but-still-retained tool outputs (chars).
+const TOOL_OUTPUT_SOFT_TRIM_CHARS: usize = 4_000;
+const TOOL_OUTPUT_SOFT_TRIM_HEAD: usize = 1_500;
+const TOOL_OUTPUT_SOFT_TRIM_TAIL: usize = 1_500;
+const PRUNED_TOOL_OUTPUT_PLACEHOLDER: &str = "[Old tool result content cleared]";
+
 pub struct StreamTextResponse {
     pub stream: LanguageModelStream,
     stop_reason: Arc<tokio::sync::Mutex<Option<StopReason>>>,
@@ -127,6 +136,13 @@ pub async fn stream_with_tools<P: Provider>(
             }
 
             let step_summary = provider_step_log_summary(&current_messages, &tools);
+            let pruned = prune_stale_tool_outputs_in_place(&mut current_messages);
+            if pruned > 0 {
+                let _ = tx_loop.send(ChunkType::Metadata(format!(
+                    "tool_outputs_pruned count={} keep_recent={}",
+                    pruned, KEEP_RECENT_TOOL_OUTPUTS
+                )));
+            }
             let _ = tx_loop.send(ChunkType::Metadata(format!(
                 "provider_step_start step={} messages={} tools={} {}",
                 step_idx,
@@ -758,6 +774,86 @@ fn rollback_provider_attempt(
     *emitted_non_replayable_output = false;
 }
 
+/// Prune older tool outputs in the live multi-step transcript before each
+/// provider request. Durable UI/history copies are left intact — this only
+/// mutates the request-facing message list.
+///
+/// Strategy (Grok Build / OpenCode inspired):
+/// - Keep the newest [`KEEP_RECENT_TOOL_OUTPUTS`] results full-size
+/// - Soft-trim large older results to head+tail
+/// - Hard-clear anything older than 2× the keep window to a placeholder
+/// - Drop attached images on pruned outputs (base64 is extremely expensive)
+fn prune_stale_tool_outputs_in_place(messages: &mut [Message]) -> usize {
+    let tool_output_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, message)| matches!(message, Message::ToolOutput(_)).then_some(idx))
+        .collect();
+
+    if tool_output_indices.is_empty() {
+        return 0;
+    }
+
+    let keep_from = tool_output_indices
+        .len()
+        .saturating_sub(KEEP_RECENT_TOOL_OUTPUTS);
+    let hard_clear_before = tool_output_indices
+        .len()
+        .saturating_sub(KEEP_RECENT_TOOL_OUTPUTS.saturating_mul(2));
+    let mut pruned = 0usize;
+
+    for (rank, &idx) in tool_output_indices.iter().enumerate() {
+        if rank >= keep_from {
+            continue;
+        }
+
+        let Message::ToolOutput(output) = &mut messages[idx] else {
+            continue;
+        };
+
+        let had_images = !output.images.is_empty();
+        let original_len = output.output.len();
+        if rank < hard_clear_before {
+            if original_len > PRUNED_TOOL_OUTPUT_PLACEHOLDER.len() || had_images {
+                output.output = PRUNED_TOOL_OUTPUT_PLACEHOLDER.to_string();
+                output.images.clear();
+                pruned += 1;
+            }
+            continue;
+        }
+
+        let trimmed = soft_trim_tool_output(&output.output);
+        if trimmed.len() < original_len || had_images {
+            output.output = trimmed;
+            output.images.clear();
+            pruned += 1;
+        }
+    }
+
+    pruned
+}
+
+fn soft_trim_tool_output(text: &str) -> String {
+    let char_count = text.chars().count();
+    if char_count <= TOOL_OUTPUT_SOFT_TRIM_CHARS {
+        return text.to_string();
+    }
+
+    let head: String = text.chars().take(TOOL_OUTPUT_SOFT_TRIM_HEAD).collect();
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(TOOL_OUTPUT_SOFT_TRIM_TAIL)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let omitted = char_count
+        .saturating_sub(TOOL_OUTPUT_SOFT_TRIM_HEAD)
+        .saturating_sub(TOOL_OUTPUT_SOFT_TRIM_TAIL);
+    format!("{head}\n\n...[{omitted} chars truncated]...\n\n{tail}")
+}
+
 #[derive(Debug, Default)]
 struct MessageLogSummary {
     system_messages: usize,
@@ -1300,7 +1396,11 @@ fn tool_call_key(item: &serde_json::Value, array_index: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{stream_with_tools, ToolCallAccumulator};
+    use super::{
+        prune_stale_tool_outputs_in_place, soft_trim_tool_output, stream_with_tools,
+        ToolCallAccumulator, KEEP_RECENT_TOOL_OUTPUTS, PRUNED_TOOL_OUTPUT_PLACEHOLDER,
+        TOOL_OUTPUT_SOFT_TRIM_CHARS,
+    };
     use crate::chunk::{ChunkType, FinishReason, MessagePhase};
     use crate::message::Message;
     use crate::provider::{Provider, ProviderStream};
@@ -1318,6 +1418,50 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn soft_trim_tool_output_keeps_short_text() {
+        assert_eq!(soft_trim_tool_output("short"), "short");
+    }
+
+    #[test]
+    fn soft_trim_tool_output_keeps_head_and_tail() {
+        let text = "a".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 500);
+        let trimmed = soft_trim_tool_output(&text);
+        assert!(trimmed.len() < text.len());
+        assert!(trimmed.starts_with('a'));
+        assert!(trimmed.ends_with('a'));
+        assert!(trimmed.contains("chars truncated"));
+    }
+
+    #[test]
+    fn prune_stale_tool_outputs_clears_oldest_and_keeps_recent() {
+        let mut messages = Vec::new();
+        let total = KEEP_RECENT_TOOL_OUTPUTS * 2 + 2;
+        for i in 0..total {
+            messages.push(Message::tool_output(
+                format!("call_{i}"),
+                "bash",
+                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 200),
+                false,
+            ));
+        }
+
+        let pruned = prune_stale_tool_outputs_in_place(&mut messages);
+        assert!(pruned > 0);
+
+        let outputs: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolOutput(output) => Some(output.output.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(outputs[0], PRUNED_TOOL_OUTPUT_PLACEHOLDER);
+        let last = outputs.last().expect("output");
+        assert_eq!(last.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 200);
+    }
 
     #[derive(Debug, Clone)]
     struct BlockingTextProvider;

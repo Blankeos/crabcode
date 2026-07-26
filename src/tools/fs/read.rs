@@ -8,7 +8,7 @@ use std::path::Path;
 
 const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50MB
 const BINARY_CHECK_SIZE: usize = 8192; // 8KB
-const DEFAULT_LIMIT: usize = 2000;
+const DEFAULT_LIMIT: usize = 1000;
 
 pub struct ReadTool;
 
@@ -104,7 +104,7 @@ impl ToolHandler for ReadTool {
                 },
                 ParameterSchema {
                     name: "limit".to_string(),
-                    description: "Maximum number of lines to read (default: 2000)".to_string(),
+                    description: "Maximum number of lines to read (default: 1000)".to_string(),
                     required: false,
                     param_type: ParameterType::Integer,
                 },
@@ -124,7 +124,7 @@ impl ToolHandler for ReadTool {
         }
     }
 
-    async fn execute(&self, params: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let file_path = Self::file_path_param(&params)
             .ok_or_else(|| ToolError::Validation("file_path is required".to_string()))?;
 
@@ -136,28 +136,28 @@ impl ToolHandler for ReadTool {
             .map(|v| if v <= 0 { DEFAULT_LIMIT } else { v as usize })
             .unwrap_or(DEFAULT_LIMIT);
 
-        let path = Path::new(&file_path);
+        let path = super::resolve_path(Some(&file_path), ctx);
 
         if !path.exists() {
             return Err(ToolError::NotFound(format!(
                 "File not found: {}",
-                file_path
+                path.display()
             )));
         }
 
         if path.is_dir() {
-            let output = Self::read_directory(path, offset, limit)?;
-            return Ok(ToolResult::new(format!("Read: {}", file_path), output));
+            let output = Self::read_directory(&path, offset, limit)?;
+            return Ok(ToolResult::new(format!("Read: {}", path.display()), output));
         }
 
         if !path.is_file() {
             return Err(ToolError::Validation(format!(
                 "Path is not readable: {}",
-                file_path
+                path.display()
             )));
         }
 
-        let metadata = std::fs::metadata(path)
+        let metadata = std::fs::metadata(&path)
             .map_err(|e| ToolError::Execution(format!("Failed to read file metadata: {}", e)))?;
 
         let file_size = metadata.len();
@@ -170,12 +170,12 @@ impl ToolHandler for ReadTool {
             )));
         }
 
-        let content = std::fs::read(path)
+        let content = std::fs::read(&path)
             .map_err(|e| ToolError::Execution(format!("Failed to read file: {}", e)))?;
 
         if Self::is_binary(&content) {
             return Ok(ToolResult::new(
-                format!("Read: {}", file_path),
+                format!("Read: {}", path.display()),
                 "[Binary file - contents not displayed]".to_string(),
             ));
         }
@@ -186,7 +186,7 @@ impl ToolHandler for ReadTool {
 
         if offset >= total_lines {
             return Ok(ToolResult::new(
-                format!("Read: {}", file_path),
+                format!("Read: {}", path.display()),
                 format!(
                     "[File has {} lines, offset {} is beyond end]",
                     total_lines, offset
@@ -215,13 +215,14 @@ impl ToolHandler for ReadTool {
             ));
         }
 
-        Ok(ToolResult::new(format!("Read: {}", file_path), output))
+        Ok(ToolResult::new(format!("Read: {}", path.display()), output))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -250,6 +251,22 @@ mod tests {
         assert!(output.contains("README.md"));
         assert!(output.contains("config/"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_blank_path_uses_workspace_directory() {
+        let dir = unique_temp_dir("crabcode_read_tool_blank_path_test");
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        std::fs::write(dir.join("workspace.txt"), "x").expect("test file should be written");
+        let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
+        let ctx = ToolContext::new("session", "message", "Plan", abort_rx).with_workdir(&dir);
+
+        let result =
+            tokio_test::block_on(ReadTool::new().execute(json!({ "file_path": "" }), &ctx))
+                .expect("blank path should read the workspace directory");
+
+        assert!(result.output.contains("workspace.txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

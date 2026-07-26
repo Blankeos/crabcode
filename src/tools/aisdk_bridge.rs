@@ -10,7 +10,9 @@ use tokio_util::sync::CancellationToken;
 use crate::llm::ChunkSender;
 
 const TOOL_UI_PREVIEW_LIMIT: usize = 4_000;
-const TOOL_MODEL_OUTPUT_LIMIT: usize = 60_000;
+/// Generic model-facing tool output cap (non-bash tools). Matches Grok Build's
+/// 40KiB default; OpenCode uses 50KiB.
+const TOOL_MODEL_OUTPUT_LIMIT: usize = 40_000;
 
 static TOOL_CALL_SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -124,7 +126,7 @@ pub async fn convert_to_aisdk_tools(
                 };
 
                 if let Err(e) = handler.validate(&input) {
-                    let err = format!("Validation error: {}", e);
+                    let err = e.to_string();
                     send_tool_error_result(sender.as_ref(), &call_id, &tool_id_for_ui, &err);
                     crate::emit_log!(
                         "[AISDK_TOOL] error tool={} call_id={} session_id={} message_id={} agent_mode={} duration_ms={} error={}",
@@ -164,12 +166,13 @@ pub async fn convert_to_aisdk_tools(
                     agent_mode.clone(),
                     cancel_token.clone(),
                 )
-                .with_call_id(call_id.clone());
+                .with_call_id(call_id.clone())
+                .with_workdir(permissions.workdir().to_path_buf());
 
                 let tool_result = handler
                     .execute(input, &ctx)
                     .await
-                    .map_err(|e| format!("Execution error: {}", e));
+                    .map_err(|e| e.to_string());
                 let tool_result = match tool_result {
                     Ok(tool_result) => tool_result,
                     Err(err) => {
@@ -397,17 +400,17 @@ mod tests {
     fn truncate_tool_output_bounds_large_results() {
         let output = "a".repeat(70_000);
 
-        let truncated = truncate_tool_output(&output, 60_000);
+        let truncated = truncate_tool_output(&output, 40_000);
 
         assert!(truncated.len() < output.len());
-        assert!(truncated.contains("tool output truncated to 60000 bytes"));
+        assert!(truncated.contains("tool output truncated to 40000 bytes"));
     }
 
     #[test]
     fn truncate_tool_output_preserves_small_results() {
         let output = "small result";
 
-        assert_eq!(truncate_tool_output(output, 60_000), output);
+        assert_eq!(truncate_tool_output(output, 40_000), output);
     }
 
     #[test]

@@ -7,6 +7,7 @@ import {
   CommandItem,
   CommandList,
 } from "cmdk-solid"
+import { useIsMobileViewport } from "./mobile-utils"
 import { IconBrainGlyph, IconClockCounterClockwise, IconF7ChevronDownSquare } from "../../assets/icons"
 import { FadedEdgeEffect } from "../../components/remote/faded-edge-effect"
 import { ProjectFavicon } from "../../components/remote/project-favicon"
@@ -30,6 +31,7 @@ import { relativeTime } from "./shared-utils"
 export function RemoteClientPage(props: { ui: RemoteClientUi }) {
   const ui = props.ui
   const git = ui.header.gitViewer
+  const isMobileViewport = useIsMobileViewport()
   const gitPanelOpen = createMemo(() => Boolean(git.open() && git.summary()?.is_repo))
   const mainColumn = () => (
     <main class="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[#171717]">
@@ -48,7 +50,7 @@ export function RemoteClientPage(props: { ui: RemoteClientUi }) {
 
       <Show when={gitPanelOpen()}>
         <button
-          class="fixed inset-0 z-[75] bg-black/45 min-[901px]:hidden"
+          class="fixed inset-0 z-[75] bg-black/45"
           type="button"
           aria-label="Close git changes"
           onClick={() => git.onOpenChange(false)}
@@ -86,20 +88,27 @@ export function RemoteClientPage(props: { ui: RemoteClientUi }) {
             </div>
           }
         >
-          <div class="hidden h-full min-h-0 min-w-0 min-[901px]:block">
-            <Resizable class="h-full w-full min-h-0 min-w-0" initialSizes={[0.72, 0.28]} keyboardDelta={0.03}>
-              <ResizablePanel class="min-h-0 min-w-0 overflow-hidden" minSize={0.35} initialSize={0.72}>
-                {mainColumn()}
-              </ResizablePanel>
-              <ResizableHandle aria-label="Resize git panel" class="z-[2] w-px basis-px px-0 bg-[var(--line)] hover:bg-[var(--line-strong)]" />
-              <ResizablePanel class="min-h-0 min-w-0 overflow-hidden" minSize={0.18} maxSize={0.55} initialSize={0.28}>
-                <GitSidePanel git={git} variant="desktop" />
-              </ResizablePanel>
-            </Resizable>
-          </div>
-          <div class="h-full min-h-0 min-w-0 min-[901px]:hidden max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)]">
-            {mainLayout()}
-          </div>
+          {/* One layout only — dual CSS-hidden trees double-mount ServerPopover and race open state. */}
+          <Show
+            when={isMobileViewport()}
+            fallback={
+              <div class="h-full min-h-0 min-w-0">
+                <Resizable class="h-full w-full min-h-0 min-w-0" initialSizes={[0.72, 0.28]} keyboardDelta={0.03}>
+                  <ResizablePanel class="min-h-0 min-w-0 overflow-hidden" minSize={0.35} initialSize={0.72}>
+                    {mainColumn()}
+                  </ResizablePanel>
+                  <ResizableHandle aria-label="Resize git panel" class="z-[2] w-px basis-px px-0 bg-[var(--line)] hover:bg-[var(--line-strong)]" />
+                  <ResizablePanel class="min-h-0 min-w-0 overflow-hidden" minSize={0.18} maxSize={0.55} initialSize={0.28}>
+                    <GitSidePanel git={git} variant="desktop" />
+                  </ResizablePanel>
+                </Resizable>
+              </div>
+            }
+          >
+            <div class="h-full min-h-0 min-w-0 max-[900px]:h-[var(--dvh,100dvh)] max-[900px]:max-h-[var(--dvh,100dvh)]">
+              {mainLayout()}
+            </div>
+          </Show>
         </Show>
       </div>
 
@@ -970,13 +979,15 @@ function ThreadViewport(props: { thread: ThreadController }) {
               : "pb-52 max-[900px]:pb-4 max-[900px]:pt-2"
         )}
       >
-        <div ref={thread.setContentRef} class={cx("mx-auto w-[min(100%,64rem)]", thread.isEmptyChat() && "grid h-full")}>
+        <div ref={thread.setContentRef} class={cx("mx-auto w-[min(100%,64rem)] min-w-0 max-w-full", thread.isEmptyChat() && "grid h-full")}>
           <Show
             when={thread.visibleMessages().length > 0}
             fallback={
               <EmptyThread
                 projectName={thread.projectName()}
                 mascotFrame={thread.mascotFrame()}
+                recentSessions={thread.recentSessions}
+                onSwitchSession={thread.onSwitchSession}
               />
             }
           >

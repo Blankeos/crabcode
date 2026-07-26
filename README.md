@@ -23,7 +23,7 @@ A purely Rust-based AI CLI coding agent with a beautiful terminal UI for interac
   - **Multiple Model Support** - Works w/ the same models.dev support.
   - **Command System** - Intuitive commands: `/sessions`, `/new`, `/connect`, `/models`, `/exit` + custom commands.
   - **Session Management** - Create and manage multiple chat sessions
-  - **Streaming Responses** - Real-time streaming of AI responses (w/ [aisdk.rs](https://aisdk.rs))
+  - **Streaming Responses** - Real-time streaming of AI responses + websockets using OpenAI.
 
 ## Installation
 
@@ -118,9 +118,9 @@ Like any benchmark, please take this with a grain of salt. I have a cherry-picke
 
 | Agent       | Score | Checks | Avg time | Est. tokens | Est. cost |
 | ----------- | ----: | -----: | -------: | ----------: | --------: |
-| 🦀 crabcode |  100% |  19/19 |    21.3s |        2851 |   $0.0103 |
-| 🔲 opencode |  100% |  19/19 |    24.2s |        3837 |   $0.0201 |
-| ⚛️ codex    |  100% |  19/19 |    24.9s |       56172 |   $0.5435 |
+| 🦀 crabcode |  100% |  19/19 |    29.8s |        2768 |   $0.0094 |
+| 🔲 opencode |  100% |  19/19 |    34.9s |        4612 |   $0.0279 |
+| ⚛️ codex    |  100% |  19/19 |    33.7s |       36888 |   $0.3506 |
 
 ## Contributing
 
