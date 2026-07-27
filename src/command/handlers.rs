@@ -106,7 +106,6 @@ pub fn handle_connect<'a>(
             Ok(providers) => providers,
             Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
         };
-
         fn fallback_providers(
         ) -> std::collections::HashMap<String, crate::model::discovery::Provider> {
             use crate::model::discovery::Provider;
@@ -274,6 +273,10 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
             Ok(providers) => providers,
             Err(e) => return CommandResult::Error(format!("Failed to load providers: {}", e)),
         };
+        let connected_provider_ids = connected_providers
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<String>>();
 
         let provider_filter_matches_runtime = provider_filter.as_deref().is_some_and(|filter| {
             let filter = filter.to_ascii_lowercase();
@@ -288,6 +291,16 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
                 })
         });
 
+        let discovery = Discovery::new();
+        let configured_provider_ids = discovery
+            .as_ref()
+            .map(Discovery::custom_provider_ids)
+            .unwrap_or_default();
+        let provider_filter_matches_configured = provider_filter.as_deref().is_some_and(|filter| {
+            discovery
+                .as_ref()
+                .is_ok_and(|discovery| discovery.custom_provider_matches_filter(filter))
+        });
         let provider_filter_matches_unauthenticated_free = provider_filter.as_deref().is_some_and(
             crate::model::extensions::ModelExtensions::unauthenticated_free_provider_matches_filter,
         );
@@ -300,16 +313,16 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
         let has_persistent = connected_providers.keys().any(|provider_id| {
             !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_id)
         }) || provider_filter.is_none()
+            || provider_filter_matches_configured
             || provider_filter_matches_unauthenticated_free;
 
         let snapshot_models = crate::model::effective_catalog::models_for_dialog()
             .ok()
             .flatten();
-        let discovery = Discovery::new();
         let mut models: Vec<ModelType> = if let Some(models) = snapshot_models.as_ref() {
             models.clone()
         } else if has_persistent {
-            match discovery {
+            match discovery.as_ref() {
                 Ok(d) => match d.fetch_models().await {
                     Ok(models) => models
                         .into_iter()
@@ -352,23 +365,31 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
             Vec::new()
         };
 
+        if let Ok(discovery) = discovery.as_ref() {
+            discovery.apply_custom_models_to_dialog(&mut models);
+        }
+
         let mut runtime_errors = Vec::new();
-        if snapshot_models.is_none() && has_runtime {
+        if has_runtime {
             let runtime_result =
                 crate::model::extensions::ModelExtensions::runtime_models_for_dialog_cached().await;
-            models.extend(runtime_result.models);
+            crate::model::discovery::merge_dialog_models(&mut models, runtime_result.models);
             runtime_errors = runtime_result.errors;
         }
 
         if snapshot_models.is_none() && !models.is_empty() {
-            if let Err(err) =
-                crate::model::effective_catalog::publish_refreshed_models(models.clone())
-            {
-                push_toast(Toast::new(
-                    format!("Failed to seed model catalog cache: {}", err),
-                    ToastLevel::Warning,
-                    Some(std::time::Duration::from_secs(3)),
-                ));
+            if let Ok(discovery) = Discovery::new_with_custom(None) {
+                if let Ok(snapshot_models) = discovery.fetch_models().await {
+                    if let Err(err) =
+                        crate::model::effective_catalog::publish_refreshed_models(snapshot_models)
+                    {
+                        push_toast(Toast::new(
+                            format!("Failed to seed model catalog cache: {}", err),
+                            ToastLevel::Warning,
+                            Some(std::time::Duration::from_secs(3)),
+                        ));
+                    }
+                }
             }
         }
 
@@ -378,14 +399,14 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
             std::collections::HashMap::new();
 
         let is_model_selectable = |model: &ModelType| {
-            (connected_providers.contains_key(&model.provider_id)
-                || crate::model::extensions::ModelExtensions::is_available_without_connection(
-                    model,
-                ))
-                && crate::model::extensions::ModelExtensions::model_matches_provider_filter(
-                    model,
-                    provider_filter.as_deref(),
-                )
+            crate::model::discovery::is_model_selectable(
+                model,
+                &connected_provider_ids,
+                &configured_provider_ids,
+            ) && crate::model::extensions::ModelExtensions::model_matches_provider_filter(
+                model,
+                provider_filter.as_deref(),
+            )
         };
 
         for model in &models {
@@ -798,7 +819,7 @@ pub async fn refresh_models() -> CommandResult {
             .sum::<usize>()
             + runtime_model_count;
 
-        let models = match crate::model::discovery::Discovery::new() {
+        let models = match crate::model::discovery::Discovery::new_with_custom(None) {
             Ok(discovery) => match discovery.fetch_models().await {
                 Ok(models) => models,
                 Err(err) => {

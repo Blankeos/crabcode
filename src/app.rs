@@ -157,6 +157,23 @@ fn has_single_user_message(chat: &Chat) -> bool {
         == 1
 }
 
+fn models_dialog_provider_ids() -> Option<Vec<String>> {
+    let mut signature = crate::persistence::AuthDAO::new()
+        .and_then(|dao| dao.load())
+        .ok()?
+        .into_keys()
+        .map(|provider_id| format!("auth:{provider_id}"))
+        .collect::<Vec<_>>();
+
+    if let Ok(discovery) = crate::model::discovery::Discovery::new() {
+        signature.extend(discovery.custom_provider_dialog_signature());
+    }
+
+    signature.sort();
+    signature.dedup();
+    Some(signature)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamingRetryStatus {
     pub attempt: usize,
@@ -315,6 +332,7 @@ enum ModelsTaskKind {
 struct ModelsTaskMessage {
     kind: ModelsTaskKind,
     result: crate::command::registry::CommandResult,
+    provider_signature: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -1063,7 +1081,6 @@ impl App {
         );
         let agent_steps = agent_registry.max_steps_map();
         let provider_timeouts = loaded_config.merged_config.provider_timeouts.clone();
-
         let theme_for_colors = themes
             .get(current_theme_index)
             .or_else(|| themes.first())
@@ -1082,7 +1099,10 @@ impl App {
             .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
             .with_agent_permission_rules(agent_registry.permission_rules_map());
 
-        let discovery = crate::model::discovery::Discovery::new().ok();
+        let discovery = crate::model::discovery::Discovery::new_with_custom(Some(
+            loaded_config.merged_config.custom_providers.clone(),
+        ))
+        .ok();
         let now = std::time::Instant::now();
 
         Ok(Self {
@@ -6814,6 +6834,16 @@ impl App {
             Ok(providers) => providers,
             Err(_) => return,
         };
+        let connected_provider_ids = connected_providers
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<String>>();
+
+        let discovery = Discovery::new();
+        let configured_provider_ids = discovery
+            .as_ref()
+            .map(Discovery::custom_provider_ids)
+            .unwrap_or_default();
 
         let include_runtime = crate::model::extensions::ModelExtensions::runtime()
             .iter()
@@ -6833,17 +6863,22 @@ impl App {
                 )
             });
 
-        if connected_providers.is_empty() && !include_runtime && !include_unauthenticated_free {
+        if connected_providers.is_empty()
+            && configured_provider_ids.is_empty()
+            && !include_runtime
+            && !include_unauthenticated_free
+        {
             return;
         }
 
         let has_persistent = connected_providers.keys().any(|provider_id| {
             !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_id)
-        }) || include_unauthenticated_free
+        }) || !configured_provider_ids.is_empty()
+            || include_unauthenticated_free
             || connected_providers.is_empty();
 
         let models = if has_persistent {
-            match Discovery::new() {
+            match discovery.as_ref() {
                 Ok(discovery) => match tokio::task::block_in_place(|| {
                     let rt = tokio::runtime::Handle::current();
                     rt.block_on(discovery.fetch_models())
@@ -6879,6 +6914,19 @@ impl App {
         } else {
             return;
         };
+        let mut models = models;
+        if include_runtime {
+            let runtime_models = tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(
+                    crate::model::extensions::ModelExtensions::runtime_models_for_dialog_cached_or_empty(),
+                )
+            });
+            crate::model::discovery::merge_dialog_models(&mut models, runtime_models);
+        }
+        if let Ok(discovery) = discovery.as_ref() {
+            discovery.apply_custom_models_to_dialog(&mut models);
+        }
 
         self.model_reasoning_options = models
             .iter()
@@ -6899,8 +6947,11 @@ impl App {
             std::collections::HashMap::new();
 
         let is_model_selectable = |model: &ModelType| {
-            connected_providers.contains_key(&model.provider_id)
-                || crate::model::extensions::ModelExtensions::is_available_without_connection(model)
+            crate::model::discovery::is_model_selectable(
+                model,
+                &connected_provider_ids,
+                &configured_provider_ids,
+            )
         };
 
         for model in &models {
@@ -7154,14 +7205,7 @@ impl App {
             return true;
         }
 
-        let connected_provider_ids = crate::persistence::AuthDAO::new()
-            .and_then(|dao| dao.load())
-            .map(|providers| {
-                let mut ids = providers.into_keys().collect::<Vec<_>>();
-                ids.sort();
-                ids
-            })
-            .ok();
+        let connected_provider_ids = models_dialog_provider_ids();
 
         if kind == ModelsTaskKind::Load
             && parsed.args.is_empty()
@@ -7202,12 +7246,17 @@ impl App {
         }
 
         let parsed = parsed.clone();
+        let provider_signature = models_dialog_provider_ids();
         tokio::spawn(async move {
             let result = match kind {
                 ModelsTaskKind::Load => crate::command::handlers::load_models(parsed).await,
                 ModelsTaskKind::Refresh => crate::command::handlers::refresh_models().await,
             };
-            let _ = sender.send(ModelsTaskMessage { kind, result });
+            let _ = sender.send(ModelsTaskMessage {
+                kind,
+                result,
+                provider_signature,
+            });
         });
         true
     }
@@ -8149,7 +8198,12 @@ impl App {
         }
 
         for event in events {
-            match (event.kind, event.result) {
+            let ModelsTaskMessage {
+                kind,
+                result,
+                provider_signature,
+            } = event;
+            match (kind, result) {
                 (
                     ModelsTaskKind::Load,
                     crate::command::registry::CommandResult::ShowDialog { title, items },
@@ -8167,14 +8221,10 @@ impl App {
                         })
                         .collect();
                     self.models_dialog_state.finish_loading();
-                    self.models_dialog_provider_ids = crate::persistence::AuthDAO::new()
-                        .and_then(|dao| dao.load())
-                        .map(|providers| {
-                            let mut ids = providers.into_keys().collect::<Vec<_>>();
-                            ids.sort();
-                            ids
-                        })
-                        .ok();
+                    let current_signature = models_dialog_provider_ids();
+                    self.models_dialog_provider_ids = (provider_signature == current_signature)
+                        .then_some(provider_signature)
+                        .flatten();
                     if self.overlay_focus == OverlayFocus::ModelsDialog {
                         self.show_models_dialog(title, dialog_items);
                     }
@@ -11977,6 +12027,7 @@ mod tests {
                         active: false,
                     }],
                 },
+                provider_signature: models_dialog_provider_ids(),
             })
             .unwrap();
         app.models_receiver = Some(receiver);
@@ -12005,15 +12056,8 @@ mod tests {
                 active: false,
             }],
         );
-        // Match the connected-provider snapshot used by the reopen cache check.
-        app.models_dialog_provider_ids = crate::persistence::AuthDAO::new()
-            .and_then(|dao| dao.load())
-            .map(|providers| {
-                let mut ids = providers.into_keys().collect::<Vec<_>>();
-                ids.sort();
-                ids
-            })
-            .ok();
+        // Match the auth/config snapshot used by the reopen cache check.
+        app.models_dialog_provider_ids = models_dialog_provider_ids();
         app.models_dialog_state.dialog.hide();
         app.overlay_focus = OverlayFocus::None;
 
@@ -12050,6 +12094,7 @@ mod tests {
             .send(ModelsTaskMessage {
                 kind: ModelsTaskKind::Refresh,
                 result: crate::command::registry::CommandResult::Success(String::new()),
+                provider_signature: models_dialog_provider_ids(),
             })
             .unwrap();
         app.models_receiver = Some(receiver);

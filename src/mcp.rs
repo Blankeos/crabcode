@@ -11,6 +11,7 @@ use rmcp::ServiceExt;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -189,13 +190,15 @@ impl McpManager {
                     .map(|cwd| resolve_path(&self.workspace, cwd))
                     .unwrap_or_else(|| self.workspace.clone());
                 let env = local.environment.clone();
-                let transport = TokioChildProcess::new(
+                let (transport, _) = TokioChildProcess::builder(
                     tokio::process::Command::new(command).configure(move |cmd| {
                         cmd.args(args);
                         cmd.current_dir(cwd);
                         cmd.envs(env);
                     }),
-                )?;
+                )
+                .stderr(Stdio::null())
+                .spawn()?;
                 Ok(().serve(transport).await?)
             }
             McpServerConfig::Remote(remote) => {
