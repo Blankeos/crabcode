@@ -30,7 +30,8 @@ pub struct Provider {
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 static MEMORY_CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<CacheEntry>>>> = OnceLock::new();
-static MEMORY_MODEL_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedModels>>> = OnceLock::new();
+static MEMORY_MODEL_CACHE: OnceLock<Mutex<HashMap<(PathBuf, Vec<String>), CachedModels>>> =
+    OnceLock::new();
 
 #[derive(Clone)]
 struct CachedModels {
@@ -55,7 +56,7 @@ fn memory_cache() -> &'static Mutex<HashMap<PathBuf, Arc<CacheEntry>>> {
     MEMORY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn memory_model_cache() -> &'static Mutex<HashMap<PathBuf, CachedModels>> {
+fn memory_model_cache() -> &'static Mutex<HashMap<(PathBuf, Vec<String>), CachedModels>> {
     MEMORY_MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -153,7 +154,140 @@ pub struct Discovery {
     custom_providers:
         Option<std::collections::HashMap<String, crate::config::CustomProviderConfig>>,
 }
+
+pub fn is_model_selectable(
+    model: &crate::model::types::Model,
+    connected_provider_ids: &std::collections::HashSet<String>,
+    configured_provider_ids: &std::collections::HashSet<String>,
+) -> bool {
+    connected_provider_ids.contains(&model.provider_id)
+        || configured_provider_ids.contains(&model.provider_id)
+        || crate::model::extensions::ModelExtensions::is_available_without_connection(model)
+}
+
+pub fn merge_dialog_models(
+    models: &mut Vec<crate::model::types::Model>,
+    additional_models: impl IntoIterator<Item = crate::model::types::Model>,
+) {
+    let mut known = models
+        .iter()
+        .map(|model| (model.provider_id.clone(), model.id.clone()))
+        .collect::<std::collections::HashSet<_>>();
+    for model in additional_models {
+        if known.insert((model.provider_id.clone(), model.id.clone())) {
+            models.push(model);
+        }
+    }
+}
+
 impl Discovery {
+    pub fn custom_provider_ids(&self) -> std::collections::HashSet<String> {
+        self.custom_providers
+            .as_ref()
+            .map(|providers| providers.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn custom_provider_dialog_signature(&self) -> Vec<String> {
+        let Some(custom_providers) = &self.custom_providers else {
+            return Vec::new();
+        };
+
+        let mut signature = Vec::new();
+        for (provider_id, provider) in custom_providers {
+            signature.push(format!(
+                "provider:{provider_id}:{}",
+                provider.name.as_deref().unwrap_or_default()
+            ));
+            for (model_id, model) in &provider.models {
+                let mut input_modalities = model
+                    .modalities
+                    .as_ref()
+                    .map(|modalities| modalities.input.clone())
+                    .unwrap_or_default();
+                input_modalities.sort();
+                let mut output_modalities = model
+                    .modalities
+                    .as_ref()
+                    .map(|modalities| modalities.output.clone())
+                    .unwrap_or_default();
+                output_modalities.sort();
+                signature.push(format!(
+                    "model:{provider_id}:{model_id}:{}:{:?}:{}:{}",
+                    model.name.as_deref().unwrap_or_default(),
+                    model.attachment,
+                    input_modalities.join(","),
+                    output_modalities.join(",")
+                ));
+            }
+        }
+        signature.sort();
+        signature
+    }
+
+    pub fn custom_provider_matches_filter(&self, filter: &str) -> bool {
+        let filter = filter.trim().to_ascii_lowercase();
+        self.custom_providers.as_ref().is_some_and(|providers| {
+            providers.iter().any(|(provider_id, provider)| {
+                provider_id.contains(&filter)
+                    || provider
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.to_ascii_lowercase().contains(&filter))
+            })
+        })
+    }
+
+    pub fn apply_custom_models_to_dialog(&self, models: &mut Vec<crate::model::types::Model>) {
+        let Some(custom_providers) = &self.custom_providers else {
+            return;
+        };
+
+        for (provider_id, provider) in custom_providers {
+            let provider_name = provider.name.as_deref().unwrap_or(provider_id);
+            for (model_id, custom_model) in &provider.models {
+                let model = models
+                    .iter_mut()
+                    .find(|model| model.provider_id == *provider_id && model.id == *model_id);
+
+                if let Some(model) = model {
+                    model.provider_name = provider_name.to_string();
+                    if let Some(name) = &custom_model.name {
+                        model.name.clone_from(name);
+                    }
+                    if let Some(modalities) = &custom_model.modalities {
+                        model.attachment = modalities.input.iter().any(|input| input == "image");
+                    }
+                    if let Some(attachment) = custom_model.attachment {
+                        model.attachment = attachment;
+                    }
+                    continue;
+                }
+
+                let attachment = custom_model.attachment.unwrap_or_else(|| {
+                    custom_model.modalities.as_ref().is_some_and(|modalities| {
+                        modalities.input.iter().any(|input| input == "image")
+                    })
+                });
+                models.push(crate::model::types::Model {
+                    id: model_id.clone(),
+                    name: custom_model
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| model_id.clone()),
+                    family: String::new(),
+                    provider_id: provider_id.clone(),
+                    provider_name: provider_name.to_string(),
+                    attachment,
+                    structured_output: false,
+                    free: false,
+                    local: false,
+                    reasoning_options: Vec::new(),
+                });
+            }
+        }
+    }
+
     pub fn custom_provider_api_key(&self, provider_id: &str) -> Option<String> {
         self.custom_providers
             .as_ref()?
@@ -317,7 +451,7 @@ impl Discovery {
             cache.insert(cache_path.clone(), Arc::new(entry));
         }
         if let Ok(mut cache) = memory_model_cache().lock() {
-            cache.remove(cache_path);
+            cache.retain(|(path, _), _| path != cache_path);
         }
 
         Ok(())
@@ -525,10 +659,14 @@ impl Discovery {
 
     pub async fn fetch_models(&self) -> Result<Vec<crate::model::types::Model>> {
         let mut models = crate::model::extensions::ModelExtensions::runtime_models_from_cache();
+        let cache_key = (
+            self.get_cache_path().clone(),
+            self.custom_provider_dialog_signature(),
+        );
         if let Some(cached) = memory_model_cache()
             .lock()
             .ok()
-            .and_then(|cache| cache.get(self.get_cache_path()).cloned())
+            .and_then(|cache| cache.get(&cache_key).cloned())
             .filter(|cached| cached.cached_at.elapsed().as_secs() <= CACHE_TTL_SECONDS)
         {
             models.extend(cached.models);
@@ -583,7 +721,7 @@ impl Discovery {
 
         if let Ok(mut cache) = memory_model_cache().lock() {
             cache.insert(
-                self.get_cache_path().clone(),
+                cache_key,
                 CachedModels {
                     models: persistent_models.clone(),
                     cached_at: std::time::Instant::now(),
@@ -729,6 +867,92 @@ mod tests {
     async fn test_discovery_creation() {
         let discovery = Discovery::new();
         assert!(discovery.is_ok());
+    }
+
+    #[test]
+    fn configured_provider_models_are_selectable_without_auth() {
+        let model = crate::model::types::Model {
+            id: "configured-model".to_string(),
+            name: "Configured Model".to_string(),
+            family: String::new(),
+            provider_id: "configured-provider".to_string(),
+            provider_name: "Configured Provider".to_string(),
+            attachment: false,
+            structured_output: false,
+            free: false,
+            local: false,
+            reasoning_options: Vec::new(),
+        };
+        let connected_provider_ids = std::collections::HashSet::new();
+        let configured_provider_ids =
+            std::collections::HashSet::from(["configured-provider".to_string()]);
+
+        assert!(is_model_selectable(
+            &model,
+            &connected_provider_ids,
+            &configured_provider_ids,
+        ));
+        assert!(!is_model_selectable(
+            &model,
+            &connected_provider_ids,
+            &std::collections::HashSet::new(),
+        ));
+
+        let mut models = vec![model.clone()];
+        merge_dialog_models(&mut models, [model]);
+        assert_eq!(models.len(), 1);
+    }
+
+    #[test]
+    fn custom_provider_ids_and_names_match_model_filters() {
+        let providers = HashMap::from([(
+            "mygateway".to_string(),
+            CustomProviderConfig {
+                name: Some("My Gateway".to_string()),
+                npm: None,
+                base_url: None,
+                api_key: None,
+                models: HashMap::from([(
+                    "configured-model".to_string(),
+                    CustomModelConfig {
+                        name: Some("Configured Model".to_string()),
+                        context_window: None,
+                        max_tokens: None,
+                        attachment: Some(true),
+                        reasoning: None,
+                        temperature: None,
+                        tool_call: None,
+                        modalities: None,
+                        launch: false,
+                    },
+                )]),
+            },
+        )]);
+        let discovery = Discovery::new_with_custom(Some(providers)).expect("discovery");
+
+        assert_eq!(
+            discovery.custom_provider_ids(),
+            std::collections::HashSet::from(["mygateway".to_string()])
+        );
+        assert!(discovery.custom_provider_matches_filter("mygateway"));
+        assert!(discovery.custom_provider_matches_filter("gateway"));
+        assert!(!discovery.custom_provider_matches_filter("openai"));
+        assert_eq!(
+            discovery.custom_provider_dialog_signature(),
+            vec![
+                "model:mygateway:configured-model:Configured Model:Some(true)::".to_string(),
+                "provider:mygateway:My Gateway".to_string(),
+            ]
+        );
+
+        let mut models = Vec::new();
+        discovery.apply_custom_models_to_dialog(&mut models);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].provider_id, "mygateway");
+        assert_eq!(models[0].provider_name, "My Gateway");
+        assert_eq!(models[0].id, "configured-model");
+        assert_eq!(models[0].name, "Configured Model");
+        assert!(models[0].attachment);
     }
 
     #[test]

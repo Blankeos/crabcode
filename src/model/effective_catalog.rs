@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SNAPSHOT_FILE: &str = "effective_catalog.json";
-const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct SnapshotModel {
