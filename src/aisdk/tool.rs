@@ -16,6 +16,12 @@ pub struct ToolOutput {
     pub images: Vec<ImageContent>,
 }
 
+/// A tool executed by the model provider rather than by Crabcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedTool {
+    WebSearch,
+}
+
 impl ToolOutput {
     pub fn new(text: impl Into<String>) -> Self {
         Self {

@@ -1,9 +1,9 @@
 use crate::agent::config::OpenAIRequestOptions;
 use crate::aisdk::core::{
     chunk::{ChunkType, MessagePhase},
-    response::{stream_with_tools, LanguageModelStream, StreamTextResponse},
+    response::{stream_with_hosted_tools, LanguageModelStream, StreamTextResponse},
     stop::StopReason,
-    Message as AisdkMessage, Tool,
+    HostedTool, Message as AisdkMessage, Tool,
 };
 use crate::aisdk::message::ImageContent;
 use crate::aisdk::{Anthropic, OpenAI, OpenAICompatible};
@@ -411,6 +411,7 @@ pub async fn stream_llm_with_cancellation(
         supports_image_input: request_config.supports_image_input,
         openai_options: request_config.openai_options.clone(),
         prompt_cache_key: Some(session_id.clone()),
+        websearch: websearch_config.clone(),
     };
     crate::agent::config::set_llm_session(llm_session.clone());
     let session_registration =
@@ -451,6 +452,11 @@ pub async fn stream_llm_with_cancellation(
     if text_only_image_turn {
         aisdk_tools.retain(|tool| tool.name != "view_image");
     }
+    let hosted_tools = resolve_websearch_tools(
+        &request_config.provider_name,
+        &websearch_config,
+        &mut aisdk_tools,
+    );
 
     let message_count = aisdk_messages.len();
     let tool_count = aisdk_tools.len();
@@ -463,10 +469,11 @@ pub async fn stream_llm_with_cancellation(
     );
     log_stream_request(primary_log_context, &request_config);
 
-    let mut response = stream_provider_request(
+    let mut response = stream_provider_request_with_hosted_tools(
         &request_config,
         aisdk_messages,
         aisdk_tools,
+        hosted_tools,
         agent_max_steps,
         Some(cancel_token.clone()),
     )
@@ -628,6 +635,7 @@ pub async fn build_subagent_llm_session(
         supports_image_input: request_config.supports_image_input,
         openai_options: request_config.openai_options,
         prompt_cache_key: None,
+        websearch: crate::config::configuration::WebsearchConfig::default(),
     })
 }
 
@@ -1183,10 +1191,65 @@ fn send_warning(sender: &crate::llm::ChunkSender, warning: impl Into<String>) {
     let _ = sender.send(crate::llm::ChunkMessage::Warning(warning.into()));
 }
 
+fn provider_supports_native_websearch(provider_name: &str) -> bool {
+    matches!(
+        provider_name.trim().to_ascii_lowercase().as_str(),
+        "openai" | "xai" | "openrouter"
+    )
+}
+
+pub(crate) fn resolve_websearch_tools(
+    provider_name: &str,
+    websearch: &crate::config::configuration::WebsearchConfig,
+    tools: &mut Vec<Tool>,
+) -> Vec<HostedTool> {
+    use crate::config::configuration::WebsearchStrategy;
+
+    if websearch.enabled == Some(false) || !tools.iter().any(|tool| tool.name == "websearch") {
+        return Vec::new();
+    }
+
+    let use_native = match websearch.strategy {
+        WebsearchStrategy::NativeFirst | WebsearchStrategy::NativeOnly => {
+            provider_supports_native_websearch(provider_name)
+        }
+        WebsearchStrategy::ExternalOnly => false,
+    };
+
+    if use_native {
+        tools.retain(|tool| tool.name != "websearch");
+        vec![HostedTool::WebSearch]
+    } else if websearch.strategy == WebsearchStrategy::NativeOnly {
+        tools.retain(|tool| tool.name != "websearch");
+        Vec::new()
+    } else {
+        Vec::new()
+    }
+}
+
 async fn stream_provider_request(
     config: &ProviderRequestConfig,
     messages: Vec<AisdkMessage>,
     tools: Vec<Tool>,
+    max_steps: Option<usize>,
+    cancel_token: Option<CancellationToken>,
+) -> Result<StreamTextResponse, DynError> {
+    stream_provider_request_with_hosted_tools(
+        config,
+        messages,
+        tools,
+        Vec::new(),
+        max_steps,
+        cancel_token,
+    )
+    .await
+}
+
+async fn stream_provider_request_with_hosted_tools(
+    config: &ProviderRequestConfig,
+    messages: Vec<AisdkMessage>,
+    tools: Vec<Tool>,
+    hosted_tools: Vec<HostedTool>,
     max_steps: Option<usize>,
     cancel_token: Option<CancellationToken>,
 ) -> Result<StreamTextResponse, DynError> {
@@ -1207,10 +1270,11 @@ async fn stream_provider_request(
                 builder = builder.prompt_cache_key(cache_key);
             }
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
-            stream_with_tools(
+            stream_with_hosted_tools(
                 provider,
                 messages,
                 tools,
+                hosted_tools,
                 max_steps,
                 None,
                 headers,
@@ -1231,10 +1295,11 @@ async fn stream_provider_request(
                 builder = builder.api_key(key);
             }
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
-            stream_with_tools(
+            stream_with_hosted_tools(
                 provider,
                 messages,
                 tools,
+                hosted_tools,
                 max_steps,
                 None,
                 headers,
@@ -1288,10 +1353,11 @@ async fn stream_provider_request(
             }
 
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
-            stream_with_tools(
+            stream_with_hosted_tools(
                 provider,
                 messages,
                 tools,
+                hosted_tools,
                 max_steps,
                 None,
                 headers,
@@ -2099,8 +2165,8 @@ mod tests {
         apply_provider_request_defaults, convert_messages, convert_messages_for_model,
         is_openai_oauth_model_allowed, maybe_apply_unauthenticated_free_provider_key,
         model_supports_image_input, openai_request_instructions, resolve_api_key,
-        resolve_model_route, vlm_agent_has_model, AisdkMessage, OpenAIRequestOptions, ProviderKind,
-        ProviderRequestConfig,
+        resolve_model_route, resolve_websearch_tools, vlm_agent_has_model, AisdkMessage,
+        OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
     };
 
     use crate::persistence::AuthConfig;
@@ -2939,6 +3005,62 @@ mod tests {
             AisdkMessage::User(message) => assert_eq!(message.content, "tail"),
             other => panic!("expected user message, got {other:?}"),
         }
+    }
+
+    fn websearch_tool_for_test() -> crate::aisdk::core::Tool {
+        crate::aisdk::core::Tool::builder()
+            .name("websearch")
+            .description("Search the web")
+            .input_schema(schemars::schema_for!(bool))
+            .execute(crate::aisdk::tool::ToolExecute::new(|_| async {
+                Ok::<_, String>("ok")
+            }))
+            .build()
+            .expect("test tool")
+    }
+
+    #[test]
+    fn native_first_replaces_external_websearch_for_openai() {
+        let mut tools = vec![websearch_tool_for_test()];
+        let hosted = resolve_websearch_tools(
+            "openai",
+            &crate::config::configuration::WebsearchConfig::default(),
+            &mut tools,
+        );
+        assert!(tools.is_empty());
+        assert_eq!(hosted, vec![crate::aisdk::core::HostedTool::WebSearch]);
+    }
+
+    #[test]
+    fn native_first_keeps_external_websearch_for_unsupported_provider() {
+        let mut tools = vec![websearch_tool_for_test()];
+        let hosted = resolve_websearch_tools(
+            "anthropic",
+            &crate::config::configuration::WebsearchConfig::default(),
+            &mut tools,
+        );
+        assert_eq!(tools.len(), 1);
+        assert!(hosted.is_empty());
+    }
+
+    #[test]
+    fn external_only_keeps_external_websearch_for_openrouter() {
+        let mut config = crate::config::configuration::WebsearchConfig::default();
+        config.strategy = crate::config::configuration::WebsearchStrategy::ExternalOnly;
+        let mut tools = vec![websearch_tool_for_test()];
+        let hosted = resolve_websearch_tools("openrouter", &config, &mut tools);
+        assert_eq!(tools.len(), 1);
+        assert!(hosted.is_empty());
+    }
+
+    #[test]
+    fn native_only_hides_external_websearch_for_unsupported_provider() {
+        let mut config = crate::config::configuration::WebsearchConfig::default();
+        config.strategy = crate::config::configuration::WebsearchStrategy::NativeOnly;
+        let mut tools = vec![websearch_tool_for_test()];
+        let hosted = resolve_websearch_tools("anthropic", &config, &mut tools);
+        assert!(tools.is_empty());
+        assert!(hosted.is_empty());
     }
 }
 fn content_with_vlm_agent_hint(content: &str, image_paths: &[String]) -> String {

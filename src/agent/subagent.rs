@@ -51,7 +51,7 @@ pub async fn run_subagent(
 
     let scoped_registry = build_scoped_registry(full_registry, &agent).await;
 
-    let aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
+    let mut aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
         &scoped_registry,
         sender.clone(),
         agent.name.clone(),
@@ -62,6 +62,11 @@ pub async fn run_subagent(
         cancel_token.clone(),
     )
     .await;
+    let hosted_tools = crate::llm::client::resolve_websearch_tools(
+        &session.provider_name,
+        &session.websearch,
+        &mut aisdk_tools,
+    );
 
     let system_prompt = agent
         .instructions
@@ -94,6 +99,7 @@ pub async fn run_subagent(
         &session,
         messages,
         aisdk_tools,
+        hosted_tools,
         max_steps,
         headers,
         Some(cancel_token.clone()),
@@ -209,6 +215,7 @@ pub async fn run_subagent(
             &session,
             follow_up_messages,
             Vec::new(),
+            Vec::new(),
             None,
             HashMap::new(),
             Some(cancel_token.clone()),
@@ -306,11 +313,12 @@ async fn start_subagent_stream(
     session: &crate::agent::config::LlmSessionConfig,
     messages: Vec<crate::aisdk::core::Message>,
     tools: Vec<crate::aisdk::core::Tool>,
+    hosted_tools: Vec<crate::aisdk::core::HostedTool>,
     max_steps: Option<usize>,
     headers: std::collections::HashMap<String, String>,
     cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<crate::aisdk::core::response::StreamTextResponse, String> {
-    use crate::aisdk::core::response::stream_with_tools;
+    use crate::aisdk::core::response::stream_with_hosted_tools;
     use crate::aisdk::{Anthropic, OpenAI, OpenAICompatible};
 
     match session.provider_kind {
@@ -334,10 +342,11 @@ async fn start_subagent_stream(
                 .build()
                 .map_err(|e| format!("Failed to build OpenAICompatible provider: {}", e))?;
 
-            stream_with_tools(
+            stream_with_hosted_tools(
                 provider,
                 messages,
                 tools,
+                hosted_tools,
                 max_steps,
                 None,
                 headers,
@@ -359,10 +368,11 @@ async fn start_subagent_stream(
                 .build()
                 .map_err(|e| format!("Failed to build Anthropic provider: {}", e))?;
 
-            stream_with_tools(
+            stream_with_hosted_tools(
                 provider,
                 messages,
                 tools,
+                hosted_tools,
                 max_steps,
                 None,
                 headers,
@@ -410,10 +420,11 @@ async fn start_subagent_stream(
                 .build()
                 .map_err(|e| format!("Failed to build OpenAI provider: {}", e))?;
 
-            stream_with_tools(
+            stream_with_hosted_tools(
                 provider,
                 messages,
                 tools,
+                hosted_tools,
                 max_steps,
                 None,
                 headers,
@@ -459,14 +470,17 @@ async fn resolve_subagent_session(
 
     let (fallback_sender, _fallback_rx) = tokio::sync::mpsc::unbounded_channel();
     let sender = sender.unwrap_or(&fallback_sender);
-    crate::llm::client::build_subagent_llm_session(
+    let websearch = parent_session.websearch;
+    let mut session = crate::llm::client::build_subagent_llm_session(
         provider,
         model.to_string(),
         agent.reasoning_effort,
         sender,
     )
     .await
-    .map_err(|err| err.to_string())
+    .map_err(|err| err.to_string())?;
+    session.websearch = websearch;
+    Ok(session)
 }
 
 fn normalize_subagent_output(output: String) -> String {
@@ -630,6 +644,7 @@ mod tests {
             supports_image_input: false,
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
             prompt_cache_key: None,
+            websearch: crate::config::configuration::WebsearchConfig::default(),
         }
     }
 }

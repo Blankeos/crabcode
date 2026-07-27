@@ -4,7 +4,7 @@ use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
 use crate::retry::RetryError;
 use crate::stop::{StopReason, StopWhenFn};
-use crate::tool::{Tool, ToolOutput};
+use crate::tool::{HostedTool, Tool, ToolOutput};
 use futures::{future::join_all, StreamExt};
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
@@ -94,6 +94,30 @@ pub async fn stream_with_tools<P: Provider>(
     headers: HashMap<String, String>,
     cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<StreamTextResponse> {
+    stream_with_hosted_tools(
+        provider,
+        messages,
+        tools,
+        Vec::new(),
+        max_steps,
+        stop_when,
+        headers,
+        cancel_token,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn stream_with_hosted_tools<P: Provider>(
+    provider: P,
+    messages: Vec<Message>,
+    tools: Vec<Tool>,
+    hosted_tools: Vec<HostedTool>,
+    max_steps: Option<usize>,
+    stop_when: Option<StopWhenFn>,
+    headers: HashMap<String, String>,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
+) -> Result<StreamTextResponse> {
     let (mut response, tx) = StreamTextResponse::create();
     let _ = tx.send(ChunkType::Start);
 
@@ -156,6 +180,7 @@ pub async fn stream_with_tools<P: Provider>(
                 &provider_clone,
                 &current_messages,
                 &tools,
+                &hosted_tools,
                 &headers,
                 &tx_loop,
                 step_idx,
@@ -305,6 +330,7 @@ pub async fn stream_with_tools<P: Provider>(
                                 &provider_clone,
                                 &current_messages,
                                 &tools,
+                                &hosted_tools,
                                 &headers,
                                 &tx_loop,
                                 step_idx,
@@ -381,6 +407,7 @@ pub async fn stream_with_tools<P: Provider>(
                                 &provider_clone,
                                 &current_messages,
                                 &tools,
+                                &hosted_tools,
                                 &headers,
                                 &tx_loop,
                                 step_idx,
@@ -450,6 +477,7 @@ pub async fn stream_with_tools<P: Provider>(
                                 &provider_clone,
                                 &current_messages,
                                 &tools,
+                                &hosted_tools,
                                 &headers,
                                 &tx_loop,
                                 step_idx,
@@ -1053,6 +1081,7 @@ async fn open_provider_stream_with_retries<P: Provider>(
     provider: &P,
     messages: &[Message],
     tools: &[Tool],
+    hosted_tools: &[HostedTool],
     headers: &HashMap<String, String>,
     tx: &mpsc::UnboundedSender<ChunkType>,
     step_idx: usize,
@@ -1065,10 +1094,12 @@ async fn open_provider_stream_with_retries<P: Provider>(
                 _ = token.cancelled() => {
                     return Err(Error::Provider("Streaming cancelled by user".to_string()));
                 }
-                result = provider.stream_text(messages, tools, headers) => result,
+                result = provider.stream_text(messages, tools, hosted_tools, headers) => result,
             }
         } else {
-            provider.stream_text(messages, tools, headers).await
+            provider
+                .stream_text(messages, tools, hosted_tools, headers)
+                .await
         };
         match stream_result {
             Ok(stream) => return Ok(stream),
@@ -1405,7 +1436,7 @@ mod tests {
     use crate::message::Message;
     use crate::provider::{Provider, ProviderStream};
     use crate::stop::StopReason;
-    use crate::tool::{Tool, ToolExecute};
+    use crate::tool::{HostedTool, Tool, ToolExecute};
     use async_trait::async_trait;
     use futures::StreamExt;
     use schemars::Schema;
@@ -1509,6 +1540,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             Ok(Box::pin(NeverEndingStream {
@@ -1535,6 +1567,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             std::future::pending::<()>().await;
@@ -1556,6 +1589,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             Ok(Box::pin(futures::stream::pending()))
@@ -1625,6 +1659,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             let request = self.requests.fetch_add(1, Ordering::SeqCst);
@@ -1661,6 +1696,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             let request = self.requests.fetch_add(1, Ordering::SeqCst);
@@ -1700,6 +1736,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             let request = self.requests.fetch_add(1, Ordering::SeqCst);
@@ -1740,6 +1777,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             let request = self.requests.fetch_add(1, Ordering::SeqCst);
@@ -1781,6 +1819,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             let request = self.requests.fetch_add(1, Ordering::SeqCst);
@@ -1820,6 +1859,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             Ok(Box::pin(futures::stream::iter(vec![Ok(ChunkType::Text(
@@ -1842,6 +1882,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             let request = self.requests.fetch_add(1, Ordering::SeqCst);
@@ -1885,6 +1926,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             let request = self.requests.fetch_add(1, Ordering::SeqCst);
@@ -1930,6 +1972,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             self.requests.fetch_add(1, Ordering::SeqCst);
@@ -1956,6 +1999,7 @@ mod tests {
             &self,
             messages: &[Message],
             _tools: &[Tool],
+            _hosted_tools: &[HostedTool],
             _headers: &HashMap<String, String>,
         ) -> crate::error::Result<ProviderStream> {
             let request = self.requests.fetch_add(1, Ordering::SeqCst);

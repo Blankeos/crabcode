@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
 use crate::retry::RetryError;
-use crate::tool::Tool;
+use crate::tool::{HostedTool, Tool};
 use async_trait::async_trait;
 use futures::stream;
 use futures::StreamExt;
@@ -100,6 +100,7 @@ impl Provider for OpenAICompatible {
         &self,
         messages: &[Message],
         tools: &[Tool],
+        hosted_tools: &[HostedTool],
         _headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
         let base = self.base_url.trim_end_matches('/');
@@ -113,20 +114,7 @@ impl Provider for OpenAICompatible {
             openai_compatible_requires_tool_call_reasoning_content(self);
         let chat_messages = openai_compatible_messages(messages, include_empty_tool_call_reasoning);
 
-        let tool_params: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|t| {
-                let schema = serde_json::to_value(&t.input_schema).unwrap_or_default();
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": schema,
-                    }
-                })
-            })
-            .collect();
+        let tool_params = openai_compatible_tool_params(&self.provider_name, tools, hosted_tools);
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -222,6 +210,34 @@ fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_j
         })
     }));
     serde_json::Value::Array(parts)
+}
+
+fn openai_compatible_tool_params(
+    provider_name: &str,
+    tools: &[Tool],
+    hosted_tools: &[HostedTool],
+) -> Vec<serde_json::Value> {
+    let mut params: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|tool| {
+            let schema = serde_json::to_value(&tool.input_schema).unwrap_or_default();
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": schema,
+                }
+            })
+        })
+        .collect();
+    params.extend(hosted_tools.iter().map(|tool| match tool {
+        HostedTool::WebSearch if provider_name.eq_ignore_ascii_case("openrouter") => {
+            serde_json::json!({ "type": "openrouter:web_search" })
+        }
+        HostedTool::WebSearch => serde_json::json!({ "type": "web_search" }),
+    }));
+    params
 }
 
 fn openai_compatible_messages(
@@ -448,6 +464,28 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     if let Some(delta) = text {
         debug_log(&format!("[SSE] Text chunk: {}", delta));
         chunks.push(Ok(ChunkType::Text(delta.to_string())));
+    }
+
+    let annotations = choice["delta"]["annotations"]
+        .as_array()
+        .or_else(|| choice["message"]["annotations"].as_array());
+    if let Some(annotations) = annotations {
+        for annotation in annotations {
+            let citation = annotation
+                .get("url_citation")
+                .or_else(|| annotation.get("citation"));
+            let Some(citation) = citation else { continue };
+            let Some(url) = citation.get("url").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let title = citation
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or(url);
+            chunks.push(Ok(ChunkType::Metadata(format!(
+                "websearch.citation title={title:?} url={url:?}"
+            ))));
+        }
     }
 
     // Emit reasoning delta
@@ -785,4 +823,49 @@ fn has_version_segment(base_url: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod hosted_websearch_tests {
+    use super::*;
+
+    #[test]
+    fn openrouter_uses_namespaced_websearch_tool() {
+        let tools = openai_compatible_tool_params("openrouter", &[], &[HostedTool::WebSearch]);
+        assert_eq!(
+            tools,
+            vec![serde_json::json!({ "type": "openrouter:web_search" })]
+        );
+    }
+
+    #[test]
+    fn other_compatible_providers_use_standard_websearch_tool() {
+        let tools = openai_compatible_tool_params("custom", &[], &[HostedTool::WebSearch]);
+        assert_eq!(tools, vec![serde_json::json!({ "type": "web_search" })]);
+    }
+
+    #[test]
+    fn openrouter_annotation_emits_citation_metadata() {
+        let chunks = process_sse_data(
+            &serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "annotations": [{
+                            "type": "url_citation",
+                            "url_citation": {
+                                "url": "https://example.com/source",
+                                "title": "Example source"
+                            }
+                        }]
+                    }
+                }]
+            })
+            .to_string(),
+        );
+        assert!(chunks.iter().any(|chunk| matches!(
+            chunk,
+            Ok(ChunkType::Metadata(metadata))
+                if metadata.contains("https://example.com/source")
+        )));
+    }
 }

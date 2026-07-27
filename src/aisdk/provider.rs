@@ -1,7 +1,7 @@
 use crate::chunk::ChunkType;
 use crate::error::Result;
 use crate::message::Message;
-use crate::tool::Tool;
+use crate::tool::{HostedTool, Tool};
 use async_trait::async_trait;
 use futures::Stream;
 use std::collections::HashMap;
@@ -26,6 +26,7 @@ pub trait Provider: Send + Sync + std::fmt::Debug + Clone + 'static {
         &self,
         messages: &[Message],
         tools: &[Tool],
+        hosted_tools: &[HostedTool],
         headers: &HashMap<String, String>,
     ) -> Result<ProviderStream>;
 }

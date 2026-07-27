@@ -272,11 +272,23 @@
       ],
       "type": "string"
     },
+    "WebsearchStrategy": {
+      "enum": [
+        "native-first",
+        "native-only",
+        "external-only"
+      ],
+      "type": "string"
+    },
     "WebsearchConfigFile": {
       "additionalProperties": false,
       "properties": {
         "enabled": {
           "type": "boolean"
+        },
+        "strategy": {
+          "$ref": "#/$defs/WebsearchStrategy",
+          "default": "native-first"
         },
         "provider": {
           "$ref": "#/$defs/WebsearchProvider",

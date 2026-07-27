@@ -131,6 +131,7 @@ mod tests {
                 supports_image_input: false,
                 openai_options: crate::agent::config::OpenAIRequestOptions::default(),
                 prompt_cache_key: None,
+                websearch: crate::config::configuration::WebsearchConfig::default(),
             },
         );
 
@@ -209,6 +210,7 @@ mod tests {
             supports_image_input: false,
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
             prompt_cache_key: None,
+            websearch: crate::config::configuration::WebsearchConfig::default(),
         };
 
         let mut warnings = Vec::new();
@@ -247,6 +249,7 @@ mod tests {
             supports_image_input: false,
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
             prompt_cache_key: None,
+            websearch: crate::config::configuration::WebsearchConfig::default(),
         };
         let mut warnings = Vec::new();
         let defs = crate::agent::definition::parse_agent_definitions_from_config(

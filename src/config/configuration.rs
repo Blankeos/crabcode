@@ -302,9 +302,23 @@ impl WebsearchProvider {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebsearchStrategy {
+    NativeFirst,
+    NativeOnly,
+    ExternalOnly,
+}
+
+impl Default for WebsearchStrategy {
+    fn default() -> Self {
+        Self::NativeFirst
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebsearchConfig {
     pub enabled: Option<bool>,
+    pub strategy: WebsearchStrategy,
     pub provider: WebsearchProvider,
     pub endpoint: Option<String>,
     pub api_key: Option<String>,
@@ -314,6 +328,7 @@ impl Default for WebsearchConfig {
     fn default() -> Self {
         Self {
             enabled: None,
+            strategy: WebsearchStrategy::NativeFirst,
             provider: WebsearchProvider::ExaHostedMcp,
             endpoint: None,
             api_key: None,
@@ -1465,6 +1480,22 @@ fn parse_websearch(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -
                 }
             }
 
+            if let Some(strategy) = map.get("strategy") {
+                if let Some(raw) = strategy.as_str() {
+                    match parse_websearch_strategy(raw) {
+                        Some(strategy) => websearch.strategy = strategy,
+                        None => diagnostics.warnings.push(format!(
+                            "websearch.strategy must be one of: native-first, native-only, external-only; got {}",
+                            raw
+                        )),
+                    }
+                } else {
+                    diagnostics
+                        .warnings
+                        .push("websearch.strategy must be a string".to_string());
+                }
+            }
+
             if let Some(provider) = map.get("provider") {
                 if let Some(raw) = provider.as_str() {
                     match parse_websearch_provider(raw) {
@@ -1523,6 +1554,16 @@ fn parse_websearch(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -
     }
 
     websearch
+}
+
+fn parse_websearch_strategy(raw: &str) -> Option<WebsearchStrategy> {
+    let normalized = raw.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "native-first" => Some(WebsearchStrategy::NativeFirst),
+        "native-only" => Some(WebsearchStrategy::NativeOnly),
+        "external-only" => Some(WebsearchStrategy::ExternalOnly),
+        _ => None,
+    }
 }
 
 fn parse_websearch_provider(raw: &str) -> Option<WebsearchProvider> {
@@ -2977,6 +3018,23 @@ mod tests {
     }
 
     #[test]
+    fn websearch_strategy_parses_and_defaults() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({ "websearch": { "strategy": "external-only" } }),
+            &mut diagnostics,
+        );
+        assert_eq!(config.websearch.strategy, WebsearchStrategy::ExternalOnly);
+
+        let config = parse_merged_config(
+            &json!({ "websearch": { "provider": "exa-hosted-mcp" } }),
+            &mut diagnostics,
+        );
+        assert_eq!(config.websearch.strategy, WebsearchStrategy::NativeFirst);
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
     fn resolves_literal_custom_provider_api_key() {
         let provider = CustomProviderConfig {
             name: None,
@@ -3003,5 +3061,19 @@ mod tests {
             resolve_api_key_value(Some("{env:MISSING_KEY}"), |_| None),
             None
         );
+    }
+
+    #[test]
+    fn invalid_websearch_strategy_warns_and_uses_default() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({ "websearch": { "strategy": "fastest" } }),
+            &mut diagnostics,
+        );
+        assert_eq!(config.websearch.strategy, WebsearchStrategy::NativeFirst);
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("websearch.strategy")));
     }
 }

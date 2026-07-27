@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
 use crate::retry::RetryError;
-use crate::tool::Tool;
+use crate::tool::{HostedTool, Tool};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -92,8 +92,15 @@ impl Provider for Anthropic {
         &self,
         messages: &[Message],
         tools: &[Tool],
+        hosted_tools: &[HostedTool],
         _headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
+        if !hosted_tools.is_empty() {
+            return Err(Error::Provider(
+                "Provider-hosted tools are not supported by the Anthropic adapter".to_string(),
+            ));
+        }
+
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
         let mut system_prompts: Vec<serde_json::Value> = messages

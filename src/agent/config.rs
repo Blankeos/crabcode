@@ -88,6 +88,7 @@ pub struct LlmSessionConfig {
     pub openai_options: OpenAIRequestOptions,
     /// Sticky prompt-cache key for this session (OpenAI/xAI/compatible).
     pub prompt_cache_key: Option<String>,
+    pub websearch: crate::config::configuration::WebsearchConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +138,7 @@ mod tests {
             supports_image_input: false,
             openai_options: OpenAIRequestOptions::default(),
             prompt_cache_key: None,
+            websearch: crate::config::configuration::WebsearchConfig::default(),
         }
     }
 

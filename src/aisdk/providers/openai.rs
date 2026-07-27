@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::message::{is_prefixed_response_item_id, Message};
 use crate::provider::{Provider, ProviderStream};
 use crate::retry::RetryError;
-use crate::tool::Tool;
+use crate::tool::{HostedTool, Tool};
 use async_trait::async_trait;
 use eventsource_stream::{EventStreamError, Eventsource};
 use futures::{SinkExt, StreamExt};
@@ -307,6 +307,7 @@ impl Provider for OpenAI {
         &self,
         messages: &[Message],
         tools: &[Tool],
+        hosted_tools: &[HostedTool],
         headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
         let url = format!(
@@ -355,7 +356,7 @@ impl Provider for OpenAI {
         }
 
         let input = build_openai_messages(messages, self.strip_system_and_developer_messages);
-        let body = self.build_responses_body(input.clone(), tools);
+        let body = self.build_responses_body_with_hosted_tools(input.clone(), tools, hosted_tools);
 
         let mut fallback_warning = None;
         if self.responses_websocket {
@@ -521,12 +522,22 @@ fn stream_disconnected_before_completion(reason: &str) -> String {
 }
 
 impl OpenAI {
+    #[cfg(test)]
     fn build_responses_body(
         &self,
         input: Vec<serde_json::Value>,
         tools: &[Tool],
     ) -> serde_json::Value {
-        let tool_params: Vec<serde_json::Value> = tools
+        self.build_responses_body_with_hosted_tools(input, tools, &[])
+    }
+
+    fn build_responses_body_with_hosted_tools(
+        &self,
+        input: Vec<serde_json::Value>,
+        tools: &[Tool],
+        hosted_tools: &[HostedTool],
+    ) -> serde_json::Value {
+        let mut tool_params: Vec<serde_json::Value> = tools
             .iter()
             .map(|t| {
                 let schema = serde_json::to_value(&t.input_schema).unwrap_or_default();
@@ -550,6 +561,9 @@ impl OpenAI {
                 tool
             })
             .collect();
+        tool_params.extend(hosted_tools.iter().map(|tool| match tool {
+            HostedTool::WebSearch => serde_json::json!({ "type": "web_search" }),
+        }));
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -1397,6 +1411,25 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
             let delta = value["delta"].as_str().unwrap_or("");
             Some(Ok(ChunkType::Text(delta.to_string())))
         }
+        "response.output_text.annotation.added" => {
+            let annotation = &value["annotation"];
+            let citation = annotation.get("url_citation").unwrap_or(annotation);
+            citation.get("url").and_then(|url| url.as_str()).map(|url| {
+                let title = citation
+                    .get("title")
+                    .and_then(|title| title.as_str())
+                    .unwrap_or(url);
+                Ok(ChunkType::Metadata(format!(
+                    "websearch.citation title={title:?} url={url:?}"
+                )))
+            })
+        }
+        "response.web_search_call.in_progress" | "response.web_search_call.searching" => Some(Ok(
+            ChunkType::Metadata("websearch.status=searching".to_string()),
+        )),
+        "response.web_search_call.completed" => Some(Ok(ChunkType::Metadata(
+            "websearch.status=completed".to_string(),
+        ))),
         "response.reasoning_summary_text.delta" => {
             let delta = value["delta"].as_str().unwrap_or("");
             Some(Ok(ChunkType::Reasoning(delta.to_string())))
@@ -2518,5 +2551,41 @@ mod tests {
 
         assert!(ws_body.get("previous_response_id").is_none());
         assert_eq!(ws_body["input"], next_body["input"]);
+    }
+
+    #[test]
+    fn hosted_websearch_serializes_as_openai_responses_tool() {
+        let provider = OpenAI::builder()
+            .api_key("key")
+            .base_url("https://api.openai.com")
+            .model_name("gpt-test")
+            .build()
+            .expect("provider");
+        let body = provider.build_responses_body_with_hosted_tools(
+            vec![serde_json::json!({"role": "user", "content": "latest news"})],
+            &[],
+            &[crate::tool::HostedTool::WebSearch],
+        );
+        assert_eq!(body["tools"], serde_json::json!([{ "type": "web_search" }]));
+    }
+
+    #[test]
+    fn hosted_websearch_annotation_emits_citation_metadata() {
+        let event = serde_json::json!({
+            "type": "response.output_text.annotation.added",
+            "annotation": {
+                "type": "url_citation",
+                "url": "https://example.com/source",
+                "title": "Example source"
+            }
+        });
+        let chunk = response_sse_data_to_chunk(&event.to_string())
+            .expect("chunk")
+            .expect("valid chunk");
+        assert!(matches!(
+            chunk,
+            ChunkType::Metadata(metadata)
+                if metadata.contains("https://example.com/source")
+        ));
     }
 }

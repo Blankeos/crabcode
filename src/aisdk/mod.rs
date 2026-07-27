@@ -10,7 +10,7 @@ pub mod tool;
 
 pub mod core {
     pub use crate::aisdk::message::Message;
-    pub use crate::aisdk::tool::Tool;
+    pub use crate::aisdk::tool::{HostedTool, Tool};
 
     pub mod tools {
         pub use crate::aisdk::tool::{ToolExecute, ToolOutput};
@@ -22,7 +22,7 @@ pub mod core {
 
     pub mod response {
         pub use crate::aisdk::response::{
-            stream_with_tools, LanguageModelStream, StreamTextResponse,
+            stream_with_hosted_tools, LanguageModelStream, StreamTextResponse,
         };
     }
 

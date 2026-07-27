@@ -1,27 +1,55 @@
 ---
-title: Websearch
-description: Configure the built-in websearch tool and search provider.
+title: Web search
+description: Configure provider-native search and external fallback providers.
 ---
 
-# Web Search
+# Configure search routing
 
-crabcode exposes a built-in `websearch` tool by default. Agents use `websearch` for discovery and `webfetch` when they already know the URL. The default provider is Exa's hosted MCP service, which does not require an API key.
+Crabcode exposes a single `websearch` capability to agents. By default, it uses a provider-hosted web search tool when the active provider supports one and falls back to Crabcode's configured external search backend otherwise.
 
-```jsonc title="crabcode.jsonc"
+```jsonc
 {
+  "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json",
   "websearch": {
     "enabled": true,
+    "strategy": "native-first",
     "provider": "exa-hosted-mcp"
-  },
-  "permission": {
-    "websearch": "allow"
   }
 }
 ```
 
-Use `websearch: false` to disable the tool.
+## Strategies
 
-## Providers
+| Strategy | Behavior |
+| --- | --- |
+| `native-first` | Use native search for OpenAI, xAI, and OpenRouter. Use the configured external provider for other providers. This is the default. |
+| `native-only` | Expose web search only when the active provider has a supported native search integration. |
+| `external-only` | Always use Crabcode's configured external web search tool. |
+
+Crabcode exposes only one web search path per request. When native search is active, the external `websearch` function is omitted to avoid duplicate searches.
+
+Provider-native requests currently use:
+
+- OpenAI: `web_search`
+- xAI: `web_search`
+- OpenRouter: `openrouter:web_search`
+
+Native search can have provider-specific usage charges. Check the provider's pricing before enabling `native-first` or `native-only`.
+
+This setting configures general web search only. xAI X Search is not enabled by this option and can be added separately as its own tool or skill.
+
+## External providers
+
+`exa-hosted-mcp` is the default external provider and requires no API key. It is used as the fallback for `native-first` and as the search backend for `external-only`.
+
+```jsonc
+{
+  "websearch": {
+    "strategy": "external-only",
+    "provider": "exa-hosted-mcp"
+  }
+}
+```
 
 | Provider | API key config |
 | --- | --- |
@@ -34,17 +62,44 @@ Use `websearch: false` to disable the tool.
 | `serpapi` | `apiKey: "{env:SERPAPI_API_KEY}"` |
 | `keiro` | `apiKey: "{env:KEIRO_API_KEY}"` |
 
-Only the provider names above are accepted.
+Only the provider names above are accepted. `endpoint` can override a provider's default URL for testing or proxying.
 
-## Keyed provider example
-
-```jsonc title="crabcode.jsonc"
+```jsonc
 {
   "websearch": {
-    "provider": "keiro",
-    "apiKey": "{env:KEIRO_API_KEY}"
+    "strategy": "external-only",
+    "provider": "exa",
+    "apiKey": "{env:EXA_API_KEY}",
+    "endpoint": "https://api.exa.ai/mcp"
   }
 }
 ```
 
-`endpoint` can override the default provider URL for testing or proxying.
+```jsonc
+{
+  "websearch": {
+    "strategy": "external-only",
+    "provider": "tavily",
+    "apiKey": "{env:TAVILY_API_KEY}",
+    "endpoint": "https://mcp.tavily.com/mcp"
+  }
+}
+```
+
+## Disable web search
+
+Disable the capability entirely with either form:
+
+```jsonc
+{
+  "websearch": false
+}
+```
+
+```jsonc
+{
+  "websearch": {
+    "enabled": false
+  }
+}
+```
