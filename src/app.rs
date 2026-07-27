@@ -8235,6 +8235,12 @@ impl App {
             return false;
         }
 
+        // Match manual cancel: stop nested subagents so they don't stay "loading"
+        // (active stream / Streaming status) after the parent is interrupted.
+        self.interrupt_child_streams_for_parent(
+            session_id,
+            "Stopped because parent agent was interrupted",
+        );
         self.cancel_streaming_for_session(session_id);
         self.mark_streamed_assistant_interrupted(session_id);
         let _ = self.finalize_and_persist_streamed_messages(
@@ -13843,6 +13849,73 @@ mod tests {
         );
         assert_eq!(child_session.messages.len(), 2);
         assert!(child_session.messages[1].is_complete);
+        assert!(child_session.messages[1].was_interrupted);
+    }
+
+    #[test]
+    fn queue_interrupt_also_interrupts_active_subagent_sessions() {
+        // Mirrors parent_cancellation, but exercises the queue-interrupt path's
+        // child cleanup (without submit_queued, which needs a live model/runtime).
+        let mut app = test_app();
+        let parent_id = app.create_new_session(Some("Parent".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Parent partial"));
+        app.chat_state.chat.begin_streaming_turn();
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&parent_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("parent-model".to_string()),
+                Some("parent-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+
+        app.start_subagent_session(
+            parent_id.clone(),
+            "child-a".to_string(),
+            "General task (@general subagent)".to_string(),
+            "general".to_string(),
+            Some("sub-model".to_string()),
+            Some("sub-provider".to_string()),
+            "General task".to_string(),
+            "Check implementation".to_string(),
+        );
+
+        assert!(app.session_has_active_stream("child-a"));
+        assert!(app.switch_to_session(&parent_id));
+        assert!(app.queue_message_for_current_session("queued follow-up".to_string(), Vec::new()));
+        assert!(app.has_queued_messages_for_session(&parent_id));
+        assert!(app.session_has_active_stream(&parent_id));
+
+        // Same first step as interrupt_streaming_to_send_queued_for_session.
+        app.interrupt_child_streams_for_parent(
+            &parent_id,
+            "Stopped because parent agent was interrupted",
+        );
+        app.cancel_streaming_for_session(&parent_id);
+        app.mark_streamed_assistant_interrupted(&parent_id);
+        let _ = app.finalize_and_persist_streamed_messages(
+            &parent_id,
+            Some("Streaming interrupted to send queued messages"),
+        );
+        let _ = app.session_manager.set_session_status(
+            &parent_id,
+            crate::session::types::SessionStatus::Interrupted,
+            None,
+        );
+        app.cleanup_streaming_for_session(&parent_id);
+
+        assert!(!app.session_has_active_stream("child-a"));
+        let child_session = app.session_manager.get_session_ref("child-a").unwrap();
+        assert_eq!(
+            child_session.status,
+            crate::session::types::SessionStatus::Interrupted
+        );
         assert!(child_session.messages[1].was_interrupted);
     }
 
