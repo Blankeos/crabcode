@@ -249,6 +249,8 @@ pub struct Chat {
     scrollbar_drag_offset: Option<u16>,
     pub content_height: usize,
     pub viewport_height: usize,
+    /// Extra scroll range past content bottom (e.g. so overlays don't cover last lines).
+    scroll_bottom_padding: usize,
     // Streaming metrics tracking (per streaming turn)
     pub streaming_start_time: Option<std::time::Instant>,
     pub streaming_first_token_time: Option<std::time::Instant>,
@@ -1583,6 +1585,7 @@ impl Chat {
             scrollbar_drag_offset: None,
             content_height: 0,
             viewport_height: 0,
+            scroll_bottom_padding: 0,
             streaming_start_time: None,
             streaming_first_token_time: None,
             streaming_end_time: None,
@@ -1647,6 +1650,7 @@ impl Chat {
             scrollbar_drag_offset: None,
             content_height: 0,
             viewport_height: 0,
+            scroll_bottom_padding: 0,
             streaming_start_time: None,
             streaming_first_token_time: None,
             streaming_end_time: None,
@@ -2576,7 +2580,7 @@ impl Chat {
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
-        let max_offset = self.content_height.saturating_sub(self.viewport_height);
+        let max_offset = self.max_scroll_offset();
         self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
         // Check if we're now at the bottom
         self.user_scrolled_up = self.scroll_offset < max_offset;
@@ -2613,7 +2617,7 @@ impl Chat {
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.content_height.saturating_sub(self.viewport_height);
+        self.scroll_offset = self.max_scroll_offset();
         self.user_scrolled_up = false;
         self.update_scrollbar();
     }
@@ -2622,6 +2626,33 @@ impl Chat {
         self.scroll_offset = usize::MAX;
         self.user_scrolled_up = false;
         self.update_scrollbar();
+    }
+
+    /// Extra lines of scroll range past content bottom (for overlays covering chat).
+    pub fn set_scroll_bottom_padding(&mut self, padding: usize) {
+        if self.scroll_bottom_padding == padding {
+            return;
+        }
+        self.scroll_bottom_padding = padding;
+        let max_offset = self.max_scroll_offset();
+        if self.scroll_offset > max_offset {
+            self.scroll_offset = max_offset;
+        }
+        if !self.user_scrolled_up {
+            self.scroll_offset = max_offset;
+        }
+        self.update_scrollbar();
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        self.content_height
+            .saturating_add(self.scroll_bottom_padding)
+            .saturating_sub(self.viewport_height)
+    }
+
+    fn scroll_content_height(&self) -> usize {
+        self.content_height
+            .saturating_add(self.scroll_bottom_padding)
     }
 
     pub fn set_search_query(
@@ -2699,7 +2730,7 @@ impl Chat {
 
         // Scroll so the message is visible (near top of viewport, with a small margin)
         let target_offset = line_pos.saturating_sub(2);
-        let max_offset = self.content_height.saturating_sub(self.viewport_height);
+        let max_offset = self.max_scroll_offset();
         self.scroll_offset = target_offset.min(max_offset);
         self.user_scrolled_up = true;
         self.update_scrollbar();
@@ -3013,7 +3044,7 @@ impl Chat {
     }
 
     fn update_scrollbar(&mut self) {
-        let max_offset = self.content_height.saturating_sub(self.viewport_height);
+        let max_offset = self.max_scroll_offset();
         let content_length = max_offset.saturating_add(1).max(1);
         let position = self.scroll_offset.min(content_length.saturating_sub(1));
         self.scrollbar_state = self.scrollbar_state.content_length(content_length);
@@ -3252,7 +3283,7 @@ impl Chat {
             MouseEventKind::Down(MouseButton::Left) => {
                 if is_on_scrollbar {
                     let metrics = ScrollMetrics::new(
-                        self.content_height,
+                        self.scroll_content_height(),
                         self.viewport_height,
                         self.scroll_offset,
                     );
@@ -3360,12 +3391,9 @@ impl Chat {
             return;
         }
 
-        let max_offset = self.content_height.saturating_sub(self.viewport_height);
-        let metrics = ScrollMetrics::new(
-            self.content_height,
-            self.viewport_height,
-            self.scroll_offset,
-        );
+        let max_offset = self.max_scroll_offset();
+        let content_height = self.scroll_content_height();
+        let metrics = ScrollMetrics::new(content_height, self.viewport_height, self.scroll_offset);
         let grab_offset = self
             .scrollbar_drag_offset
             .or_else(|| scrollbar_grab_offset(metrics, scrollbar_area, row))
@@ -3544,10 +3572,11 @@ impl Chat {
 
         let content_height = all_lines.len();
         let viewport = self.viewport_height;
-        let max_offset = content_height.saturating_sub(viewport);
+        let max_offset = content_height
+            .saturating_add(self.scroll_bottom_padding)
+            .saturating_sub(viewport);
         let was_pinned_to_bottom = self.scroll_offset == usize::MAX
-            || (self.scroll_offset >= self.content_height.saturating_sub(self.viewport_height)
-                && !self.user_scrolled_up);
+            || (self.scroll_offset >= self.max_scroll_offset() && !self.user_scrolled_up);
         let clamped_scroll = if was_pinned_to_bottom {
             max_offset
         } else {
@@ -3665,7 +3694,11 @@ impl Chat {
 
         render_scrollbar(
             f,
-            ScrollMetrics::new(content_height, viewport, clamped_scroll),
+            ScrollMetrics::new(
+                content_height.saturating_add(self.scroll_bottom_padding),
+                viewport,
+                clamped_scroll,
+            ),
             scrollbar_area,
             colors.background_element,
             colors.text_weak,

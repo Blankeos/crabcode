@@ -20,6 +20,8 @@ pub struct PermissionDialogState {
     queue: VecDeque<PermissionPrompt>,
     selected_action: usize,
     action_hitboxes: Vec<(Rect, PermissionResponse)>,
+    /// Last rendered panel height (for chat bottom scroll padding).
+    last_panel_height: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +44,7 @@ impl PermissionDialogState {
             queue: VecDeque::new(),
             selected_action: 1,
             action_hitboxes: Vec::new(),
+            last_panel_height: 0,
         }
     }
 
@@ -56,6 +59,23 @@ impl PermissionDialogState {
 
     pub fn has_active(&self) -> bool {
         self.current.is_some()
+    }
+
+    /// Bottom padding for chat scroll so last lines stay above the dialog.
+    ///
+    /// `below_chat_height` is the terminal rows under the chat viewport (input,
+    /// help, status, etc.). Only the portion of the dialog that actually
+    /// overlaps chat is used as padding.
+    pub fn chat_scroll_bottom_padding(&self, below_chat_height: u16) -> u16 {
+        if self.current.is_none() {
+            return 0;
+        }
+        let panel_height = if self.last_panel_height == 0 {
+            PERMISSION_DIALOG_MIN_HEIGHT
+        } else {
+            self.last_panel_height
+        };
+        panel_height.saturating_sub(below_chat_height)
     }
 
     pub fn current_snapshot(&self) -> Option<PermissionPromptSnapshot> {
@@ -369,11 +389,15 @@ pub fn render_permission_dialog(
     area: Rect,
     colors: ThemeColors,
 ) {
-    let Some(prompt) = state.current.as_ref() else {
+    if state.current.is_none() {
+        state.last_panel_height = 0;
         return;
-    };
+    }
 
-    let details = permission_detail_lines(prompt, colors);
+    let details = {
+        let prompt = state.current.as_ref().expect("checked above");
+        permission_detail_lines(prompt, colors)
+    };
     let detail_line_count =
         wrapped_lines_height(&details, permission_dialog_body_width(area.width));
     let desired_height = detail_line_count
@@ -386,6 +410,7 @@ pub fn render_permission_dialog(
         width: area.width,
         height: panel_height,
     };
+    state.last_panel_height = panel_height;
 
     f.render_widget(Clear, dialog_area);
     f.render_widget(

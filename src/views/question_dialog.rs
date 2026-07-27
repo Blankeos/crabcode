@@ -252,6 +252,8 @@ pub struct QuestionDialogState {
     queue: VecDeque<QuestionDialogRequest>,
     tab_hitboxes: Vec<QuestionTabHitbox>,
     mouse_hitboxes: Vec<QuestionMouseHitbox>,
+    /// Last rendered panel height (for chat bottom scroll padding).
+    last_panel_height: u16,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -279,7 +281,12 @@ impl QuestionDialogState {
             queue: VecDeque::new(),
             tab_hitboxes: Vec::new(),
             mouse_hitboxes: Vec::new(),
+            last_panel_height: 0,
         }
+    }
+
+    pub fn last_panel_height(&self) -> u16 {
+        self.last_panel_height
     }
 
     pub fn enqueue(&mut self, questions: Value, response_tx: oneshot::Sender<Value>) {
@@ -288,12 +295,26 @@ impl QuestionDialogState {
             self.current = Some(request);
             self.tab_hitboxes.clear();
             self.mouse_hitboxes.clear();
-            self.mouse_hitboxes.clear();
-            self.mouse_hitboxes.clear();
-            self.mouse_hitboxes.clear();
         } else {
             self.queue.push_back(request);
         }
+    }
+
+    /// Bottom padding for chat scroll so last lines stay above the dialog.
+    ///
+    /// `below_chat_height` is the terminal rows under the chat viewport (input,
+    /// help, status, etc.). Only the portion of the dialog that actually
+    /// overlaps chat is used as padding.
+    pub fn chat_scroll_bottom_padding(&self, below_chat_height: u16) -> u16 {
+        if self.current.is_none() {
+            return 0;
+        }
+        let panel_height = if self.last_panel_height == 0 {
+            QUESTION_DIALOG_MIN_HEIGHT
+        } else {
+            self.last_panel_height
+        };
+        panel_height.saturating_sub(below_chat_height)
     }
 
     pub fn has_active(&self) -> bool {
@@ -1255,28 +1276,38 @@ pub fn render_question_dialog(
     area: Rect,
     colors: ThemeColors,
 ) {
-    let Some(request) = state.active() else {
-        state.tab_hitboxes.clear();
-        state.mouse_hitboxes.clear();
-        return;
+    let (body_lines, tabs_line, footer, tab_scroll_x_base) = {
+        let Some(request) = state.active() else {
+            state.tab_hitboxes.clear();
+            state.mouse_hitboxes.clear();
+            state.last_panel_height = 0;
+            return;
+        };
+
+        let body_lines = if request.is_confirm_tab() {
+            confirm_body_lines(request, &colors)
+        } else if let (Some(question), Some(answer)) =
+            (request.current_question(), request.current_answer())
+        {
+            question_body_lines(
+                question,
+                answer,
+                request.current_index,
+                request.editing_custom,
+                &colors,
+            )
+        } else {
+            Vec::new()
+        };
+
+        let tabs_line = question_tabs_line(request, state.queued_count(), &colors);
+        let footer = footer_line(request, &colors);
+        // tab_scroll_x needs viewport width; computed later after layout.
+        (body_lines, tabs_line, footer, request)
     };
 
-    let body_lines = if request.is_confirm_tab() {
-        confirm_body_lines(request, &colors)
-    } else if let (Some(question), Some(answer)) =
-        (request.current_question(), request.current_answer())
-    {
-        question_body_lines(
-            question,
-            answer,
-            request.current_index,
-            request.editing_custom,
-            &colors,
-        )
-    } else {
-        Vec::new()
-    };
-
+    // Re-borrow for hitbox/tab scroll calculations after layout; avoid holding borrow
+    // across state mutations by computing panel geometry first.
     let desired_body_height = wrapped_lines_height(&body_lines, dialog_body_width(area.width));
     let desired_height = desired_body_height.saturating_add(QUESTION_DIALOG_CHROME_HEIGHT);
     let panel_height = area
@@ -1288,6 +1319,9 @@ pub fn render_question_dialog(
         width: area.width,
         height: panel_height,
     };
+    // Drop temporary request borrow by ending the block above; safe to mutate now.
+    let _ = tab_scroll_x_base;
+    state.last_panel_height = panel_height;
 
     f.render_widget(Clear, dialog_area);
     f.render_widget(
@@ -1328,22 +1362,28 @@ pub fn render_question_dialog(
         .constraints([Constraint::Min(0), Constraint::Length(cancel_chunk_width)])
         .split(chunks[0]);
 
-    let tab_scroll_x = active_tab_scroll(request, header_chunks[0].width);
+    let (tab_scroll_x, tab_hitboxes, mouse_hitboxes) = {
+        let Some(request) = state.active() else {
+            return;
+        };
+        let tab_scroll_x = active_tab_scroll(request, header_chunks[0].width);
+        let tab_hitboxes = question_tab_hitboxes(request, header_chunks[0], tab_scroll_x);
+        let mut mouse_hitboxes = question_body_hitboxes(request, &body_lines, chunks[1]);
+        mouse_hitboxes.push(QuestionMouseHitbox {
+            area: header_chunks[1],
+            target: QuestionMouseTarget::Cancel,
+        });
+        mouse_hitboxes.push(QuestionMouseHitbox {
+            area: chunks[3],
+            target: QuestionMouseTarget::Confirm,
+        });
+        (tab_scroll_x, tab_hitboxes, mouse_hitboxes)
+    };
+
     f.render_widget(
-        Paragraph::new(question_tabs_line(request, state.queued_count(), &colors))
-            .scroll((0, tab_scroll_x)),
+        Paragraph::new(tabs_line).scroll((0, tab_scroll_x)),
         header_chunks[0],
     );
-    let tab_hitboxes = question_tab_hitboxes(request, header_chunks[0], tab_scroll_x);
-    let mut mouse_hitboxes = question_body_hitboxes(request, &body_lines, chunks[1]);
-    mouse_hitboxes.push(QuestionMouseHitbox {
-        area: header_chunks[1],
-        target: QuestionMouseTarget::Cancel,
-    });
-    mouse_hitboxes.push(QuestionMouseHitbox {
-        area: chunks[3],
-        target: QuestionMouseTarget::Confirm,
-    });
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             cancel_text,
@@ -1362,7 +1402,6 @@ pub fn render_question_dialog(
         chunks[1],
     );
 
-    let footer = footer_line(request, &colors);
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Left), chunks[3]);
     state.tab_hitboxes = tab_hitboxes;
     state.mouse_hitboxes = mouse_hitboxes;

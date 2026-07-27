@@ -1660,6 +1660,30 @@ impl App {
             .is_some_and(|id| self.session_manager.parent_id_of(id).is_some())
     }
 
+    /// Rows under the chat viewport (queue/input/help/status) for dialog overlap math.
+    fn dialog_below_chat_height(&self, size: ratatui::layout::Rect) -> u16 {
+        let is_subagent = self.is_subagent_session_active();
+        let input_height = if is_subagent {
+            SUBAGENT_FOOTER_HEIGHT
+        } else {
+            self.input.get_height_for_width(size.width)
+        };
+        let help_height = if is_subagent { 0 } else { 1 };
+        let queue_height = if is_subagent {
+            0
+        } else {
+            crate::views::chat::queued_messages_height(
+                &self.queued_message_previews_for_current_session(),
+            )
+        };
+        // Matches render_chat: queue + input + help + inner status row + outer status bar.
+        queue_height
+            .saturating_add(input_height)
+            .saturating_add(help_height)
+            .saturating_add(1)
+            .saturating_add(1)
+    }
+
     fn should_handle_child_session_arrow(&self) -> bool {
         if self.base_focus != BaseFocus::Chat {
             return false;
@@ -4436,7 +4460,9 @@ impl App {
                 let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
             }
         } else if self.overlay_focus == OverlayFocus::QuestionDialog {
-            match handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse) {
+            let action = handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse);
+            let handled = !matches!(action, QuestionDialogAction::NotHandled);
+            match action {
                 QuestionDialogAction::Submit => {
                     self.question_dialog_state.submit_current();
                     if self.question_dialog_state.has_active() {
@@ -4451,6 +4477,53 @@ impl App {
                     self.cancel_streaming();
                 }
                 QuestionDialogAction::Handled | QuestionDialogAction::NotHandled => {}
+            }
+            if !handled
+                && matches!(
+                    mouse.kind,
+                    ratatui::crossterm::event::MouseEventKind::ScrollDown
+                        | ratatui::crossterm::event::MouseEventKind::ScrollUp
+                )
+                && self.base_focus == BaseFocus::Chat
+            {
+                let size = self.last_frame_size;
+                let main_chunks = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints(
+                        [
+                            ratatui::layout::Constraint::Min(0),
+                            ratatui::layout::Constraint::Length(1),
+                        ]
+                        .as_ref(),
+                    )
+                    .split(size);
+                let input_height = self.input.get_height_for_width(size.width);
+                let input_height = if self.is_subagent_session_active() {
+                    SUBAGENT_FOOTER_HEIGHT
+                } else {
+                    input_height
+                };
+                let help_height = if self.is_subagent_session_active() {
+                    0
+                } else {
+                    1
+                };
+                let above_status_chunks = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints(
+                        [
+                            ratatui::layout::Constraint::Length(0),
+                            ratatui::layout::Constraint::Min(0),
+                            ratatui::layout::Constraint::Length(0),
+                            ratatui::layout::Constraint::Length(input_height),
+                            ratatui::layout::Constraint::Length(help_height),
+                            ratatui::layout::Constraint::Length(1),
+                        ]
+                        .as_ref(),
+                    )
+                    .split(main_chunks[0]);
+                let chat_area = above_status_chunks[1];
+                let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
             }
         } else if self.overlay_focus == OverlayFocus::RemoteDialog {
             let action = handle_remote_dialog_mouse_event(&mut self.remote_dialog_state, mouse);
@@ -10133,6 +10206,23 @@ impl App {
                 let queued_messages = self.queued_message_previews_for_current_session();
                 let (display_agent, display_model) = self.current_session_agent_model_for_display();
                 let retry_status = self.current_session_retry_status();
+                let below_chat = self.dialog_below_chat_height(size);
+                let scroll_padding = if self.overlay_focus == OverlayFocus::QuestionDialog
+                    && self.question_dialog_state.has_active()
+                {
+                    self.question_dialog_state
+                        .chat_scroll_bottom_padding(below_chat) as usize
+                } else if self.overlay_focus == OverlayFocus::PermissionDialog
+                    && self.permission_dialog_state.has_active()
+                {
+                    self.permission_dialog_state
+                        .chat_scroll_bottom_padding(below_chat) as usize
+                } else {
+                    0
+                };
+                self.chat_state
+                    .chat
+                    .set_scroll_bottom_padding(scroll_padding);
                 render_chat(
                     f,
                     &mut self.chat_state,
@@ -10283,16 +10373,25 @@ impl App {
             render_session_rename_dialog(f, &mut self.session_rename_dialog_state, size, colors);
         }
 
+        let below_chat = self.dialog_below_chat_height(size);
         if self.overlay_focus == OverlayFocus::PermissionDialog
             && self.permission_dialog_state.has_active()
         {
             render_permission_dialog(f, &mut self.permission_dialog_state, size, colors);
-        }
-
-        if self.overlay_focus == OverlayFocus::QuestionDialog
+            let padding = self
+                .permission_dialog_state
+                .chat_scroll_bottom_padding(below_chat) as usize;
+            self.chat_state.chat.set_scroll_bottom_padding(padding);
+        } else if self.overlay_focus == OverlayFocus::QuestionDialog
             && self.question_dialog_state.has_active()
         {
             render_question_dialog(f, &mut self.question_dialog_state, size, colors);
+            let padding = self
+                .question_dialog_state
+                .chat_scroll_bottom_padding(below_chat) as usize;
+            self.chat_state.chat.set_scroll_bottom_padding(padding);
+        } else {
+            self.chat_state.chat.set_scroll_bottom_padding(0);
         }
 
         if self.overlay_focus == OverlayFocus::TerminalSessionDialog

@@ -427,7 +427,7 @@ I think this is how the TUI works already anyway right?
 
 - [x] Some permission requests are annoying, might have missed allowing them... subagents requesting permission to read stuff inside of the same current workspace. Also sometimes the parent agent requesting permission to read a file inside the same current workspace.
 
-- [ ] When question dialog is there, allow me to scroll the chat still
+- [x] When question dialog is there, allow me to scroll the chat still
 
 - [x] When I queue (it's supposed to interrupt right? after the most recent tool call..).. What i noticed is if it's doing a subagent just as I queued some message. It finishes the subagent, interrupts... BUt whne I check the subagent it says it's still loadig... AND also it says "interrupted" just after the subagent is supposedly "done".
 
