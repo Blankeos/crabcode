@@ -15,6 +15,7 @@ import {
   MessageContent,
   MessageResponse,
   MessageToolbar,
+  remoteMarkdownComponents,
 } from "../../components/ai-elements/message"
 import { Shimmer } from "../../components/ai-elements/shimmer"
 import { CollapsiblePanel } from "../../components/remote/collapsible-panel"
@@ -819,7 +820,11 @@ function ThinkingAccordion(props: {
       <CollapsiblePanel open={open()} steady={steadyActivity()} class="w-full">
         <div class="w-full overflow-x-auto pt-1 text-[14px] leading-relaxed text-[var(--muted)]">
           <Show when={props.text.trim()}>
-            <StreamMarkdown content={props.text} class="streamdown remote-markdown text-[var(--muted)]" />
+            <StreamMarkdown
+              content={props.text}
+              class="streamdown remote-markdown text-[var(--muted)]"
+              components={remoteMarkdownComponents}
+            />
           </Show>
           <Show when={hasActivity()}>
             <div class="mt-1 [&_.tool-activity]:w-[min(100%,34rem)]">

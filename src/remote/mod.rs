@@ -2516,6 +2516,10 @@ fn remote_git_status(cwd: &str) -> Result<RemoteGitStatus> {
             .collect();
     }
 
+    // Tracked diffs come from `git diff HEAD`. Untracked files need separate
+    // `git diff --no-index` patches so the UI can show full-file additions.
+    append_untracked_git_diffs(cwd, &files, &mut diff_files, &mut truncated_files)?;
+
     merge_git_diff_file_metadata(&mut files, &diff_files);
 
     if files.len() > MAX_GIT_FILES {
@@ -2685,10 +2689,161 @@ fn merge_git_diff_file_metadata(
         let Some(diff_file) = by_path.get(file.path.as_str()) else {
             continue;
         };
-        file.status = diff_file.status.clone();
+        // Keep untracked status labels from porcelain; only fill missing metadata.
+        if file.status != "untracked" {
+            file.status = diff_file.status.clone();
+        }
         file.old_path = file.old_path.clone().or_else(|| diff_file.old_path.clone());
         file.binary = file.binary || diff_file.binary;
+        if file.additions == 0 && file.deletions == 0 {
+            file.additions = diff_file.additions;
+            file.deletions = diff_file.deletions;
+        }
     }
+}
+
+/// Build full-file addition patches for untracked files via `git diff --no-index`.
+fn append_untracked_git_diffs(
+    cwd: &str,
+    files: &[RemoteGitFileChange],
+    diff_files: &mut Vec<RemoteGitDiffFile>,
+    truncated_files: &mut bool,
+) -> Result<()> {
+    if diff_files.len() >= MAX_GIT_FILES {
+        *truncated_files = true;
+        return Ok(());
+    }
+
+    let mut existing = diff_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<std::collections::HashSet<_>>();
+
+    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
+    for file in files {
+        if file.status != "untracked" || existing.contains(&file.path) {
+            continue;
+        }
+        if diff_files.len() >= MAX_GIT_FILES {
+            *truncated_files = true;
+            break;
+        }
+
+        // Binary / non-UTF8 files: surface as binary without loading content.
+        if file_looks_binary(cwd, &file.path) {
+            diff_files.push(RemoteGitDiffFile {
+                path: file.path.clone(),
+                old_path: None,
+                status: "added".to_string(),
+                additions: 0,
+                deletions: 0,
+                binary: true,
+                lines: Vec::new(),
+                truncated: false,
+            });
+            existing.insert(file.path.clone());
+            continue;
+        }
+
+        // `git diff --no-index` exits 1 when files differ (always for untracked).
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-index",
+                "--unified=3",
+                "--",
+                null_device,
+                file.path.as_str(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to diff untracked file {}", file.path))?;
+
+        let mut output = Vec::with_capacity(64 * 1024);
+        let mut truncated = false;
+        if let Some(stdout) = child.stdout.as_mut() {
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let read = stdout
+                    .read(&mut buffer)
+                    .with_context(|| format!("failed to read untracked diff for {}", file.path))?;
+                if read == 0 {
+                    break;
+                }
+                let remaining = MAX_GIT_DIFF_BYTES.saturating_sub(output.len());
+                if read <= remaining {
+                    output.extend_from_slice(&buffer[..read]);
+                } else {
+                    output.extend_from_slice(&buffer[..remaining]);
+                    truncated = true;
+                    let _ = child.kill();
+                    break;
+                }
+            }
+        }
+        let _ = child.wait();
+
+        let patch = String::from_utf8_lossy(&output);
+        if patch.trim().is_empty() {
+            // Empty untracked file: still show a minimal added-file patch.
+            let mut empty = RemoteGitDiffFile {
+                path: file.path.clone(),
+                old_path: None,
+                status: "added".to_string(),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+                lines: Vec::new(),
+                truncated: false,
+            };
+            push_git_diff_line(
+                &mut empty,
+                "hunk",
+                "@@ -0,0 +0,0 @@".to_string(),
+                None,
+                None,
+            );
+            existing.insert(file.path.clone());
+            diff_files.push(empty);
+            continue;
+        }
+
+        let mut parsed = parse_git_diff(&patch);
+        if let Some(parsed_file) = parsed.first_mut() {
+            parsed_file.path = file.path.clone();
+            parsed_file.old_path = None;
+            parsed_file.status = "added".to_string();
+            if truncated {
+                parsed_file.truncated = true;
+            }
+            existing.insert(file.path.clone());
+            diff_files.push(parsed_file.clone());
+        } else if truncated {
+            *truncated_files = true;
+        }
+    }
+
+    Ok(())
+}
+
+fn file_looks_binary(cwd: &str, rel_path: &str) -> bool {
+    let path = Path::new(cwd).join(rel_path);
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        return false;
+    };
+    let mut sample = [0_u8; 8192];
+    let Ok(read) = file.read(&mut sample) else {
+        return false;
+    };
+    if read == 0 {
+        return false;
+    }
+    sample[..read].contains(&0)
 }
 
 fn parse_git_numstat(output: &str) -> (Vec<RemoteGitFileChange>, bool) {

@@ -1,4 +1,4 @@
-import { For, Index, Show, createMemo } from "solid-js"
+import { For, Index, Show, createMemo, createSignal } from "solid-js"
 import {
   Command,
   CommandEmpty,
@@ -8,13 +8,13 @@ import {
   CommandList,
 } from "cmdk-solid"
 import { useIsMobileViewport } from "./mobile-utils"
-import { IconBrainGlyph, IconClockCounterClockwise, IconF7ChevronDownSquare } from "../../assets/icons"
+import { IconBrainGlyph, IconClockCounterClockwise, IconF7ChevronDownSquare, IconGitDiff } from "../../assets/icons"
 import { FadedEdgeEffect } from "../../components/remote/faded-edge-effect"
 import { ProjectFavicon } from "../../components/remote/project-favicon"
 import { ProjectList } from "../../components/remote/project-list"
 import { Popover, PopoverContent, PopoverTrigger } from "../../components/ui/popover"
 import { Resizable, ResizableHandle, ResizablePanel } from "../../components/ui/resizable"
-import { IconArrowLeft, IconCaretDown, IconCheck, IconDots, IconFolder, IconGitBranch, IconPlus, IconSearch, IconServers, IconSidebar, IconX } from "../../icons"
+import { IconArrowLeft, IconCaretDown, IconCheck, IconDots, IconFolder, IconPlus, IconSearch, IconServers, IconSidebar, IconX } from "../../icons"
 import { mostRecentSession } from "./projects"
 import { cx } from "../../lib/cx"
 import { ICON_BUTTON, INPUT_BASE, PANEL_BASE, POPOVER_ANIMATION } from "./page-constants"
@@ -25,6 +25,7 @@ import { QuestionRequestPanel, PermissionRequestPanel } from "./request-panels"
 import { SubagentSessionFooter } from "./subagent-footer"
 import { ImagePreviewDialog, ThreadItemView } from "./thread-view"
 import { ThreadTabsBar } from "./thread-tabs"
+import { GitDiffFile } from "./git-diff-viewer"
 import { isActiveServer } from "./server-utils"
 import { relativeTime } from "./shared-utils"
 
@@ -39,7 +40,9 @@ export function RemoteClientPage(props: { ui: RemoteClientUi }) {
       <ThreadTabsBar tabs={ui.thread.tabs} />
       <ThreadViewport thread={ui.thread} />
       <Show when={!ui.thread.isSubagentView()} fallback={<SubagentSessionFooter footer={ui.subagentFooter} />}>
-        <ComposerDock composer={ui.composer} />
+        <div class={cx(ui.thread.shellLoading() && "pointer-events-none opacity-55")}>
+          <ComposerDock composer={ui.composer} />
+        </div>
       </Show>
     </main>
   )
@@ -308,7 +311,7 @@ function GitPanelTrigger(props: { git: GitViewerController }) {
         title="Git changes"
         onClick={() => git.onOpenChange(!git.open())}
       >
-        <IconGitBranch class="h-[1.05rem] w-[1.05rem] text-[var(--muted)]" />
+        <IconGitDiff class="h-[1.05rem] w-[1.05rem] text-[var(--muted)]" />
         <span class="max-w-[9rem] overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.76rem] font-semibold text-[var(--muted)] max-[560px]:hidden">
           {branchLabel()}
         </span>
@@ -326,6 +329,7 @@ function GitSidePanel(props: { git: GitViewerController; variant: "desktop" | "m
   const git = props.git
   const status = createMemo(() => git.status())
   const branchLabel = createMemo(() => status()?.branch || git.summary()?.branch || "git")
+  const [wrapLines, setWrapLines] = createSignal(false)
 
   return (
     <aside
@@ -344,6 +348,20 @@ function GitSidePanel(props: { git: GitViewerController; variant: "desktop" | "m
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-1">
+          <button
+            class={cx(
+              "inline-flex h-7 items-center justify-center rounded-md border px-2.5 text-[0.72rem] font-semibold transition disabled:opacity-55",
+              wrapLines()
+                ? "border-[var(--line-strong)] bg-white/[0.08] text-[var(--text)]"
+                : "border-[var(--line-strong)] text-[var(--muted)] hover:bg-white/[0.045] hover:text-[var(--text)]"
+            )}
+            type="button"
+            aria-pressed={wrapLines()}
+            title={wrapLines() ? "Disable line wrap" : "Wrap long lines"}
+            onClick={() => setWrapLines((value) => !value)}
+          >
+            Wrap
+          </button>
           <button
             class="inline-flex h-7 items-center justify-center rounded-md border border-[var(--line-strong)] px-2.5 text-[0.72rem] font-semibold text-[var(--muted)] transition hover:bg-white/[0.045] hover:text-[var(--text)] disabled:opacity-55"
             type="button"
@@ -372,7 +390,9 @@ function GitSidePanel(props: { git: GitViewerController; variant: "desktop" | "m
           )}
         </Show>
         <Show when={status()} fallback={<GitLoadingState loading={git.loading} />}>
-          {(current) => <GitStatusView git={git} status={current} loading={git.loading} />}
+          {(current) => (
+            <GitStatusView git={git} status={current} loading={git.loading} wrapLines={wrapLines} />
+          )}
         </Show>
       </div>
     </aside>
@@ -391,6 +411,7 @@ function GitStatusView(props: {
   git: GitViewerController
   status: () => NonNullable<ReturnType<GitViewerController["status"]>>
   loading: () => boolean
+  wrapLines: () => boolean
 }) {
   const status = props.status
   const selectedDiff = createMemo(() => {
@@ -447,7 +468,7 @@ function GitStatusView(props: {
                   </div>
                 }
               >
-                {(file) => <GitDiffFile file={file()} compact />}
+                {(file) => <GitDiffFile file={file()} compact wrap={props.wrapLines()} />}
               </Show>
             }
           >
@@ -460,7 +481,9 @@ function GitStatusView(props: {
               }
             >
               <div class="grid min-w-0 gap-2">
-                <For each={status().diff_files}>{(file) => <GitDiffFile file={file} compact />}</For>
+                <For each={status().diff_files}>
+                  {(file) => <GitDiffFile file={file} compact wrap={props.wrapLines()} />}
+                </For>
               </div>
             </Show>
           </Show>
@@ -559,95 +582,6 @@ function GitFileRow(props: {
   )
 }
 
-function GitDiffFile(props: {
-  file: NonNullable<ReturnType<GitViewerController["status"]>>["diff_files"][number]
-  compact?: boolean
-}) {
-  return (
-    <article class="w-full min-w-0 max-w-full overflow-hidden rounded-md border border-[var(--line)] bg-black/12">
-      <div class="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-[var(--line)] px-2 py-1.5">
-        <div
-          class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.7rem] font-semibold text-[var(--text)]"
-          title={props.file.old_path ? `${props.file.old_path} → ${props.file.path}` : props.file.path}
-        >
-          <Show when={props.file.old_path} fallback={props.file.path}>
-            {(oldPath) => (
-              <>
-                {oldPath()} → {props.file.path}
-              </>
-            )}
-          </Show>
-        </div>
-        <span class="inline-flex items-center gap-1 whitespace-nowrap font-mono text-[0.65rem] font-semibold">
-          <span class="text-[#6ecf9a]">+{props.file.additions}</span>
-          <span class="text-[#f08a96]">−{props.file.deletions}</span>
-        </span>
-      </div>
-      <Show
-        when={!props.file.binary && props.file.lines.length > 0}
-        fallback={
-          <div class="px-2 py-2 text-[0.72rem] text-[var(--faint)]">
-            {props.file.binary ? "Binary file changed." : "No textual diff preview."}
-          </div>
-        }
-      >
-        <div class={cx("block w-full min-w-0 max-w-full overflow-x-auto p-1.5 font-mono text-[0.68rem] leading-[1.35]", props.compact && "max-h-[min(22rem,42vh)] overflow-y-auto")}>
-          <For each={props.file.lines}>{(line) => <GitDiffLine line={line} />}</For>
-          <Show when={props.file.truncated}>
-            <div class="px-1 py-0.5 text-[#d4bc82]">… truncated</div>
-          </Show>
-        </div>
-      </Show>
-    </article>
-  )
-}
-
-function GitDiffLine(props: { line: NonNullable<ReturnType<GitViewerController["status"]>>["diff_files"][number]["lines"][number] }) {
-  const line = props.line
-  const number = () => line.new_line ?? line.old_line ?? ""
-  const isAdd = () => line.kind === "add"
-  const isRemove = () => line.kind === "remove"
-  const isSemantic = () => isAdd() || isRemove()
-  return (
-    <div
-      class={cx(
-        "grid w-max min-w-full max-w-none grid-cols-[2.4rem_0.85rem_auto] gap-0",
-        line.kind === "context" && "text-[#8a8680]",
-        (line.kind === "hunk" || line.kind === "meta") && "text-[#c9a24a]"
-      )}
-    >
-      <span
-        class={cx(
-          "select-none px-1 text-right text-[var(--faint)]",
-          isAdd() && "bg-[#103a23] text-[#7dcf9d]",
-          isRemove() && "bg-[#4a1217] text-[#e58b96]"
-        )}
-      >
-        {number()}
-      </span>
-      <span
-        class={cx(
-          "select-none px-1 text-[var(--faint)]",
-          isAdd() && "bg-[#103a23] text-[#7dcf9d]",
-          isRemove() && "bg-[#4a1217] text-[#e58b96]"
-        )}
-      >
-        {gitDiffPrefix(line.kind)}
-      </span>
-      <code
-        class={cx(
-          "whitespace-pre px-1 [font:inherit] text-inherit",
-          isAdd() && "bg-[rgba(46,120,82,0.24)] text-[#9be7b9]",
-          isRemove() && "bg-[rgba(150,48,60,0.28)] text-[#f4a3ad]",
-          !isSemantic() && "pl-2"
-        )}
-      >
-        {line.text}
-      </code>
-    </div>
-  )
-}
-
 function gitStatusLabel(status: string) {
   if (status === "added") return "A"
   if (status === "deleted") return "D"
@@ -661,12 +595,6 @@ function gitStatusClass(status: string) {
   if (status === "deleted") return "bg-[#2b1012] text-[#e09299]"
   if (status === "renamed") return "bg-[#1f2536] text-[#8fb7ff]"
   return "bg-white/[0.055] text-[var(--muted)]"
-}
-
-function gitDiffPrefix(kind: string) {
-  if (kind === "add") return "+"
-  if (kind === "remove") return "-"
-  return " "
 }
 
 function ProjectPicker(props: { picker: ProjectPickerController }) {
@@ -691,18 +619,32 @@ function ProjectPicker(props: { picker: ProjectPickerController }) {
         class="grid min-w-0 max-w-[min(36rem,52vw)] flex-[0_1_auto] grid-cols-[auto_minmax(0,auto)_auto] items-center justify-start gap-2 rounded-lg px-2 py-1.5 text-left transition hover:bg-white/[0.035]"
         type="button"
       >
-        <ProjectFavicon
-          cwd={picker.projectPath()}
-          label={picker.projectName()}
-          token={picker.token()}
-          class="h-[1.8rem] w-[1.8rem]"
-        />
+        <Show
+          when={picker.projectName()}
+          fallback={<span class="h-[1.8rem] w-[1.8rem] rounded-md bg-white/[0.04]" aria-hidden="true" />}
+        >
+          <ProjectFavicon
+            cwd={picker.projectPath()}
+            label={picker.projectName()}
+            token={picker.token()}
+            class="h-[1.8rem] w-[1.8rem]"
+          />
+        </Show>
         <span class="flex min-w-0 flex-col gap-0.5">
           <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[1.12rem] font-bold text-[var(--text)]">
-            {picker.projectName()}
+            <Show
+              when={picker.projectName()}
+              fallback={
+                <span class="flex h-[1lh] w-24 items-center" aria-hidden="true">
+                  <span class="block h-[1em] w-full rounded-sm bg-white/[0.04]" />
+                </span>
+              }
+            >
+              {picker.projectName()}
+            </Show>
           </span>
           <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.72rem] text-[var(--faint)] max-[560px]:hidden">
-            {picker.projectPath()}
+            {picker.projectPath() || "\u00a0"}
           </span>
         </span>
         <IconCaretDown class="h-3 w-3 text-[var(--faint)]" />
@@ -809,7 +751,10 @@ function ServerPopover(props: { servers: ServerPanelController }) {
         aria-label="Open servers"
         title="Open servers"
       >
-        <span class="absolute top-[0.42rem] right-[0.42rem] h-[0.43rem] w-[0.43rem] rounded-full bg-[#53b842]" />
+        <span class="absolute top-[0.42rem] right-[0.42rem] flex h-[0.43rem] w-[0.43rem]">
+          <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#53b842] opacity-60" />
+          <span class="relative inline-flex h-full w-full rounded-full bg-[#53b842]" />
+        </span>
         <IconServers class="h-[1.08rem] w-[1.08rem] text-[var(--muted)]" />
       </PopoverTrigger>
       <PopoverContent
@@ -979,30 +924,38 @@ function ThreadViewport(props: { thread: ThreadController }) {
               : "pb-52 max-[900px]:pb-4 max-[900px]:pt-2"
         )}
       >
-        <div ref={thread.setContentRef} class={cx("mx-auto w-[min(100%,64rem)] min-w-0 max-w-full", thread.isEmptyChat() && "grid h-full")}>
-          <Show
-            when={thread.visibleMessages().length > 0}
-            fallback={
-              <EmptyThread
-                projectName={thread.projectName()}
-                mascotFrame={thread.mascotFrame()}
-                recentSessions={thread.recentSessions}
-                onSwitchSession={thread.onSwitchSession}
-              />
-            }
-          >
-            <Index each={thread.threadItems()}>
-              {(item) => (
-                <ThreadItemView
-                  item={item}
-                  status={thread.status}
-                  streaming={thread.streaming}
-                  token={thread.token}
-                  onPreviewImage={thread.onPreviewImage}
-                  onOpenSubagentSession={thread.tabs.onOpenSubagentSession}
+        <div
+          ref={thread.setContentRef}
+          class={cx(
+            "mx-auto w-[min(100%,64rem)] min-w-0 max-w-full",
+            (thread.isEmptyChat() || thread.shellLoading()) && "grid h-full"
+          )}
+        >
+          <Show when={!thread.shellLoading()} fallback={<div class="min-h-0" aria-busy="true" aria-label="Loading" />}>
+            <Show
+              when={thread.visibleMessages().length > 0}
+              fallback={
+                <EmptyThread
+                  projectName={thread.projectName()}
+                  mascotFrame={thread.mascotFrame()}
+                  recentSessions={thread.recentSessions}
+                  onSwitchSession={thread.onSwitchSession}
                 />
-              )}
-            </Index>
+              }
+            >
+              <Index each={thread.threadItems()}>
+                {(item) => (
+                  <ThreadItemView
+                    item={item}
+                    status={thread.status}
+                    streaming={thread.streaming}
+                    token={thread.token}
+                    onPreviewImage={thread.onPreviewImage}
+                    onOpenSubagentSession={thread.tabs.onOpenSubagentSession}
+                  />
+                )}
+              </Index>
+            </Show>
           </Show>
         </div>
       </div>

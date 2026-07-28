@@ -30,7 +30,13 @@
 
 - [ ] Minor, `chat_only` flag is codesmell... We better come up with strings for deciding "Only show this slash command in this context", just like how we do with 'Shortcuts' (in case shortcuts follow this codesmell as well, come up with a better approach)
 
-- [ ] Remote UI: Persist the selected primary agent per existing session. For `/new`, default to the last-used primary agent instead of always Build.
+- [x] ~~Remote UI: Persist the selected primary agent per existing session. For `/new`, default to the last-used primary agent instead of always Build.~~
+
+- [x] Remote UI: Omit the line-number gutter from compact tool-call output beneath “Thinking”. Tool calls such as Read currently show labels like `2841| something: {`; because this is a small, minor UI element, show only the content without the line number or `|` gutter.
+
+- [x] Remote UI: On app refresh, show an empty, non-interactive shell while the app is loading instead of briefly rendering an empty Crabcode state with the “Project” heading and an unusable user input. Do not show placeholder content or the logo during this loading state for now, so it is clear the app is not ready for interaction yet.
+
+- [x] Remote UI: Improve the web diff viewer by using [Diffs](https://diffs.com/).
 
 - [x] Remote UI: In the Open Project searchable popover, selecting a project with an active streaming session should auto-open that streaming session instead of creating/navigating to that project's `/new` page. (I made a recent icon instead.)
 

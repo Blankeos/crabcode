@@ -50,12 +50,26 @@ export function MessageContent(props: MessageContentProps) {
   )
 }
 
+/** Horizontal scroll shell so wide GFM tables don't expand the page. */
+export function MarkdownTable(props: ComponentProps<"table">) {
+  return (
+    <div class="remote-md-table">
+      <table {...props} />
+    </div>
+  )
+}
+
+export const remoteMarkdownComponents = {
+  table: MarkdownTable,
+}
+
 export function MessageResponse(props: MessageResponseProps) {
   const [local, others] = splitProps(props, ["class", "content"])
   return (
     <StreamMarkdown
       content={local.content}
       class={cx("streamdown remote-markdown", local.class)}
+      components={remoteMarkdownComponents}
       {...others}
     />
   )

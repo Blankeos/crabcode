@@ -273,6 +273,8 @@ export type ThreadController = {
   isAtTop: Accessor<boolean>
   isAtBottom: Accessor<boolean>
   isEmptyChat: Accessor<boolean>
+  /** App chrome is up but remote state has not arrived yet. */
+  shellLoading: Accessor<boolean>
   streaming: Accessor<boolean>
   visibleMessages: Accessor<RemoteMessage[]>
   threadItems: Accessor<ThreadItem[]>
@@ -372,6 +374,8 @@ export type CommandPaletteController = {
 
 export type RemoteClientUi = {
   themeStyle: Accessor<JSX.CSSProperties>
+  /** False until first remote state arrives (or pair screen is shown). */
+  ready: Accessor<boolean>
   pair: PairPanelController
   sidebar: SidebarController
   header: HeaderController

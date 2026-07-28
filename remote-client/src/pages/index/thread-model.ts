@@ -909,11 +909,18 @@ export function readableUrl(raw: string) {
   }
 }
 
+/** Strip server line-number gutters (`00042| …`) from compact tool previews. */
+export function stripLineNumberGutter(text: string) {
+  return text.replace(/^\d+\|\s?/gm, "")
+}
+
 export function firstPreviewLine(preview: string | undefined) {
   return preview
-    ?.split("\n")
-    .map((line) => line.trim())
-    .find(Boolean)
+    ? stripLineNumberGutter(preview)
+        .split("\n")
+        .map((line) => line.trim())
+        .find(Boolean)
+    : undefined
 }
 
 export function formatCount(count: number, noun: string, verb?: string) {

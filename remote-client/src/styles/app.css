@@ -189,20 +189,36 @@
   .streamdown pre code { border: 0; background: transparent; padding: 0; }
   .streamdown blockquote { border-left: 3px solid var(--line-strong); padding-left: 0.9em; color: var(--muted); }
   .streamdown hr { margin: 1.5em 0; border: 0; border-top: 1px solid var(--line); }
-  .streamdown table {
-    display: table;
-    width: 100%;
-    border-collapse: collapse;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    font-size: 0.9em;
-  }
-  .streamdown th, .streamdown td {
-    border-bottom: 1px solid var(--line);
-    padding: 0.6em 0.9em;
-    text-align: left;
-    vertical-align: top;
-  }
-  .streamdown thead { background: #242424; }
-  .streamdown tbody tr:last-child td { border-bottom: 0; }
 }
+
+/* Unlayered so this beats solid-streamdown's unlayered `display: block` on
+   tables (layered rules lose to unlayered regardless of specificity).
+   `display: block` stretched the border full-width while cells stayed content-sized.
+   Wide tables scroll inside `.remote-md-table` without expanding the page. */
+.streamdown.remote-markdown .remote-md-table {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.streamdown.remote-markdown table {
+  display: table;
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+  border-collapse: collapse;
+  border: 0;
+  border-radius: 0;
+  font-size: 0.9em;
+  table-layout: auto;
+}
+.streamdown.remote-markdown th,
+.streamdown.remote-markdown td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.6em 0.9em;
+  text-align: left;
+  vertical-align: top;
+}
+.streamdown.remote-markdown thead { background: #242424; }
+.streamdown.remote-markdown tbody tr:last-child td { border-bottom: 0; }

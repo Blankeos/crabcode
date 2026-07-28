@@ -332,9 +332,10 @@ export default function RemoteClient() {
   })
 
   const projectPath = createMemo(() => state()?.status.cwd || "")
-  const projectName = createMemo(
-    () => state()?.status.workspace || basename(projectPath()) || "Project"
-  )
+  const projectName = createMemo(() => {
+    if (!state()) return ""
+    return state()?.status.workspace || basename(projectPath()) || "Project"
+  })
   const projects = createMemo(() => projectsFromState(state()))
   const recentWorkspaceSessions = createMemo(() => {
     const cwd = projectPath().trim()
@@ -1592,6 +1593,8 @@ export default function RemoteClient() {
 
   const ui: RemoteClientUi = {
     themeStyle,
+    // Chrome (sidebar/header/composer shell) is always shown; content waits on state.
+    ready: () => true,
     pair: {
       required: pairRequired,
       code: pairCode,
@@ -1657,6 +1660,7 @@ export default function RemoteClient() {
       isAtTop: threadScroll.isAtTop,
       isAtBottom: threadScroll.isAtBottom,
       isEmptyChat,
+      shellLoading: () => !pairRequired() && state() === null,
       streaming: () => Boolean(state()?.is_streaming),
       visibleMessages,
       threadItems,
