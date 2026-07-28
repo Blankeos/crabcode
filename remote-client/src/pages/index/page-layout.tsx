@@ -523,15 +523,15 @@ function GitStatsRow(props: {
             File
           </button>
         </span>
+        <span class="inline-flex items-center gap-1 rounded-md border border-[rgba(72,158,108,0.28)] bg-[rgba(46,120,82,0.12)] px-2 py-0.5 font-mono font-semibold text-[#6ecf9a]">
+          <span class="text-[0.62rem] font-bold uppercase tracking-[0.06em] text-[#5aab7d]">add</span>
+          +{props.additions}
+        </span>
+        <span class="inline-flex items-center gap-1 rounded-md border border-[rgba(196,98,108,0.28)] bg-[rgba(120,48,58,0.14)] px-2 py-0.5 font-mono font-semibold text-[#f08a96]">
+          <span class="text-[0.62rem] font-bold uppercase tracking-[0.06em] text-[#c4727c]">del</span>
+          −{props.deletions}
+        </span>
       </Show>
-      <span class="inline-flex items-center gap-1 rounded-md border border-[rgba(72,158,108,0.28)] bg-[rgba(46,120,82,0.12)] px-2 py-0.5 font-mono font-semibold text-[#6ecf9a]">
-        <span class="text-[0.62rem] font-bold uppercase tracking-[0.06em] text-[#5aab7d]">add</span>
-        +{props.additions}
-      </span>
-      <span class="inline-flex items-center gap-1 rounded-md border border-[rgba(196,98,108,0.28)] bg-[rgba(120,48,58,0.14)] px-2 py-0.5 font-mono font-semibold text-[#f08a96]">
-        <span class="text-[0.62rem] font-bold uppercase tracking-[0.06em] text-[#c4727c]">del</span>
-        −{props.deletions}
-      </span>
     </div>
   )
 }
