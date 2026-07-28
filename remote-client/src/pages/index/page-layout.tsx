@@ -516,11 +516,11 @@ function GitStatsRow(props: {
     <div class="flex flex-wrap items-center gap-1.5 text-[0.72rem]">
       <Show when={props.hasDiffs}>
         <span class="inline-flex items-center gap-0.5 rounded-md border border-[var(--line)] bg-black/10 p-0.5 font-mono">
-          <button class={tabClass(mode() === "file")} type="button" onClick={() => props.git.setViewMode("file")}>
-            File
-          </button>
           <button class={tabClass(mode() === "all")} type="button" onClick={() => props.git.setViewMode("all")}>
             All
+          </button>
+          <button class={tabClass(mode() === "file")} type="button" onClick={() => props.git.setViewMode("file")}>
+            File
           </button>
         </span>
       </Show>

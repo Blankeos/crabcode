@@ -48,8 +48,17 @@ function pierreChromeCss(opts: { compact?: boolean; wrap?: boolean }): string {
       gap: 0.5rem;
     }
 
-    [data-diffs-header] {
+    /* Clickable accordion affordance for collapsing a file's diff body. */
+    [data-diffs-header],
+    [data-diffs-header="default"] {
       font-size: 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    [data-diffs-header]:hover,
+    [data-diffs-header="default"]:hover {
+      filter: brightness(1.08);
     }
 
     [data-header-content],
@@ -257,7 +266,11 @@ function parseFileDiff(file: DiffFile): FileDiffMetadata | undefined {
   }
 }
 
-function pierreOptions(opts: { compact?: boolean; wrap?: boolean }): FileDiffOptions<undefined> {
+function pierreOptions(opts: {
+  compact?: boolean
+  wrap?: boolean
+  collapsed?: boolean
+}): FileDiffOptions<undefined> {
   return {
     theme: { dark: "pierre-dark", light: "pierre-light" },
     themeType: "dark",
@@ -274,8 +287,56 @@ function pierreOptions(opts: { compact?: boolean; wrap?: boolean }): FileDiffOpt
     lineDiffType: "word-alt",
     disableLineNumbers: false,
     disableBackground: false,
+    collapsed: opts.collapsed ?? false,
     unsafeCSS: pierreChromeCss(opts),
   }
+}
+
+function findPierreHeader(root: HTMLElement): HTMLElement | null {
+  const host = root.matches?.("diffs-container")
+    ? root
+    : (root.querySelector("diffs-container") as HTMLElement | null)
+  const shadow = host?.shadowRoot
+  if (!shadow) return null
+  return (
+    (shadow.querySelector("[data-diffs-header]") as HTMLElement | null) ??
+    (shadow.querySelector("[data-file-header]") as HTMLElement | null) ??
+    (shadow.querySelector("header") as HTMLElement | null)
+  )
+}
+
+function wireHeaderAccordion(
+  root: HTMLElement,
+  isCollapsed: () => boolean,
+  toggleCollapsed: () => void
+) {
+  const header = findPierreHeader(root)
+  if (!header) return
+
+  header.style.cursor = "pointer"
+  header.setAttribute("role", "button")
+  header.setAttribute("tabindex", "0")
+  header.setAttribute("aria-expanded", isCollapsed() ? "false" : "true")
+  header.setAttribute("title", isCollapsed() ? "Expand file diff" : "Collapse file diff")
+
+  if (header.dataset.accordionWired === "1") return
+  header.dataset.accordionWired = "1"
+
+  const onActivate = (event: Event) => {
+    // Ignore clicks on nested interactive controls (copy buttons, etc.).
+    const target = event.target as HTMLElement | null
+    if (target && target !== header && target.closest("button, a, input, select, textarea")) return
+    event.preventDefault()
+    toggleCollapsed()
+  }
+
+  header.addEventListener("click", onActivate)
+  header.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault()
+      toggleCollapsed()
+    }
+  })
 }
 
 export function GitDiffFile(props: {
@@ -286,6 +347,7 @@ export function GitDiffFile(props: {
 }) {
   const [host, setHost] = createSignal<HTMLDivElement | undefined>()
   const [failed, setFailed] = createSignal(false)
+  const [collapsed, setCollapsed] = createSignal(false)
 
   onMount(() => {
     void ensureHighlighter().catch((error) => {
@@ -293,11 +355,18 @@ export function GitDiffFile(props: {
     })
   })
 
+  // Expanding/collapsing is per-file instance; reset when the path changes.
+  createEffect(() => {
+    props.file.path
+    setCollapsed(false)
+  })
+
   createEffect(() => {
     const el = host()
     const file = props.file
     const compact = props.compact
     const wrap = props.wrap
+    const isCollapsed = collapsed()
     setFailed(false)
     if (!el) return
 
@@ -321,20 +390,39 @@ export function GitDiffFile(props: {
         return
       }
 
-      diff = new FileDiff(pierreOptions({ compact, wrap }), undefined, false)
+      diff = new FileDiff(
+        {
+          ...pierreOptions({ compact, wrap, collapsed: isCollapsed }),
+          onPostRender: (node) => {
+            wireHeaderAccordion(
+              node,
+              () => collapsed(),
+              () => setCollapsed((value) => !value)
+            )
+          },
+        },
+        undefined,
+        false
+      )
 
       try {
         const ok = diff.render({
           fileDiff,
           containerWrapper: el,
         })
+        // Header may already exist even if render returns false in edge cases.
+        wireHeaderAccordion(
+          el,
+          () => collapsed(),
+          () => setCollapsed((value) => !value)
+        )
         if (!ok) {
           window.setTimeout(() => {
             if (cancelled || host() !== el) return
             const container = el.querySelector("diffs-container")
             const shadow = container?.shadowRoot
             const hasContent = Boolean(
-              shadow?.querySelector("[data-diff], [data-file], pre, [data-line]") ||
+              shadow?.querySelector("[data-diff], [data-file], pre, [data-line], [data-diffs-header]") ||
                 (container && container.childElementCount > 0)
             )
             if (!hasContent) setFailed(true)
@@ -373,19 +461,29 @@ export function GitDiffFile(props: {
         }
       >
         <Show when={failed()}>
-          <div class="border-b border-[var(--line)] px-2 py-1.5 font-mono text-[0.7rem] text-[var(--muted)]">
-            {props.file.old_path ? `${props.file.old_path} → ${props.file.path}` : props.file.path}
-            <span class="ml-2 text-[#6ecf9a]">+{props.file.additions}</span>
-            <span class="ml-1 text-[#f08a96]">−{props.file.deletions}</span>
-          </div>
-          <pre
-            class={cx(
-              "m-0 max-h-[min(22rem,42vh)] overflow-auto px-2 py-2 font-mono text-[0.68rem] leading-[1.4] text-[var(--muted)]",
-              props.wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre"
-            )}
+          <button
+            type="button"
+            class="flex w-full items-center justify-between gap-2 border-b border-[var(--line)] px-2 py-1.5 text-left font-mono text-[0.7rem] text-[var(--muted)]"
+            onClick={() => setCollapsed((value) => !value)}
           >
-            {toUnifiedPatch(props.file)}
-          </pre>
+            <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+              {props.file.old_path ? `${props.file.old_path} → ${props.file.path}` : props.file.path}
+            </span>
+            <span class="shrink-0">
+              <span class="text-[#6ecf9a]">+{props.file.additions}</span>
+              <span class="ml-1 text-[#f08a96]">−{props.file.deletions}</span>
+            </span>
+          </button>
+          <Show when={!collapsed()}>
+            <pre
+              class={cx(
+                "m-0 max-h-[min(22rem,42vh)] overflow-auto px-2 py-2 font-mono text-[0.68rem] leading-[1.4] text-[var(--muted)]",
+                props.wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre"
+              )}
+            >
+              {toUnifiedPatch(props.file)}
+            </pre>
+          </Show>
         </Show>
         <div
           ref={setHost}
@@ -395,7 +493,7 @@ export function GitDiffFile(props: {
             failed() && "hidden"
           )}
         />
-        <Show when={props.file.truncated}>
+        <Show when={props.file.truncated && !collapsed()}>
           <div class="border-t border-[var(--line)] px-2 py-1 text-[0.68rem] text-[#d4bc82]">… truncated</div>
         </Show>
       </Show>

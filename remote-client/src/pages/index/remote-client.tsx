@@ -102,7 +102,7 @@ export default function RemoteClient() {
   const [gitStatus, setGitStatus] = createSignal<RemoteGitStatus | null>(null)
   const [gitLoadedPath, setGitLoadedPath] = createSignal("")
   const [gitSelectedPath, setGitSelectedPath] = createSignal<string | null>(null)
-  const [gitViewMode, setGitViewMode] = createSignal<"file" | "all">("file")
+  const [gitViewMode, setGitViewMode] = createSignal<"file" | "all">("all")
   const [agentOpen, setAgentOpen] = createSignal(false)
   const [reasoningOpen, setReasoningOpen] = createSignal(false)
   const [modelOpen, setModelOpen] = createSignal(false)
@@ -239,7 +239,7 @@ export default function RemoteClient() {
     setGitLoadedPath("")
     setGitError("")
     setGitSelectedPath(null)
-    setGitViewMode("file")
+    setGitViewMode("all")
   })
 
   createEffect(() => {
