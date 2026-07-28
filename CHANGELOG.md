@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.9] - 2026-07-28
+
+### Bug Fixes
+
+- Reserve chat scroll space for active question/permission dialogs by @Blankeos
+- Stop child subagent (stuck loading) streams on parent queue interrupts by @Blankeos
+- Prevent responsive layout race and stabilize popover focus by @Blankeos
+- Disable response storage for subagent requests by @Blankeos
+
+### Documentation
+
+- More planning for v2-shape by @Blankeos
+
+### Features
+
+- Remove teh add+0 and del-0 when working tree is clean by @Blankeos
+- Make file diffs collapsible and default to all-view by @Blankeos
+- Add interactive git diff viewer with untracked file support by @Blankeos
+- Add custom provider configuration support and mcp error screen broken fix (#5) by @visitorise in [#5](https://github.com/Blankeos/crabcode/pull/5)
+- Refining the remote ui by @Blankeos
+- Add xAI Grok Build OAuth transport overrides and retry policy by @Blankeos
+
+
+### New Contributors
+
+- @visitorise made their first contribution in [#5](https://github.com/Blankeos/crabcode/pull/5)
 ## [0.0.8] - 2026-07-23
 
 ### Bug Fixes
@@ -19,6 +45,7 @@ All notable changes to this project will be documented in this file.
 
 ### Chores
 
+- Needs a user agent by @Blankeos
 - Automated trusted-publishing after just tag. by @Blankeos
 
 ### Features
@@ -41,6 +68,10 @@ All notable changes to this project will be documented in this file.
 - Run model discovery and refresh commands asynchronously by @Blankeos
 - Cache discovered and runtime models in-process by @Blankeos
 - Optimize streaming drain scheduling and sessions dialog refresh path by @Blankeos
+
+### Refactor
+
+- Remove redundant non-unix process-group killer by @Blankeos
 
 ### Ci
 
