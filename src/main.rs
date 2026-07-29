@@ -25,6 +25,7 @@ mod theme;
 mod toast;
 mod tools;
 mod ui;
+mod upgrade;
 mod utils;
 mod views;
 
@@ -659,6 +660,9 @@ enum Command {
 
     /// List remembered remote hosts
     Hosts,
+
+    /// Upgrade crabcode to the latest GitHub release
+    Upgrade,
 }
 
 fn merge_prompt_with_stdin(prompt: &str, stdin: &str) -> String {
@@ -732,6 +736,9 @@ async fn main() -> Result<()> {
         Some(Command::Hosts) => {
             crate::remote::list_hosts()?;
             return Ok(());
+        }
+        Some(Command::Upgrade) => {
+            return crate::upgrade::upgrade().await;
         }
         None => {}
     }
@@ -948,6 +955,13 @@ mod tests {
             Some(Command::Attach { target }) => assert_eq!(target, "http://127.0.0.1:8421"),
             other => panic!("expected attach command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_upgrade_command() {
+        let args = Args::try_parse_from(["crabcode", "upgrade"]).unwrap();
+
+        assert!(matches!(args.command, Some(Command::Upgrade)));
     }
 
     #[test]
