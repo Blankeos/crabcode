@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod acp;
 mod agent;
 mod aisdk;
 mod app;
@@ -74,6 +75,7 @@ use ratatui::crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, buffer::Buffer, style::Color, Terminal};
 use std::io::{self, IsTerminal, Read, Write};
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -640,6 +642,13 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Start an Agent Client Protocol server over stdin/stdout
+    Acp {
+        /// Working directory used for the initial ACP workspace
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+
     /// Host the current workspace for browser and CLI clients
     Serve {
         /// Address to bind, for example 127.0.0.1:8421 or 0.0.0.0:8421
@@ -718,6 +727,9 @@ async fn main() -> Result<()> {
     }
 
     match &args.command {
+        Some(Command::Acp { cwd }) => {
+            return crate::acp::run(cwd.clone()).await;
+        }
         Some(Command::Serve { bind, pair_code }) => {
             return crate::remote::serve(crate::remote::ServeOptions {
                 bind: bind.clone(),
@@ -925,6 +937,16 @@ mod tests {
                 assert_eq!(pair_code.as_deref(), None);
             }
             other => panic!("expected serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_acp_command_with_workspace() {
+        let args = Args::try_parse_from(["crabcode", "acp", "--cwd", "/tmp/workspace"]).unwrap();
+
+        match args.command {
+            Some(Command::Acp { cwd }) => assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace"))),
+            other => panic!("expected acp command, got {other:?}"),
         }
     }
 

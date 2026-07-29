@@ -19,6 +19,7 @@
       "items": [
         { "label": "Overview", "path": "/" },
         { "label": "Quickstart", "path": "/quickstart" },
+        { "label": "ACP Integration", "path": "/acp" },
         { "label": "Remote Usage", "path": "/remote-usage" },
       ],
     },

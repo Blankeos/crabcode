@@ -61,6 +61,7 @@ It works (almost) exactly like OpenCode. Just opens faster, with some intuitive 
 - Multiworkspace by default, can run like 3+ sessions in the same instance, just works like a webapp.
 - Ollama Local CLI connections works out-of-the-box.
 - My own remote implementation. Probably worse.
+- **ACP editor integration** - Run `crabcode acp` from compatible editors. See the [ACP capability matrix](_docs/acp.mdx).
 - My own UX preferences:
   - Can click on `[Image #1]` tags to open them.
   - Themes has no background, all tranluscent (don't really care right now).
@@ -145,7 +146,7 @@ This project was inspired by [anomalyco/opencode](https://github.com/anomalyco/o
 - [x] Copy chat contents, copy the chat input
 - [x] Image inputs
 - [x] Personal remote usage + Browser client equivalent.
-- [ ] ACP w/ Zed? (very far, idk how to do that)
+- [x] ACP integration for compatible editors; see the [capability matrix](_docs/acp.mdx).
 - [x] No Claude Code oauth spoofing.
 - [x] No plugin ecosystem (If I think it's worth building, just make it built-in and configurable i.e. sounds)
 - [x] No desktop app

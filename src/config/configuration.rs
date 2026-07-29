@@ -474,6 +474,11 @@ pub struct ConfigLoader;
 impl ConfigLoader {
     pub fn load() -> Result<LoadedConfig> {
         let cwd = crate::utils::cwd::current_dir()?;
+        Self::load_for(&cwd)
+    }
+
+    pub fn load_for(cwd: &Path) -> Result<LoadedConfig> {
+        let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         let xdg_config_home = xdg_config_home();
         let project_root = discover_project_root(&cwd);
 

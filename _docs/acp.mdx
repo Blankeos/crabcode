@@ -1,0 +1,62 @@
+---
+title: ACP Integration
+description: Run Crabcode as an Agent Client Protocol server for compatible editors.
+---
+
+Run Crabcode from an ACP-compatible editor or IDE with a stdio subprocess. ACP keeps the workspace, credentials, tools, permissions, and session history on the machine running Crabcode.
+
+## Start the server
+
+```bash
+crabcode acp
+```
+
+Use `--cwd` when the editor should start Crabcode for a specific workspace:
+
+```bash
+crabcode acp --cwd /absolute/path/to/project
+```
+
+ACP uses stdin and stdout for JSON-RPC traffic. Do not wrap the command with a program that writes banners or logs to stdout.
+
+## Editor configuration
+
+For Zed, add an agent server to `~/.config/zed/settings.json`:
+
+```json
+{
+  "agent_servers": {
+    "Crabcode": {
+      "command": "crabcode",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+Configure a provider in the Crabcode TUI with `/connect` before starting an ACP session. Credentials remain in Crabcode's normal state directory; the editor does not receive API keys or OAuth tokens.
+
+## Capability Matrix
+
+| Area | Supported behavior | Current limitations | Planned follow-up |
+| --- | --- | --- | --- |
+| Transport | JSON-RPC over stdio through `crabcode acp`; clean stdin EOF shutdown. | stdout must remain protocol-only. | Add protocol-level subprocess integration coverage. |
+| Sessions | Create, list, load, resume, close, and fork persisted root sessions. | Replay message IDs are deterministic per load, not durable message IDs. | Persist stable message IDs across streaming snapshots and reloads. |
+| Prompts | Text and embedded text resources; assistant text and reasoning stream back to the editor. | Image and audio prompt blocks are rejected. | Store ACP attachments and convert supported image MIME types into Crabcode image inputs. |
+| Modes | Visible primary Crabcode agents are available as ACP modes; changes are session-local. | Model and reasoning-effort selectors are not exposed yet. | Add validated provider/model and effort config options per session. |
+| Tools | Tool calls and completed or failed results stream with ACP tool kinds, titles, raw input, and preview output. | No normalized locations, diffs, full outputs, or result images yet. | Preserve structured tool results, locations, patches, and image content in runtime events. |
+| Permissions | Existing Crabcode permission prompts are forwarded with allow once, always allow, and reject choices. | Permission requests use a generated ACP call ID because the current internal prompt lacks the originating tool-call ID. | Carry the real tool-call ID and edit patch metadata through permission preflight. |
+| Cancellation | `session/cancel` cancels the active turn and keeps the session reusable. | Provider stop reasons are currently reduced to normal completion, cancellation, or a safe failure. | Preserve output-limit and refusal stop reasons from the model runtime. |
+| Commands and skills | Existing tools, project rules, configured agents, and normal prompt execution are reused. | ACP available-command updates and slash-command execution are not exposed yet. | Publish safe commands and skills, then handle `/compact` and custom commands. |
+| MCP and terminals | Project-configured MCP tools continue to use Crabcode's normal runtime. | Client-supplied MCP servers and ACP terminal embedding are not supported. | Add per-session MCP overlays and a client-terminal adapter. |
+| Usage | Session and model configuration remain visible to Crabcode. | ACP usage/cost updates are not emitted because provider token accounting is incomplete. | Retain provider input, output, cache, context, and cost data for usage updates. |
+
+## Session behavior
+
+`session/close` detaches the editor and cancels any active turn. It does not delete Crabcode session history. Load replays the stored transcript; resume restores the session configuration without replaying prior content. Fork creates a new persisted session with a copied transcript.
+
+## Safety notes
+
+Crabcode applies the same configured permission rules in ACP as it does in the TUI. When a tool needs approval, the editor receives an ACP permission request. If the editor cannot respond or disconnects, Crabcode denies the request rather than continuing unattended.
+
+The capability matrix is intentionally conservative: Crabcode only advertises protocol features that the ACP server currently handles.
