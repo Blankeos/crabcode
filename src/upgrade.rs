@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::process::Command;
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Blankeos/crabcode/releases/latest";
-const INSTALL_COMMAND: &str = "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Blankeos/crabcode/releases/latest/download/crabcode-installer.sh | sh";
+const INSTALLER_URL: &str = "https://github.com/Blankeos/crabcode/releases/download";
 
 #[derive(Debug, Deserialize)]
 struct LatestRelease {
@@ -27,6 +27,19 @@ fn check_version(current: &str, release_tag: &str) -> Result<VersionCheck> {
     } else {
         Ok(VersionCheck::UpToDate { current, latest })
     }
+}
+
+fn target_release_tag(target: &str) -> Result<String> {
+    let version = Version::parse(target.trim_start_matches('v'))
+        .with_context(|| format!("invalid target version {target:?}; expected a semver version"))?;
+
+    Ok(format!("v{version}"))
+}
+
+fn installer_command(release_tag: &str) -> String {
+    format!(
+        "curl --proto '=https' --tlsv1.2 -LsSf {INSTALLER_URL}/{release_tag}/crabcode-installer.sh | sh"
+    )
 }
 
 fn run_upgrade<F>(check: VersionCheck, install: F) -> Result<VersionCheck>
@@ -57,9 +70,9 @@ async fn latest_release_tag() -> Result<String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_installer() -> Result<()> {
+fn run_installer(release_tag: &str) -> Result<()> {
     let status = Command::new("sh")
-        .args(["-c", INSTALL_COMMAND])
+        .args(["-c", &installer_command(release_tag)])
         .status()
         .context("failed to start the crabcode installer")?;
 
@@ -71,13 +84,17 @@ fn run_installer() -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn run_installer() -> Result<()> {
+fn run_installer(_release_tag: &str) -> Result<()> {
     bail!("automatic upgrades are not supported on Windows; reinstall with npm, cargo, or the latest GitHub release")
 }
 
-pub async fn upgrade() -> Result<()> {
-    let check = check_version(env!("CARGO_PKG_VERSION"), &latest_release_tag().await?)?;
-    let check = run_upgrade(check, run_installer)?;
+pub async fn upgrade(target: Option<&str>) -> Result<()> {
+    let release_tag = match target {
+        Some(target) if target != "latest" => target_release_tag(target)?,
+        _ => latest_release_tag().await?,
+    };
+    let check = check_version(env!("CARGO_PKG_VERSION"), &release_tag)?;
+    let check = run_upgrade(check, || run_installer(&release_tag))?;
 
     match check {
         VersionCheck::UpToDate { current, .. } => {
@@ -114,6 +131,30 @@ mod tests {
                 current: Version::parse("0.1.0").unwrap(),
                 latest: Version::parse("0.1.0").unwrap(),
             }
+        );
+    }
+
+    #[test]
+    fn normalizes_an_explicit_target_version() {
+        assert_eq!(target_release_tag("0.1.0").unwrap(), "v0.1.0");
+        assert_eq!(target_release_tag("v0.1.0").unwrap(), "v0.1.0");
+    }
+
+    #[test]
+    fn rejects_an_invalid_explicit_target_version() {
+        let error = target_release_tag("nightly").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid target version \"nightly\"; expected a semver version"
+        );
+    }
+
+    #[test]
+    fn builds_an_installer_command_for_the_requested_release() {
+        assert_eq!(
+            installer_command("v0.1.0"),
+            "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Blankeos/crabcode/releases/download/v0.1.0/crabcode-installer.sh | sh"
         );
     }
 
