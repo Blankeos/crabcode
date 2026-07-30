@@ -1116,8 +1116,17 @@ async fn emit_retry_and_sleep(
     let status = crate::retry::status_for_attempt(retry_error, attempt);
     let delay = std::time::Duration::from_millis(status.delay_ms);
     let _ = tx.send(ChunkType::Metadata(format!(
-        "provider_step_retry step={} attempt={} delay_ms={} next_epoch_ms={} error={}",
-        step_idx, status.attempt, status.delay_ms, status.next_epoch_ms, status.message,
+        "provider_step_retry step={} attempt={} delay_ms={} next_epoch_ms={} error={} raw_error={} status={}",
+        step_idx,
+        status.attempt,
+        status.delay_ms,
+        status.next_epoch_ms,
+        status.message,
+        retry_error.message.replace(['\n', '\r'], " "),
+        retry_error
+            .status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "none".to_string()),
     )));
     let _ = tx.send(ChunkType::Retry(status));
     if let Some(cancel_token) = cancel_token {
