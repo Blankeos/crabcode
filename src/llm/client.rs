@@ -790,7 +790,13 @@ async fn prepare_request_config(
     let model_route = resolve_model_route(&provider, model);
     let provider_kind = ProviderKind::from_provider(provider_name, &model_route.npm_package);
     let base_url = if provider_name == "xai" && model_route.api.trim().is_empty() {
+        // models.dev currently ships empty api for xAI; default to the public endpoint.
         "https://api.x.ai".to_string()
+    } else if is_vercel_ai_gateway(provider_name, &model_route.npm_package)
+        && model_route.api.trim().is_empty()
+    {
+        // models.dev ships empty api for Vercel AI Gateway; OpenAI client appends /v1/...
+        "https://ai-gateway.vercel.sh".to_string()
     } else {
         provider_kind.normalize_base_url(&model_route.api)
     };
@@ -2039,6 +2045,10 @@ fn truncate_for_tool_observation(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn is_vercel_ai_gateway(provider_name: &str, npm_package: &str) -> bool {
+    provider_name == "vercel" || npm_package == "@ai-sdk/gateway"
+}
+
 fn is_openai_oauth_model_allowed(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
     model.contains("codex") || is_openai_oauth_gpt5_model(&model)
@@ -2384,6 +2394,46 @@ mod tests {
         assert_eq!(
             ProviderKind::from_provider("xai", &route.npm_package),
             ProviderKind::OpenAI
+        );
+    }
+
+    #[test]
+    fn vercel_gateway_defaults_to_ai_gateway_base_url() {
+        let provider: crate::model::discovery::Provider =
+            serde_json::from_value(serde_json::json!({
+                "id": "vercel",
+                "name": "Vercel AI Gateway",
+                "api": "",
+                "npm": "@ai-sdk/gateway",
+                "env": ["AI_GATEWAY_API_KEY"],
+                "models": {
+                    "moonshotai/kimi-k3": {
+                        "id": "moonshotai/kimi-k3",
+                        "name": "Kimi K3"
+                    }
+                }
+            }))
+            .unwrap();
+
+        let route = resolve_model_route(&provider, "moonshotai/kimi-k3".to_string());
+        assert_eq!(route.npm_package, "@ai-sdk/gateway");
+        assert_eq!(route.api, "");
+        assert_eq!(route.model_name, "moonshotai/kimi-k3");
+        assert!(super::is_vercel_ai_gateway("vercel", &route.npm_package));
+        assert_eq!(
+            ProviderKind::from_provider("vercel", &route.npm_package),
+            ProviderKind::OpenAI
+        );
+        // Empty api must not fall through to api.openai.com.
+        assert_eq!(
+            if super::is_vercel_ai_gateway("vercel", &route.npm_package)
+                && route.api.trim().is_empty()
+            {
+                "https://ai-gateway.vercel.sh".to_string()
+            } else {
+                ProviderKind::OpenAI.normalize_base_url(&route.api)
+            },
+            "https://ai-gateway.vercel.sh"
         );
     }
 
