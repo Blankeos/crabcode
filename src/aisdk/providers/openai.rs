@@ -23,6 +23,13 @@ const OPENAI_STREAM_CONNECT_TIMEOUT_SECS: u64 = 30;
 const OPENAI_ERROR_BODY_MAX_CHARS: usize = 2048;
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
+const OPENAI_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
+const OPENAI_RESPONSES_LITE_WS_METADATA_KEY: &str =
+    "ws_request_header_x_openai_internal_codex_responses_lite";
+const OPENAI_SESSION_ID_HEADER: &str = "session-id";
+const OPENAI_THREAD_ID_HEADER: &str = "thread-id";
+const OPENAI_CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
+const OPENAI_CODEX_WINDOW_ID_HEADER: &str = "x-codex-window-id";
 const OPENAI_WEBSOCKET_IDLE_MAX: Duration = Duration::from_secs(60);
 const OPENAI_WEBSOCKET_IO_TIMEOUT: Duration = Duration::from_secs(300);
 const OPENAI_WEBSOCKET_STREAM_RETRIES: usize = 1;
@@ -50,6 +57,7 @@ pub struct OpenAI {
     default_instructions: Option<String>,
     reasoning_effort: Option<String>,
     responses_websocket: bool,
+    responses_lite: bool,
     prompt_cache_key: Option<String>,
     response_retry_policy: Option<Arc<dyn HttpResponseRetryPolicy>>,
     websocket_state: Arc<Mutex<OpenAIWebsocketState>>,
@@ -87,6 +95,7 @@ pub struct OpenAIBuilder {
     default_instructions: Option<String>,
     reasoning_effort: Option<String>,
     responses_websocket: bool,
+    responses_lite: bool,
     prompt_cache_key: Option<String>,
     response_retry_policy: Option<Arc<dyn HttpResponseRetryPolicy>>,
 }
@@ -152,6 +161,11 @@ impl OpenAIBuilder {
         self
     }
 
+    pub fn responses_lite(mut self, enabled: bool) -> Self {
+        self.responses_lite = enabled;
+        self
+    }
+
     pub fn prompt_cache_key(mut self, key: impl Into<String>) -> Self {
         self.prompt_cache_key = Some(key.into());
         self
@@ -196,6 +210,7 @@ impl OpenAIBuilder {
             default_instructions: self.default_instructions,
             reasoning_effort: self.reasoning_effort,
             responses_websocket: self.responses_websocket,
+            responses_lite: self.responses_lite,
             prompt_cache_key: self.prompt_cache_key,
             response_retry_policy: self.response_retry_policy,
             websocket_state: Arc::new(Mutex::new(OpenAIWebsocketState::default())),
@@ -335,7 +350,6 @@ impl Provider for OpenAI {
                 format!("Bearer {}", self.api_key).parse().unwrap(),
             );
         }
-
         for (k, v) in &self.headers {
             if let (Ok(name), Ok(value)) = (
                 reqwest::header::HeaderName::from_bytes(k.as_bytes()),
@@ -344,7 +358,6 @@ impl Provider for OpenAI {
                 request_headers.insert(name, value);
             }
         }
-
         for (k, v) in headers {
             if let (Ok(name), Ok(value)) = (
                 reqwest::header::HeaderName::from_bytes(k.as_bytes()),
@@ -353,8 +366,35 @@ impl Provider for OpenAI {
                 request_headers.insert(name, value);
             }
         }
+        add_responses_lite_header(&mut request_headers, self.responses_lite);
+        if self.responses_lite {
+            if let Some(session_id) = self
+                .prompt_cache_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|session_id| !session_id.is_empty())
+            {
+                for name in [
+                    OPENAI_SESSION_ID_HEADER,
+                    OPENAI_THREAD_ID_HEADER,
+                    OPENAI_CLIENT_REQUEST_ID_HEADER,
+                    OPENAI_CODEX_WINDOW_ID_HEADER,
+                ] {
+                    if let (Ok(name), Ok(value)) = (
+                        reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                        reqwest::header::HeaderValue::from_str(session_id),
+                    ) {
+                        request_headers.insert(name, value);
+                    }
+                }
+            }
+        }
 
-        let input = build_openai_messages(messages, self.strip_system_and_developer_messages);
+        let input = build_openai_messages(
+            messages,
+            self.strip_system_and_developer_messages,
+            self.responses_lite,
+        );
         let body = self.build_responses_body(input.clone(), tools);
 
         let mut fallback_warning = None;
@@ -520,10 +560,19 @@ fn stream_disconnected_before_completion(reason: &str) -> String {
     }
 }
 
+fn add_responses_lite_header(headers: &mut reqwest::header::HeaderMap, enabled: bool) {
+    if enabled {
+        headers.insert(
+            OPENAI_RESPONSES_LITE_HEADER,
+            reqwest::header::HeaderValue::from_static("true"),
+        );
+    }
+}
+
 impl OpenAI {
     fn build_responses_body(
         &self,
-        input: Vec<serde_json::Value>,
+        mut input: Vec<serde_json::Value>,
         tools: &[Tool],
     ) -> serde_json::Value {
         let tool_params: Vec<serde_json::Value> = tools
@@ -551,28 +600,91 @@ impl OpenAI {
             })
             .collect();
 
+        if self.responses_lite {
+            let mut prefix = vec![serde_json::json!({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": tool_params,
+            })];
+            if let Some(instructions) = self
+                .default_instructions
+                .as_deref()
+                .map(str::trim)
+                .filter(|instructions| !instructions.is_empty())
+            {
+                prefix.push(serde_json::json!({
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{
+                        "type": "input_text",
+                        "text": instructions,
+                    }],
+                }));
+            }
+            prefix.append(&mut input);
+            input = prefix;
+        }
+
         let mut body = serde_json::json!({
             "model": self.model_name,
             "input": input,
             "stream": true,
-            "include": [],
+            "include": if self.responses_lite {
+                serde_json::json!(["reasoning.encrypted_content"])
+            } else {
+                serde_json::json!([])
+            },
         });
 
-        if !tool_params.is_empty() {
+        if self.responses_lite {
+            body["tool_choice"] = serde_json::Value::String("auto".to_string());
+            body["parallel_tool_calls"] = serde_json::Value::Bool(false);
+            body["instructions"] = serde_json::Value::String(String::new());
+            body["text"] = serde_json::json!({ "verbosity": "low" });
+
+            let mut client_metadata = serde_json::Map::from_iter([(
+                OPENAI_RESPONSES_LITE_WS_METADATA_KEY.to_string(),
+                serde_json::Value::String("true".to_string()),
+            )]);
+            if let Some(session_id) = self
+                .prompt_cache_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|session_id| !session_id.is_empty())
+            {
+                for name in ["session_id", "thread_id", OPENAI_CODEX_WINDOW_ID_HEADER] {
+                    client_metadata.insert(
+                        name.to_string(),
+                        serde_json::Value::String(session_id.to_string()),
+                    );
+                }
+            }
+            body["client_metadata"] = serde_json::Value::Object(client_metadata);
+        } else if !tool_params.is_empty() {
             body["tools"] = serde_json::Value::Array(tool_params);
             body["tool_choice"] = serde_json::Value::String("auto".to_string());
             body["parallel_tool_calls"] = serde_json::Value::Bool(true);
         }
 
-        if let Some(instructions) = &self.default_instructions {
-            body["instructions"] = serde_json::Value::String(instructions.clone());
+        if !self.responses_lite {
+            if let Some(instructions) = &self.default_instructions {
+                body["instructions"] = serde_json::Value::String(instructions.clone());
+            }
         }
 
         if let Some(store) = self.store_override {
             body["store"] = serde_json::Value::Bool(store);
         }
 
-        if let Some(effort) = &self.reasoning_effort {
+        if self.responses_lite {
+            let mut reasoning = serde_json::json!({
+                "context": "all_turns",
+            });
+            if let Some(effort) = &self.reasoning_effort {
+                reasoning["effort"] = serde_json::Value::String(effort.clone());
+            }
+            body["reasoning"] = reasoning;
+        } else if let Some(effort) = &self.reasoning_effort {
             body["reasoning"] = serde_json::json!({ "effort": effort });
         }
 
@@ -1731,7 +1843,11 @@ fn response_function_call_chunk_base_with_item(
     Some(chunk)
 }
 
-fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_json::Value> {
+fn build_openai_messages(
+    messages: &[Message],
+    strip_system: bool,
+    responses_lite: bool,
+) -> Vec<serde_json::Value> {
     messages
         .iter()
         .filter_map(|msg| {
@@ -1741,18 +1857,33 @@ fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_
                 }
             }
             match msg {
-                Message::System(s) => Some(serde_json::json!({
-                    "role": "system",
-                    "content": s.content,
-                })),
-                Message::User(u) => Some(serde_json::json!({
-                    "role": "user",
-                    "content": openai_responses_user_content(u),
-                })),
-                Message::Assistant(a) => Some(serde_json::json!({
-                    "role": "assistant",
-                    "content": a.content,
-                })),
+                Message::System(s) => Some(if responses_lite {
+                    responses_lite_message("developer", "input_text", s.content.clone())
+                } else {
+                    serde_json::json!({
+                        "role": "system",
+                        "content": s.content,
+                    })
+                }),
+                Message::User(u) => {
+                    let content = openai_responses_user_content(u);
+                    Some(if responses_lite {
+                        responses_lite_message_with_content("user", "input_text", content)
+                    } else {
+                        serde_json::json!({
+                            "role": "user",
+                            "content": content,
+                        })
+                    })
+                }
+                Message::Assistant(a) => Some(if responses_lite {
+                    responses_lite_message("assistant", "output_text", a.content.clone())
+                } else {
+                    serde_json::json!({
+                        "role": "assistant",
+                        "content": a.content,
+                    })
+                }),
                 Message::ToolCall(t) => {
                     let mut item = serde_json::json!({
                         "type": "function_call",
@@ -1775,6 +1906,30 @@ fn build_openai_messages(messages: &[Message], strip_system: bool) -> Vec<serde_
             }
         })
         .collect()
+}
+
+fn responses_lite_message(role: &str, text_type: &str, text: String) -> serde_json::Value {
+    responses_lite_message_with_content(role, text_type, serde_json::Value::String(text))
+}
+
+fn responses_lite_message_with_content(
+    role: &str,
+    text_type: &str,
+    content: serde_json::Value,
+) -> serde_json::Value {
+    let content = match content {
+        serde_json::Value::String(text) => vec![serde_json::json!({
+            "type": text_type,
+            "text": text,
+        })],
+        serde_json::Value::Array(parts) => parts,
+        _ => Vec::new(),
+    };
+    serde_json::json!({
+        "type": "message",
+        "role": role,
+        "content": content,
+    })
 }
 
 fn openai_responses_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
@@ -1822,12 +1977,13 @@ fn openai_tool_output_content(tool: &crate::message::ToolOutputMessage) -> serde
 #[cfg(test)]
 mod tests {
     use super::{
-        build_openai_messages, build_websocket_request_body, fresh_websocket_request_body,
-        openai_chunk_is_terminal, request_snapshot_from_body, response_sse_data_to_chunk,
-        responses_function_call_chunk, websocket_connection_is_idle,
+        add_responses_lite_header, build_openai_messages, build_websocket_request_body,
+        fresh_websocket_request_body, openai_chunk_is_terminal, request_snapshot_from_body,
+        response_sse_data_to_chunk, responses_function_call_chunk, websocket_connection_is_idle,
         websocket_continuation_mode_after_idle_policy, websocket_continuation_mode_from_state,
         OpenAI, OpenAIResponseSnapshot, OpenAIWebsocketState, WebsocketContinuationMode,
-        WebsocketStreamProgress, OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK,
+        WebsocketStreamProgress, OPENAI_CODEX_WINDOW_ID_HEADER, OPENAI_RESPONSES_LITE_HEADER,
+        OPENAI_RESPONSES_LITE_WS_METADATA_KEY, OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK,
         OPENAI_WEBSOCKET_IDLE_MAX,
     };
     use crate::chunk::{ChunkType, MessagePhase};
@@ -1856,7 +2012,7 @@ mod tests {
             Message::tool_call_with_item_id("future_valid", "call_3", "read", "{}"),
         ];
 
-        let input = build_openai_messages(&messages, false);
+        let input = build_openai_messages(&messages, false, false);
 
         assert!(input[0].get("id").is_none());
         assert_eq!(input[1]["id"], "fc_valid");
@@ -2099,6 +2255,7 @@ mod tests {
                 Message::tool_output("call_edit", "edit", "Replaced at line 7", false),
             ],
             false,
+            false,
         );
 
         assert_eq!(input[0]["type"], "function_call");
@@ -2124,6 +2281,7 @@ mod tests {
                 }],
                 false,
             )],
+            false,
             false,
         );
 
@@ -2199,6 +2357,80 @@ mod tests {
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], true);
         assert_eq!(body["tools"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn responses_lite_uses_input_items_and_lite_reasoning_contract() {
+        let provider = OpenAI::builder()
+            .base_url("https://chatgpt.com")
+            .api_key("oauth-token")
+            .model_name("gpt-5.6-sol")
+            .responses_lite(true)
+            .default_instructions("system guidance")
+            .reasoning_effort("high")
+            .store_override(false)
+            .prompt_cache_key("session-abc")
+            .build()
+            .unwrap();
+        let tools = vec![Tool::builder()
+            .name("read")
+            .description("Read a file")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(|_| async { Ok("ok") }))
+            .build()
+            .unwrap()];
+        let input = build_openai_messages(&[Message::user("inspect")], true, true);
+
+        let body = provider.build_responses_body(input, &tools);
+
+        assert_eq!(body["instructions"], "");
+        assert!(body.get("tools").is_none());
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["text"]["verbosity"], "low");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["context"], "all_turns");
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+        assert_eq!(body["store"], false);
+        assert_eq!(
+            body["client_metadata"][OPENAI_RESPONSES_LITE_WS_METADATA_KEY],
+            "true"
+        );
+        assert_eq!(body["client_metadata"]["session_id"], "session-abc");
+        assert_eq!(body["client_metadata"]["thread_id"], "session-abc");
+        assert_eq!(
+            body["client_metadata"][OPENAI_CODEX_WINDOW_ID_HEADER],
+            "session-abc"
+        );
+
+        let items = body["input"].as_array().expect("Responses input items");
+        assert_eq!(items[0]["type"], "additional_tools");
+        assert_eq!(items[0]["role"], "developer");
+        assert_eq!(items[0]["tools"][0]["name"], "read");
+        assert_eq!(items[1]["type"], "message");
+        assert_eq!(items[1]["role"], "developer");
+        assert_eq!(items[1]["content"][0]["type"], "input_text");
+        assert_eq!(items[1]["content"][0]["text"], "system guidance");
+        assert_eq!(items[2]["type"], "message");
+        assert_eq!(items[2]["role"], "user");
+        assert_eq!(items[2]["content"][0]["type"], "input_text");
+        assert_eq!(items[2]["content"][0]["text"], "inspect");
+    }
+
+    #[test]
+    fn responses_lite_header_is_model_option_scoped() {
+        let mut headers = reqwest::header::HeaderMap::new();
+
+        add_responses_lite_header(&mut headers, false);
+        assert!(!headers.contains_key(OPENAI_RESPONSES_LITE_HEADER));
+
+        add_responses_lite_header(&mut headers, true);
+        assert_eq!(
+            headers
+                .get(OPENAI_RESPONSES_LITE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
     }
 
     #[tokio::test]

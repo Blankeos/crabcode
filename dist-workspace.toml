@@ -10,7 +10,7 @@ ci = "github"
 # Build the embedded browser client before cargo-dist compiles the Rust binary.
 github-build-setup = "../dist-build-setup.yml"
 # The installers to generate for each app
-installers = ["homebrew"]
+installers = ["homebrew", "shell"]
 # Publish the Homebrew formula to blankeos/homebrew-tap
 tap = "blankeos/homebrew-tap"
 # Publish package-manager metadata after release assets are uploaded

@@ -10,6 +10,8 @@ pub struct OpenAIRequestOptions {
     pub default_instructions: Option<String>,
     pub disallow_system_messages: bool,
     pub force_tool_strict_false: bool,
+    /// Use the ChatGPT Codex Responses Lite request contract.
+    pub use_responses_lite: bool,
     /// Sticky prompt-cache routing key (Responses / chat-completions).
     /// Typically the crabcode session id.
     pub prompt_cache_key: Option<String>,
