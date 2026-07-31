@@ -79,16 +79,26 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
             {
                 let service = service.clone();
                 async move |request: SetSessionConfigOptionRequest, responder, _connection| {
-                    let result = if request.config_id.to_string() != "mode" {
-                        Err(agent_client_protocol::Error::invalid_params()
-                            .data("unknown config option"))
-                    } else if let Some(mode) = request.value.as_value_id() {
-                        service
-                            .set_mode(&request.session_id.to_string(), &mode.to_string())
-                            .await
-                    } else {
-                        Err(agent_client_protocol::Error::invalid_params()
-                            .data("mode must be a string"))
+                    let result = match (
+                        request.config_id.to_string().as_str(),
+                        request.value.as_value_id(),
+                    ) {
+                        ("mode", Some(mode)) => {
+                            service
+                                .set_mode(&request.session_id.to_string(), &mode.to_string())
+                                .await
+                        }
+                        ("model", Some(model)) => {
+                            service
+                                .set_model(&request.session_id.to_string(), &model.to_string())
+                                .await
+                        }
+                        ("mode" | "model", None) => {
+                            Err(agent_client_protocol::Error::invalid_params()
+                                .data("config option value must be a string"))
+                        }
+                        _ => Err(agent_client_protocol::Error::invalid_params()
+                            .data("unknown config option")),
                     };
                     responder.respond_with_result(result)
                 }

@@ -4,10 +4,10 @@ use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, EmbeddedResourceResource, ListSessionsResponse,
     LoadSessionResponse, NewSessionResponse, PermissionOption, PermissionOptionKind,
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionResponse,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo,
-    SessionMode, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
+    SessionConfigSelectOption, SessionInfo, SessionMode, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
 use std::collections::HashMap;
@@ -26,6 +26,7 @@ pub struct AcpService {
 struct AcpSession {
     cwd: PathBuf,
     config: LoadedConfig,
+    models: Vec<crate::model::types::Model>,
     provider: String,
     model: String,
     agent: String,
@@ -49,6 +50,7 @@ impl AcpService {
         let config = crate::config::ConfigLoader::load_for(&cwd).map_err(|_| internal_error())?;
         crate::skill::init_skill_store(&config.xdg_config_home, &config.project_root);
         let (provider, model) = resolve_model(&config);
+        let models = selectable_models(&config).await?;
         let agent = config
             .merged_config
             .default_agent
@@ -74,6 +76,7 @@ impl AcpService {
             AcpSession {
                 cwd,
                 config,
+                models,
                 provider,
                 model,
                 agent,
@@ -211,6 +214,24 @@ impl AcpService {
         )))
     }
 
+    pub async fn set_model(
+        &self,
+        session_id: &str,
+        model_ref: &str,
+    ) -> Result<SetSessionConfigOptionResponse, Error> {
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        let model = find_selectable_model(&session.models, model_ref)?;
+        session.provider.clone_from(&model.provider_id);
+        session.model.clone_from(&model.id);
+        session.reasoning = None;
+        Ok(SetSessionConfigOptionResponse::new(session_config_options(
+            session,
+        )))
+    }
+
     async fn attach_persisted_session(
         &self,
         session_id: &str,
@@ -219,6 +240,7 @@ impl AcpService {
         let cwd = workspace_path(&cwd)?;
         let config = crate::config::ConfigLoader::load_for(&cwd).map_err(|_| internal_error())?;
         crate::skill::init_skill_store(&config.xdg_config_home, &config.project_root);
+        let models = selectable_models(&config).await?;
 
         let messages = {
             let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
@@ -259,6 +281,7 @@ impl AcpService {
         let session = AcpSession {
             cwd,
             config,
+            models,
             provider,
             model,
             agent,
@@ -484,6 +507,59 @@ fn resolve_model(config: &LoadedConfig) -> (String, String) {
         .unwrap_or_else(|| ("opencode".to_string(), "big-pickle".to_string()))
 }
 
+async fn selectable_models(
+    config: &LoadedConfig,
+) -> Result<Vec<crate::model::types::Model>, Error> {
+    let connected_providers = crate::persistence::AuthDAO::new()
+        .and_then(|dao| dao.load())
+        .map_err(|_| internal_error())?;
+    let connected_provider_ids = connected_providers.keys().cloned().collect();
+    let discovery = crate::model::discovery::Discovery::new_with_custom(Some(
+        config.merged_config.custom_providers.clone(),
+    ))
+    .map_err(|_| internal_error())?;
+    let configured_provider_ids = discovery.custom_provider_ids();
+
+    let snapshot_models =
+        crate::model::effective_catalog::models_for_dialog().map_err(|_| internal_error())?;
+    let mut models = match snapshot_models {
+        Some(models) => models,
+        None => discovery
+            .fetch_models()
+            .await
+            .map_err(|_| internal_error())?,
+    };
+    discovery.apply_custom_models_to_dialog(&mut models);
+
+    let has_runtime = crate::model::extensions::ModelExtensions::runtime()
+        .iter()
+        .any(|integration| connected_providers.contains_key(integration.provider_id()))
+        || connected_providers.is_empty();
+    if has_runtime {
+        let runtime =
+            crate::model::extensions::ModelExtensions::runtime_models_for_dialog_cached().await;
+        crate::model::discovery::merge_dialog_models(&mut models, runtime.models);
+    }
+
+    models.retain(|model| {
+        crate::model::discovery::is_model_selectable(
+            model,
+            &connected_provider_ids,
+            &configured_provider_ids,
+        )
+    });
+    models.sort_by(|left, right| {
+        left.provider_name
+            .cmp(&right.provider_name)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.provider_id.cmp(&right.provider_id))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|model| seen.insert((model.provider_id.clone(), model.id.clone())));
+    Ok(models)
+}
+
 fn tool_permissions(session: &AcpSession) -> crate::tools::ToolPermissions {
     let mut policies = crate::tools::AgentToolPolicies::default();
     for (mode, tools) in session
@@ -523,7 +599,7 @@ fn session_modes(session: &AcpSession) -> SessionModeState {
 }
 
 fn session_config_options(session: &AcpSession) -> Vec<SessionConfigOption> {
-    let mut options = session
+    let mut mode_options = session
         .config
         .merged_config
         .agent_registry
@@ -534,11 +610,63 @@ fn session_config_options(session: &AcpSession) -> Vec<SessionConfigOption> {
                 .description(agent.description.clone())
         })
         .collect::<Vec<_>>();
-    options.sort_by(|left, right| left.name.cmp(&right.name));
+    mode_options.sort_by(|left, right| left.name.cmp(&right.name));
+
     vec![
-        SessionConfigOption::select("mode", "Mode", session.agent.clone(), options)
+        SessionConfigOption::select("mode", "Mode", session.agent.clone(), mode_options)
             .category(SessionConfigOptionCategory::Mode),
+        model_config_option(&session.models, &session.provider, &session.model),
     ]
+}
+
+fn model_config_option(
+    models: &[crate::model::types::Model],
+    provider: &str,
+    model_id: &str,
+) -> SessionConfigOption {
+    let mut model_groups: Vec<SessionConfigSelectGroup> = Vec::new();
+    for model in models {
+        let option = SessionConfigSelectOption::new(model_value(model), model.name.clone())
+            .description(model.id.clone());
+        if model_groups
+            .last()
+            .is_some_and(|group| group.group.to_string() == model.provider_id)
+        {
+            model_groups
+                .last_mut()
+                .expect("model group exists")
+                .options
+                .push(option);
+        } else {
+            model_groups.push(SessionConfigSelectGroup::new(
+                model.provider_id.clone(),
+                model.provider_name.clone(),
+                vec![option],
+            ));
+        }
+    }
+
+    SessionConfigOption::select(
+        "model",
+        "Model",
+        format!("{provider}/{model_id}"),
+        model_groups,
+    )
+    .category(SessionConfigOptionCategory::Model)
+}
+
+fn model_value(model: &crate::model::types::Model) -> String {
+    format!("{}/{}", model.provider_id, model.id)
+}
+
+fn find_selectable_model<'a>(
+    models: &'a [crate::model::types::Model],
+    model_ref: &str,
+) -> Result<&'a crate::model::types::Model, Error> {
+    models
+        .iter()
+        .find(|model| model_value(model) == model_ref)
+        .ok_or_else(|| Error::invalid_params().data("unknown or unavailable ACP model"))
 }
 
 fn workspace_path(path: &Path) -> Result<PathBuf, Error> {
@@ -888,6 +1016,26 @@ fn internal_error() -> Error {
 mod tests {
     use super::*;
 
+    fn model(
+        provider_id: &str,
+        provider_name: &str,
+        id: &str,
+        name: &str,
+    ) -> crate::model::types::Model {
+        crate::model::types::Model {
+            id: id.to_string(),
+            name: name.to_string(),
+            family: String::new(),
+            provider_id: provider_id.to_string(),
+            provider_name: provider_name.to_string(),
+            attachment: false,
+            structured_output: false,
+            free: false,
+            local: false,
+            reasoning_options: Vec::new(),
+        }
+    }
+
     #[test]
     fn maps_crabcode_tools_to_acp_kinds() {
         assert_eq!(tool_kind("bash"), ToolKind::Execute);
@@ -929,5 +1077,48 @@ mod tests {
     #[test]
     fn rejects_non_absolute_workspaces() {
         assert!(workspace_path(Path::new("relative")).is_err());
+    }
+
+    #[test]
+    fn builds_grouped_model_config_option() {
+        let option = model_config_option(
+            &[
+                model("anthropic", "Anthropic", "claude", "Claude"),
+                model("openai", "OpenAI", "gpt-5", "GPT-5"),
+                model("openai", "OpenAI", "gpt-5-mini", "GPT-5 Mini"),
+            ],
+            "openai",
+            "gpt-5",
+        );
+
+        assert_eq!(option.id.to_string(), "model");
+        assert_eq!(option.category, Some(SessionConfigOptionCategory::Model));
+        let agent_client_protocol::schema::v1::SessionConfigKind::Select(select) = option.kind
+        else {
+            panic!("model option should be a select");
+        };
+        assert_eq!(select.current_value.to_string(), "openai/gpt-5");
+        let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Grouped(groups) =
+            select.options
+        else {
+            panic!("model options should be grouped");
+        };
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1].name, "OpenAI");
+        assert_eq!(groups[1].options[1].value.to_string(), "openai/gpt-5-mini");
+    }
+
+    #[test]
+    fn validates_model_refs_against_selectable_catalog() {
+        let models = [model("openai", "OpenAI", "gpt-5", "GPT-5")];
+
+        assert_eq!(
+            find_selectable_model(&models, "openai/gpt-5")
+                .expect("known model")
+                .id,
+            "gpt-5"
+        );
+        assert!(find_selectable_model(&models, "openai/missing").is_err());
+        assert!(find_selectable_model(&models, "other/gpt-5").is_err());
     }
 }
