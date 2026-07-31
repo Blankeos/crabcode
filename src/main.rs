@@ -642,6 +642,12 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// List available models, optionally filtered by provider
+    Models {
+        /// Exact provider ID to filter by
+        provider: Option<String>,
+    },
+
     /// Start an Agent Client Protocol server over stdin/stdout
     Acp {
         /// Working directory used for the initial ACP workspace
@@ -727,6 +733,21 @@ async fn main() -> Result<()> {
     }
 
     match &args.command {
+        Some(Command::Models { provider }) => {
+            let config = crate::config::ConfigLoader::load()?;
+            let models =
+                crate::model::catalog::selectable_models(&config, provider.as_deref()).await?;
+            if models.is_empty() {
+                if let Some(provider) = provider {
+                    anyhow::bail!("no models found for provider: {provider}");
+                }
+                anyhow::bail!("no models available");
+            }
+            for model in models {
+                println!("{}", crate::model::catalog::model_ref(&model));
+            }
+            return Ok(());
+        }
         Some(Command::Acp { cwd }) => {
             return crate::acp::run(cwd.clone()).await;
         }
@@ -947,6 +968,22 @@ mod tests {
         match args.command {
             Some(Command::Acp { cwd }) => assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace"))),
             other => panic!("expected acp command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_models_command_with_optional_provider() {
+        let args = Args::try_parse_from(["crabcode", "models", "openai"]).unwrap();
+
+        match args.command {
+            Some(Command::Models { provider }) => assert_eq!(provider.as_deref(), Some("openai")),
+            other => panic!("expected models command, got {other:?}"),
+        }
+
+        let args = Args::try_parse_from(["crabcode", "models"]).unwrap();
+        match args.command {
+            Some(Command::Models { provider }) => assert!(provider.is_none()),
+            other => panic!("expected models command, got {other:?}"),
         }
     }
 

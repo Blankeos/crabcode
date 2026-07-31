@@ -50,7 +50,9 @@ impl AcpService {
         let config = crate::config::ConfigLoader::load_for(&cwd).map_err(|_| internal_error())?;
         crate::skill::init_skill_store(&config.xdg_config_home, &config.project_root);
         let (provider, model) = resolve_model(&config);
-        let models = selectable_models(&config).await?;
+        let models = crate::model::catalog::selectable_models(&config, None)
+            .await
+            .map_err(|_| internal_error())?;
         let agent = config
             .merged_config
             .default_agent
@@ -240,7 +242,9 @@ impl AcpService {
         let cwd = workspace_path(&cwd)?;
         let config = crate::config::ConfigLoader::load_for(&cwd).map_err(|_| internal_error())?;
         crate::skill::init_skill_store(&config.xdg_config_home, &config.project_root);
-        let models = selectable_models(&config).await?;
+        let models = crate::model::catalog::selectable_models(&config, None)
+            .await
+            .map_err(|_| internal_error())?;
 
         let messages = {
             let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
@@ -507,59 +511,6 @@ fn resolve_model(config: &LoadedConfig) -> (String, String) {
         .unwrap_or_else(|| ("opencode".to_string(), "big-pickle".to_string()))
 }
 
-async fn selectable_models(
-    config: &LoadedConfig,
-) -> Result<Vec<crate::model::types::Model>, Error> {
-    let connected_providers = crate::persistence::AuthDAO::new()
-        .and_then(|dao| dao.load())
-        .map_err(|_| internal_error())?;
-    let connected_provider_ids = connected_providers.keys().cloned().collect();
-    let discovery = crate::model::discovery::Discovery::new_with_custom(Some(
-        config.merged_config.custom_providers.clone(),
-    ))
-    .map_err(|_| internal_error())?;
-    let configured_provider_ids = discovery.custom_provider_ids();
-
-    let snapshot_models =
-        crate::model::effective_catalog::models_for_dialog().map_err(|_| internal_error())?;
-    let mut models = match snapshot_models {
-        Some(models) => models,
-        None => discovery
-            .fetch_models()
-            .await
-            .map_err(|_| internal_error())?,
-    };
-    discovery.apply_custom_models_to_dialog(&mut models);
-
-    let has_runtime = crate::model::extensions::ModelExtensions::runtime()
-        .iter()
-        .any(|integration| connected_providers.contains_key(integration.provider_id()))
-        || connected_providers.is_empty();
-    if has_runtime {
-        let runtime =
-            crate::model::extensions::ModelExtensions::runtime_models_for_dialog_cached().await;
-        crate::model::discovery::merge_dialog_models(&mut models, runtime.models);
-    }
-
-    models.retain(|model| {
-        crate::model::discovery::is_model_selectable(
-            model,
-            &connected_provider_ids,
-            &configured_provider_ids,
-        )
-    });
-    models.sort_by(|left, right| {
-        left.provider_name
-            .cmp(&right.provider_name)
-            .then_with(|| left.name.cmp(&right.name))
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let mut seen = std::collections::HashSet::new();
-    models.retain(|model| seen.insert((model.provider_id.clone(), model.id.clone())));
-    Ok(models)
-}
-
 fn tool_permissions(session: &AcpSession) -> crate::tools::ToolPermissions {
     let mut policies = crate::tools::AgentToolPolicies::default();
     for (mode, tools) in session
@@ -656,7 +607,7 @@ fn model_config_option(
 }
 
 fn model_value(model: &crate::model::types::Model) -> String {
-    format!("{}/{}", model.provider_id, model.id)
+    crate::model::catalog::model_ref(model)
 }
 
 fn find_selectable_model<'a>(
