@@ -10,8 +10,10 @@ use agent_client_protocol::schema::v1::{
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
+use base64::Engine as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -305,11 +307,6 @@ impl AcpService {
         prompt: Vec<ContentBlock>,
         connection: ConnectionTo<Client>,
     ) -> Result<PromptResponse, Error> {
-        let prompt = prompt_text(prompt)?;
-        if prompt.trim().is_empty() {
-            return Err(Error::invalid_params().data("prompt must include text content"));
-        }
-
         let session = self
             .sessions
             .lock()
@@ -317,6 +314,15 @@ impl AcpService {
             .get(&session_id)
             .cloned()
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        let supports_images = session
+            .models
+            .iter()
+            .find(|model| model.provider_id == session.provider && model.id == session.model)
+            .is_some_and(|model| model.attachment);
+        let (prompt, local_image_paths) = prompt_content(prompt, supports_images, &session)?;
+        if prompt.trim().is_empty() {
+            return Err(Error::invalid_params().data("prompt must include text content"));
+        }
         let cancellation = CancellationToken::new();
         {
             let mut sessions = self.sessions.lock().await;
@@ -337,6 +343,7 @@ impl AcpService {
             stored.messages.clone()
         };
         let mut user_message = crate::session::types::Message::user(&prompt);
+        user_message.local_image_paths = local_image_paths;
         user_message.provider = Some(session.provider.clone());
         user_message.model = Some(session.model.clone());
         user_message.agent_mode = Some(session.agent.clone());
@@ -633,8 +640,15 @@ fn workspace_path(path: &Path) -> Result<PathBuf, Error> {
     Ok(path)
 }
 
-fn prompt_text(parts: Vec<ContentBlock>) -> Result<String, Error> {
+static ACP_IMAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn prompt_content(
+    parts: Vec<ContentBlock>,
+    supports_images: bool,
+    session: &AcpSession,
+) -> Result<(String, Vec<String>), Error> {
     let mut text = String::new();
+    let mut local_image_paths = Vec::new();
     for part in parts {
         match part {
             ContentBlock::Text(content) => text.push_str(&content.text),
@@ -650,14 +664,82 @@ fn prompt_text(parts: Vec<ContentBlock>) -> Result<String, Error> {
                 }
                 _ => {}
             },
+            ContentBlock::Image(image) => {
+                if !supports_images {
+                    return Err(Error::invalid_params().data(format!(
+                        "model {}/{} does not support image input",
+                        session.provider, session.model
+                    )));
+                }
+                local_image_paths.push(write_prompt_image(&image)?);
+            }
+            ContentBlock::Audio(_) => {
+                return Err(Error::invalid_params().data("audio ACP prompts are not supported yet"));
+            }
+            _ => {}
+        }
+    }
+    if text.is_empty() && !local_image_paths.is_empty() {
+        text.push_str("[Image attached]");
+    }
+    Ok((text, local_image_paths))
+}
+
+fn prompt_text(parts: Vec<ContentBlock>) -> Result<String, Error> {
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            ContentBlock::Text(content) => text.push_str(&content.text),
+            ContentBlock::ResourceLink(link) => text.push_str(&format!("[{}]", link.uri)),
+            ContentBlock::Resource(resource) => match resource.resource {
+                EmbeddedResourceResource::TextResourceContents(resource) => {
+                    text.push_str(&format!("[{}]\n{}", resource.uri, resource.text));
+                }
+                EmbeddedResourceResource::BlobResourceContents(resource) => {
+                    text.push_str(&format!("[{}]", resource.uri));
+                }
+                _ => {}
+            },
             ContentBlock::Image(_) | ContentBlock::Audio(_) => {
-                return Err(Error::invalid_params()
-                    .data("image and audio ACP prompts are not supported yet"));
+                return Err(
+                    Error::invalid_params().data("binary ACP prompt content is not supported here")
+                );
             }
             _ => {}
         }
     }
     Ok(text)
+}
+
+fn write_prompt_image(
+    image: &agent_client_protocol::schema::v1::ImageContent,
+) -> Result<String, Error> {
+    const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+    let extension = match image.mime_type.as_str() {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        mime_type => {
+            return Err(
+                Error::invalid_params().data(format!("unsupported image MIME type: {mime_type}"))
+            );
+        }
+    };
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&image.data)
+        .map_err(|error| Error::invalid_params().data(format!("invalid image data: {error}")))?;
+    if data.len() > MAX_IMAGE_BYTES {
+        return Err(Error::invalid_params().data("image exceeds the 20 MiB size limit"));
+    }
+
+    let directory = std::env::temp_dir().join("crabcode").join("acp-images");
+    std::fs::create_dir_all(&directory).map_err(|_| internal_error())?;
+    let sequence = ACP_IMAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = directory.join(format!("{}-{sequence}.{extension}", std::process::id()));
+    std::fs::write(&path, data).map_err(|_| internal_error())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn send_text(
@@ -1023,6 +1105,22 @@ mod tests {
         .expect("prompt text");
 
         assert_eq!(text, "Inspect this.[file:///tmp/main.rs]\nfn main() {}");
+    }
+
+    #[test]
+    fn writes_supported_acp_image_to_temp_file() {
+        let image = agent_client_protocol::schema::v1::ImageContent::new("aGk=", "image/png");
+        let path = write_prompt_image(&image).expect("image file");
+
+        assert_eq!(std::fs::read(&path).expect("image bytes"), b"hi");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_unsupported_acp_image_mime_type() {
+        let image = agent_client_protocol::schema::v1::ImageContent::new("aGk=", "image/tiff");
+
+        assert!(write_prompt_image(&image).is_err());
     }
 
     #[test]

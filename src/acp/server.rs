@@ -196,7 +196,7 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
 fn capabilities() -> AgentCapabilities {
     AgentCapabilities::new()
         .load_session(true)
-        .prompt_capabilities(PromptCapabilities::new().embedded_context(true))
+        .prompt_capabilities(PromptCapabilities::new().embedded_context(true).image(true))
         .session_capabilities(
             SessionCapabilities::new()
                 .list(SessionListCapabilities::new())
