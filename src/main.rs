@@ -25,6 +25,7 @@ mod theme;
 mod toast;
 mod tools;
 mod ui;
+mod upgrade;
 mod utils;
 mod views;
 
@@ -659,6 +660,12 @@ enum Command {
 
     /// List remembered remote hosts
     Hosts,
+
+    /// Upgrade crabcode to the latest or a specific version
+    Upgrade {
+        /// Version to install, for example 0.1.0. Defaults to latest.
+        target: Option<String>,
+    },
 }
 
 fn merge_prompt_with_stdin(prompt: &str, stdin: &str) -> String {
@@ -732,6 +739,9 @@ async fn main() -> Result<()> {
         Some(Command::Hosts) => {
             crate::remote::list_hosts()?;
             return Ok(());
+        }
+        Some(Command::Upgrade { target }) => {
+            return crate::upgrade::upgrade(target.as_deref()).await;
         }
         None => {}
     }
@@ -947,6 +957,26 @@ mod tests {
         match args.command {
             Some(Command::Attach { target }) => assert_eq!(target, "http://127.0.0.1:8421"),
             other => panic!("expected attach command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_upgrade_command() {
+        let args = Args::try_parse_from(["crabcode", "upgrade"]).unwrap();
+
+        assert!(matches!(
+            args.command,
+            Some(Command::Upgrade { target: None })
+        ));
+    }
+
+    #[test]
+    fn parses_upgrade_target() {
+        let args = Args::try_parse_from(["crabcode", "upgrade", "0.1.0"]).unwrap();
+
+        match args.command {
+            Some(Command::Upgrade { target }) => assert_eq!(target.as_deref(), Some("0.1.0")),
+            other => panic!("expected upgrade command, got {other:?}"),
         }
     }
 
