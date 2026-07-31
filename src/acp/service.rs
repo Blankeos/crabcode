@@ -497,8 +497,8 @@ impl AcpService {
         if assistant.was_interrupted {
             return Ok(PromptResponse::new(StopReason::Cancelled));
         }
-        if failed.is_some() {
-            return Err(internal_error());
+        if let Some(error) = failed {
+            return Err(internal_error_with(&error));
         }
         Ok(PromptResponse::new(StopReason::EndTurn))
     }
@@ -1043,6 +1043,10 @@ fn system_time_to_iso8601(value: std::time::SystemTime) -> String {
 
 fn internal_error() -> Error {
     Error::internal_error().data("Crabcode ACP operation failed")
+}
+
+fn internal_error_with(error: &str) -> Error {
+    Error::internal_error().data(format!("Crabcode ACP operation failed: {error}"))
 }
 
 #[cfg(test)]
