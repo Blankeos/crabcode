@@ -7,7 +7,7 @@ use agent_client_protocol::schema::v1::{
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
     SessionConfigSelectOption, SessionInfo, SessionMode, SessionModeState, SessionNotification,
     SessionUpdate, SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
 use base64::Engine as _;
@@ -33,6 +33,7 @@ struct AcpSession {
     model: String,
     agent: String,
     reasoning: Option<crate::model::reasoning::ReasoningEffort>,
+    context_window: Option<u32>,
     cancellation: Option<CancellationToken>,
 }
 
@@ -55,6 +56,8 @@ impl AcpService {
         let models = crate::model::catalog::selectable_models(&config, None)
             .await
             .map_err(|_| internal_error())?;
+        let reasoning = model_reasoning(&config, &models, &provider, &model);
+        let context_window = model_context_window(&config, &provider, &model);
         let agent = config
             .merged_config
             .default_agent
@@ -84,7 +87,8 @@ impl AcpService {
                 provider,
                 model,
                 agent,
-                reasoning: None,
+                reasoning,
+                context_window,
                 cancellation: None,
             },
         );
@@ -230,7 +234,43 @@ impl AcpService {
         let model = find_selectable_model(&session.models, model_ref)?;
         session.provider.clone_from(&model.provider_id);
         session.model.clone_from(&model.id);
-        session.reasoning = None;
+        session.reasoning = model_reasoning(
+            &session.config,
+            &session.models,
+            &session.provider,
+            &session.model,
+        );
+        session.context_window =
+            model_context_window(&session.config, &session.provider, &session.model);
+        Ok(SetSessionConfigOptionResponse::new(session_config_options(
+            session,
+        )))
+    }
+
+    pub async fn set_reasoning_effort(
+        &self,
+        session_id: &str,
+        value: &str,
+    ) -> Result<SetSessionConfigOptionResponse, Error> {
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        let capability = model_reasoning_capability(
+            &session.config,
+            &session.models,
+            &session.provider,
+            &session.model,
+        )
+        .ok_or_else(|| Error::invalid_params().data("reasoning effort is unavailable"))?;
+        let requested = value
+            .parse::<crate::model::reasoning::ReasoningEffort>()
+            .map_err(|_| Error::invalid_params().data("invalid reasoning effort"))?;
+        if !capability.values().contains(&requested) {
+            return Err(Error::invalid_params().data("unsupported reasoning effort"));
+        }
+        session.reasoning =
+            (requested != crate::model::reasoning::ReasoningEffort::None).then_some(requested);
         Ok(SetSessionConfigOptionResponse::new(session_config_options(
             session,
         )))
@@ -284,6 +324,8 @@ impl AcpService {
                             .to_string()
                     })
             });
+        let reasoning = model_reasoning(&config, &models, &provider, &model);
+        let context_window = model_context_window(&config, &provider, &model);
         let session = AcpSession {
             cwd,
             config,
@@ -291,7 +333,8 @@ impl AcpService {
             provider,
             model,
             agent,
-            reasoning: None,
+            reasoning,
+            context_window,
             cancellation: None,
         };
         self.sessions
@@ -387,6 +430,8 @@ impl AcpService {
         .compose()
         .await;
         messages.insert(0, crate::session::types::Message::system(system_prompt));
+        let base_context_tokens = crate::session::compaction::total_context_tokens(&messages);
+        send_usage(&connection, &session_id, &session, base_context_tokens)?;
 
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let stream_session_id = session_id.clone();
@@ -452,6 +497,19 @@ impl AcpService {
                         "content": result.content,
                     }));
                     send_tool_result(&connection, &session_id, result)?;
+                }
+                crate::llm::ChunkMessage::Metrics {
+                    token_count,
+                    duration_ms,
+                } => {
+                    assistant.token_count = Some(token_count);
+                    assistant.duration_ms = Some(duration_ms);
+                    send_usage(
+                        &connection,
+                        &session_id,
+                        &session,
+                        base_context_tokens.saturating_add(token_count),
+                    )?;
                 }
                 crate::llm::ChunkMessage::Cancelled => cancelled = true,
                 crate::llm::ChunkMessage::Failed(error) => failed = Some(error),
@@ -570,11 +628,37 @@ fn session_config_options(session: &AcpSession) -> Vec<SessionConfigOption> {
         .collect::<Vec<_>>();
     mode_options.sort_by(|left, right| left.name.cmp(&right.name));
 
-    vec![
+    let mut options = vec![
         SessionConfigOption::select("mode", "Mode", session.agent.clone(), mode_options)
             .category(SessionConfigOptionCategory::Mode),
         model_config_option(&session.models, &session.provider, &session.model),
-    ]
+    ];
+    if let Some(option) = reasoning_config_option(session) {
+        options.push(option);
+    }
+    options
+}
+
+fn reasoning_config_option(session: &AcpSession) -> Option<SessionConfigOption> {
+    let capability = model_reasoning_capability(
+        &session.config,
+        &session.models,
+        &session.provider,
+        &session.model,
+    )?;
+    let options = capability
+        .values()
+        .iter()
+        .map(|effort| SessionConfigSelectOption::new(effort.as_str(), effort.as_str()))
+        .collect::<Vec<_>>();
+    let current = session
+        .reasoning
+        .map(|effort| effort.as_str())
+        .unwrap_or("none");
+    Some(
+        SessionConfigOption::select("reasoning_effort", "Reasoning effort", current, options)
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+    )
 }
 
 fn model_config_option(
@@ -625,6 +709,57 @@ fn find_selectable_model<'a>(
         .iter()
         .find(|model| model_value(model) == model_ref)
         .ok_or_else(|| Error::invalid_params().data("unknown or unavailable ACP model"))
+}
+
+fn model_reasoning(
+    config: &LoadedConfig,
+    models: &[crate::model::types::Model],
+    provider: &str,
+    model_id: &str,
+) -> Option<crate::model::reasoning::ReasoningEffort> {
+    model_reasoning_capability(config, models, provider, model_id)
+        .and_then(|capability| capability.resolve(None))
+}
+
+fn model_reasoning_capability(
+    config: &LoadedConfig,
+    models: &[crate::model::types::Model],
+    provider: &str,
+    model_id: &str,
+) -> Option<crate::model::reasoning::ReasoningCapability> {
+    if let Some(capability) = models
+        .iter()
+        .find(|model| model.provider_id == provider && model.id == model_id)
+        .and_then(|model| {
+            crate::model::reasoning::capability_from_options(&model.reasoning_options)
+        })
+    {
+        return Some(capability);
+    }
+    crate::model::discovery::Discovery::new_with_custom(Some(
+        config.merged_config.custom_providers.clone(),
+    ))
+    .ok()
+    .and_then(|discovery| discovery.get_model_reasoning_capability(provider, model_id))
+    .filter(|capability| !capability.values().is_empty())
+}
+
+fn model_context_window(config: &LoadedConfig, provider: &str, model: &str) -> Option<u32> {
+    let discovery = crate::model::discovery::Discovery::new_with_custom(Some(
+        config.merged_config.custom_providers.clone(),
+    ))
+    .ok();
+    discovery
+        .as_ref()
+        .and_then(|discovery| discovery.get_model_limit(provider, model))
+        .or_else(|| {
+            config
+                .merged_config
+                .custom_providers
+                .get(provider)
+                .and_then(|provider| provider.models.get(model))
+                .and_then(|model| model.context_window)
+        })
 }
 
 fn workspace_path(path: &Path) -> Result<PathBuf, Error> {
@@ -868,6 +1003,21 @@ fn send_tool_result(
         .map_err(|_| internal_error())
 }
 
+fn send_usage(
+    connection: &ConnectionTo<Client>,
+    session_id: &str,
+    session: &AcpSession,
+    used: usize,
+) -> Result<(), Error> {
+    let Some(size) = session.context_window else {
+        return Ok(());
+    };
+    let update = SessionUpdate::UsageUpdate(UsageUpdate::new(used as u64, size as u64));
+    connection
+        .send_notification(SessionNotification::new(session_id.to_string(), update))
+        .map_err(|_| internal_error())
+}
+
 fn replay_messages(
     connection: &ConnectionTo<Client>,
     session_id: &str,
@@ -1073,6 +1223,15 @@ mod tests {
         }
     }
 
+    fn reasoning_model() -> crate::model::types::Model {
+        let mut model = model("openai", "OpenAI", "o3", "o3");
+        model.reasoning_options = vec![crate::model::reasoning::ReasoningOption {
+            kind: "effort".to_string(),
+            values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+        }];
+        model
+    }
+
     #[test]
     fn maps_crabcode_tools_to_acp_kinds() {
         assert_eq!(tool_kind("bash"), ToolKind::Execute);
@@ -1173,5 +1332,35 @@ mod tests {
         );
         assert!(find_selectable_model(&models, "openai/missing").is_err());
         assert!(find_selectable_model(&models, "other/gpt-5").is_err());
+    }
+
+    #[test]
+    fn exposes_reasoning_effort_config_for_supported_models() {
+        let model = reasoning_model();
+        let session = AcpSession {
+            cwd: PathBuf::from("/tmp"),
+            config: crate::config::configuration::LoadedConfig {
+                merged_config: crate::config::configuration::MergedConfig::default(),
+                raw_merged: serde_json::Value::Null,
+                diagnostics: Default::default(),
+                inventory: Default::default(),
+                project_root: PathBuf::from("/tmp"),
+                cwd: PathBuf::from("/tmp"),
+                xdg_config_home: PathBuf::from("/tmp"),
+            },
+            models: vec![model],
+            provider: "openai".to_string(),
+            model: "o3".to_string(),
+            agent: "Build".to_string(),
+            reasoning: Some(crate::model::reasoning::ReasoningEffort::Medium),
+            context_window: None,
+            cancellation: None,
+        };
+        let option = reasoning_config_option(&session).expect("reasoning option");
+        assert_eq!(option.id.to_string(), "reasoning_effort");
+        assert_eq!(
+            option.category,
+            Some(SessionConfigOptionCategory::ThoughtLevel)
+        );
     }
 }
