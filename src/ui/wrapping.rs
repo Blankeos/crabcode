@@ -7,6 +7,8 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+const TAB_STOP_WIDTH: usize = 4;
+
 #[derive(Debug, Clone)]
 pub struct WrapOptions<'a> {
     pub width: usize,
@@ -47,6 +49,7 @@ where
     O: Into<WrapOptions<'a>>,
 {
     let options = options.into();
+    let line = sanitize_line(line);
     let mut flat = String::new();
     let mut span_bounds = Vec::with_capacity(line.spans.len());
 
@@ -84,9 +87,48 @@ where
             } else {
                 &options.subsequent_indent
             };
-            line_from_range(line, &span_bounds, &range, indent)
+            line_from_range(&line, &span_bounds, &range, indent)
         })
         .collect()
+}
+
+fn sanitize_line(line: &Line<'_>) -> Line<'static> {
+    let mut column = 0;
+    let spans = line
+        .spans
+        .iter()
+        .map(|span| {
+            let mut content = String::with_capacity(span.content.len());
+            for ch in span.content.chars() {
+                match ch {
+                    '\t' => {
+                        let spaces = TAB_STOP_WIDTH - column % TAB_STOP_WIDTH;
+                        content.extend(std::iter::repeat_n(' ', spaces));
+                        column += spaces;
+                    }
+                    '\n' | '\r' => {
+                        content.push(ch);
+                        column = 0;
+                    }
+                    ch if ch.is_control() => {
+                        content.push('�');
+                        column += 1;
+                    }
+                    ch => {
+                        content.push(ch);
+                        column += ch.width().unwrap_or(0);
+                    }
+                }
+            }
+            Span::styled(content, span.style)
+        })
+        .collect();
+
+    Line {
+        spans,
+        style: line.style,
+        alignment: line.alignment,
+    }
 }
 
 pub fn wrap_styled_lines<'a, I, O>(lines: I, options: O) -> Vec<Line<'static>>
@@ -111,7 +153,86 @@ where
     out
 }
 
+/// Remove terminal control characters from an already wrapped line.
+///
+/// Ratatui measures a tab as one column, while terminals execute it as a jump
+/// to the next tab stop. Letting one reach Crossterm desynchronizes Ratatui's
+/// tracked cursor from the real terminal until the next full redraw.
+pub fn sanitize_styled_line(line: &Line<'_>) -> Line<'static> {
+    let spans = line
+        .spans
+        .iter()
+        .map(|span| {
+            let content = span
+                .content
+                .chars()
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .collect::<String>();
+            Span::styled(content, span.style)
+        })
+        .collect();
+
+    Line {
+        spans,
+        style: line.style,
+        alignment: line.alignment,
+    }
+}
+
 fn wrap_ranges(text: &str, first_width: usize, subsequent_width: usize) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut first_segment = true;
+
+    for logical_line in logical_line_ranges(text) {
+        let line = &text[logical_line.clone()];
+        if line.is_empty() {
+            ranges.push(logical_line.start..logical_line.start);
+            first_segment = false;
+            continue;
+        }
+
+        let line_first_width = if first_segment {
+            first_width
+        } else {
+            subsequent_width
+        };
+        let line_ranges = wrap_single_line_ranges(line, line_first_width, subsequent_width);
+        ranges.extend(
+            line_ranges
+                .into_iter()
+                .map(|range| logical_line.start + range.start..logical_line.start + range.end),
+        );
+        first_segment = false;
+    }
+
+    ranges
+}
+
+fn logical_line_ranges(text: &str) -> Vec<Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        if matches!(bytes[idx], b'\n' | b'\r') {
+            ranges.push(start..idx);
+            if bytes[idx] == b'\r' && bytes.get(idx + 1) == Some(&b'\n') {
+                idx += 1;
+            }
+            start = idx + 1;
+        }
+        idx += 1;
+    }
+    ranges.push(start..text.len());
+    ranges
+}
+
+fn wrap_single_line_ranges(
+    text: &str,
+    first_width: usize,
+    subsequent_width: usize,
+) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut start = 0;
     let mut width = first_width.max(1);
@@ -396,5 +517,81 @@ mod tests {
         assert_eq!(line_text(&wrapped[0]), "cool 😄");
         assert_eq!(line_text(&wrapped[1]), "emoji");
         assert_eq!(line_text(&wrapped[2]), "wraps");
+    }
+
+    #[test]
+    fn turns_hard_breaks_into_separate_lines() {
+        let command = "python3 <<'PY'\n\tfrom pathlib import Path\r\n\t\tprint('ok')\rPY";
+        let line = Line::from(vec![
+            Span::styled("⬢ Ran ", Style::default().fg(Color::Green)),
+            Span::styled(command, Style::default().fg(Color::Blue)),
+        ]);
+
+        let wrapped = wrap_styled_line(
+            &line,
+            WrapOptions::new(200).subsequent_indent(Line::from("  ")),
+        );
+
+        assert_eq!(
+            wrapped.iter().map(line_text).collect::<Vec<_>>(),
+            vec![
+                "⬢ Ran python3 <<'PY'",
+                "      from pathlib import Path",
+                "          print('ok')",
+                "  PY",
+            ]
+        );
+        assert!(wrapped.iter().all(|line| line
+            .spans
+            .iter()
+            .all(|span| !span.content.contains(['\n', '\r']))));
+        assert!(wrapped
+            .iter()
+            .all(|line| line.spans.iter().all(|span| !span.content.contains('\t'))));
+    }
+
+    #[test]
+    fn expands_tabs_using_display_columns_across_spans() {
+        let line = Line::from(vec![Span::raw("ab"), Span::raw("\tcd\u{1b}x")]);
+
+        let wrapped = wrap_styled_line(&line, 80);
+
+        assert_eq!(line_text(&wrapped[0]), "ab  cd�x");
+        assert!(wrapped[0]
+            .spans
+            .iter()
+            .all(|span| span.content.chars().all(|ch| !ch.is_control())));
+    }
+
+    #[test]
+    fn final_line_sanitization_preserves_measured_width() {
+        let line = Line::from(Span::raw("ab\tcd\u{1b}x"));
+
+        let sanitized = sanitize_styled_line(&line);
+
+        assert_eq!(line_text(&sanitized), "ab cd x");
+        assert_eq!(line.width(), sanitized.width());
+        assert!(sanitized
+            .spans
+            .iter()
+            .all(|span| span.content.chars().all(|ch| !ch.is_control())));
+    }
+
+    #[test]
+    fn preserves_blank_lines_without_embedding_control_characters() {
+        let line = Line::from(Span::styled(
+            "first\n\nlast\n".to_string(),
+            Style::default(),
+        ));
+        let wrapped = wrap_styled_line(&line, 80);
+
+        assert_eq!(
+            wrapped.iter().map(line_text).collect::<Vec<_>>(),
+            vec!["first", "", "last", ""]
+        );
+        assert!(wrapped.iter().all(|line| line
+            .spans
+            .iter()
+            .all(|span| !span.content.contains(['\n', '\r']))));
     }
 }
