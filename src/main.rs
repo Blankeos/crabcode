@@ -60,7 +60,8 @@ mod tool {
 use crate::toast::{Toast, ToastManager};
 use anyhow::{Context, Result};
 use app::App;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, shells};
 use ratatui::crossterm::{
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -641,6 +642,9 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Generate shell completion script
+    Completion,
+
     /// Host the current workspace for browser and CLI clients
     Serve {
         /// Address to bind, for example 127.0.0.1:8421 or 0.0.0.0:8421
@@ -666,6 +670,37 @@ enum Command {
         /// Version to install, for example 0.1.0. Defaults to latest.
         target: Option<String>,
     },
+}
+
+fn is_completion_help(args: &[String]) -> bool {
+    matches!(args, [command, help] if command == "completion" && matches!(help.as_str(), "--help" | "-h"))
+}
+
+fn completion_shell(shell: Option<&str>) -> shells::Shell {
+    match shell.and_then(|shell| shell.rsplit('/').next()) {
+        Some("zsh") => shells::Shell::Zsh,
+        _ => shells::Shell::Bash,
+    }
+}
+
+fn generate_completion(shell: shells::Shell) -> Vec<u8> {
+    let mut command = Args::command();
+    let mut output = Vec::new();
+    generate(shell, &mut command, "crabcode", &mut output);
+    output
+}
+
+fn root_help() -> Result<String> {
+    let mut command = Args::command();
+    let mut output = Vec::new();
+    command.write_long_help(&mut output)?;
+    Ok(String::from_utf8(output).expect("Clap help is valid UTF-8"))
+}
+
+fn print_completion() -> Result<()> {
+    let shell = completion_shell(std::env::var("SHELL").ok().as_deref());
+    io::stdout().write_all(&generate_completion(shell))?;
+    Ok(())
 }
 
 fn merge_prompt_with_stdin(prompt: &str, stdin: &str) -> String {
@@ -716,6 +751,12 @@ fn launch_remote_serve(request: app::RemoteLaunchRequest) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if is_completion_help(&raw_args) {
+        println!("{}", root_help()?);
+        return Ok(());
+    }
+
     let args = Args::parse();
     crate::logging::set_enabled(args.emit_logs);
 
@@ -725,6 +766,10 @@ async fn main() -> Result<()> {
     }
 
     match &args.command {
+        Some(Command::Completion) => {
+            print_completion()?;
+            return Ok(());
+        }
         Some(Command::Serve { bind, pair_code }) => {
             return crate::remote::serve(crate::remote::ServeOptions {
                 bind: bind.clone(),
@@ -936,6 +981,47 @@ mod tests {
             }
             other => panic!("expected serve command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn generates_bash_completion() {
+        let script =
+            String::from_utf8(generate_completion(completion_shell(Some("/bin/bash")))).unwrap();
+
+        assert!(script.contains("_crabcode"));
+        assert!(script.contains("complete"));
+        assert!(script.contains("crabcode"));
+    }
+
+    #[test]
+    fn generates_zsh_completion() {
+        let script =
+            String::from_utf8(generate_completion(completion_shell(Some("/bin/zsh")))).unwrap();
+
+        assert!(script.starts_with("#compdef crabcode"));
+        assert!(script.contains("_crabcode"));
+    }
+
+    #[test]
+    fn completion_help_uses_root_help() {
+        assert!(is_completion_help(&[
+            "completion".to_string(),
+            "--help".to_string()
+        ]));
+        assert!(is_completion_help(&[
+            "completion".to_string(),
+            "-h".to_string()
+        ]));
+        assert!(!is_completion_help(&["completion".to_string()]));
+        assert!(!is_completion_help(&[
+            "serve".to_string(),
+            "--help".to_string()
+        ]));
+
+        let help = root_help().unwrap();
+        assert!(help.contains("Usage: crabcode"));
+        assert!(help.contains("completion  Generate shell completion script"));
+        assert!(help.contains("serve       Host the current workspace"));
     }
 
     #[test]

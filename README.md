@@ -68,6 +68,16 @@ It works (almost) exactly like OpenCode. Just opens faster, with some intuitive 
   - When switching models, you can press `⇆` to change thinking efforts.
   - Copy on select is disabled by default. Copy is two-step in crabcode. Gets annoying in OpenCode, especially w/ clipboard history.
 
+### Shell Completion
+
+Generate a completion script for the current shell:
+
+```sh
+crabcode completion >> ~/.zshrc
+```
+
+`crabcode completion` generates Zsh completions when `$SHELL` ends in `zsh`; it generates Bash completions for all other shells.
+
 ### Agent Types
 
 - **PLAN** - Read-only analysis and planning agent. Best for understanding codebases, architecture questions, and planning changes.
