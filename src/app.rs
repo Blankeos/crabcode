@@ -897,6 +897,32 @@ struct StreamingUsageBase {
 }
 
 impl App {
+    const INTERRUPTED_TURN_CONTINUATION_GUIDANCE: &'static str = "The previous turn was interrupted. Address the newest request, then resume unfinished work unless the user canceled or redirected it. Do not claim completion prematurely.";
+
+    fn apply_turn_guidance(
+        messages: &mut Vec<crate::session::types::Message>,
+        turn_guidance: Option<&str>,
+    ) {
+        let Some(guidance) = turn_guidance
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+
+        if let Some(system_message) = messages
+            .iter_mut()
+            .find(|message| message.role == crate::session::types::MessageRole::System)
+        {
+            if !system_message.content.trim().is_empty() {
+                system_message.content.push_str("\n\n");
+            }
+            system_message.content.push_str(guidance);
+        } else {
+            messages.insert(0, crate::session::types::Message::system(guidance));
+        }
+    }
+
     pub fn new() -> Result<Self> {
         Self::new_with_model_override(None)
     }
@@ -8376,7 +8402,7 @@ impl App {
             None,
         );
         self.cleanup_streaming_for_session(session_id);
-        self.submit_queued_messages_for_session(session_id)
+        self.submit_queued_messages_for_session_after_interruption(session_id)
     }
 
     pub fn update_animations(&mut self) {
@@ -9300,6 +9326,14 @@ impl App {
         &mut self,
         _user_message: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.start_llm_streaming_with_guidance(_user_message, None)
+    }
+
+    fn start_llm_streaming_with_guidance(
+        &mut self,
+        _user_message: &str,
+        turn_guidance: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use tokio::sync::mpsc;
 
         let session_id = self
@@ -9424,6 +9458,8 @@ impl App {
             let system_msg = crate::session::types::Message::system(system_prompt);
             messages.insert(0, system_msg);
         }
+
+        Self::apply_turn_guidance(&mut messages, turn_guidance);
 
         tokio::spawn(async move {
             let stream = stream_llm_with_cancellation(
@@ -10082,6 +10118,21 @@ impl App {
     }
 
     fn submit_queued_messages_for_session(&mut self, session_id: &str) -> bool {
+        self.submit_queued_messages_for_session_with_guidance(session_id, None)
+    }
+
+    fn submit_queued_messages_for_session_after_interruption(&mut self, session_id: &str) -> bool {
+        self.submit_queued_messages_for_session_with_guidance(
+            session_id,
+            Some(Self::INTERRUPTED_TURN_CONTINUATION_GUIDANCE),
+        )
+    }
+
+    fn submit_queued_messages_for_session_with_guidance(
+        &mut self,
+        session_id: &str,
+        turn_guidance: Option<&str>,
+    ) -> bool {
         if !self.is_active_session(session_id) || self.session_has_active_stream(session_id) {
             return false;
         }
@@ -10096,7 +10147,7 @@ impl App {
         let prompt = queued.text.clone();
         self.append_user_message_to_current_session(queued.text, queued.image_paths);
 
-        if let Err(e) = self.start_llm_streaming(&prompt) {
+        if let Err(e) = self.start_llm_streaming_with_guidance(&prompt, turn_guidance) {
             self.play_sound_event(crate::sound::SoundEvent::Error);
             self.notify_terminal_event(crate::sound::SoundEvent::Error);
             push_toast(Toast::new(
@@ -12804,6 +12855,34 @@ mod tests {
             crate::session::types::MessageRole::Assistant
         );
         assert!(!persisted_messages[1].is_complete);
+    }
+
+    #[test]
+    fn interruption_guidance_augments_the_request_system_prompt() {
+        let mut messages = vec![
+            crate::session::types::Message::system("base prompt"),
+            crate::session::types::Message::user("new request"),
+        ];
+
+        App::apply_turn_guidance(
+            &mut messages,
+            Some(App::INTERRUPTED_TURN_CONTINUATION_GUIDANCE),
+        );
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, crate::session::types::MessageRole::System);
+        assert!(messages[0].content.starts_with("base prompt\n\n"));
+        assert!(messages[0].content.contains("resume unfinished work"));
+    }
+
+    #[test]
+    fn no_interruption_guidance_leaves_messages_unchanged() {
+        let mut messages = vec![crate::session::types::Message::system("base prompt")];
+        let expected = messages.clone();
+
+        App::apply_turn_guidance(&mut messages, None);
+
+        assert_eq!(messages, expected);
     }
 
     #[tokio::test(flavor = "multi_thread")]
