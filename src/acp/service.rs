@@ -25,6 +25,18 @@ pub struct AcpService {
     session_manager: Arc<Mutex<SessionManager>>,
 }
 
+fn reasoning_effort_label(effort: crate::model::reasoning::ReasoningEffort) -> &'static str {
+    match effort {
+        crate::model::reasoning::ReasoningEffort::None => "None",
+        crate::model::reasoning::ReasoningEffort::Minimal => "Minimal",
+        crate::model::reasoning::ReasoningEffort::Low => "Low",
+        crate::model::reasoning::ReasoningEffort::Medium => "Medium",
+        crate::model::reasoning::ReasoningEffort::High => "High",
+        crate::model::reasoning::ReasoningEffort::XHigh => "Xhigh",
+        crate::model::reasoning::ReasoningEffort::Max => "Max",
+    }
+}
+
 fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
     let mut commands: Vec<_> = session
         .config
@@ -864,14 +876,16 @@ fn reasoning_config_option(session: &AcpSession) -> Option<SessionConfigOption> 
     let options = capability
         .values()
         .iter()
-        .map(|effort| SessionConfigSelectOption::new(effort.as_str(), effort.as_str()))
+        .map(|effort| {
+            SessionConfigSelectOption::new(effort.as_str(), reasoning_effort_label(*effort))
+        })
         .collect::<Vec<_>>();
     let current = session
         .reasoning
         .map(|effort| effort.as_str())
         .unwrap_or("none");
     Some(
-        SessionConfigOption::select("reasoning_effort", "Reasoning effort", current, options)
+        SessionConfigOption::select("effort", "Effort", current, options)
             .category(SessionConfigOptionCategory::ThoughtLevel),
     )
 }
@@ -1815,10 +1829,24 @@ mod tests {
             cancellation: None,
         };
         let option = reasoning_config_option(&session).expect("reasoning option");
-        assert_eq!(option.id.to_string(), "reasoning_effort");
+        assert_eq!(option.id.to_string(), "effort");
+        assert_eq!(option.name, "Effort");
         assert_eq!(
             option.category,
             Some(SessionConfigOptionCategory::ThoughtLevel)
         );
+        let agent_client_protocol::schema::v1::SessionConfigKind::Select(select) = option.kind
+        else {
+            panic!("reasoning option should be a select");
+        };
+        let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(options) =
+            select.options
+        else {
+            panic!("reasoning options should be ungrouped");
+        };
+        assert_eq!(options[0].value.to_string(), "low");
+        assert_eq!(options[0].name, "Low");
+        assert_eq!(options[1].value.to_string(), "medium");
+        assert_eq!(options[1].name, "Medium");
     }
 }
