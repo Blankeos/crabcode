@@ -25,6 +25,19 @@ pub struct AcpService {
     session_manager: Arc<Mutex<SessionManager>>,
 }
 
+fn resolved_reasoning(
+    session: &AcpSession,
+    requested: crate::model::reasoning::ReasoningEffort,
+) -> Option<crate::model::reasoning::ReasoningEffort> {
+    model_reasoning_capability(
+        &session.config,
+        &session.models,
+        &session.provider,
+        &session.model,
+    )
+    .and_then(|capability| capability.resolve(Some(requested)))
+}
+
 fn reasoning_effort_label(effort: crate::model::reasoning::ReasoningEffort) -> &'static str {
     match effort {
         crate::model::reasoning::ReasoningEffort::None => "None",
@@ -235,6 +248,7 @@ struct AcpSession {
     provider: String,
     model: String,
     agent: String,
+    reasoning_selection: crate::model::reasoning::ReasoningEffort,
     reasoning: Option<crate::model::reasoning::ReasoningEffort>,
     context_window: Option<u32>,
     cancellation: Option<CancellationToken>,
@@ -277,6 +291,8 @@ impl AcpService {
             .await
             .map_err(|_| internal_error())?;
         let reasoning = model_reasoning(&config, &models, &provider, &model);
+        let reasoning_selection =
+            reasoning.unwrap_or(crate::model::reasoning::ReasoningEffort::None);
         let context_window = model_context_window(&config, &provider, &model);
         let agent = config
             .merged_config
@@ -309,6 +325,7 @@ impl AcpService {
                 provider,
                 model,
                 agent,
+                reasoning_selection,
                 reasoning,
                 context_window,
                 cancellation: None,
@@ -456,12 +473,7 @@ impl AcpService {
         let model = find_selectable_model(&session.models, model_ref)?;
         session.provider.clone_from(&model.provider_id);
         session.model.clone_from(&model.id);
-        session.reasoning = model_reasoning(
-            &session.config,
-            &session.models,
-            &session.provider,
-            &session.model,
-        );
+        session.reasoning = resolved_reasoning(session, session.reasoning_selection);
         session.context_window =
             model_context_window(&session.config, &session.provider, &session.model);
         Ok(SetSessionConfigOptionResponse::new(session_config_options(
@@ -478,21 +490,11 @@ impl AcpService {
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
-        let capability = model_reasoning_capability(
-            &session.config,
-            &session.models,
-            &session.provider,
-            &session.model,
-        )
-        .ok_or_else(|| Error::invalid_params().data("reasoning effort is unavailable"))?;
         let requested = value
             .parse::<crate::model::reasoning::ReasoningEffort>()
             .map_err(|_| Error::invalid_params().data("invalid reasoning effort"))?;
-        if !capability.values().contains(&requested) {
-            return Err(Error::invalid_params().data("unsupported reasoning effort"));
-        }
-        session.reasoning =
-            (requested != crate::model::reasoning::ReasoningEffort::None).then_some(requested);
+        session.reasoning_selection = requested;
+        session.reasoning = resolved_reasoning(session, requested);
         Ok(SetSessionConfigOptionResponse::new(session_config_options(
             session,
         )))
@@ -547,6 +549,8 @@ impl AcpService {
                     })
             });
         let reasoning = model_reasoning(&config, &models, &provider, &model);
+        let reasoning_selection =
+            reasoning.unwrap_or(crate::model::reasoning::ReasoningEffort::None);
         let context_window = model_context_window(&config, &provider, &model);
         let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
         let session = AcpSession {
@@ -557,6 +561,7 @@ impl AcpService {
             provider,
             model,
             agent,
+            reasoning_selection,
             reasoning,
             context_window,
             cancellation: None,
@@ -860,34 +865,25 @@ fn session_config_options(session: &AcpSession) -> Vec<SessionConfigOption> {
             .category(SessionConfigOptionCategory::Mode),
         model_config_option(&session.models, &session.provider, &session.model),
     ];
-    if let Some(option) = reasoning_config_option(session) {
-        options.push(option);
-    }
+    options.push(reasoning_config_option(session));
     options
 }
 
-fn reasoning_config_option(session: &AcpSession) -> Option<SessionConfigOption> {
-    let capability = model_reasoning_capability(
-        &session.config,
-        &session.models,
-        &session.provider,
-        &session.model,
-    )?;
-    let options = capability
-        .values()
-        .iter()
-        .map(|effort| {
-            SessionConfigSelectOption::new(effort.as_str(), reasoning_effort_label(*effort))
-        })
-        .collect::<Vec<_>>();
-    let current = session
-        .reasoning
-        .map(|effort| effort.as_str())
-        .unwrap_or("none");
-    Some(
-        SessionConfigOption::select("effort", "Effort", current, options)
-            .category(SessionConfigOptionCategory::ThoughtLevel),
-    )
+fn reasoning_config_option(session: &AcpSession) -> SessionConfigOption {
+    let options = [
+        crate::model::reasoning::ReasoningEffort::None,
+        crate::model::reasoning::ReasoningEffort::Low,
+        crate::model::reasoning::ReasoningEffort::Medium,
+        crate::model::reasoning::ReasoningEffort::High,
+        crate::model::reasoning::ReasoningEffort::XHigh,
+        crate::model::reasoning::ReasoningEffort::Max,
+    ]
+    .iter()
+    .map(|effort| SessionConfigSelectOption::new(effort.as_str(), reasoning_effort_label(*effort)))
+    .collect::<Vec<_>>();
+    let current = session.reasoning_selection.as_str();
+    SessionConfigOption::select("effort", "Effort", current, options)
+        .category(SessionConfigOptionCategory::ThoughtLevel)
 }
 
 fn model_config_option(
@@ -1593,6 +1589,7 @@ mod tests {
             provider: String::new(),
             model: String::new(),
             agent: "Build".to_string(),
+            reasoning_selection: crate::model::reasoning::ReasoningEffort::None,
             reasoning: None,
             context_window: None,
             cancellation: None,
@@ -1806,8 +1803,8 @@ mod tests {
     }
 
     #[test]
-    fn exposes_reasoning_effort_config_for_supported_models() {
-        let model = reasoning_model();
+    fn preserves_selected_reasoning_effort_when_model_cannot_apply_it() {
+        let model = model("example", "Example", "chat", "Chat");
         let session = AcpSession {
             cwd: PathBuf::from("/tmp"),
             config: crate::config::configuration::LoadedConfig {
@@ -1821,14 +1818,15 @@ mod tests {
             },
             skills: crate::skill::SkillStore::load(Path::new("/tmp"), Path::new("/tmp")),
             models: vec![model],
-            provider: "openai".to_string(),
-            model: "o3".to_string(),
+            provider: "example".to_string(),
+            model: "chat".to_string(),
             agent: "Build".to_string(),
-            reasoning: Some(crate::model::reasoning::ReasoningEffort::Medium),
+            reasoning_selection: crate::model::reasoning::ReasoningEffort::High,
+            reasoning: None,
             context_window: None,
             cancellation: None,
         };
-        let option = reasoning_config_option(&session).expect("reasoning option");
+        let option = reasoning_config_option(&session);
         assert_eq!(option.id.to_string(), "effort");
         assert_eq!(option.name, "Effort");
         assert_eq!(
@@ -1839,14 +1837,26 @@ mod tests {
         else {
             panic!("reasoning option should be a select");
         };
+        assert_eq!(select.current_value.to_string(), "high");
         let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(options) =
             select.options
         else {
             panic!("reasoning options should be ungrouped");
         };
-        assert_eq!(options[0].value.to_string(), "low");
-        assert_eq!(options[0].name, "Low");
-        assert_eq!(options[1].value.to_string(), "medium");
-        assert_eq!(options[1].name, "Medium");
+        let values = options
+            .iter()
+            .map(|option| (option.value.to_string(), option.name.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![
+                ("none".to_string(), "None".to_string()),
+                ("low".to_string(), "Low".to_string()),
+                ("medium".to_string(), "Medium".to_string()),
+                ("high".to_string(), "High".to_string()),
+                ("xhigh".to_string(), "Xhigh".to_string()),
+                ("max".to_string(), "Max".to_string()),
+            ]
+        );
     }
 }
