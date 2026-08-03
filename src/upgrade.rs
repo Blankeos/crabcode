@@ -3,11 +3,12 @@ use semver::Version;
 use serde::Deserialize;
 use std::process::Command;
 
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Blankeos/crabcode/releases/latest";
-const INSTALLER_URL: &str = "https://github.com/Blankeos/crabcode/releases/download";
+const PREVIEW_RELEASES_URL: &str =
+    "https://api.github.com/repos/yan-ad/crabcode/releases?per_page=100";
+const INSTALLER_URL: &str = "https://raw.githubusercontent.com/yan-ad/crabcode";
 
 #[derive(Debug, Deserialize)]
-struct LatestRelease {
+struct Release {
     tag_name: String,
 }
 
@@ -30,15 +31,16 @@ fn check_version(current: &str, release_tag: &str) -> Result<VersionCheck> {
 }
 
 fn target_release_tag(target: &str) -> Result<String> {
-    let version = Version::parse(target.trim_start_matches('v'))
-        .with_context(|| format!("invalid target version {target:?}; expected a semver version"))?;
+    if target.starts_with("gondescode-") {
+        return Ok(target.to_owned());
+    }
 
-    Ok(format!("v{version}"))
+    bail!("invalid target release {target:?}; expected a gondescode-<commit> preview tag or latest")
 }
 
 fn installer_command(release_tag: &str) -> String {
     format!(
-        "curl --proto '=https' --tlsv1.2 -LsSf {INSTALLER_URL}/{release_tag}/crabcode-installer.sh | sh"
+        "curl --proto '=https' --tlsv1.2 -LsSf {INSTALLER_URL}/{release_tag}/install.sh | CRABCODE_PREVIEW_TAG={release_tag} sh"
     )
 }
 
@@ -54,19 +56,23 @@ where
 }
 
 async fn latest_release_tag() -> Result<String> {
-    let release = reqwest::Client::new()
-        .get(LATEST_RELEASE_URL)
+    let releases = reqwest::Client::new()
+        .get(PREVIEW_RELEASES_URL)
         .header(reqwest::header::USER_AGENT, "crabcode-upgrade")
         .send()
         .await
         .context("failed to check for the latest crabcode release")?
         .error_for_status()
         .context("failed to check for the latest crabcode release")?
-        .json::<LatestRelease>()
+        .json::<Vec<Release>>()
         .await
         .context("failed to read the latest crabcode release")?;
 
-    Ok(release.tag_name)
+    releases
+        .into_iter()
+        .find(|release| release.tag_name.starts_with("gondescode-"))
+        .map(|release| release.tag_name)
+        .context("no crabcode preview release found")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -93,6 +99,12 @@ pub async fn upgrade(target: Option<&str>) -> Result<()> {
         Some(target) if target != "latest" => target_release_tag(target)?,
         _ => latest_release_tag().await?,
     };
+    if release_tag.starts_with("gondescode-") {
+        run_installer(&release_tag)?;
+        println!("Upgraded crabcode to preview {release_tag}.");
+        return Ok(());
+    }
+
     let check = check_version(env!("CARGO_PKG_VERSION"), &release_tag)?;
     let check = run_upgrade(check, || run_installer(&release_tag))?;
 
@@ -135,26 +147,28 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_an_explicit_target_version() {
-        assert_eq!(target_release_tag("0.1.0").unwrap(), "v0.1.0");
-        assert_eq!(target_release_tag("v0.1.0").unwrap(), "v0.1.0");
+    fn accepts_an_explicit_preview_target() {
+        assert_eq!(
+            target_release_tag("gondescode-0123456789abcdef").unwrap(),
+            "gondescode-0123456789abcdef"
+        );
     }
 
     #[test]
-    fn rejects_an_invalid_explicit_target_version() {
+    fn rejects_an_invalid_explicit_target() {
         let error = target_release_tag("nightly").unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "invalid target version \"nightly\"; expected a semver version"
+            "invalid target release \"nightly\"; expected a gondescode-<commit> preview tag or latest"
         );
     }
 
     #[test]
     fn builds_an_installer_command_for_the_requested_release() {
         assert_eq!(
-            installer_command("v0.1.0"),
-            "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Blankeos/crabcode/releases/download/v0.1.0/crabcode-installer.sh | sh"
+            installer_command("gondescode-0123456789abcdef"),
+             "curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/yan-ad/crabcode/gondescode-0123456789abcdef/install.sh | CRABCODE_PREVIEW_TAG=gondescode-0123456789abcdef sh"
         );
     }
 

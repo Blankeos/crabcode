@@ -41,7 +41,7 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
-      - name: Build Gondescode
+      - name: Build Crabcode
         run: cargo build --release --locked
 
       - name: Package preview archive
@@ -49,10 +49,10 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_SHA::7}"
-          archive="gondescode-${version}-${{ matrix.platform }}.tar.gz"
-          staging="${RUNNER_TEMP}/gondescode"
+          archive="crabcode-${version}-${{ matrix.platform }}.tar.gz"
+          staging="${RUNNER_TEMP}/crabcode"
           mkdir -p "$staging"
-          cp target/release/crabcode "$staging/gondescode"
+          cp target/release/crabcode "$staging/crabcode"
           cp README.md LICENSE* "$staging" 2>/dev/null || true
           tar -C "$staging" -czf "$archive" .
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
@@ -86,24 +86,24 @@ jobs:
 
           ## Install
 
-          Download the archive for your platform, extract it, and move \`gondescode\` somewhere on your \`PATH\`:
+          Download the archive for your platform, extract it, and move \`crabcode\` somewhere on your \`PATH\`:
 
           ### macOS (Apple Silicon)
 
           \`\`\`sh
-          curl -fL -o gondescode.tar.gz \\
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/gondescode-${SHORT_SHA::7}-macos-arm64.tar.gz"
-          tar -xzf gondescode.tar.gz
-          install -m 755 gondescode ~/.local/bin/gondescode
+          curl -fL -o crabcode.tar.gz \\
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/crabcode-${SHORT_SHA::7}-macos-arm64.tar.gz"
+          tar -xzf crabcode.tar.gz
+          install -m 755 crabcode ~/.local/bin/crabcode
           \`\`\`
 
           ### Linux (x64)
 
           \`\`\`sh
-          curl -fL -o gondescode.tar.gz \\
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/gondescode-${SHORT_SHA::7}-linux-x64.tar.gz"
-          tar -xzf gondescode.tar.gz
-          install -Dm 755 gondescode ~/.local/bin/gondescode
+          curl -fL -o crabcode.tar.gz \\
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/crabcode-${SHORT_SHA::7}-linux-x64.tar.gz"
+          tar -xzf crabcode.tar.gz
+          install -Dm 755 crabcode ~/.local/bin/crabcode
           \`\`\`
 
           If \`~/.local/bin\` is not on your \`PATH\`, add \`export PATH="\$HOME/.local/bin:\$PATH"\` to your shell profile.
@@ -113,5 +113,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --prerelease \
-            --title "Gondescode preview ${SHORT_SHA::7}" \
+            --title "Crabcode preview ${SHORT_SHA::7}" \
             --notes-file release-notes.md
