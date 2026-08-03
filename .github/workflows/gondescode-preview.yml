@@ -1,0 +1,128 @@
+name: Publish Gondescode preview
+
+on:
+  push:
+    branches:
+      - yan-flavor
+  workflow_dispatch:
+
+# Each preview is immutable and tied to the commit that produced it.
+concurrency:
+  group: gondescode-preview-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-14
+          - platform: macos-x64
+            runner: macos-13
+          - platform: linux-x64
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build embedded remote client
+        working-directory: remote-client
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Build Gondescode
+        run: cargo build --release --locked
+
+      - name: Package preview archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_SHA::7}"
+          archive="gondescode-${version}-${{ matrix.platform }}.tar.gz"
+          staging="${RUNNER_TEMP}/gondescode"
+          mkdir -p "$staging"
+          cp target/release/crabcode "$staging/gondescode"
+          cp README.md LICENSE* "$staging" 2>/dev/null || true
+          tar -C "$staging" -czf "$archive" .
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  release:
+    name: Publish preview release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: gondescode-${{ github.sha }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          cat > release-notes.md <<EOF
+          Automated preview build from \`yan-flavor\` at \`${SHORT_SHA}\`.
+
+          These preview artifacts are isolated from Crabcode's main release channels.
+
+          ## Install
+
+          Download the archive for your platform, extract it, and move \`gondescode\` somewhere on your \`PATH\`:
+
+          ### macOS (Apple Silicon)
+
+          \`\`\`sh
+          curl -fL -o gondescode.tar.gz \\
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/gondescode-${SHORT_SHA::7}-macos-arm64.tar.gz"
+          tar -xzf gondescode.tar.gz
+          install -m 755 gondescode ~/.local/bin/gondescode
+          \`\`\`
+
+          ### macOS (Intel)
+
+          \`\`\`sh
+          curl -fL -o gondescode.tar.gz \\
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/gondescode-${SHORT_SHA::7}-macos-x64.tar.gz"
+          tar -xzf gondescode.tar.gz
+          install -m 755 gondescode ~/.local/bin/gondescode
+          \`\`\`
+
+          ### Linux (x64)
+
+          \`\`\`sh
+          curl -fL -o gondescode.tar.gz \\
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/gondescode-${SHORT_SHA::7}-linux-x64.tar.gz"
+          tar -xzf gondescode.tar.gz
+          install -Dm 755 gondescode ~/.local/bin/gondescode
+          \`\`\`
+
+          If \`~/.local/bin\` is not on your \`PATH\`, add \`export PATH="\$HOME/.local/bin:\$PATH"\` to your shell profile.
+          EOF
+
+          gh release create "$TAG" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Gondescode preview ${SHORT_SHA::7}" \
+            --notes-file release-notes.md
