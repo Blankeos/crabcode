@@ -71,6 +71,9 @@ trap 'rm -rf "$TEMP_DIR"' EXIT
 if curl -fL "$BINARY_URL" -o "$TEMP_DIR/$ARCHIVE" \
     && tar -xzf "$TEMP_DIR/$ARCHIVE" -C "$TEMP_DIR" \
     && install -m 755 "$TEMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"; then
+    if [[ "$OS" == "Darwin" ]]; then
+        xattr -d com.apple.quarantine "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null || true
+    fi
     echo "✓ crabcode installed successfully to $INSTALL_DIR/$BINARY_NAME"
 else
     echo "❌ Failed to download preview from ${REPO}."

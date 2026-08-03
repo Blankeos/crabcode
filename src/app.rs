@@ -1133,7 +1133,7 @@ impl App {
 
         Ok(Self {
             running: true,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::version::CURRENT.to_string(),
             input,
             command_registry: registry,
             session_manager,

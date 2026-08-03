@@ -105,7 +105,7 @@ pub async fn upgrade(target: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let check = check_version(env!("CARGO_PKG_VERSION"), &release_tag)?;
+    let check = check_version(crate::version::CURRENT, &release_tag)?;
     let check = run_upgrade(check, || run_installer(&release_tag))?;
 
     match check {

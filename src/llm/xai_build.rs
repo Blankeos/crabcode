@@ -78,7 +78,7 @@ fn request_overrides_with_version(
     let mut headers = std::collections::HashMap::new();
     headers.insert(
         "User-Agent".to_string(),
-        format!("crabcode/{}", env!("CARGO_PKG_VERSION")),
+        format!("crabcode/{}", crate::version::CURRENT),
     );
     headers.insert(TOKEN_AUTH_HEADER.to_string(), TOKEN_AUTH_VALUE.to_string());
     headers.insert("x-grok-model-override".to_string(), MODEL.to_string());
@@ -254,7 +254,7 @@ mod tests {
         );
         assert_eq!(
             overrides.headers.get("User-Agent").map(String::as_str),
-            Some(concat!("crabcode/", env!("CARGO_PKG_VERSION")))
+            Some(format!("crabcode/{}", crate::version::CURRENT).as_str())
         );
     }
 

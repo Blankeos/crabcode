@@ -28,6 +28,7 @@ mod tools;
 mod ui;
 mod upgrade;
 mod utils;
+mod version;
 mod views;
 
 mod chunk {
@@ -600,7 +601,12 @@ pub fn get_toast_manager() -> &'static Mutex<ToastManager> {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author,
+    version = crate::version::CURRENT,
+    about,
+    long_about = None
+)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,

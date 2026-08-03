@@ -42,7 +42,7 @@ jobs:
           bun run build
 
       - name: Build Crabcode
-        run: cargo build --release --locked
+        run: CRABCODE_VERSION="0.0.${GITHUB_RUN_ID}" cargo build --release --locked
 
       - name: Package preview archive
         shell: bash
@@ -78,40 +78,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: gondescode-${{ github.sha }}
           SHORT_SHA: ${{ github.sha }}
+          VERSION: 0.0.${{ github.run_id }}
         run: |
           cat > release-notes.md <<EOF
-          Automated preview build from \`yan-flavor\` at \`${SHORT_SHA}\`.
+          Automated preview build \`v${VERSION}\` from \`yan-flavor\` at \`${SHORT_SHA}\`.
 
           These preview artifacts are isolated from Crabcode's main release channels.
 
           ## Install
 
-          Download the archive for your platform, extract it, and move \`crabcode\` somewhere on your \`PATH\`:
+          ```sh
+          curl -fsSL https://raw.githubusercontent.com/yan-ad/crabcode/yan-flavor/install.sh | \
+            CRABCODE_PREVIEW_TAG="${TAG}" sh
+          ```
 
-          ### macOS (Apple Silicon)
-
-          \`\`\`sh
-          curl -fL -o crabcode.tar.gz \\
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/crabcode-${SHORT_SHA::7}-macos-arm64.tar.gz"
-          tar -xzf crabcode.tar.gz
-          install -m 755 crabcode ~/.local/bin/crabcode
-          \`\`\`
-
-          ### Linux (x64)
-
-          \`\`\`sh
-          curl -fL -o crabcode.tar.gz \\
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/crabcode-${SHORT_SHA::7}-linux-x64.tar.gz"
-          tar -xzf crabcode.tar.gz
-          install -Dm 755 crabcode ~/.local/bin/crabcode
-          \`\`\`
-
-          If \`~/.local/bin\` is not on your \`PATH\`, add \`export PATH="\$HOME/.local/bin:\$PATH"\` to your shell profile.
+          This installs the preview as `crabcode` and selects the exact preview release above.
           EOF
 
           gh release create "$TAG" artifacts/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --prerelease \
-            --title "Crabcode preview ${SHORT_SHA::7}" \
+            --title "Crabcode preview v${VERSION}" \
             --notes-file release-notes.md

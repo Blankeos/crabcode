@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=remote-client/dist/client");
+    println!("cargo:rerun-if-env-changed=CRABCODE_VERSION");
+    let version = env::var("CRABCODE_VERSION")
+        .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").expect("Cargo package version is set"));
+    println!("cargo:rustc-env=CRABCODE_VERSION={version}");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let dist_dir = manifest_dir.join("remote-client/dist/client");

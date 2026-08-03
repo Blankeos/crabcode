@@ -85,7 +85,7 @@ pub fn now_unix_ms() -> i64 {
 pub fn build_user_agent() -> String {
     format!(
         "crabcode/{} ({} {}; {})",
-        env!("CARGO_PKG_VERSION"),
+        crate::version::CURRENT,
         std::env::consts::OS,
         std::env::consts::ARCH,
         std::env::consts::FAMILY

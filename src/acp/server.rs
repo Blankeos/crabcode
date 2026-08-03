@@ -38,7 +38,7 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
             async move |request: InitializeRequest, responder, _connection| {
                 let response = InitializeResponse::new(request.protocol_version)
                     .agent_capabilities(capabilities())
-                    .agent_info(Implementation::new("crabcode", env!("CARGO_PKG_VERSION")));
+                    .agent_info(Implementation::new("crabcode", crate::version::CURRENT));
                 responder.respond(response)
             },
             agent_client_protocol::on_receive_request!(),
