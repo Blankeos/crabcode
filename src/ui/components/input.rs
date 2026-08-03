@@ -487,6 +487,13 @@ impl Input {
         self.update_viewport(visible_lines, wrap_width);
         self.render_wrapped_textarea(frame, v_chunks[1], colors);
 
+        // Set the physical terminal cursor position to the textarea's cursor
+        // location so that the IME candidate window appears at the correct position.
+        // This is essential for CJK input methods.
+        if let Some(area) = self.textarea_area {
+            self.set_terminal_cursor_position(frame, area);
+        }
+
         let mut info_spans = vec![
             ratatui::text::Span::styled(agent.to_string(), Style::default().fg(agent_color)),
             ratatui::text::Span::raw("  "),
@@ -1424,6 +1431,51 @@ impl Input {
         frame.render_widget(Paragraph::new(text).style(text_style), area);
         self.style_placeholder_ranges(frame.buffer_mut(), area, colors, &visual_lines);
         self.render_paste_hover_tooltip(frame.buffer_mut(), area, colors, &visual_lines);
+    }
+
+    fn set_terminal_cursor_position(&self, frame: &mut ratatui::Frame, area: Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let (cursor_row, cursor_col) = self.textarea.cursor();
+        let wrap_width = area.width as usize;
+        let visual_lines = self.visual_lines(wrap_width);
+
+        // Find the visual line containing the cursor's source row, then compute
+        // the rendered column accounting for wrapping and character widths.
+        let cursor_vl = visual_lines
+            .iter()
+            .skip(self.viewport_top)
+            .take(area.height as usize)
+            .enumerate()
+            .find(|(_, vl)| {
+                vl.source_row == cursor_row
+                    && cursor_col >= vl.start_col
+                    && cursor_col <= vl.end_col
+            });
+
+        if let Some((screen_row, vl)) = cursor_vl {
+            let line = self.textarea.lines().get(cursor_row);
+            let prefix_width = line
+                .map(|l| {
+                    l.chars()
+                        .take(cursor_col)
+                        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+
+            // Account for horizontal scrolling if present
+            let render_col = prefix_width.saturating_sub(vl.start_col);
+            let cursor_x = area.x + render_col.min(area.width.saturating_sub(1) as usize) as u16;
+            let cursor_y = area.y + screen_row as u16;
+
+            frame.set_cursor_position(ratatui::layout::Position {
+                x: cursor_x,
+                y: cursor_y,
+            });
+        }
     }
 
     fn render_visual_line(
@@ -3028,7 +3080,7 @@ mod tests {
         for _ in 0..5 {
             input.textarea.move_cursor(CursorMove::Forward);
         }
-        
+
         assert!(input.has_selection());
         assert_eq!(input.get_selected_text(), "World");
     }
@@ -3038,18 +3090,92 @@ mod tests {
         let mut input = Input::new();
         // "안녕하세요" = 5 Korean chars, each 3 bytes in UTF-8 (total 15 bytes)
         input.insert_str("안녕하세요");
-        
+
         // Move cursor to char position 2 (after "녕")
         input.textarea.move_cursor(CursorMove::Jump(0, 2));
         input.textarea.start_selection();
-        
+
         // Move cursor forward 2 chars to select chars 2-3 ("하세")
         input.textarea.move_cursor(CursorMove::Forward);
         input.textarea.move_cursor(CursorMove::Forward);
-        
+
         assert!(input.has_selection());
         // Selection is from char 2 to char 4 (chars positions 2 and 3)
         // With the bug, this would produce incorrect bytes; with fix, it should be "하세"
         assert_eq!(input.get_selected_text(), "하세");
+    }
+
+    #[test]
+    fn test_cursor_position_for_ime_cjk() {
+        let mut input = Input::new();
+        // "안녕hello" - 2 CJK chars (width 2 each) + 5 ASCII chars
+        input.insert_str("안녕hello");
+
+        // Cursor at position 2 (after "안녕", before "h")
+        input.textarea.move_cursor(CursorMove::Jump(0, 2));
+
+        let area = Rect::new(0, 0, 80, 5);
+        let (row, col) = input.textarea.cursor();
+        assert_eq!(row, 0);
+        assert_eq!(col, 2);
+
+        // The visual line should contain the cursor's source row
+        let visual_lines = input.visual_lines(area.width as usize);
+        let cursor_vl = visual_lines
+            .iter()
+            .skip(input.viewport_top)
+            .take(area.height as usize)
+            .enumerate()
+            .find(|(_, vl)| vl.source_row == row && col >= vl.start_col && col <= vl.end_col);
+
+        assert!(
+            cursor_vl.is_some(),
+            "Cursor should be found in a visible visual line"
+        );
+
+        let (screen_row, vl) = cursor_vl.unwrap();
+        let line = input.textarea.lines().get(row);
+        let prefix_width: usize = line
+            .map(|l| {
+                l.chars()
+                    .take(col)
+                    .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+
+        let render_col = prefix_width.saturating_sub(vl.start_col);
+
+        // "안녕" = 2 chars, each width 2 = 4 cells
+        assert_eq!(prefix_width, 4, "CJK chars '안녕' should be 4 cells wide");
+        assert_eq!(
+            render_col, 4,
+            "Cursor should be at column 4 (after 2 CJK chars)"
+        );
+        assert_eq!(screen_row, 0, "Cursor should be on the first visible line");
+    }
+
+    #[test]
+    fn test_cursor_position_for_ime_english() {
+        let mut input = Input::new();
+        input.insert_str("Hello World");
+        // Cursor at position 6 (after "Hello ")
+        input.textarea.move_cursor(CursorMove::Jump(0, 6));
+
+        let area = Rect::new(0, 0, 80, 5);
+
+        let visual_lines = input.visual_lines(area.width as usize);
+        let (row, col) = input.textarea.cursor();
+        assert_eq!(col, 6);
+
+        let cursor_vl = visual_lines
+            .iter()
+            .skip(input.viewport_top)
+            .take(area.height as usize)
+            .enumerate()
+            .find(|(_, vl)| vl.source_row == row && col >= vl.start_col && col <= vl.end_col);
+
+        assert!(cursor_vl.is_some());
+        let (_, _) = cursor_vl.unwrap(); // Verify it was found
     }
 }
