@@ -5,7 +5,7 @@ use crate::ui::scrollbar::{
     render_scrollbar, scrollbar_grab_offset, scrollbar_offset_from_row_with_grab, ScrollMetrics,
 };
 use crate::ui::selection::{non_selectable_style, EdgeScrollDirection, Selection};
-use crate::ui::wrapping::{wrap_styled_line, wrap_styled_lines, WrapOptions};
+use crate::ui::wrapping::{sanitize_styled_line, wrap_styled_line, wrap_styled_lines, WrapOptions};
 use crate::utils::token_counter::StreamingTokenCounter;
 use ratatui::{
     crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
@@ -3461,6 +3461,10 @@ impl Chat {
             self.cached_editor_locations = message_locations;
             self.message_line_positions = message_positions.clone();
             self.cached_positions = message_positions;
+        }
+
+        for line in &mut self.cached_lines {
+            *line = sanitize_styled_line(line);
         }
 
         self.cached_revision = self.render_revision;
@@ -8101,6 +8105,21 @@ mod tests {
         assert!(rendered
             .iter()
             .any(|line| line.contains("But I dont want to do this.")));
+    }
+
+    #[test]
+    fn render_cache_strips_terminal_controls_from_quoted_tool_payloads() {
+        let mut chat = Chat::with_messages(vec![Message::user(
+            "⬢ Ran python3 <<'PY'\n\tfrom pathlib import Path\n\ttext = path.read_text()\u{1b}\nPY",
+        )]);
+        let colors = test_colors();
+
+        chat.ensure_render_cache(80, "model", &colors);
+
+        assert!(chat.cached_lines.iter().all(|line| line
+            .spans
+            .iter()
+            .all(|span| span.content.chars().all(|ch| !ch.is_control()))));
     }
 
     #[test]

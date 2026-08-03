@@ -393,6 +393,9 @@ async fn start_subagent_stream(
                 builder = builder.strip_system_and_developer_messages(true);
                 builder = builder.responses_websocket(true);
             }
+            if session.openai_options.use_responses_lite {
+                builder = builder.responses_lite(true);
+            }
             if session.openai_options.force_tool_strict_false {
                 builder = builder.tool_strict_override(false);
             }

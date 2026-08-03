@@ -106,6 +106,36 @@ fn list_json_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+fn parse_provider_id_set(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+    key: &str,
+) -> BTreeSet<String> {
+    let Some(value) = value else {
+        return BTreeSet::new();
+    };
+    let Some(entries) = value.as_array() else {
+        diagnostics
+            .warnings
+            .push(format!("{key} must be an array of provider IDs"));
+        return BTreeSet::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let Some(provider_id) = entry.as_str() else {
+                diagnostics
+                    .warnings
+                    .push(format!("{key} entries must be provider IDs"));
+                return None;
+            };
+            let provider_id = provider_id.trim();
+            (!provider_id.is_empty()).then(|| provider_id.to_string())
+        })
+        .collect()
+}
+
 fn parse_string_array(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
@@ -392,6 +422,8 @@ pub struct MergedConfig {
     pub agent_permission_rules: HashMap<String, PermissionRules>,
     pub agent_steps: HashMap<String, usize>,
     pub provider_timeouts: HashMap<String, ProviderTimeout>,
+    pub enabled_providers: BTreeSet<String>,
+    pub disabled_providers: BTreeSet<String>,
     pub custom_providers: HashMap<String, CustomProviderConfig>,
     pub notifications: NotificationsConfig,
     pub images: ImagesConfig,
@@ -954,7 +986,9 @@ fn opencode_allowed_keys() -> BTreeSet<&'static str> {
         "default_agent",
         "formatter",
         "disabled_providers",
+        "disabledProviders",
         "enabled_providers",
+        "enabledProviders",
     ]
     .into_iter()
     .collect()
@@ -1226,6 +1260,18 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     );
     out.sync_agent_derived_fields();
     out.provider_timeouts = parse_provider_timeouts(obj.get("provider"), diagnostics);
+    out.enabled_providers = parse_provider_id_set(
+        obj.get("enabled_providers")
+            .or_else(|| obj.get("enabledProviders")),
+        diagnostics,
+        "enabled_providers",
+    );
+    out.disabled_providers = parse_provider_id_set(
+        obj.get("disabled_providers")
+            .or_else(|| obj.get("disabledProviders")),
+        diagnostics,
+        "disabled_providers",
+    );
     out.custom_providers = parse_custom_providers(obj.get("provider"), diagnostics);
 
     let mut notifications = NotificationsConfig::default();
@@ -2383,6 +2429,10 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "command",
         "agent",
         "provider",
+        "disabled_providers",
+        "disabledProviders",
+        "enabled_providers",
+        "enabledProviders",
         "notifications",
         "images",
         "websearch",
@@ -2429,6 +2479,31 @@ mod tests {
             config.small_model.as_deref(),
             Some("anthropic/claude-haiku")
         );
+    }
+
+    #[test]
+    fn parses_enabled_and_disabled_providers() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "enabledProviders": [" anthropic ", "openai", ""],
+                "disabled_providers": ["openai", 42]
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.enabled_providers,
+            BTreeSet::from(["anthropic".to_string(), "openai".to_string()])
+        );
+        assert_eq!(
+            config.disabled_providers,
+            BTreeSet::from(["openai".to_string()])
+        );
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("disabled_providers entries")));
     }
 
     #[test]

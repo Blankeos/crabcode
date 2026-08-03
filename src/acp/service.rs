@@ -1,17 +1,20 @@
 use crate::config::configuration::LoadedConfig;
 use crate::session::manager::SessionManager;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, EmbeddedResourceResource, ListSessionsResponse,
-    LoadSessionResponse, NewSessionResponse, PermissionOption, PermissionOptionKind,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionResponse,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
-    SessionConfigSelectOption, SessionInfo, SessionMode, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, ContentBlock, ContentChunk,
+    EmbeddedResourceResource, ListSessionsResponse, LoadSessionResponse, McpServer,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionResponse, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo,
+    SessionMode, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, UsageUpdate,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
+use base64::Engine as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -22,15 +25,206 @@ pub struct AcpService {
     session_manager: Arc<Mutex<SessionManager>>,
 }
 
+fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
+    let mut commands: Vec<_> = session
+        .config
+        .merged_config
+        .commands
+        .iter()
+        .map(|command| {
+            let description = command
+                .description
+                .clone()
+                .unwrap_or_else(|| format!("Run /{}", command.name));
+            let mut available = AvailableCommand::new(command.name.clone(), description);
+            if command.template.contains("$ARGUMENTS") {
+                available = available.input(AvailableCommandInput::Unstructured(
+                    UnstructuredCommandInput::new("Arguments"),
+                ));
+            }
+            available
+        })
+        .collect();
+    commands.extend(session.skills.all().into_iter().map(|skill| {
+        AvailableCommand::new(
+            skill.name.clone(),
+            skill
+                .description
+                .clone()
+                .unwrap_or_else(|| format!("Use the {} skill", skill.name)),
+        )
+        .input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("Task or context for this skill"),
+        ))
+    }));
+    commands.push(AvailableCommand::new(
+        "skills",
+        "List skills available in this workspace",
+    ));
+    commands.push(AvailableCommand::new(
+        "mcp",
+        "List configured MCP servers and their status",
+    ));
+    commands.sort_by(|left, right| left.name.cmp(&right.name));
+    commands.dedup_by(|left, right| left.name == right.name);
+    commands
+}
+
+async fn expand_slash_command(session: &AcpSession, prompt: &str) -> Result<String, Error> {
+    let Some(command_line) = prompt.strip_prefix('/') else {
+        return Ok(prompt.to_string());
+    };
+    let (name, args) = command_line
+        .split_once(char::is_whitespace)
+        .map(|(name, args)| (name, args.trim_start()))
+        .unwrap_or((command_line, ""));
+    if let Some(command) = session
+        .config
+        .merged_config
+        .commands
+        .iter()
+        .find(|command| command.name == name)
+    {
+        return command
+            .render(args)
+            .await
+            .map(|rendered| rendered.prompt)
+            .map_err(|_| internal_error());
+    }
+    if let Some(skill) = session.skills.get(name) {
+        let mut expanded = skill.content.clone();
+        if !args.is_empty() {
+            expanded.push_str("\n\nUser task/context:\n");
+            expanded.push_str(args);
+        }
+        return Ok(expanded);
+    }
+    if name == "skills" {
+        let skills = session
+            .skills
+            .all()
+            .into_iter()
+            .map(|skill| {
+                format!(
+                    "- /{} — {}",
+                    skill.name,
+                    skill.description.as_deref().unwrap_or("No description")
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok(if skills.is_empty() {
+            "No skills are available in this workspace.".to_string()
+        } else {
+            format!("Available workspace skills:\n{}", skills.join("\n"))
+        });
+    }
+    if name == "mcp" {
+        let servers = session
+            .config
+            .merged_config
+            .mcp
+            .iter()
+            .map(|(name, server)| {
+                format!(
+                    "- {} ({}, {})",
+                    name,
+                    server.kind(),
+                    if server.enabled() {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok(if servers.is_empty() {
+            "No MCP servers are configured for this workspace.".to_string()
+        } else {
+            format!("Configured MCP servers:\n{}", servers.join("\n"))
+        });
+    }
+    Ok(prompt.to_string())
+}
+
+fn merge_acp_mcp_servers(config: &mut LoadedConfig, servers: Vec<McpServer>) {
+    for server in servers {
+        let (name, server) = match server {
+            McpServer::Stdio(server) => {
+                let mut command = vec![server.command.to_string_lossy().into_owned()];
+                command.extend(server.args);
+                (
+                    server.name,
+                    crate::config::configuration::McpServerConfig::Local(
+                        crate::config::configuration::McpLocalConfig {
+                            command,
+                            cwd: None,
+                            environment: server
+                                .env
+                                .into_iter()
+                                .map(|variable| (variable.name, variable.value))
+                                .collect(),
+                            enabled: true,
+                            timeout_ms: None,
+                        },
+                    ),
+                )
+            }
+            McpServer::Http(server) => (
+                server.name,
+                crate::config::configuration::McpServerConfig::Remote(
+                    crate::config::configuration::McpRemoteConfig {
+                        url: server.url,
+                        headers: server
+                            .headers
+                            .into_iter()
+                            .map(|header| (header.name, header.value))
+                            .collect(),
+                        enabled: true,
+                        timeout_ms: None,
+                        oauth_enabled: false,
+                        oauth_client_id: None,
+                        oauth_client_secret: None,
+                        oauth_scope: None,
+                    },
+                ),
+            ),
+            McpServer::Sse(server) => (
+                server.name,
+                crate::config::configuration::McpServerConfig::Remote(
+                    crate::config::configuration::McpRemoteConfig {
+                        url: server.url,
+                        headers: server
+                            .headers
+                            .into_iter()
+                            .map(|header| (header.name, header.value))
+                            .collect(),
+                        enabled: true,
+                        timeout_ms: None,
+                        oauth_enabled: false,
+                        oauth_client_id: None,
+                        oauth_client_secret: None,
+                        oauth_scope: None,
+                    },
+                ),
+            ),
+            #[allow(unreachable_patterns)]
+            _ => continue,
+        };
+        config.merged_config.mcp.insert(name, server);
+    }
+}
+
 #[derive(Clone)]
 struct AcpSession {
     cwd: PathBuf,
     config: LoadedConfig,
+    skills: crate::skill::SkillStore,
     models: Vec<crate::model::types::Model>,
     provider: String,
     model: String,
     agent: String,
     reasoning: Option<crate::model::reasoning::ReasoningEffort>,
+    context_window: Option<u32>,
     cancellation: Option<CancellationToken>,
 }
 
@@ -45,14 +239,33 @@ impl AcpService {
         })
     }
 
-    pub async fn new_session(&self, cwd: PathBuf) -> Result<NewSessionResponse, Error> {
+    pub async fn available_commands(
+        &self,
+        session_id: &str,
+    ) -> Result<AvailableCommandsUpdate, Error> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        Ok(AvailableCommandsUpdate::new(available_commands(session)))
+    }
+
+    pub async fn new_session(
+        &self,
+        cwd: PathBuf,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<NewSessionResponse, Error> {
         let cwd = workspace_path(&cwd)?;
-        let config = crate::config::ConfigLoader::load_for(&cwd).map_err(|_| internal_error())?;
+        let mut config =
+            crate::config::ConfigLoader::load_for(&cwd).map_err(|_| internal_error())?;
+        merge_acp_mcp_servers(&mut config, mcp_servers);
         crate::skill::init_skill_store(&config.xdg_config_home, &config.project_root);
         let (provider, model) = resolve_model(&config);
         let models = crate::model::catalog::selectable_models(&config, None)
             .await
             .map_err(|_| internal_error())?;
+        let reasoning = model_reasoning(&config, &models, &provider, &model);
+        let context_window = model_context_window(&config, &provider, &model);
         let agent = config
             .merged_config
             .default_agent
@@ -73,16 +286,19 @@ impl AcpService {
             manager.create_session(Some("New session".to_string()))
         };
 
+        let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
         self.sessions.lock().await.insert(
             session_id.clone(),
             AcpSession {
                 cwd,
                 config,
+                skills,
                 models,
                 provider,
                 model,
                 agent,
-                reasoning: None,
+                reasoning,
+                context_window,
                 cancellation: None,
             },
         );
@@ -228,7 +444,43 @@ impl AcpService {
         let model = find_selectable_model(&session.models, model_ref)?;
         session.provider.clone_from(&model.provider_id);
         session.model.clone_from(&model.id);
-        session.reasoning = None;
+        session.reasoning = model_reasoning(
+            &session.config,
+            &session.models,
+            &session.provider,
+            &session.model,
+        );
+        session.context_window =
+            model_context_window(&session.config, &session.provider, &session.model);
+        Ok(SetSessionConfigOptionResponse::new(session_config_options(
+            session,
+        )))
+    }
+
+    pub async fn set_reasoning_effort(
+        &self,
+        session_id: &str,
+        value: &str,
+    ) -> Result<SetSessionConfigOptionResponse, Error> {
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        let capability = model_reasoning_capability(
+            &session.config,
+            &session.models,
+            &session.provider,
+            &session.model,
+        )
+        .ok_or_else(|| Error::invalid_params().data("reasoning effort is unavailable"))?;
+        let requested = value
+            .parse::<crate::model::reasoning::ReasoningEffort>()
+            .map_err(|_| Error::invalid_params().data("invalid reasoning effort"))?;
+        if !capability.values().contains(&requested) {
+            return Err(Error::invalid_params().data("unsupported reasoning effort"));
+        }
+        session.reasoning =
+            (requested != crate::model::reasoning::ReasoningEffort::None).then_some(requested);
         Ok(SetSessionConfigOptionResponse::new(session_config_options(
             session,
         )))
@@ -282,14 +534,19 @@ impl AcpService {
                             .to_string()
                     })
             });
+        let reasoning = model_reasoning(&config, &models, &provider, &model);
+        let context_window = model_context_window(&config, &provider, &model);
+        let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
         let session = AcpSession {
             cwd,
             config,
+            skills,
             models,
             provider,
             model,
             agent,
-            reasoning: None,
+            reasoning,
+            context_window,
             cancellation: None,
         };
         self.sessions
@@ -305,11 +562,6 @@ impl AcpService {
         prompt: Vec<ContentBlock>,
         connection: ConnectionTo<Client>,
     ) -> Result<PromptResponse, Error> {
-        let prompt = prompt_text(prompt)?;
-        if prompt.trim().is_empty() {
-            return Err(Error::invalid_params().data("prompt must include text content"));
-        }
-
         let session = self
             .sessions
             .lock()
@@ -317,6 +569,16 @@ impl AcpService {
             .get(&session_id)
             .cloned()
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        let supports_images = session
+            .models
+            .iter()
+            .find(|model| model.provider_id == session.provider && model.id == session.model)
+            .is_some_and(|model| model.attachment);
+        let (prompt, local_image_paths) = prompt_content(prompt, supports_images, &session)?;
+        let prompt = expand_slash_command(&session, &prompt).await?;
+        if prompt.trim().is_empty() {
+            return Err(Error::invalid_params().data("prompt must include text content"));
+        }
         let cancellation = CancellationToken::new();
         {
             let mut sessions = self.sessions.lock().await;
@@ -337,6 +599,7 @@ impl AcpService {
             stored.messages.clone()
         };
         let mut user_message = crate::session::types::Message::user(&prompt);
+        user_message.local_image_paths = local_image_paths;
         user_message.provider = Some(session.provider.clone());
         user_message.model = Some(session.model.clone());
         user_message.agent_mode = Some(session.agent.clone());
@@ -380,6 +643,8 @@ impl AcpService {
         .compose()
         .await;
         messages.insert(0, crate::session::types::Message::system(system_prompt));
+        let base_context_tokens = crate::session::compaction::total_context_tokens(&messages);
+        send_usage(&connection, &session_id, &session, base_context_tokens)?;
 
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let stream_session_id = session_id.clone();
@@ -446,6 +711,19 @@ impl AcpService {
                     }));
                     send_tool_result(&connection, &session_id, result)?;
                 }
+                crate::llm::ChunkMessage::Metrics {
+                    token_count,
+                    duration_ms,
+                } => {
+                    assistant.token_count = Some(token_count);
+                    assistant.duration_ms = Some(duration_ms);
+                    send_usage(
+                        &connection,
+                        &session_id,
+                        &session,
+                        base_context_tokens.saturating_add(token_count),
+                    )?;
+                }
                 crate::llm::ChunkMessage::Cancelled => cancelled = true,
                 crate::llm::ChunkMessage::Failed(error) => failed = Some(error),
                 crate::llm::ChunkMessage::PermissionRequest(prompt) => {
@@ -490,8 +768,8 @@ impl AcpService {
         if assistant.was_interrupted {
             return Ok(PromptResponse::new(StopReason::Cancelled));
         }
-        if failed.is_some() {
-            return Err(internal_error());
+        if let Some(error) = failed {
+            return Err(internal_error_with(&error));
         }
         Ok(PromptResponse::new(StopReason::EndTurn))
     }
@@ -563,11 +841,37 @@ fn session_config_options(session: &AcpSession) -> Vec<SessionConfigOption> {
         .collect::<Vec<_>>();
     mode_options.sort_by(|left, right| left.name.cmp(&right.name));
 
-    vec![
+    let mut options = vec![
         SessionConfigOption::select("mode", "Mode", session.agent.clone(), mode_options)
             .category(SessionConfigOptionCategory::Mode),
         model_config_option(&session.models, &session.provider, &session.model),
-    ]
+    ];
+    if let Some(option) = reasoning_config_option(session) {
+        options.push(option);
+    }
+    options
+}
+
+fn reasoning_config_option(session: &AcpSession) -> Option<SessionConfigOption> {
+    let capability = model_reasoning_capability(
+        &session.config,
+        &session.models,
+        &session.provider,
+        &session.model,
+    )?;
+    let options = capability
+        .values()
+        .iter()
+        .map(|effort| SessionConfigSelectOption::new(effort.as_str(), effort.as_str()))
+        .collect::<Vec<_>>();
+    let current = session
+        .reasoning
+        .map(|effort| effort.as_str())
+        .unwrap_or("none");
+    Some(
+        SessionConfigOption::select("reasoning_effort", "Reasoning effort", current, options)
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+    )
 }
 
 fn model_config_option(
@@ -620,6 +924,57 @@ fn find_selectable_model<'a>(
         .ok_or_else(|| Error::invalid_params().data("unknown or unavailable ACP model"))
 }
 
+fn model_reasoning(
+    config: &LoadedConfig,
+    models: &[crate::model::types::Model],
+    provider: &str,
+    model_id: &str,
+) -> Option<crate::model::reasoning::ReasoningEffort> {
+    model_reasoning_capability(config, models, provider, model_id)
+        .and_then(|capability| capability.resolve(None))
+}
+
+fn model_reasoning_capability(
+    config: &LoadedConfig,
+    models: &[crate::model::types::Model],
+    provider: &str,
+    model_id: &str,
+) -> Option<crate::model::reasoning::ReasoningCapability> {
+    if let Some(capability) = models
+        .iter()
+        .find(|model| model.provider_id == provider && model.id == model_id)
+        .and_then(|model| {
+            crate::model::reasoning::capability_from_options(&model.reasoning_options)
+        })
+    {
+        return Some(capability);
+    }
+    crate::model::discovery::Discovery::new_with_custom(Some(
+        config.merged_config.custom_providers.clone(),
+    ))
+    .ok()
+    .and_then(|discovery| discovery.get_model_reasoning_capability(provider, model_id))
+    .filter(|capability| !capability.values().is_empty())
+}
+
+fn model_context_window(config: &LoadedConfig, provider: &str, model: &str) -> Option<u32> {
+    let discovery = crate::model::discovery::Discovery::new_with_custom(Some(
+        config.merged_config.custom_providers.clone(),
+    ))
+    .ok();
+    discovery
+        .as_ref()
+        .and_then(|discovery| discovery.get_model_limit(provider, model))
+        .or_else(|| {
+            config
+                .merged_config
+                .custom_providers
+                .get(provider)
+                .and_then(|provider| provider.models.get(model))
+                .and_then(|model| model.context_window)
+        })
+}
+
 fn workspace_path(path: &Path) -> Result<PathBuf, Error> {
     if !path.is_absolute() {
         return Err(Error::invalid_params().data("cwd must be an absolute path"));
@@ -633,8 +988,15 @@ fn workspace_path(path: &Path) -> Result<PathBuf, Error> {
     Ok(path)
 }
 
-fn prompt_text(parts: Vec<ContentBlock>) -> Result<String, Error> {
+static ACP_IMAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn prompt_content(
+    parts: Vec<ContentBlock>,
+    supports_images: bool,
+    session: &AcpSession,
+) -> Result<(String, Vec<String>), Error> {
     let mut text = String::new();
+    let mut local_image_paths = Vec::new();
     for part in parts {
         match part {
             ContentBlock::Text(content) => text.push_str(&content.text),
@@ -650,14 +1012,113 @@ fn prompt_text(parts: Vec<ContentBlock>) -> Result<String, Error> {
                 }
                 _ => {}
             },
+            ContentBlock::Image(image) => {
+                if !supports_images {
+                    return Err(Error::invalid_params().data(format!(
+                        "model {}/{} does not support image input",
+                        session.provider, session.model
+                    )));
+                }
+                local_image_paths.push(write_prompt_image(&image)?);
+            }
+            ContentBlock::Audio(_) => {
+                return Err(Error::invalid_params().data("audio ACP prompts are not supported yet"));
+            }
+            _ => {}
+        }
+    }
+    if text.is_empty() && !local_image_paths.is_empty() {
+        text.push_str("[Image attached]");
+    }
+    Ok((text, local_image_paths))
+}
+
+fn prompt_text(parts: Vec<ContentBlock>) -> Result<String, Error> {
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            ContentBlock::Text(content) => text.push_str(&content.text),
+            ContentBlock::ResourceLink(link) => text.push_str(&format!("[{}]", link.uri)),
+            ContentBlock::Resource(resource) => match resource.resource {
+                EmbeddedResourceResource::TextResourceContents(resource) => {
+                    text.push_str(&format!("[{}]\n{}", resource.uri, resource.text));
+                }
+                EmbeddedResourceResource::BlobResourceContents(resource) => {
+                    text.push_str(&format!("[{}]", resource.uri));
+                }
+                _ => {}
+            },
             ContentBlock::Image(_) | ContentBlock::Audio(_) => {
-                return Err(Error::invalid_params()
-                    .data("image and audio ACP prompts are not supported yet"));
+                return Err(
+                    Error::invalid_params().data("binary ACP prompt content is not supported here")
+                );
             }
             _ => {}
         }
     }
     Ok(text)
+}
+
+fn write_prompt_image(
+    image: &agent_client_protocol::schema::v1::ImageContent,
+) -> Result<String, Error> {
+    const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+    let (mime_type, encoded_data) = prompt_image_payload(image)?;
+    let extension = match mime_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        mime_type => {
+            return Err(
+                Error::invalid_params().data(format!("unsupported image MIME type: {mime_type}"))
+            );
+        }
+    };
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(encoded_data)
+        .map_err(|error| Error::invalid_params().data(format!("invalid image data: {error}")))?;
+    if data.len() > MAX_IMAGE_BYTES {
+        return Err(Error::invalid_params().data("image exceeds the 20 MiB size limit"));
+    }
+
+    let directory = std::env::temp_dir().join("crabcode").join("acp-images");
+    std::fs::create_dir_all(&directory).map_err(|_| internal_error())?;
+    let sequence = ACP_IMAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = directory.join(format!("{}-{sequence}.{extension}", std::process::id()));
+    std::fs::write(&path, data).map_err(|_| internal_error())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn prompt_image_payload(
+    image: &agent_client_protocol::schema::v1::ImageContent,
+) -> Result<(&str, &str), Error> {
+    let data = image.data.trim();
+    if data.is_empty() {
+        return Err(Error::invalid_params().data("image data is empty"));
+    }
+
+    let Some(data_uri) = data.strip_prefix("data:") else {
+        return Ok((image.mime_type.as_str(), data));
+    };
+    let (metadata, payload) = data_uri
+        .split_once(',')
+        .ok_or_else(|| Error::invalid_params().data("invalid image data URI"))?;
+    let mut metadata = metadata.split(';');
+    let mime_type = metadata
+        .next()
+        .filter(|mime_type| !mime_type.is_empty())
+        .ok_or_else(|| Error::invalid_params().data("image data URI is missing a MIME type"))?;
+    if !metadata.any(|value| value.eq_ignore_ascii_case("base64")) {
+        return Err(Error::invalid_params().data("image data URI must be base64 encoded"));
+    }
+    let payload = payload.trim();
+    if payload.is_empty() {
+        return Err(Error::invalid_params().data("image data is empty"));
+    }
+
+    Ok((mime_type, payload))
 }
 
 fn send_text(
@@ -781,6 +1242,21 @@ fn send_tool_result(
         .content((!text.is_empty()).then(|| vec![ToolCallContent::from(text)]))
         .raw_output(payload);
     let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(result.tool_call_id, fields));
+    connection
+        .send_notification(SessionNotification::new(session_id.to_string(), update))
+        .map_err(|_| internal_error())
+}
+
+fn send_usage(
+    connection: &ConnectionTo<Client>,
+    session_id: &str,
+    session: &AcpSession,
+    used: usize,
+) -> Result<(), Error> {
+    let Some(size) = session.context_window else {
+        return Ok(());
+    };
+    let update = SessionUpdate::UsageUpdate(UsageUpdate::new(used as u64, size as u64));
     connection
         .send_notification(SessionNotification::new(session_id.to_string(), update))
         .map_err(|_| internal_error())
@@ -963,6 +1439,10 @@ fn internal_error() -> Error {
     Error::internal_error().data("Crabcode ACP operation failed")
 }
 
+fn internal_error_with(error: &str) -> Error {
+    Error::internal_error().data(format!("Crabcode ACP operation failed: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,6 +1465,15 @@ mod tests {
             local: false,
             reasoning_options: Vec::new(),
         }
+    }
+
+    fn reasoning_model() -> crate::model::types::Model {
+        let mut model = model("openai", "OpenAI", "o3", "o3");
+        model.reasoning_options = vec![crate::model::reasoning::ReasoningOption {
+            kind: "effort".to_string(),
+            values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+        }];
+        model
     }
 
     #[test]
@@ -1023,6 +1512,233 @@ mod tests {
         .expect("prompt text");
 
         assert_eq!(text, "Inspect this.[file:///tmp/main.rs]\nfn main() {}");
+    }
+
+    #[test]
+    fn writes_supported_acp_image_to_temp_file() {
+        let image = agent_client_protocol::schema::v1::ImageContent::new("aGk=", "image/png");
+        let path = write_prompt_image(&image).expect("image file");
+
+        assert_eq!(std::fs::read(&path).expect("image bytes"), b"hi");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn writes_acp_clipboard_image_data_uri_to_temp_file() {
+        let image = agent_client_protocol::schema::v1::ImageContent::new(
+            "data:image/png;base64,aGk=",
+            "application/octet-stream",
+        );
+        let path = write_prompt_image(&image).expect("image file");
+
+        assert!(path.ends_with(".png"));
+        assert_eq!(std::fs::read(&path).expect("image bytes"), b"hi");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_non_base64_acp_image_data_uri() {
+        let image = agent_client_protocol::schema::v1::ImageContent::new(
+            "data:image/png,not-base64",
+            "image/png",
+        );
+
+        assert!(write_prompt_image(&image).is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_acp_image_mime_type() {
+        let image = agent_client_protocol::schema::v1::ImageContent::new("aGk=", "image/tiff");
+
+        assert!(write_prompt_image(&image).is_err());
+    }
+
+    fn config_with_command(command: crate::command::custom::CustomCommand) -> LoadedConfig {
+        let mut merged_config = crate::config::configuration::MergedConfig::default();
+        merged_config.commands.push(command);
+        LoadedConfig {
+            merged_config,
+            raw_merged: serde_json::Value::Null,
+            diagnostics: Default::default(),
+            inventory: Default::default(),
+            project_root: PathBuf::from("/tmp"),
+            cwd: PathBuf::from("/tmp"),
+            xdg_config_home: PathBuf::from("/tmp"),
+        }
+    }
+
+    fn session_with_config(config: LoadedConfig) -> AcpSession {
+        let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
+        AcpSession {
+            cwd: config.cwd.clone(),
+            config,
+            skills,
+            models: Vec::new(),
+            provider: String::new(),
+            model: String::new(),
+            agent: "Build".to_string(),
+            reasoning: None,
+            context_window: None,
+            cancellation: None,
+        }
+    }
+
+    #[test]
+    fn advertises_custom_commands_with_argument_input() {
+        let config = config_with_command(crate::command::custom::CustomCommand {
+            name: "review".to_string(),
+            description: Some("Review selected code".to_string()),
+            template: "Review: $ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(PathBuf::from(
+                "/tmp/opencode.jsonc",
+            )),
+            workdir: PathBuf::from("/tmp"),
+        });
+
+        let session = session_with_config(config);
+        let commands = available_commands(&session);
+
+        let command = commands
+            .iter()
+            .find(|command| command.name == "review")
+            .expect("review command");
+        assert!(commands.iter().any(|command| command.name == "skills"));
+        assert!(commands.iter().any(|command| command.name == "mcp"));
+        assert_eq!(command.description, "Review selected code");
+        assert!(matches!(
+            command.input,
+            Some(AvailableCommandInput::Unstructured(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn expands_custom_slash_command_before_prompting() {
+        let config = config_with_command(crate::command::custom::CustomCommand {
+            name: "review".to_string(),
+            description: None,
+            template: "Review this carefully: $ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(PathBuf::from(
+                "/tmp/opencode.jsonc",
+            )),
+            workdir: PathBuf::from("/tmp"),
+        });
+
+        let session = session_with_config(config);
+        let prompt = expand_slash_command(&session, "/review src/acp/service.rs")
+            .await
+            .expect("expanded command");
+
+        assert_eq!(prompt, "Review this carefully: src/acp/service.rs");
+    }
+
+    #[tokio::test]
+    async fn advertises_and_expands_workspace_skills() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let skill_dir = temp.path().join(".opencode/skill/reviewer");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: reviewer\ndescription: Review code carefully\n---\nInspect correctness and risks.",
+        )
+        .expect("skill file");
+        let mut config = config_with_command(crate::command::custom::CustomCommand {
+            name: "custom".to_string(),
+            description: None,
+            template: "$ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(
+                temp.path().join("opencode.jsonc"),
+            ),
+            workdir: temp.path().to_path_buf(),
+        });
+        config.project_root = temp.path().to_path_buf();
+        config.cwd = temp.path().to_path_buf();
+        config.xdg_config_home = temp.path().join("config");
+        let session = session_with_config(config);
+
+        let commands = available_commands(&session);
+        assert!(commands.iter().any(|command| command.name == "reviewer"));
+        let prompt = expand_slash_command(&session, "/reviewer src/lib.rs")
+            .await
+            .expect("expanded skill");
+        assert!(prompt.contains("Inspect correctness and risks."));
+        assert!(prompt.contains("src/lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn reports_configured_mcp_servers() {
+        let mut config = config_with_command(crate::command::custom::CustomCommand {
+            name: "custom".to_string(),
+            description: None,
+            template: "$ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(PathBuf::from(
+                "/tmp/opencode.jsonc",
+            )),
+            workdir: PathBuf::from("/tmp"),
+        });
+        config.merged_config.mcp.insert(
+            "filesystem".to_string(),
+            crate::config::configuration::McpServerConfig::Local(
+                crate::config::configuration::McpLocalConfig {
+                    command: vec!["mcp-server".to_string()],
+                    cwd: None,
+                    environment: Default::default(),
+                    enabled: true,
+                    timeout_ms: None,
+                },
+            ),
+        );
+        let session = session_with_config(config);
+
+        let prompt = expand_slash_command(&session, "/mcp")
+            .await
+            .expect("mcp status");
+        assert!(prompt.contains("filesystem (local, enabled)"));
+    }
+
+    #[test]
+    fn merges_client_mcp_servers_into_session_config() {
+        let mut config = config_with_command(crate::command::custom::CustomCommand {
+            name: "custom".to_string(),
+            description: None,
+            template: "$ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(PathBuf::from(
+                "/tmp/opencode.jsonc",
+            )),
+            workdir: PathBuf::from("/tmp"),
+        });
+        merge_acp_mcp_servers(
+            &mut config,
+            vec![serde_json::from_value(serde_json::json!({
+                "name": "zed-fs",
+                "command": "mcp-server",
+                "args": ["--stdio"],
+                "env": [{"name": "ROOT", "value": "/workspace"}]
+            }))
+            .expect("ACP stdio MCP server")],
+        );
+
+        let server = config
+            .merged_config
+            .mcp
+            .get("zed-fs")
+            .expect("merged ACP MCP server");
+        assert_eq!(server.kind(), "local");
+        assert!(server.enabled());
     }
 
     #[test]
@@ -1071,5 +1787,36 @@ mod tests {
         );
         assert!(find_selectable_model(&models, "openai/missing").is_err());
         assert!(find_selectable_model(&models, "other/gpt-5").is_err());
+    }
+
+    #[test]
+    fn exposes_reasoning_effort_config_for_supported_models() {
+        let model = reasoning_model();
+        let session = AcpSession {
+            cwd: PathBuf::from("/tmp"),
+            config: crate::config::configuration::LoadedConfig {
+                merged_config: crate::config::configuration::MergedConfig::default(),
+                raw_merged: serde_json::Value::Null,
+                diagnostics: Default::default(),
+                inventory: Default::default(),
+                project_root: PathBuf::from("/tmp"),
+                cwd: PathBuf::from("/tmp"),
+                xdg_config_home: PathBuf::from("/tmp"),
+            },
+            skills: crate::skill::SkillStore::load(Path::new("/tmp"), Path::new("/tmp")),
+            models: vec![model],
+            provider: "openai".to_string(),
+            model: "o3".to_string(),
+            agent: "Build".to_string(),
+            reasoning: Some(crate::model::reasoning::ReasoningEffort::Medium),
+            context_window: None,
+            cancellation: None,
+        };
+        let option = reasoning_config_option(&session).expect("reasoning option");
+        assert_eq!(option.id.to_string(), "reasoning_effort");
+        assert_eq!(
+            option.category,
+            Some(SessionConfigOptionCategory::ThoughtLevel)
+        );
     }
 }

@@ -790,7 +790,13 @@ async fn prepare_request_config(
     let model_route = resolve_model_route(&provider, model);
     let provider_kind = ProviderKind::from_provider(provider_name, &model_route.npm_package);
     let base_url = if provider_name == "xai" && model_route.api.trim().is_empty() {
+        // models.dev currently ships empty api for xAI; default to the public endpoint.
         "https://api.x.ai".to_string()
+    } else if is_vercel_ai_gateway(provider_name, &model_route.npm_package)
+        && model_route.api.trim().is_empty()
+    {
+        // models.dev ships empty api for Vercel AI Gateway; OpenAI client appends /v1/...
+        "https://ai-gateway.vercel.sh".to_string()
     } else {
         provider_kind.normalize_base_url(&model_route.api)
     };
@@ -1075,10 +1081,6 @@ async fn maybe_apply_openai_oauth_overrides(
     request_config.openai_options.disallow_system_messages = true;
     request_config.openai_options.force_tool_strict_false = true;
 
-    request_config
-        .openai_options
-        .additional_headers
-        .insert("originator".to_string(), "crabcode".to_string());
     request_config.openai_options.additional_headers.insert(
         "User-Agent".to_string(),
         crate::auth::openai_oauth::build_user_agent(),
@@ -1104,6 +1106,17 @@ async fn maybe_apply_openai_oauth_overrides(
         );
         request_config.model_name = fallback_model;
     }
+    request_config.openai_options.use_responses_lite =
+        openai_oauth_model_uses_responses_lite(&request_config.model_name);
+    let default_originator =
+        openai_oauth_default_originator(request_config.openai_options.use_responses_lite);
+    request_config.openai_options.additional_headers.insert(
+        "originator".to_string(),
+        std::env::var("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
+            .ok()
+            .filter(|originator| !originator.trim().is_empty())
+            .unwrap_or_else(|| default_originator.to_string()),
+    );
 
     Ok(())
 }
@@ -1275,6 +1288,9 @@ async fn stream_provider_request(
             if config.openai_options.disallow_system_messages {
                 builder = builder.responses_websocket(true);
             }
+            if config.openai_options.use_responses_lite {
+                builder = builder.responses_lite(true);
+            }
             if let Some(cache_key) = config.openai_options.prompt_cache_key.as_deref() {
                 builder = builder.prompt_cache_key(cache_key);
             }
@@ -1349,11 +1365,12 @@ fn log_stream_request(context: StreamLogContext<'_>, config: &ProviderRequestCon
         .collect::<Vec<_>>();
     header_names.sort_unstable();
     crate::emit_log!(
-        "[STREAM_REQUEST] {} reasoning_effort={} responses_path={:?} force_store_false={} prompt_cache_key={} disallow_system_messages={} force_tool_strict_false={} extra_header_names=[{}]",
+        "[STREAM_REQUEST] {} reasoning_effort={} responses_path={:?} force_store_false={} responses_lite={} prompt_cache_key={} disallow_system_messages={} force_tool_strict_false={} extra_header_names=[{}]",
         context.describe(),
         reasoning_effort,
         config.openai_options.response_path,
         config.openai_options.force_store_false,
+        config.openai_options.use_responses_lite,
         config
             .openai_options
             .prompt_cache_key
@@ -2039,9 +2056,29 @@ fn truncate_for_tool_observation(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn is_vercel_ai_gateway(provider_name: &str, npm_package: &str) -> bool {
+    provider_name == "vercel" || npm_package == "@ai-sdk/gateway"
+}
+
 fn is_openai_oauth_model_allowed(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
     model.contains("codex") || is_openai_oauth_gpt5_model(&model)
+}
+
+fn openai_oauth_model_uses_responses_lite(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    let model = model.strip_prefix("openai/").unwrap_or(&model);
+    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+        .iter()
+        .any(|lite_model| model == *lite_model || model.starts_with(&format!("{lite_model}-")))
+}
+
+fn openai_oauth_default_originator(use_responses_lite: bool) -> &'static str {
+    if use_responses_lite {
+        "codex_cli_rs"
+    } else {
+        "crabcode"
+    }
 }
 
 fn is_openai_oauth_gpt5_model(model: &str) -> bool {
@@ -2098,7 +2135,8 @@ mod tests {
     use super::{
         apply_provider_request_defaults, convert_messages, convert_messages_for_model,
         is_openai_oauth_model_allowed, maybe_apply_unauthenticated_free_provider_key,
-        model_supports_image_input, openai_request_instructions, resolve_api_key,
+        model_supports_image_input, openai_oauth_default_originator,
+        openai_oauth_model_uses_responses_lite, openai_request_instructions, resolve_api_key,
         resolve_model_route, vlm_agent_has_model, AisdkMessage, OpenAIRequestOptions, ProviderKind,
         ProviderRequestConfig,
     };
@@ -2162,6 +2200,23 @@ mod tests {
         assert!(is_openai_oauth_model_allowed("gpt-5.4"));
         assert!(is_openai_oauth_model_allowed("gpt-5.5"));
         assert!(is_openai_oauth_model_allowed("openai/gpt-5.6"));
+    }
+
+    #[test]
+    fn openai_oauth_uses_responses_lite_only_for_current_gpt56_codex_models() {
+        assert!(openai_oauth_model_uses_responses_lite("gpt-5.6-sol"));
+        assert!(openai_oauth_model_uses_responses_lite(
+            "openai/gpt-5.6-terra"
+        ));
+        assert!(openai_oauth_model_uses_responses_lite("gpt-5.6-luna-high"));
+        assert!(!openai_oauth_model_uses_responses_lite("gpt-5.5"));
+        assert!(!openai_oauth_model_uses_responses_lite("gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn openai_oauth_uses_codex_originator_only_for_responses_lite() {
+        assert_eq!(openai_oauth_default_originator(true), "codex_cli_rs");
+        assert_eq!(openai_oauth_default_originator(false), "crabcode");
     }
 
     #[test]
@@ -2384,6 +2439,46 @@ mod tests {
         assert_eq!(
             ProviderKind::from_provider("xai", &route.npm_package),
             ProviderKind::OpenAI
+        );
+    }
+
+    #[test]
+    fn vercel_gateway_defaults_to_ai_gateway_base_url() {
+        let provider: crate::model::discovery::Provider =
+            serde_json::from_value(serde_json::json!({
+                "id": "vercel",
+                "name": "Vercel AI Gateway",
+                "api": "",
+                "npm": "@ai-sdk/gateway",
+                "env": ["AI_GATEWAY_API_KEY"],
+                "models": {
+                    "moonshotai/kimi-k3": {
+                        "id": "moonshotai/kimi-k3",
+                        "name": "Kimi K3"
+                    }
+                }
+            }))
+            .unwrap();
+
+        let route = resolve_model_route(&provider, "moonshotai/kimi-k3".to_string());
+        assert_eq!(route.npm_package, "@ai-sdk/gateway");
+        assert_eq!(route.api, "");
+        assert_eq!(route.model_name, "moonshotai/kimi-k3");
+        assert!(super::is_vercel_ai_gateway("vercel", &route.npm_package));
+        assert_eq!(
+            ProviderKind::from_provider("vercel", &route.npm_package),
+            ProviderKind::OpenAI
+        );
+        // Empty api must not fall through to api.openai.com.
+        assert_eq!(
+            if super::is_vercel_ai_gateway("vercel", &route.npm_package)
+                && route.api.trim().is_empty()
+            {
+                "https://ai-gateway.vercel.sh".to_string()
+            } else {
+                ProviderKind::OpenAI.normalize_base_url(&route.api)
+            },
+            "https://ai-gateway.vercel.sh"
         );
     }
 
