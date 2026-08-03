@@ -67,6 +67,7 @@ pub async fn selectable_models(
 
     models.retain(|model| {
         is_model_selectable(model, &connected_provider_ids, &configured_provider_ids)
+            && provider_is_enabled(&config.merged_config, &model.provider_id)
             && provider_matches(&model.provider_id, provider_filter)
     });
     models.sort_by(|left, right| {
@@ -98,6 +99,14 @@ fn provider_matches(provider_id: &str, provider_filter: Option<&str>) -> bool {
     provider_filter.is_none_or(|filter| provider_id == filter)
 }
 
+fn provider_is_enabled(
+    config: &crate::config::configuration::MergedConfig,
+    provider_id: &str,
+) -> bool {
+    !config.disabled_providers.contains(provider_id)
+        && (config.enabled_providers.is_empty() || config.enabled_providers.contains(provider_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +134,18 @@ mod tests {
         assert!(provider_matches("opencode", Some("opencode")));
         assert!(!provider_matches("opencode-go", Some("opencode")));
         assert!(provider_matches("opencode-go", None));
+    }
+
+    #[test]
+    fn provider_policy_applies_allowlist_and_blocklist() {
+        let mut config = crate::config::configuration::MergedConfig::default();
+        assert!(provider_is_enabled(&config, "openai"));
+
+        config.enabled_providers.insert("anthropic".into());
+        assert!(provider_is_enabled(&config, "anthropic"));
+        assert!(!provider_is_enabled(&config, "openai"));
+
+        config.disabled_providers.insert("anthropic".into());
+        assert!(!provider_is_enabled(&config, "anthropic"));
     }
 }
