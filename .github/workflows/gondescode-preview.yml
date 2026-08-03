@@ -23,8 +23,6 @@ jobs:
         include:
           - platform: macos-arm64
             runner: macos-14
-          - platform: macos-x64
-            runner: macos-13
           - platform: linux-x64
             runner: ubuntu-22.04
     runs-on: ${{ matrix.runner }}
@@ -95,15 +93,6 @@ jobs:
           \`\`\`sh
           curl -fL -o gondescode.tar.gz \\
             "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/gondescode-${SHORT_SHA::7}-macos-arm64.tar.gz"
-          tar -xzf gondescode.tar.gz
-          install -m 755 gondescode ~/.local/bin/gondescode
-          \`\`\`
-
-          ### macOS (Intel)
-
-          \`\`\`sh
-          curl -fL -o gondescode.tar.gz \\
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/gondescode-${SHORT_SHA::7}-macos-x64.tar.gz"
           tar -xzf gondescode.tar.gz
           install -m 755 gondescode ~/.local/bin/gondescode
           \`\`\`
