@@ -402,7 +402,7 @@ async fn run_print_mode(
         is_git_repo,
         std::env::consts::OS,
     )
-    .with_tool_registry(prompt_registry)
+    .with_tool_registry(prompt_registry.clone())
     .with_agent_registry(agent_registry.clone())
     .with_print_mode(true);
     let system_prompt = composer.compose().await;
@@ -427,6 +427,7 @@ async fn run_print_mode(
             websearch_config,
             mcp_config,
             cwd,
+            Some(prompt_registry),
             messages,
             sender,
         )
