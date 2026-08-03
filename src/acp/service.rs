@@ -637,7 +637,7 @@ impl AcpService {
             is_git_repo,
             std::env::consts::OS,
         )
-        .with_tool_registry(prompt_registry)
+        .with_tool_registry(prompt_registry.clone())
         .with_agent_registry(session.config.merged_config.agent_registry.clone())
         .with_active_agent(session.agent.clone())
         .compose()
@@ -651,6 +651,7 @@ impl AcpService {
         let stream_cancellation = cancellation.clone();
         let stream_sender = sender.clone();
         let stream_session = session.clone();
+        let stream_tool_registry = prompt_registry;
         tokio::spawn(async move {
             let result = crate::llm::client::stream_llm_with_cancellation(
                 stream_cancellation,
@@ -670,6 +671,7 @@ impl AcpService {
                 stream_session.config.merged_config.websearch.clone(),
                 stream_session.config.merged_config.mcp.clone(),
                 stream_session.cwd.to_string_lossy().to_string(),
+                Some(stream_tool_registry),
                 messages,
                 sender,
             )

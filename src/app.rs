@@ -9475,6 +9475,7 @@ impl App {
                 websearch_config,
                 mcp_config,
                 cwd,
+                None,
                 messages,
                 sender_clone.clone(),
             );
