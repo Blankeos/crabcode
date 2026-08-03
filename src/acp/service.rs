@@ -851,7 +851,8 @@ fn write_prompt_image(
 ) -> Result<String, Error> {
     const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
-    let extension = match image.mime_type.as_str() {
+    let (mime_type, encoded_data) = prompt_image_payload(image)?;
+    let extension = match mime_type {
         "image/png" => "png",
         "image/jpeg" => "jpg",
         "image/gif" => "gif",
@@ -863,7 +864,7 @@ fn write_prompt_image(
         }
     };
     let data = base64::engine::general_purpose::STANDARD
-        .decode(&image.data)
+        .decode(encoded_data)
         .map_err(|error| Error::invalid_params().data(format!("invalid image data: {error}")))?;
     if data.len() > MAX_IMAGE_BYTES {
         return Err(Error::invalid_params().data("image exceeds the 20 MiB size limit"));
@@ -875,6 +876,36 @@ fn write_prompt_image(
     let path = directory.join(format!("{}-{sequence}.{extension}", std::process::id()));
     std::fs::write(&path, data).map_err(|_| internal_error())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+fn prompt_image_payload(
+    image: &agent_client_protocol::schema::v1::ImageContent,
+) -> Result<(&str, &str), Error> {
+    let data = image.data.trim();
+    if data.is_empty() {
+        return Err(Error::invalid_params().data("image data is empty"));
+    }
+
+    let Some(data_uri) = data.strip_prefix("data:") else {
+        return Ok((image.mime_type.as_str(), data));
+    };
+    let (metadata, payload) = data_uri
+        .split_once(',')
+        .ok_or_else(|| Error::invalid_params().data("invalid image data URI"))?;
+    let mut metadata = metadata.split(';');
+    let mime_type = metadata
+        .next()
+        .filter(|mime_type| !mime_type.is_empty())
+        .ok_or_else(|| Error::invalid_params().data("image data URI is missing a MIME type"))?;
+    if !metadata.any(|value| value.eq_ignore_ascii_case("base64")) {
+        return Err(Error::invalid_params().data("image data URI must be base64 encoded"));
+    }
+    let payload = payload.trim();
+    if payload.is_empty() {
+        return Err(Error::invalid_params().data("image data is empty"));
+    }
+
+    Ok((mime_type, payload))
 }
 
 fn send_text(
@@ -1277,6 +1308,29 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).expect("image bytes"), b"hi");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn writes_acp_clipboard_image_data_uri_to_temp_file() {
+        let image = agent_client_protocol::schema::v1::ImageContent::new(
+            "data:image/png;base64,aGk=",
+            "application/octet-stream",
+        );
+        let path = write_prompt_image(&image).expect("image file");
+
+        assert!(path.ends_with(".png"));
+        assert_eq!(std::fs::read(&path).expect("image bytes"), b"hi");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_non_base64_acp_image_data_uri() {
+        let image = agent_client_protocol::schema::v1::ImageContent::new(
+            "data:image/png,not-base64",
+            "image/png",
+        );
+
+        assert!(write_prompt_image(&image).is_err());
     }
 
     #[test]
