@@ -1,13 +1,14 @@
 use crate::config::configuration::LoadedConfig;
 use crate::session::manager::SessionManager;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ContentChunk, EmbeddedResourceResource, ListSessionsResponse,
-    LoadSessionResponse, NewSessionResponse, PermissionOption, PermissionOptionKind,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionResponse,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
-    SessionConfigSelectOption, SessionInfo, SessionMode, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
+    AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, ContentBlock, ContentChunk,
+    EmbeddedResourceResource, ListSessionsResponse, LoadSessionResponse, McpServer,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionResponse, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo,
+    SessionMode, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, UsageUpdate,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
 use base64::Engine as _;
@@ -24,10 +25,200 @@ pub struct AcpService {
     session_manager: Arc<Mutex<SessionManager>>,
 }
 
+fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
+    let mut commands: Vec<_> = session
+        .config
+        .merged_config
+        .commands
+        .iter()
+        .map(|command| {
+            let description = command
+                .description
+                .clone()
+                .unwrap_or_else(|| format!("Run /{}", command.name));
+            let mut available = AvailableCommand::new(command.name.clone(), description);
+            if command.template.contains("$ARGUMENTS") {
+                available = available.input(AvailableCommandInput::Unstructured(
+                    UnstructuredCommandInput::new("Arguments"),
+                ));
+            }
+            available
+        })
+        .collect();
+    commands.extend(session.skills.all().into_iter().map(|skill| {
+        AvailableCommand::new(
+            skill.name.clone(),
+            skill
+                .description
+                .clone()
+                .unwrap_or_else(|| format!("Use the {} skill", skill.name)),
+        )
+        .input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("Task or context for this skill"),
+        ))
+    }));
+    commands.push(AvailableCommand::new(
+        "skills",
+        "List skills available in this workspace",
+    ));
+    commands.push(AvailableCommand::new(
+        "mcp",
+        "List configured MCP servers and their status",
+    ));
+    commands.sort_by(|left, right| left.name.cmp(&right.name));
+    commands.dedup_by(|left, right| left.name == right.name);
+    commands
+}
+
+async fn expand_slash_command(session: &AcpSession, prompt: &str) -> Result<String, Error> {
+    let Some(command_line) = prompt.strip_prefix('/') else {
+        return Ok(prompt.to_string());
+    };
+    let (name, args) = command_line
+        .split_once(char::is_whitespace)
+        .map(|(name, args)| (name, args.trim_start()))
+        .unwrap_or((command_line, ""));
+    if let Some(command) = session
+        .config
+        .merged_config
+        .commands
+        .iter()
+        .find(|command| command.name == name)
+    {
+        return command
+            .render(args)
+            .await
+            .map(|rendered| rendered.prompt)
+            .map_err(|_| internal_error());
+    }
+    if let Some(skill) = session.skills.get(name) {
+        let mut expanded = skill.content.clone();
+        if !args.is_empty() {
+            expanded.push_str("\n\nUser task/context:\n");
+            expanded.push_str(args);
+        }
+        return Ok(expanded);
+    }
+    if name == "skills" {
+        let skills = session
+            .skills
+            .all()
+            .into_iter()
+            .map(|skill| {
+                format!(
+                    "- /{} — {}",
+                    skill.name,
+                    skill.description.as_deref().unwrap_or("No description")
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok(if skills.is_empty() {
+            "No skills are available in this workspace.".to_string()
+        } else {
+            format!("Available workspace skills:\n{}", skills.join("\n"))
+        });
+    }
+    if name == "mcp" {
+        let servers = session
+            .config
+            .merged_config
+            .mcp
+            .iter()
+            .map(|(name, server)| {
+                format!(
+                    "- {} ({}, {})",
+                    name,
+                    server.kind(),
+                    if server.enabled() {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok(if servers.is_empty() {
+            "No MCP servers are configured for this workspace.".to_string()
+        } else {
+            format!("Configured MCP servers:\n{}", servers.join("\n"))
+        });
+    }
+    Ok(prompt.to_string())
+}
+
+fn merge_acp_mcp_servers(config: &mut LoadedConfig, servers: Vec<McpServer>) {
+    for server in servers {
+        let (name, server) = match server {
+            McpServer::Stdio(server) => {
+                let mut command = vec![server.command.to_string_lossy().into_owned()];
+                command.extend(server.args);
+                (
+                    server.name,
+                    crate::config::configuration::McpServerConfig::Local(
+                        crate::config::configuration::McpLocalConfig {
+                            command,
+                            cwd: None,
+                            environment: server
+                                .env
+                                .into_iter()
+                                .map(|variable| (variable.name, variable.value))
+                                .collect(),
+                            enabled: true,
+                            timeout_ms: None,
+                        },
+                    ),
+                )
+            }
+            McpServer::Http(server) => (
+                server.name,
+                crate::config::configuration::McpServerConfig::Remote(
+                    crate::config::configuration::McpRemoteConfig {
+                        url: server.url,
+                        headers: server
+                            .headers
+                            .into_iter()
+                            .map(|header| (header.name, header.value))
+                            .collect(),
+                        enabled: true,
+                        timeout_ms: None,
+                        oauth_enabled: false,
+                        oauth_client_id: None,
+                        oauth_client_secret: None,
+                        oauth_scope: None,
+                    },
+                ),
+            ),
+            McpServer::Sse(server) => (
+                server.name,
+                crate::config::configuration::McpServerConfig::Remote(
+                    crate::config::configuration::McpRemoteConfig {
+                        url: server.url,
+                        headers: server
+                            .headers
+                            .into_iter()
+                            .map(|header| (header.name, header.value))
+                            .collect(),
+                        enabled: true,
+                        timeout_ms: None,
+                        oauth_enabled: false,
+                        oauth_client_id: None,
+                        oauth_client_secret: None,
+                        oauth_scope: None,
+                    },
+                ),
+            ),
+            #[allow(unreachable_patterns)]
+            _ => continue,
+        };
+        config.merged_config.mcp.insert(name, server);
+    }
+}
+
 #[derive(Clone)]
 struct AcpSession {
     cwd: PathBuf,
     config: LoadedConfig,
+    skills: crate::skill::SkillStore,
     models: Vec<crate::model::types::Model>,
     provider: String,
     model: String,
@@ -48,9 +239,26 @@ impl AcpService {
         })
     }
 
-    pub async fn new_session(&self, cwd: PathBuf) -> Result<NewSessionResponse, Error> {
+    pub async fn available_commands(
+        &self,
+        session_id: &str,
+    ) -> Result<AvailableCommandsUpdate, Error> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        Ok(AvailableCommandsUpdate::new(available_commands(session)))
+    }
+
+    pub async fn new_session(
+        &self,
+        cwd: PathBuf,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<NewSessionResponse, Error> {
         let cwd = workspace_path(&cwd)?;
-        let config = crate::config::ConfigLoader::load_for(&cwd).map_err(|_| internal_error())?;
+        let mut config =
+            crate::config::ConfigLoader::load_for(&cwd).map_err(|_| internal_error())?;
+        merge_acp_mcp_servers(&mut config, mcp_servers);
         crate::skill::init_skill_store(&config.xdg_config_home, &config.project_root);
         let (provider, model) = resolve_model(&config);
         let models = crate::model::catalog::selectable_models(&config, None)
@@ -78,11 +286,13 @@ impl AcpService {
             manager.create_session(Some("New session".to_string()))
         };
 
+        let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
         self.sessions.lock().await.insert(
             session_id.clone(),
             AcpSession {
                 cwd,
                 config,
+                skills,
                 models,
                 provider,
                 model,
@@ -326,9 +536,11 @@ impl AcpService {
             });
         let reasoning = model_reasoning(&config, &models, &provider, &model);
         let context_window = model_context_window(&config, &provider, &model);
+        let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
         let session = AcpSession {
             cwd,
             config,
+            skills,
             models,
             provider,
             model,
@@ -363,6 +575,7 @@ impl AcpService {
             .find(|model| model.provider_id == session.provider && model.id == session.model)
             .is_some_and(|model| model.attachment);
         let (prompt, local_image_paths) = prompt_content(prompt, supports_images, &session)?;
+        let prompt = expand_slash_command(&session, &prompt).await?;
         if prompt.trim().is_empty() {
             return Err(Error::invalid_params().data("prompt must include text content"));
         }
@@ -1340,6 +1553,194 @@ mod tests {
         assert!(write_prompt_image(&image).is_err());
     }
 
+    fn config_with_command(command: crate::command::custom::CustomCommand) -> LoadedConfig {
+        let mut merged_config = crate::config::configuration::MergedConfig::default();
+        merged_config.commands.push(command);
+        LoadedConfig {
+            merged_config,
+            raw_merged: serde_json::Value::Null,
+            diagnostics: Default::default(),
+            inventory: Default::default(),
+            project_root: PathBuf::from("/tmp"),
+            cwd: PathBuf::from("/tmp"),
+            xdg_config_home: PathBuf::from("/tmp"),
+        }
+    }
+
+    fn session_with_config(config: LoadedConfig) -> AcpSession {
+        let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
+        AcpSession {
+            cwd: config.cwd.clone(),
+            config,
+            skills,
+            models: Vec::new(),
+            provider: String::new(),
+            model: String::new(),
+            agent: "Build".to_string(),
+            reasoning: None,
+            context_window: None,
+            cancellation: None,
+        }
+    }
+
+    #[test]
+    fn advertises_custom_commands_with_argument_input() {
+        let config = config_with_command(crate::command::custom::CustomCommand {
+            name: "review".to_string(),
+            description: Some("Review selected code".to_string()),
+            template: "Review: $ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(PathBuf::from(
+                "/tmp/opencode.jsonc",
+            )),
+            workdir: PathBuf::from("/tmp"),
+        });
+
+        let session = session_with_config(config);
+        let commands = available_commands(&session);
+
+        let command = commands
+            .iter()
+            .find(|command| command.name == "review")
+            .expect("review command");
+        assert!(commands.iter().any(|command| command.name == "skills"));
+        assert!(commands.iter().any(|command| command.name == "mcp"));
+        assert_eq!(command.description, "Review selected code");
+        assert!(matches!(
+            command.input,
+            Some(AvailableCommandInput::Unstructured(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn expands_custom_slash_command_before_prompting() {
+        let config = config_with_command(crate::command::custom::CustomCommand {
+            name: "review".to_string(),
+            description: None,
+            template: "Review this carefully: $ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(PathBuf::from(
+                "/tmp/opencode.jsonc",
+            )),
+            workdir: PathBuf::from("/tmp"),
+        });
+
+        let session = session_with_config(config);
+        let prompt = expand_slash_command(&session, "/review src/acp/service.rs")
+            .await
+            .expect("expanded command");
+
+        assert_eq!(prompt, "Review this carefully: src/acp/service.rs");
+    }
+
+    #[tokio::test]
+    async fn advertises_and_expands_workspace_skills() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let skill_dir = temp.path().join(".opencode/skill/reviewer");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: reviewer\ndescription: Review code carefully\n---\nInspect correctness and risks.",
+        )
+        .expect("skill file");
+        let mut config = config_with_command(crate::command::custom::CustomCommand {
+            name: "custom".to_string(),
+            description: None,
+            template: "$ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(
+                temp.path().join("opencode.jsonc"),
+            ),
+            workdir: temp.path().to_path_buf(),
+        });
+        config.project_root = temp.path().to_path_buf();
+        config.cwd = temp.path().to_path_buf();
+        config.xdg_config_home = temp.path().join("config");
+        let session = session_with_config(config);
+
+        let commands = available_commands(&session);
+        assert!(commands.iter().any(|command| command.name == "reviewer"));
+        let prompt = expand_slash_command(&session, "/reviewer src/lib.rs")
+            .await
+            .expect("expanded skill");
+        assert!(prompt.contains("Inspect correctness and risks."));
+        assert!(prompt.contains("src/lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn reports_configured_mcp_servers() {
+        let mut config = config_with_command(crate::command::custom::CustomCommand {
+            name: "custom".to_string(),
+            description: None,
+            template: "$ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(PathBuf::from(
+                "/tmp/opencode.jsonc",
+            )),
+            workdir: PathBuf::from("/tmp"),
+        });
+        config.merged_config.mcp.insert(
+            "filesystem".to_string(),
+            crate::config::configuration::McpServerConfig::Local(
+                crate::config::configuration::McpLocalConfig {
+                    command: vec!["mcp-server".to_string()],
+                    cwd: None,
+                    environment: Default::default(),
+                    enabled: true,
+                    timeout_ms: None,
+                },
+            ),
+        );
+        let session = session_with_config(config);
+
+        let prompt = expand_slash_command(&session, "/mcp")
+            .await
+            .expect("mcp status");
+        assert!(prompt.contains("filesystem (local, enabled)"));
+    }
+
+    #[test]
+    fn merges_client_mcp_servers_into_session_config() {
+        let mut config = config_with_command(crate::command::custom::CustomCommand {
+            name: "custom".to_string(),
+            description: None,
+            template: "$ARGUMENTS".to_string(),
+            agent: None,
+            model: None,
+            subtask: Some(false),
+            source: crate::command::custom::CustomCommandSource::Config(PathBuf::from(
+                "/tmp/opencode.jsonc",
+            )),
+            workdir: PathBuf::from("/tmp"),
+        });
+        merge_acp_mcp_servers(
+            &mut config,
+            vec![serde_json::from_value(serde_json::json!({
+                "name": "zed-fs",
+                "command": "mcp-server",
+                "args": ["--stdio"],
+                "env": [{"name": "ROOT", "value": "/workspace"}]
+            }))
+            .expect("ACP stdio MCP server")],
+        );
+
+        let server = config
+            .merged_config
+            .mcp
+            .get("zed-fs")
+            .expect("merged ACP MCP server");
+        assert_eq!(server.kind(), "local");
+        assert!(server.enabled());
+    }
+
     #[test]
     fn rejects_non_absolute_workspaces() {
         assert!(workspace_path(Path::new("relative")).is_err());
@@ -1402,6 +1803,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp"),
                 xdg_config_home: PathBuf::from("/tmp"),
             },
+            skills: crate::skill::SkillStore::load(Path::new("/tmp"), Path::new("/tmp")),
             models: vec![model],
             provider: "openai".to_string(),
             model: "o3".to_string(),

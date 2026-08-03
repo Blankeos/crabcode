@@ -1,9 +1,10 @@
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse,
     ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PromptCapabilities, PromptRequest,
-    ResumeSessionRequest, SessionCapabilities, SessionCloseCapabilities, SessionForkCapabilities,
-    SessionListCapabilities, SessionResumeCapabilities, SetSessionConfigOptionRequest,
+    ListSessionsRequest, LoadSessionRequest, McpCapabilities, NewSessionRequest,
+    PromptCapabilities, PromptRequest, ResumeSessionRequest, SessionCapabilities,
+    SessionCloseCapabilities, SessionForkCapabilities, SessionListCapabilities,
+    SessionNotification, SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionModeRequest, SetSessionModeResponse,
 };
 use agent_client_protocol::{Agent, Stdio};
@@ -117,11 +118,24 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
             {
                 let service = service.clone();
                 async move |request: LoadSessionRequest, responder, connection| {
-                    responder.respond_with_result(
-                        service
-                            .load_session(request.session_id.to_string(), request.cwd, connection)
-                            .await,
-                    )
+                    let session_id = request.session_id;
+                    let service = service.clone();
+                    let task_connection = connection.clone();
+                    connection.spawn(async move {
+                        let response = service
+                            .load_session(
+                                session_id.to_string(),
+                                request.cwd,
+                                task_connection.clone(),
+                            )
+                            .await?;
+                        let commands = service.available_commands(&session_id.to_string()).await?;
+                        responder.respond(response)?;
+                        task_connection.send_notification(SessionNotification::new(
+                            session_id,
+                            SessionUpdate::AvailableCommandsUpdate(commands),
+                        ))
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -129,12 +143,21 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
         .on_receive_request(
             {
                 let service = service.clone();
-                async move |request: ResumeSessionRequest, responder, _connection| {
-                    responder.respond_with_result(
-                        service
-                            .resume_session(request.session_id.to_string(), request.cwd)
-                            .await,
-                    )
+                async move |request: ResumeSessionRequest, responder, connection| {
+                    let session_id = request.session_id;
+                    let service = service.clone();
+                    let task_connection = connection.clone();
+                    connection.spawn(async move {
+                        let response = service
+                            .resume_session(session_id.to_string(), request.cwd)
+                            .await?;
+                        let commands = service.available_commands(&session_id.to_string()).await?;
+                        responder.respond(response)?;
+                        task_connection.send_notification(SessionNotification::new(
+                            session_id,
+                            SessionUpdate::AvailableCommandsUpdate(commands),
+                        ))
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -142,8 +165,21 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
         .on_receive_request(
             {
                 let service = service.clone();
-                async move |request: NewSessionRequest, responder, _connection| {
-                    responder.respond_with_result(service.new_session(request.cwd).await)
+                async move |request: NewSessionRequest, responder, connection| {
+                    let service = service.clone();
+                    let task_connection = connection.clone();
+                    connection.spawn(async move {
+                        let response = service
+                            .new_session(request.cwd, request.mcp_servers)
+                            .await?;
+                        let session_id = response.session_id.clone();
+                        let commands = service.available_commands(&session_id.to_string()).await?;
+                        responder.respond(response)?;
+                        task_connection.send_notification(SessionNotification::new(
+                            session_id,
+                            SessionUpdate::AvailableCommandsUpdate(commands),
+                        ))
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -205,6 +241,7 @@ fn capabilities() -> AgentCapabilities {
     AgentCapabilities::new()
         .load_session(true)
         .prompt_capabilities(PromptCapabilities::new().embedded_context(true).image(true))
+        .mcp_capabilities(McpCapabilities::new().http(true).sse(true))
         .session_capabilities(
             SessionCapabilities::new()
                 .list(SessionListCapabilities::new())
