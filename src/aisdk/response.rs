@@ -518,7 +518,7 @@ pub async fn stream_with_tools<P: Provider>(
                     && phase_less_ambiguous_follow_ups < PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT
                     && provider_finish_reason
                         .as_ref()
-                        .is_none_or(|reason| !reason.is_final_assistant_stop());
+                        .is_some_and(|reason| !reason.is_final_assistant_stop());
                 let needs_follow_up = end_turn_requires_follow_up
                     || commentary_requires_follow_up
                     || phase_less_ambiguous_requires_follow_up;
@@ -1116,8 +1116,17 @@ async fn emit_retry_and_sleep(
     let status = crate::retry::status_for_attempt(retry_error, attempt);
     let delay = std::time::Duration::from_millis(status.delay_ms);
     let _ = tx.send(ChunkType::Metadata(format!(
-        "provider_step_retry step={} attempt={} delay_ms={} next_epoch_ms={} error={}",
-        step_idx, status.attempt, status.delay_ms, status.next_epoch_ms, status.message,
+        "provider_step_retry step={} attempt={} delay_ms={} next_epoch_ms={} error={} raw_error={} status={}",
+        step_idx,
+        status.attempt,
+        status.delay_ms,
+        status.next_epoch_ms,
+        status.message,
+        retry_error.message.replace(['\n', '\r'], " "),
+        retry_error
+            .status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "none".to_string()),
     )));
     let _ = tx.send(ChunkType::Retry(status));
     if let Some(cancel_token) = cancel_token {
@@ -1596,6 +1605,11 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
+    struct PhaselessUnknownTerminalProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
     struct RecoveringToolFailureProvider {
         requests: Arc<AtomicUsize>,
         observed_follow_up: Arc<Mutex<Option<String>>>,
@@ -1938,6 +1952,30 @@ mod tests {
                 Ok(ChunkType::End {
                     reason: Some(FinishReason::Stop),
                 }),
+            ])))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for PhaselessUnknownTerminalProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ChunkType::Text("Done. Build now passes.".to_string())),
+                Ok(ChunkType::ResponseCompleted { end_turn: None }),
             ])))
         }
     }
@@ -2480,6 +2518,46 @@ mod tests {
 
         assert_eq!(text, "I'll inspect that next.Done.");
         assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+    }
+
+    #[tokio::test]
+    async fn phase_less_text_without_finish_metadata_still_finishes() {
+        let provider = PhaselessUnknownTerminalProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let noop_tool = Tool::builder()
+            .name("noop")
+            .description("noop")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(
+                |_input| async move { Ok("ok".to_string()) },
+            ))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("fix the build")],
+            vec![noop_tool],
+            Some(5),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut text = String::new();
+        while let Some(chunk) = response.stream.next().await {
+            if let ChunkType::Text(delta) = chunk {
+                text.push_str(&delta);
+            }
+        }
+
+        assert_eq!(text, "Done. Build now passes.");
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
         assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
     }
 

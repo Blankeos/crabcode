@@ -93,7 +93,15 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
                                 .set_model(&request.session_id.to_string(), &model.to_string())
                                 .await
                         }
-                        ("mode" | "model", None) => {
+                        ("reasoning_effort", Some(effort)) => {
+                            service
+                                .set_reasoning_effort(
+                                    &request.session_id.to_string(),
+                                    &effort.to_string(),
+                                )
+                                .await
+                        }
+                        ("mode" | "model" | "reasoning_effort", None) => {
                             Err(agent_client_protocol::Error::invalid_params()
                                 .data("config option value must be a string"))
                         }
