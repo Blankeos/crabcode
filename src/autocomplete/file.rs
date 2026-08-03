@@ -54,6 +54,14 @@ impl FileAuto {
     }
 
     pub fn new_at(root: impl Into<PathBuf>) -> Self {
+        Self::new_at_with_config(root, true, Vec::new())
+    }
+
+    pub fn new_at_with_config(
+        root: impl Into<PathBuf>,
+        watcher_enabled: bool,
+        ignored_paths: Vec<String>,
+    ) -> Self {
         let root = root.into();
         let (refresh_tx, refresh_rx) = mpsc::sync_channel(1);
         let inner = Arc::new(FileAutoInner {
@@ -67,10 +75,19 @@ impl FileAuto {
 
         if thread::Builder::new()
             .name("crabcode-file-index".to_string())
-            .spawn(move || run_indexer(root, weak_inner, refresh_tx, refresh_rx))
+            .spawn(move || {
+                run_indexer(
+                    root,
+                    weak_inner,
+                    refresh_tx,
+                    refresh_rx,
+                    watcher_enabled,
+                    ignored_paths,
+                )
+            })
             .is_err()
         {
-            publish_entries(&fallback_inner, collect_entries(&fallback_root));
+            publish_entries(&fallback_inner, collect_entries(&fallback_root, &[]));
         }
 
         Self { inner }
@@ -173,8 +190,12 @@ fn run_indexer(
     inner: Weak<FileAutoInner>,
     refresh_tx: SyncSender<()>,
     refresh_rx: Receiver<()>,
+    watcher_enabled: bool,
+    ignored_paths: Vec<String>,
 ) {
-    let watcher = create_watcher(&root, refresh_tx);
+    let watcher = watcher_enabled
+        .then(|| create_watcher(&root, refresh_tx))
+        .flatten();
     let safety_refresh_interval = if watcher.is_some() {
         WATCHED_SAFETY_REFRESH_INTERVAL
     } else {
@@ -182,7 +203,7 @@ fn run_indexer(
     };
     let mut last_refresh = Instant::now();
 
-    if !refresh_index(&root, &inner) {
+    if !refresh_index(&root, &inner, &ignored_paths) {
         return;
     }
 
@@ -202,7 +223,7 @@ fn run_indexer(
         }
 
         if refresh_requested || last_refresh.elapsed() >= safety_refresh_interval {
-            if !refresh_index(&root, &inner) {
+            if !refresh_index(&root, &inner, &ignored_paths) {
                 break;
             }
             last_refresh = Instant::now();
@@ -263,8 +284,8 @@ fn event_requires_refresh(event: &Event) -> bool {
     })
 }
 
-fn refresh_index(root: &Path, inner: &Weak<FileAutoInner>) -> bool {
-    let entries = collect_entries(root);
+fn refresh_index(root: &Path, inner: &Weak<FileAutoInner>, ignored_paths: &[String]) -> bool {
+    let entries = collect_entries(root, ignored_paths);
     let Some(inner) = inner.upgrade() else {
         return false;
     };
@@ -282,7 +303,7 @@ fn publish_entries(inner: &FileAutoInner, entries: Vec<FileEntry>) {
     inner.state_changed.notify_all();
 }
 
-fn collect_entries(root: &Path) -> Vec<FileEntry> {
+fn collect_entries(root: &Path, ignored_paths: &[String]) -> Vec<FileEntry> {
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -308,6 +329,12 @@ fn collect_entries(root: &Path) -> Vec<FileEntry> {
                 .unwrap_or(path);
             let mut display = rel.to_string_lossy().replace('\\', "/");
             if display.is_empty() {
+                return None;
+            }
+            if ignored_paths.iter().any(|pattern| {
+                let pattern = pattern.trim_end_matches('/');
+                display == pattern || display.starts_with(&format!("{pattern}/"))
+            }) {
                 return None;
             }
             if is_directory && !display.ends_with('/') {

@@ -211,6 +211,7 @@ pub struct ToolPermissions {
     agent_policies: Arc<AgentToolPolicies>,
     permission_rules: Arc<PermissionRules>,
     agent_permission_rules: Arc<HashMap<String, PermissionRules>>,
+    global_tool_config: Arc<HashMap<String, bool>>,
     dangerously_skip_permissions: bool,
 }
 
@@ -224,12 +225,18 @@ impl ToolPermissions {
             agent_policies: Arc::new(AgentToolPolicies::default()),
             permission_rules: Arc::new(Vec::new()),
             agent_permission_rules: Arc::new(HashMap::new()),
+            global_tool_config: Arc::new(HashMap::new()),
             dangerously_skip_permissions: false,
         }
     }
 
     pub fn with_agent_policies(mut self, policies: AgentToolPolicies) -> Self {
         self.agent_policies = Arc::new(policies);
+        self
+    }
+
+    pub fn with_global_tool_config(mut self, tools: HashMap<String, bool>) -> Self {
+        self.global_tool_config = Arc::new(tools);
         self
     }
 
@@ -264,6 +271,11 @@ impl ToolPermissions {
 
     pub fn is_tool_allowed_for_agent(&self, agent_mode: &str, tool_id: &str) -> bool {
         self.agent_policies.is_allowed(agent_mode, tool_id)
+            && self
+                .global_tool_config
+                .get(tool_id)
+                .copied()
+                .unwrap_or(true)
     }
 
     pub fn is_tool_visible_for_agent(&self, agent_mode: &str, tool_id: &str) -> bool {

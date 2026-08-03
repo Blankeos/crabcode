@@ -153,6 +153,8 @@ pub struct Discovery {
     cache_path: PathBuf,
     custom_providers:
         Option<std::collections::HashMap<String, crate::config::CustomProviderConfig>>,
+    disabled_providers: std::collections::HashSet<String>,
+    enabled_providers: Option<std::collections::HashSet<String>>,
 }
 
 pub fn is_model_selectable(
@@ -296,17 +298,32 @@ impl Discovery {
     }
 
     pub fn new() -> Result<Self> {
-        // Try to load custom providers from config file
-        let custom_providers = crate::config::ConfigLoader::load()
-            .map(|loaded| loaded.merged_config.custom_providers)
-            .ok();
-        Self::new_with_custom(custom_providers)
+        let loaded = crate::config::ConfigLoader::load().ok();
+        let custom_providers = loaded
+            .as_ref()
+            .map(|loaded| loaded.merged_config.custom_providers.clone());
+        let disabled_providers = loaded
+            .as_ref()
+            .map(|loaded| loaded.merged_config.disabled_providers.clone())
+            .unwrap_or_default();
+        let enabled_providers = loaded.and_then(|loaded| loaded.merged_config.enabled_providers);
+        Self::new_with_config(custom_providers, disabled_providers, enabled_providers)
     }
 
     pub fn new_with_custom(
         custom_providers: Option<
             std::collections::HashMap<String, crate::config::CustomProviderConfig>,
         >,
+    ) -> Result<Self> {
+        Self::new_with_config(custom_providers, Default::default(), None)
+    }
+
+    fn new_with_config(
+        custom_providers: Option<
+            std::collections::HashMap<String, crate::config::CustomProviderConfig>,
+        >,
+        disabled_providers: std::collections::HashSet<String>,
+        enabled_providers: Option<std::collections::HashSet<String>>,
     ) -> Result<Self> {
         if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
             let cache_dir = PathBuf::from("/tmp/crabcode_test_cache");
@@ -318,6 +335,8 @@ impl Discovery {
                 client: shared_http_client()?,
                 cache_path,
                 custom_providers,
+                disabled_providers,
+                enabled_providers,
             })
         } else {
             crate::persistence::ensure_cache_dir().context("Failed to create cache directory")?;
@@ -329,8 +348,18 @@ impl Discovery {
                 client: shared_http_client()?,
                 cache_path,
                 custom_providers,
+                disabled_providers,
+                enabled_providers,
             })
         }
+    }
+
+    fn provider_is_enabled(&self, provider_id: &str) -> bool {
+        !self.disabled_providers.contains(provider_id)
+            && self
+                .enabled_providers
+                .as_ref()
+                .is_none_or(|enabled| enabled.contains(provider_id))
     }
 
     pub fn cache_path(&self) -> &PathBuf {
@@ -659,6 +688,7 @@ impl Discovery {
 
     pub async fn fetch_models(&self) -> Result<Vec<crate::model::types::Model>> {
         let mut models = crate::model::extensions::ModelExtensions::runtime_models_from_cache();
+        models.retain(|model| self.provider_is_enabled(&model.provider_id));
         let cache_key = (
             self.get_cache_path().clone(),
             self.custom_provider_dialog_signature(),
@@ -670,6 +700,7 @@ impl Discovery {
             .filter(|cached| cached.cached_at.elapsed().as_secs() <= CACHE_TTL_SECONDS)
         {
             models.extend(cached.models);
+            models.retain(|model| self.provider_is_enabled(&model.provider_id));
             return Ok(models);
         }
 
@@ -682,6 +713,9 @@ impl Discovery {
         let mut persistent_models = Vec::new();
 
         for (provider_id, provider) in providers {
+            if !self.provider_is_enabled(&provider_id) {
+                continue;
+            }
             if crate::model::extensions::ModelExtensions::is_runtime_provider(&provider_id) {
                 continue;
             }

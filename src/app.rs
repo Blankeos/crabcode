@@ -1017,8 +1017,13 @@ impl App {
             })
             .collect();
         input.autocomplete = Some(
-            AutoComplete::new_at(crate::autocomplete::CommandAuto::new(&registry), &cwd_path)
-                .with_agents(agent_suggestions),
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::new(&registry),
+                &cwd_path,
+                loaded_config.merged_config.watcher.is_enabled(),
+                loaded_config.merged_config.watcher.ignored_paths().to_vec(),
+            )
+            .with_agents(agent_suggestions),
         );
 
         if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {

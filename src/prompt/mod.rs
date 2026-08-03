@@ -38,6 +38,7 @@ pub struct SystemPromptComposer {
     tool_registry: Option<ToolRegistry>,
     agent_registry: Option<crate::agent::definition::AgentRegistry>,
     active_agent: Option<String>,
+    custom_instructions: String,
 }
 
 impl SystemPromptComposer {
@@ -56,6 +57,7 @@ impl SystemPromptComposer {
             tool_registry: None,
             agent_registry: None,
             active_agent: None,
+            custom_instructions: String::new(),
         }
     }
 
@@ -82,6 +84,11 @@ impl SystemPromptComposer {
         self
     }
 
+    pub fn with_custom_instructions(mut self, instructions: String) -> Self {
+        self.custom_instructions = instructions;
+        self
+    }
+
     pub async fn compose(&self) -> String {
         let mut parts = Vec::new();
 
@@ -91,6 +98,12 @@ impl SystemPromptComposer {
             parts.push(self.get_print_mode_context());
         }
         parts.push(self.get_environment_context());
+        if !self.custom_instructions.is_empty() {
+            parts.push(format!(
+                "\n# Custom Instructions\n{}",
+                self.custom_instructions
+            ));
+        }
 
         if let Some(ref registry) = self.tool_registry {
             parts.push(self.get_tools_context(registry).await);

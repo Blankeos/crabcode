@@ -367,6 +367,7 @@ async fn run_print_mode(
         print_mode_permission_rules(loaded_config.merged_config.permission_rules.clone());
     let tool_permissions = crate::tools::ToolPermissions::new(std::path::PathBuf::from(&cwd))
         .with_agent_policies(agent_policies)
+        .with_global_tool_config(loaded_config.merged_config.tools.clone())
         .with_permission_rules(permission_rules)
         .with_agent_permission_rules(agent_registry.permission_rules_map())
         .dangerously_skip_permissions(dangerously_skip_permissions);
@@ -402,6 +403,7 @@ async fn run_print_mode(
     )
     .with_tool_registry(prompt_registry)
     .with_agent_registry(agent_registry.clone())
+    .with_custom_instructions(loaded_config.merged_config.instructions.join("\n\n"))
     .with_print_mode(true);
     let system_prompt = composer.compose().await;
     let messages = vec![Message::system(system_prompt), Message::user(prompt)];

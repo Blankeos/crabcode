@@ -4,7 +4,7 @@ use crate::tools::{
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -373,6 +373,53 @@ impl McpServerConfig {
 
 pub type McpConfig = BTreeMap<String, McpServerConfig>;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CompactionConfig {
+    #[default]
+    Enabled,
+    Disabled,
+    Settings {
+        auto: bool,
+        prune: bool,
+    },
+}
+
+impl CompactionConfig {
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum WatcherConfig {
+    #[default]
+    Enabled,
+    Disabled,
+    Settings {
+        ignore: Vec<String>,
+    },
+}
+
+impl WatcherConfig {
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    pub fn ignored_paths(&self) -> &[String] {
+        match self {
+            Self::Settings { ignore } => ignore,
+            _ => &[],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FormatterConfig {
+    #[default]
+    Disabled,
+    Command(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderTimeout {
     Millis(u64),
@@ -397,6 +444,23 @@ pub struct MergedConfig {
     pub images: ImagesConfig,
     pub websearch: WebsearchConfig,
     pub mcp: McpConfig,
+    pub instructions: Vec<String>,
+    pub tools: HashMap<String, bool>,
+    pub compaction: CompactionConfig,
+    pub watcher: WatcherConfig,
+    pub formatter: HashMap<String, FormatterConfig>,
+    pub disabled_providers: HashSet<String>,
+    pub enabled_providers: Option<HashSet<String>>,
+}
+
+impl MergedConfig {
+    pub fn provider_is_enabled(&self, provider_id: &str) -> bool {
+        !self.disabled_providers.contains(provider_id)
+            && self
+                .enabled_providers
+                .as_ref()
+                .is_none_or(|enabled| enabled.contains(provider_id))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -532,6 +596,8 @@ impl ConfigLoader {
             &mut diagnostics,
         );
         let mut merged_config = parse_merged_config(&merged, &mut diagnostics);
+        merged_config.instructions =
+            load_instruction_files(&merged_config.instructions, &project_root, &mut diagnostics);
         let mut agent_definitions = crate::agent::definition::load_markdown_agent_definitions(
             &inventory.opencode_agents,
             &mut diagnostics.warnings,
@@ -1159,6 +1225,29 @@ fn trim_trailing_newlines(s: &str) -> String {
     s.trim_end_matches(['\n', '\r']).to_string()
 }
 
+fn load_instruction_files(
+    paths: &[String],
+    project_root: &Path,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Vec<String> {
+    paths
+        .iter()
+        .filter_map(|configured_path| {
+            let path = expand_path(configured_path, project_root);
+            match fs::read_to_string(&path) {
+                Ok(contents) => Some(contents),
+                Err(error) => {
+                    diagnostics.warnings.push(format!(
+                        "Failed to read instruction file {}: {error}",
+                        path.display()
+                    ));
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 fn expand_path(arg: &str, base_dir: &Path) -> PathBuf {
     let arg = arg.trim();
     if let Some(rest) = arg.strip_prefix("~/") {
@@ -1229,6 +1318,76 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     out.images = parse_images(obj.get("images"), diagnostics);
     out.websearch = parse_websearch(obj.get("websearch"), diagnostics);
     out.mcp = parse_mcp(obj.get("mcp"), diagnostics);
+    out.instructions = obj
+        .get("instructions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|instruction| !instruction.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    out.tools = obj
+        .get("tools")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(tool, enabled)| enabled.as_bool().map(|enabled| (tool.clone(), enabled)))
+        .collect();
+    out.compaction = match obj.get("compaction") {
+        Some(Value::Bool(false)) => CompactionConfig::Disabled,
+        Some(Value::Object(settings)) => CompactionConfig::Settings {
+            auto: settings
+                .get("auto")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            prune: settings
+                .get("prune")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        _ => CompactionConfig::Enabled,
+    };
+    out.watcher = match obj.get("watcher") {
+        Some(Value::Bool(false)) => WatcherConfig::Disabled,
+        Some(Value::Object(settings)) => WatcherConfig::Settings {
+            ignore: settings
+                .get("ignore")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(ToOwned::to_owned)
+                .collect(),
+        },
+        _ => WatcherConfig::Enabled,
+    };
+    out.formatter = obj
+        .get("formatter")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(extension, formatter)| match formatter {
+            Value::String(command) if !command.trim().is_empty() => Some((
+                extension.trim_start_matches('.').to_string(),
+                FormatterConfig::Command(command.trim().to_string()),
+            )),
+            Value::Bool(false) => Some((
+                extension.trim_start_matches('.').to_string(),
+                FormatterConfig::Disabled,
+            )),
+            _ => None,
+        })
+        .collect();
+    out.disabled_providers = parse_string_array(obj.get("disabled_providers"))
+        .into_iter()
+        .collect();
+    out.enabled_providers = obj
+        .get("enabled_providers")
+        .map(|value| parse_string_array(Some(value)).into_iter().collect());
 
     out
 }
@@ -2403,6 +2562,36 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parses_and_applies_top_level_runtime_configuration() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "instructions": ["AGENTS.md"],
+                "tools": { "bash": false, "read": true },
+                "compaction": false,
+                "watcher": { "ignore": ["generated", "tmp/cache"] },
+                "formatter": { "rs": "rustfmt", ".md": false },
+                "disabled_providers": ["openai"],
+                "enabled_providers": ["anthropic", "google"]
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.instructions, vec!["AGENTS.md"]);
+        assert_eq!(config.tools.get("bash"), Some(&false));
+        assert!(!config.compaction.is_enabled());
+        assert_eq!(config.watcher.ignored_paths(), ["generated", "tmp/cache"]);
+        assert_eq!(
+            config.formatter.get("rs"),
+            Some(&FormatterConfig::Command("rustfmt".into()))
+        );
+        assert_eq!(config.formatter.get("md"), Some(&FormatterConfig::Disabled));
+        assert!(!config.provider_is_enabled("openai"));
+        assert!(config.provider_is_enabled("anthropic"));
+        assert!(!config.provider_is_enabled("mistral"));
+    }
 
     #[test]
     fn parses_small_model_aliases() {
