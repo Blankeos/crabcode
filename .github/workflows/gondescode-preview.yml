@@ -88,11 +88,10 @@ jobs:
           ## Install
 
           ```sh
-          curl -fsSL https://raw.githubusercontent.com/yan-ad/crabcode/yan-flavor/install.sh | \
-            CRABCODE_PREVIEW_TAG="${TAG}" sh
+          curl -fsSL https://raw.githubusercontent.com/yan-ad/crabcode/yan-flavor/install.sh | sh
           ```
 
-          This installs the preview as `crabcode` and selects the exact preview release above.
+          This installs the latest Crabcode preview as `crabcode`.
           EOF
 
           gh release create "$TAG" artifacts/* \

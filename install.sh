@@ -8,17 +8,7 @@ BINARY_NAME="crabcode"
 
 echo "🦀 Installing crabcode..."
 
-# Check if cargo is available when no preview release was explicitly requested.
-if [[ -z "${CRABCODE_PREVIEW_TAG:-}" ]] && command -v cargo &> /dev/null; then
-    echo "📦 Installing from ${REPO} via cargo..."
-    cargo install --git "https://github.com/${REPO}.git" --locked --force crabcode
-    echo "✓ crabcode installed successfully from ${REPO}"
-    echo ""
-    echo "Run: crabcode"
-    exit 0
-fi
-
-# Fall back to downloading pre-built binary
+# Download the newest preview archive, or an explicitly requested preview tag.
 echo "⬇️ Downloading pre-built binary..."
 
 # Determine platform
@@ -50,7 +40,6 @@ esac
 # Create install directory
 mkdir -p "$INSTALL_DIR"
 
-# Download the newest preview archive, or an explicitly requested preview tag.
 TAG="${CRABCODE_PREVIEW_TAG:-}"
 if [[ -z "$TAG" ]]; then
     TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
@@ -58,7 +47,7 @@ if [[ -z "$TAG" ]]; then
 fi
 
 if [[ -z "$TAG" ]]; then
-    echo "❌ No preview release found in ${REPO}. Set CRABCODE_PREVIEW_TAG to install a specific preview."
+    echo "❌ No preview release found in ${REPO}."
     exit 1
 fi
 
