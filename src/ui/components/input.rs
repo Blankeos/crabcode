@@ -878,12 +878,12 @@ impl Input {
                 continue;
             }
             let start = if i == start_row {
-                start_col.min(line.len())
+                Self::char_col_to_byte_offset(line, start_col)
             } else {
                 0
             };
             let end = if i == end_row {
-                end_col.min(line.len())
+                Self::char_col_to_byte_offset(line, end_col)
             } else {
                 line.len()
             };
@@ -891,7 +891,6 @@ impl Input {
             if start >= end {
                 continue;
             }
-            // Byte-based slicing (safe: start/end are guaranteed char boundaries)
             if !result.is_empty() {
                 result.push('\n');
             }
@@ -3018,5 +3017,39 @@ mod tests {
         let after_style = buffer.cell(image_pos).expect("image cell").style();
         assert_eq!(after_style.fg, Some(colors.markdown_image_text));
         assert_eq!(after_style.bg, before_style.bg);
+    }
+
+    #[test]
+    fn test_get_selected_text_english_ascii() {
+        let mut input = Input::new();
+        input.insert_str("Hello World");
+        input.textarea.move_cursor(CursorMove::Jump(0, 6));
+        input.textarea.start_selection();
+        for _ in 0..5 {
+            input.textarea.move_cursor(CursorMove::Forward);
+        }
+        
+        assert!(input.has_selection());
+        assert_eq!(input.get_selected_text(), "World");
+    }
+
+    #[test]
+    fn test_get_selected_text_korean_multibyte() {
+        let mut input = Input::new();
+        // "안녕하세요" = 5 Korean chars, each 3 bytes in UTF-8 (total 15 bytes)
+        input.insert_str("안녕하세요");
+        
+        // Move cursor to char position 2 (after "녕")
+        input.textarea.move_cursor(CursorMove::Jump(0, 2));
+        input.textarea.start_selection();
+        
+        // Move cursor forward 2 chars to select chars 2-3 ("하세")
+        input.textarea.move_cursor(CursorMove::Forward);
+        input.textarea.move_cursor(CursorMove::Forward);
+        
+        assert!(input.has_selection());
+        // Selection is from char 2 to char 4 (chars positions 2 and 3)
+        // With the bug, this would produce incorrect bytes; with fix, it should be "하세"
+        assert_eq!(input.get_selected_text(), "하세");
     }
 }
