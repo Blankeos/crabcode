@@ -1438,44 +1438,32 @@ impl Input {
             return;
         }
 
-        let (cursor_row, cursor_col) = self.textarea.cursor();
-        let wrap_width = area.width as usize;
-        let visual_lines = self.visual_lines(wrap_width);
+        let visual_lines = self.visual_lines(area.width as usize);
 
-        // Find the visual line containing the cursor's source row, then compute
-        // the rendered column accounting for wrapping and character widths.
-        let cursor_vl = visual_lines
-            .iter()
-            .skip(self.viewport_top)
-            .take(area.height as usize)
-            .enumerate()
-            .find(|(_, vl)| {
-                vl.source_row == cursor_row
-                    && cursor_col >= vl.start_col
-                    && cursor_col <= vl.end_col
-            });
+        let Some(visual_idx) = self.cursor_visual_row(&visual_lines) else {
+            return;
+        };
 
-        if let Some((screen_row, vl)) = cursor_vl {
-            let line = self.textarea.lines().get(cursor_row);
-            let prefix_width = line
-                .map(|l| {
-                    l.chars()
-                        .take(cursor_col)
-                        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-                        .sum::<usize>()
-                })
-                .unwrap_or(0);
-
-            // Account for horizontal scrolling if present
-            let render_col = prefix_width.saturating_sub(vl.start_col);
-            let cursor_x = area.x + render_col.min(area.width.saturating_sub(1) as usize) as u16;
-            let cursor_y = area.y + screen_row as u16;
-
-            frame.set_cursor_position(ratatui::layout::Position {
-                x: cursor_x,
-                y: cursor_y,
-            });
+        if visual_idx < self.viewport_top || visual_idx >= self.viewport_top + area.height as usize
+        {
+            return;
         }
+
+        let vl = &visual_lines[visual_idx];
+        let screen_row = visual_idx - self.viewport_top;
+
+        // Width of chars from this visual line's start to the cursor. The
+        // caret sits on the wrapped row, so only the suffix of the source
+        // line matters — prefix_width - start_col mixes cell widths with
+        // char indices and drifts right by start_col cells on CJK (width 2).
+        let render_col = self.cursor_display_col(vl);
+        let cursor_x = area.x + render_col.min(area.width.saturating_sub(1) as usize) as u16;
+        let cursor_y = area.y + screen_row as u16;
+
+        frame.set_cursor_position(ratatui::layout::Position {
+            x: cursor_x,
+            y: cursor_y,
+        });
     }
 
     fn render_visual_line(
@@ -3106,53 +3094,79 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_position_for_ime_cjk() {
+    fn test_cursor_position_for_ime_cjk_wrapped() {
         let mut input = Input::new();
-        // "안녕hello" - 2 CJK chars (width 2 each) + 5 ASCII chars
-        input.insert_str("안녕hello");
+        // 16 CJK chars (width 2 each) = 32 cells; at wrap width 10 they wrap
+        // every 5 chars: vl0 = chars 0..5, vl1 = chars 5..10, ...
+        input.insert_str("你好世界你好世界你好世界你好世界");
 
-        // Cursor at position 2 (after "안녕", before "h")
-        input.textarea.move_cursor(CursorMove::Jump(0, 2));
+        // Cursor at char index 7 → second wrapped row
+        input.textarea.move_cursor(CursorMove::Jump(0, 7));
 
-        let area = Rect::new(0, 0, 80, 5);
+        let area = Rect::new(0, 0, 10, 5); // narrow input forces wrapping
         let (row, col) = input.textarea.cursor();
-        assert_eq!(row, 0);
-        assert_eq!(col, 2);
+        assert_eq!((row, col), (0, 7));
 
-        // The visual line should contain the cursor's source row
         let visual_lines = input.visual_lines(area.width as usize);
-        let cursor_vl = visual_lines
-            .iter()
-            .skip(input.viewport_top)
-            .take(area.height as usize)
-            .enumerate()
-            .find(|(_, vl)| vl.source_row == row && col >= vl.start_col && col <= vl.end_col);
-
+        let visual_idx = input.cursor_visual_row(&visual_lines);
         assert!(
-            cursor_vl.is_some(),
-            "Cursor should be found in a visible visual line"
+            visual_idx.is_some(),
+            "Cursor should be found in visual lines"
         );
+        let visual_idx = visual_idx.unwrap();
+        assert!(
+            visual_idx >= input.viewport_top
+                && visual_idx < input.viewport_top + area.height as usize,
+            "Cursor should be in the visible viewport"
+        );
+        let vl = &visual_lines[visual_idx];
+        let screen_row = visual_idx - input.viewport_top;
 
-        let (screen_row, vl) = cursor_vl.unwrap();
-        let line = input.textarea.lines().get(row);
-        let prefix_width: usize = line
-            .map(|l| {
-                l.chars()
-                    .take(col)
-                    .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-                    .sum::<usize>()
-            })
-            .unwrap_or(0);
+        assert_eq!(vl.start_col, 5, "Second visual line starts at char 5");
+        assert_eq!(screen_row, 1, "Cursor should be on the second wrapped row");
 
-        let render_col = prefix_width.saturating_sub(vl.start_col);
+        // Width of chars 5..7 = two CJK chars = 4 cells. The buggy formula
+        // (prefix_width - start_col = 14 - 5 = 9) would drift 5 cells right.
+        let render_col = input.cursor_display_col(vl);
+        assert_eq!(render_col, 4, "Suffix width from wrap start to cursor");
+    }
 
-        // "안녕" = 2 chars, each width 2 = 4 cells
-        assert_eq!(prefix_width, 4, "CJK chars '안녕' should be 4 cells wide");
+    #[test]
+    fn test_cursor_position_at_visual_line_boundary() {
+        let mut input = Input::new();
+        // 10 CJK chars (width 2 each) = 20 cells; at wrap width 10 they wrap
+        // every 5 chars: vl0 = chars 0..5, vl1 = chars 5..10
+        input.insert_str("你好世界你好世界你好世界你好世界");
+
+        // Cursor at char index 5 — exactly at the vl0/vl1 boundary
+        input.textarea.move_cursor(CursorMove::Jump(0, 5));
+
+        let area = Rect::new(0, 0, 10, 5);
+
+        let visual_lines = input.visual_lines(area.width as usize);
+        let visual_idx = input.cursor_visual_row(&visual_lines);
+        assert!(
+            visual_idx.is_some(),
+            "Cursor should be found in visual lines"
+        );
+        let visual_idx = visual_idx.unwrap();
+
+        let vl = &visual_lines[visual_idx];
+        // The old `cursor_col <= vl.end_col` condition would match vl0
+        // (end_col=5, 5 <= 5), placing the caret at cell 10 (clamped to 9)
+        // on row 0. The correct behavior is vl1 (start_col=5, end_col=10).
+        assert_eq!(vl.start_col, 5, "Cursor at char 5 belongs to vl1, not vl0");
+
+        // cursor_display_col should return 0 (width of chars 5..5 = empty)
+        let render_col = input.cursor_display_col(vl);
         assert_eq!(
-            render_col, 4,
-            "Cursor should be at column 4 (after 2 CJK chars)"
+            render_col, 0,
+            "Caret should be at cell 0 of the second visual line"
         );
-        assert_eq!(screen_row, 0, "Cursor should be on the first visible line");
+
+        // Simulate what set_terminal_cursor_position does:
+        let screen_row = visual_idx - input.viewport_top;
+        assert_eq!(screen_row, 1, "Cursor should be on the second wrapped row");
     }
 
     #[test]
@@ -3168,14 +3182,7 @@ mod tests {
         let (row, col) = input.textarea.cursor();
         assert_eq!(col, 6);
 
-        let cursor_vl = visual_lines
-            .iter()
-            .skip(input.viewport_top)
-            .take(area.height as usize)
-            .enumerate()
-            .find(|(_, vl)| vl.source_row == row && col >= vl.start_col && col <= vl.end_col);
-
-        assert!(cursor_vl.is_some());
-        let (_, _) = cursor_vl.unwrap(); // Verify it was found
+        let visual_idx = input.cursor_visual_row(&visual_lines);
+        assert!(visual_idx.is_some());
     }
 }
