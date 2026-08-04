@@ -361,6 +361,7 @@ pub async fn stream_llm_with_cancellation(
     websearch_config: crate::config::configuration::WebsearchConfig,
     mcp_config: crate::config::configuration::McpConfig,
     workspace: String,
+    tool_registry: Option<crate::tools::ToolRegistry>,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
 ) -> Result<(), DynError> {
@@ -385,17 +386,22 @@ pub async fn stream_llm_with_cancellation(
     // Sticky prompt-cache routing: same key for every tool step in this session.
     request_config.openai_options.prompt_cache_key = Some(session_id.clone());
 
-    let tool_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
-        Some(sender.clone()),
-        tool_permissions.clone(),
-        agent_registry.clone(),
-        cancel_token.clone(),
-        Some(&request_config.provider_name),
-        &websearch_config,
-        &mcp_config,
-        &workspace,
-    )
-    .await;
+    let tool_registry = match tool_registry {
+        Some(tool_registry) => tool_registry,
+        None => {
+            crate::tools::initialize_tool_registry_with_dynamic_config(
+                Some(sender.clone()),
+                tool_permissions.clone(),
+                agent_registry.clone(),
+                cancel_token.clone(),
+                Some(&request_config.provider_name),
+                &websearch_config,
+                &mcp_config,
+                &workspace,
+            )
+            .await
+        }
+    };
     // Set LLM session config for subagent use
     let llm_session = crate::agent::config::LlmSessionConfig {
         provider_name: request_config.provider_name.clone(),

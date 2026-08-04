@@ -80,6 +80,27 @@ crabcode reads up to four files (highest priority wins):
 
 Set your defaults globally, override per-project when needed. See the [full configuration reference](/config).
 
+## Use an editor through ACP
+
+Start an ACP-compatible editor integration with:
+
+```bash
+crabcode acp
+```
+
+See [ACP Integration](/acp) for editor configuration and the current capability matrix.
+
+## List available models
+
+Print selectable models in `provider/model` format:
+
+```bash
+crabcode models
+crabcode models openai
+```
+
+The optional provider argument is an exact provider ID. This command uses the same local credentials, custom providers, free models, and runtime model catalog as crabcode.
+
 ---
 
 ## Common commands

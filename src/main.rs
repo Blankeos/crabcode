@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod acp;
 mod agent;
 mod aisdk;
 mod app;
@@ -76,6 +77,7 @@ use ratatui::crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, buffer::Buffer, style::Color, Terminal};
 use std::io::{self, IsTerminal, Read, Write};
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -400,7 +402,7 @@ async fn run_print_mode(
         is_git_repo,
         std::env::consts::OS,
     )
-    .with_tool_registry(prompt_registry)
+    .with_tool_registry(prompt_registry.clone())
     .with_agent_registry(agent_registry.clone())
     .with_print_mode(true);
     let system_prompt = composer.compose().await;
@@ -425,6 +427,7 @@ async fn run_print_mode(
             websearch_config,
             mcp_config,
             cwd,
+            Some(prompt_registry),
             messages,
             sender,
         )
@@ -642,6 +645,19 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// List available models, optionally filtered by provider
+    Models {
+        /// Exact provider ID to filter by
+        provider: Option<String>,
+    },
+
+    /// Start an Agent Client Protocol server over stdin/stdout
+    Acp {
+        /// Working directory used for the initial ACP workspace
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+
     /// Generate shell completion script
     Completion,
 
@@ -766,6 +782,24 @@ async fn main() -> Result<()> {
     }
 
     match &args.command {
+        Some(Command::Models { provider }) => {
+            let config = crate::config::ConfigLoader::load()?;
+            let models =
+                crate::model::catalog::selectable_models(&config, provider.as_deref()).await?;
+            if models.is_empty() {
+                if let Some(provider) = provider {
+                    anyhow::bail!("no models found for provider: {provider}");
+                }
+                anyhow::bail!("no models available");
+            }
+            for model in models {
+                println!("{}", crate::model::catalog::model_ref(&model));
+            }
+            return Ok(());
+        }
+        Some(Command::Acp { cwd }) => {
+            return crate::acp::run(cwd.clone()).await;
+        }
         Some(Command::Completion) => {
             print_completion()?;
             return Ok(());
@@ -980,6 +1014,32 @@ mod tests {
                 assert_eq!(pair_code.as_deref(), None);
             }
             other => panic!("expected serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_acp_command_with_workspace() {
+        let args = Args::try_parse_from(["crabcode", "acp", "--cwd", "/tmp/workspace"]).unwrap();
+
+        match args.command {
+            Some(Command::Acp { cwd }) => assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace"))),
+            other => panic!("expected acp command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_models_command_with_optional_provider() {
+        let args = Args::try_parse_from(["crabcode", "models", "openai"]).unwrap();
+
+        match args.command {
+            Some(Command::Models { provider }) => assert_eq!(provider.as_deref(), Some("openai")),
+            other => panic!("expected models command, got {other:?}"),
+        }
+
+        let args = Args::try_parse_from(["crabcode", "models"]).unwrap();
+        match args.command {
+            Some(Command::Models { provider }) => assert!(provider.is_none()),
+            other => panic!("expected models command, got {other:?}"),
         }
     }
 

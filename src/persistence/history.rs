@@ -73,6 +73,10 @@ pub struct HistoryDAO {
 
 impl HistoryDAO {
     pub fn new() -> Result<Self> {
+        Self::new_for_workspace(crate::utils::cwd::current_dir_or_dot())
+    }
+
+    pub fn new_for_workspace(workspace: impl AsRef<std::path::Path>) -> Result<Self> {
         let data_dir = get_data_dir();
         ensure_data_dir()?;
         let db_path = data_dir.join("data.db");
@@ -95,7 +99,10 @@ impl HistoryDAO {
             [],
         );
 
-        let current_workspace_path = crate::utils::cwd::current_dir_or_dot()
+        let current_workspace_path = workspace
+            .as_ref()
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.as_ref().to_path_buf())
             .to_string_lossy()
             .to_string();
         let current_workspace_name = workspace_display_name(&current_workspace_path);

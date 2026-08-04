@@ -81,9 +81,16 @@ impl SessionManager {
         }
     }
 
-    pub fn with_history(mut self) -> Result<Self, SessionError> {
-        let history_dao =
-            HistoryDAO::new().map_err(|e| SessionError::PersistenceError(e.to_string()))?;
+    pub fn with_history(self) -> Result<Self, SessionError> {
+        self.with_history_for_workspace(crate::utils::cwd::current_dir_or_dot())
+    }
+
+    pub fn with_history_for_workspace(
+        mut self,
+        workspace: impl AsRef<std::path::Path>,
+    ) -> Result<Self, SessionError> {
+        let history_dao = HistoryDAO::new_for_workspace(workspace)
+            .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
         self.current_workspace_id = history_dao.current_workspace_id();
         self.current_workspace_path = history_dao.current_workspace_path().to_string();
         self.current_workspace_name = history_dao.current_workspace_name().to_string();
