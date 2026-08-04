@@ -27,8 +27,10 @@ For Zed, add an agent server to `~/.config/zed/settings.json`:
 {
   "agent_servers": {
     "Crabcode": {
+      "type": "custom",
       "command": "crabcode",
-      "args": ["acp"]
+      "args": ["acp"],
+      "env": {}
     }
   }
 }
