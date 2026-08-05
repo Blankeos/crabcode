@@ -47,8 +47,10 @@ Configure a provider in the Crabcode TUI with `/connect` before starting an ACP 
 | Tools | Tool calls and completed or failed results stream with ACP tool kinds, titles, raw input, and preview output. | No normalized locations, diffs, full outputs, or result images yet. | Preserve structured tool results, locations, patches, and image content in runtime events. |
 | Permissions | Existing Crabcode permission prompts are forwarded with allow once, always allow, and reject choices. | Permission requests use a generated ACP call ID because the current internal prompt lacks the originating tool-call ID. | Carry the real tool-call ID and edit patch metadata through permission preflight. |
 | Cancellation | `session/cancel` cancels the active turn and keeps the session reusable. | Provider stop reasons are currently reduced to normal completion, cancellation, or a safe failure. | Preserve output-limit and refusal stop reasons from the model runtime. |
-| Commands and skills | Existing tools, project rules, configured agents, and normal prompt execution are reused. | ACP available-command updates and slash-command execution are not exposed yet. | Publish safe commands and skills, then handle `/compact` and custom commands. |
-| MCP and terminals | Project-configured MCP tools continue to use Crabcode's normal runtime. | Client-supplied MCP servers and ACP terminal embedding are not supported. | Add per-session MCP overlays and a client-terminal adapter. |
+| Commands and skills | Session updates publish available commands: project custom slash commands, workspace skills, plus built-in `/skills` and `/mcp`. Leading `/…` prompts expand through the same command and skill templates before the model turn. | Built-in TUI commands such as `/compact` are not ACP-available commands; unknown `/…` lines pass through as plain text. | Add more built-in commands (for example `/compact`) and richer command input schemas. |
+| MCP | Project MCP from Crabcode config runs as usual. Editors may also pass MCP servers on `session/new`; those servers are merged into the session config (stdio, HTTP, and SSE). | HTTP and SSE client MCP are advertised; stdio client MCP is accepted and merged even though it is not a separate advertised capability flag. | Surface richer MCP connection status and OAuth for remote client servers. |
+| Terminals | — | ACP terminal embedding is not implemented. | Add a client-terminal adapter for long-running shell sessions. |
+| Questions | — | Interactive question prompts from the agent are not forwarded over ACP; the runtime skips them rather than blocking the editor. | Map Crabcode questions to ACP permission-style or dedicated question requests. |
 | Usage | Estimated context-window usage is emitted when the selected model exposes a context limit. | Provider-authoritative token and cost accounting is not complete; usage is omitted when no context limit is known. | Retain provider input, output, cache, context, and cost data for authoritative usage updates. |
 
 ## Session behavior
@@ -59,4 +61,8 @@ Configure a provider in the Crabcode TUI with `/connect` before starting an ACP 
 
 Crabcode applies the same configured permission rules in ACP as it does in the TUI. When a tool needs approval, the editor receives an ACP permission request. If the editor cannot respond or disconnects, Crabcode denies the request rather than continuing unattended.
 
-The capability matrix is intentionally conservative: Crabcode only advertises protocol features that the ACP server currently handles.
+Client-supplied MCP servers run with the same trust as project-configured MCP: stdio servers can execute local processes, and remote servers can send the headers and credentials the editor provides. Only attach MCP servers you trust for that workspace.
+
+Image attachments are decoded under a size limit and written to temporary files under the system temp directory (`…/crabcode/acp-images/`) for the model turn. Prefer cleaning those files after long ACP sessions until automatic cleanup lands.
+
+The capability matrix matches what the ACP server implements today. Crabcode only advertises protocol capability flags it handles (`loadSession`, image and embedded-context prompts, HTTP/SSE MCP, and list/resume/fork/close session ops).
