@@ -1249,6 +1249,15 @@ async fn stream_provider_request(
             if let Some(key) = config.api_key.as_deref() {
                 builder = builder.api_key(key);
             }
+            if let Some(provider_meta) =
+                crate::model::extensions::ModelExtensions::provider_for_request(
+                    &config.provider_name,
+                )
+            {
+                if !provider_meta.header.is_empty() {
+                    builder = builder.headers(provider_meta.header.into_iter().collect());
+                }
+            }
             let provider = builder.build().map_err(|e| -> DynError { Box::new(e) })?;
             stream_with_tools(
                 provider,

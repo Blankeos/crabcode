@@ -112,6 +112,7 @@ I tried crabcode specifically for these providers:
 - [x] **minimax**
 - [x] **fireworks**
 - [x] **baseten**
+- [x] **kimi-for-coding** (API key, Anthropic-protocol endpoint)
 
 > Feel free to create an issue / add to this list if you tried
 
@@ -119,7 +120,6 @@ I tried crabcode specifically for these providers:
 
 > I might work harder to support these in the future.
 
-- Kimi For Coding Subscription - I keep getting 401 but it works in OpenCode, I may have to contact them first. **might support later**
 - Gemini - It's OAuth + also very unsure. So currently no.
 - Claude Code Subscription - Known to explicitly not like harnesses. So never will, sorry.
 

@@ -85,6 +85,7 @@ pub fn provider() -> crate::model::discovery::Provider {
         doc: "https://ollama.com".to_string(),
         env: Vec::new(),
         npm: NPM_PACKAGE.to_string(),
+        header: vec![],
         models: cached_discovery_models().unwrap_or_default(),
     }
 }

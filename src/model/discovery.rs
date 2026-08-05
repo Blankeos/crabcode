@@ -25,6 +25,8 @@ pub struct Provider {
     #[serde(default)]
     pub npm: String,
     #[serde(default)]
+    pub header: Vec<(String, String)>,
+    #[serde(default)]
     pub models: HashMap<String, Model>,
 }
 
@@ -502,6 +504,7 @@ impl Discovery {
                                 doc: String::new(),
                                 env: Vec::new(),
                                 npm: String::new(),
+                                header: vec![],
                                 models: HashMap::new(),
                             },
                         );
@@ -548,6 +551,7 @@ impl Discovery {
                     doc: String::new(),
                     env: Vec::new(),
                     npm: String::new(),
+                    header: vec![],
                     models: HashMap::new(),
                 });
 
@@ -966,6 +970,7 @@ mod tests {
                 doc: "https://catalog.example/docs".to_string(),
                 env: vec!["CATALOG_KEY".to_string()],
                 npm: "@ai-sdk/openai-compatible".to_string(),
+                header: vec![],
                 models: HashMap::from([(
                     "vision-model".to_string(),
                     Model {
@@ -1218,6 +1223,7 @@ mod tests {
                 doc: String::new(),
                 env: Vec::new(),
                 npm: String::new(),
+                header: vec![],
                 models: HashMap::new(),
             },
         );
@@ -1356,6 +1362,7 @@ mod tests {
                 doc: String::new(),
                 env: vec!["OPENCODE_API_KEY".to_string()],
                 npm: "@ai-sdk/openai-compatible".to_string(),
+                header: vec![],
                 models,
             },
         );
@@ -1397,6 +1404,7 @@ mod tests {
                 doc: String::new(),
                 env: vec!["XAI_API_KEY".to_string()],
                 npm: "@ai-sdk/xai".to_string(),
+                header: vec![],
                 models: HashMap::new(),
             },
         );
@@ -1435,6 +1443,7 @@ mod tests {
                     doc: String::new(),
                     env: Vec::new(),
                     npm: String::new(),
+                    header: vec![],
                     models: HashMap::new(),
                 },
             );
@@ -1468,6 +1477,7 @@ mod tests {
                 doc: String::new(),
                 env: Vec::new(),
                 npm: String::new(),
+                header: vec![],
                 models: HashMap::new(),
             },
         )]);

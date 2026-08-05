@@ -128,6 +128,7 @@ pub fn handle_connect<'a>(
                         doc: String::new(),
                         env: Vec::new(),
                         npm: String::new(),
+                        header: vec![],
                         models: HashMap::new(),
                     },
                 );
@@ -142,6 +143,7 @@ pub fn handle_connect<'a>(
                         doc: String::new(),
                         env: Vec::new(),
                         npm: String::new(),
+                        header: vec![],
                         models: HashMap::new(),
                     },
                 );

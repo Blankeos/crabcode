@@ -114,6 +114,7 @@ pub fn provider_from_models(models: Vec<CommandCodeModel>) -> crate::model::disc
         doc: DOC_URL.to_string(),
         env: vec![API_KEY_ENV.to_string()],
         npm: NPM_PACKAGE.to_string(),
+        header: vec![],
         models: models
             .into_iter()
             .filter(|model| !model.id.trim().is_empty())
