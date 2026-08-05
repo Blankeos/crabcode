@@ -197,6 +197,7 @@ fn static_provider() -> Provider {
         doc: DOC_URL.to_string(),
         env: vec![API_KEY_ENV.to_string()],
         npm: NPM_PACKAGE.to_string(),
+        header: vec![("User-Agent".to_string(), "KimiCLI/1.5".to_string())],
         models,
     }
 }

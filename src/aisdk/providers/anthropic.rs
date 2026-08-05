@@ -18,6 +18,7 @@ pub struct Anthropic {
     model_name: String,
     provider_name: String,
     reasoning_effort: Option<String>,
+    extra_headers: HashMap<String, String>,
 }
 
 impl Anthropic {
@@ -33,6 +34,7 @@ pub struct AnthropicBuilder {
     model_name: Option<String>,
     provider_name: Option<String>,
     reasoning_effort: Option<String>,
+    extra_headers: HashMap<String, String>,
 }
 
 impl AnthropicBuilder {
@@ -61,6 +63,13 @@ impl AnthropicBuilder {
         self
     }
 
+    /// Extra headers declared by the provider catalog (e.g. a vendor-specific
+    /// `User-Agent`). Applied last so they can override defaults.
+    pub fn headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
     pub fn build(self) -> Result<Anthropic> {
         Ok(Anthropic {
             base_url: self
@@ -74,6 +83,7 @@ impl AnthropicBuilder {
                 .provider_name
                 .unwrap_or_else(|| "anthropic".to_string()),
             reasoning_effort: self.reasoning_effort,
+            extra_headers: self.extra_headers,
         })
     }
 }
@@ -183,15 +193,7 @@ impl Provider for Anthropic {
             body["output_config"] = serde_json::json!({ "effort": effort });
         }
 
-        let mut request_headers = reqwest::header::HeaderMap::new();
-        request_headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
-        );
-        if !self.api_key.is_empty() {
-            request_headers.insert("x-api-key", self.api_key.parse().unwrap());
-        }
-        request_headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+        let request_headers = build_anthropic_request_headers(&self.api_key, &self.extra_headers);
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(
@@ -250,6 +252,31 @@ impl Provider for Anthropic {
 
         Ok(stream)
     }
+}
+
+fn build_anthropic_request_headers(
+    api_key: &str,
+    extra_headers: &HashMap<String, String>,
+) -> reqwest::header::HeaderMap {
+    let mut request_headers = reqwest::header::HeaderMap::new();
+    request_headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        "application/json".parse().unwrap(),
+    );
+    if !api_key.is_empty() {
+        request_headers.insert("x-api-key", api_key.parse().unwrap());
+    }
+    request_headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+
+    for (name, value) in extra_headers {
+        if let (Ok(hn), Ok(hv)) = (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            request_headers.insert(hn, hv);
+        }
+    }
+    request_headers
 }
 
 fn anthropic_stream_chunk(
@@ -547,6 +574,25 @@ mod tests {
                 reason: Some(FinishReason::EndTurn)
             }
         ));
+    }
+
+    #[test]
+    fn kimi_for_coding_sends_cli_user_agent() {
+        let mut extra = HashMap::new();
+        extra.insert("User-Agent".to_string(), "KimiCLI/1.5".to_string());
+        let headers = build_anthropic_request_headers("", &extra);
+        assert_eq!(
+            headers
+                .get(reqwest::header::USER_AGENT)
+                .map(|v| v.to_str().unwrap()),
+            Some("KimiCLI/1.5")
+        );
+    }
+
+    #[test]
+    fn anthropic_default_sends_no_extra_headers() {
+        let headers = build_anthropic_request_headers("", &HashMap::new());
+        assert!(headers.get(reqwest::header::USER_AGENT).is_none());
     }
 }
 

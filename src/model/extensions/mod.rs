@@ -332,6 +332,7 @@ mod tests {
                 doc: String::new(),
                 env: vec!["XAI_API_KEY".to_string()],
                 npm: "@ai-sdk/xai".to_string(),
+                header: vec![],
                 models: HashMap::new(),
             },
         );
