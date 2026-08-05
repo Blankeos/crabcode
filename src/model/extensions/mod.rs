@@ -5,12 +5,16 @@ use std::collections::HashMap;
 use crate::model::discovery::Provider;
 
 pub mod commandcode;
+pub mod kimicode;
 pub mod ollama;
 
 const CATALOG_EXTENSIONS_JSON: &str = include_str!("catalog_extensions.json");
 static CATALOG_JSON_EXTENSION: CatalogJsonExtension = CatalogJsonExtension;
-static PERSISTENT_EXTENSIONS: [&dyn PersistentProviderCatalogExtension; 2] =
-    [&commandcode::EXTENSION, &CATALOG_JSON_EXTENSION];
+static PERSISTENT_EXTENSIONS: [&dyn PersistentProviderCatalogExtension; 3] = [
+    &commandcode::EXTENSION,
+    &kimicode::EXTENSION,
+    &CATALOG_JSON_EXTENSION,
+];
 static RUNTIME_EXTENSIONS: [&dyn RuntimeProviderCatalogExtension; 1] = [&ollama::EXTENSION];
 
 /// Model provider catalog extensions that are not available directly from
