@@ -859,6 +859,7 @@ pub struct App {
     pub websearch: crate::config::configuration::WebsearchConfig,
     pub mcp: crate::config::configuration::McpConfig,
     pub config_raw_merged: serde_json::Value,
+    custom_instructions: String,
     terminal_focused: bool,
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
@@ -1127,13 +1128,17 @@ impl App {
         }
         let tool_permissions = crate::tools::ToolPermissions::new(cwd_path.clone())
             .with_agent_policies(agent_policies)
+            .with_global_tool_config(loaded_config.merged_config.tools.clone())
             .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
             .with_agent_permission_rules(agent_registry.permission_rules_map());
 
-        let discovery = crate::model::discovery::Discovery::new_with_custom(Some(
-            loaded_config.merged_config.custom_providers.clone(),
-        ))
+        let discovery = crate::model::discovery::Discovery::new_with_config(
+            Some(loaded_config.merged_config.custom_providers.clone()),
+            loaded_config.merged_config.disabled_providers.clone(),
+            loaded_config.merged_config.enabled_providers.clone(),
+        )
         .ok();
+        let custom_instructions = loaded_config.merged_config.instructions.join("\n\n");
         let now = std::time::Instant::now();
 
         Ok(Self {
@@ -1209,6 +1214,7 @@ impl App {
             websearch: loaded_config.merged_config.websearch,
             mcp: mcp_config,
             config_raw_merged: loaded_config.raw_merged,
+            custom_instructions,
             terminal_focused: true,
             tool_permissions,
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
@@ -9411,6 +9417,7 @@ impl App {
         let agent_registry = self.agent_registry.clone();
         let websearch_config = self.websearch.clone();
         let mcp_config = self.mcp.clone();
+        let custom_instructions = self.custom_instructions.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -9456,7 +9463,8 @@ impl App {
             )
             .with_tool_registry(prompt_registry)
             .with_agent_registry(agent_registry.clone())
-            .with_active_agent(agent_mode.clone());
+            .with_active_agent(agent_mode.clone())
+            .with_custom_instructions(custom_instructions);
             let system_prompt = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async { composer.compose().await })
             });
@@ -11002,6 +11010,7 @@ mod tests {
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             config_raw_merged: serde_json::json!({}),
+            custom_instructions: String::new(),
             terminal_focused: true,
             tool_permissions: crate::tools::ToolPermissions::new(".".to_string()),
             skills_dirs: Vec::new(),

@@ -2540,6 +2540,13 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "notifications",
         "images",
         "websearch",
+        "instructions",
+        "tools",
+        "watcher",
+        "disabled_providers",
+        "enabled_providers",
+        "permission",
+        "mcp",
     ]
     .into_iter()
     .collect();

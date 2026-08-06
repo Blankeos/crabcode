@@ -318,7 +318,7 @@ impl Discovery {
         Self::new_with_config(custom_providers, Default::default(), None)
     }
 
-    fn new_with_config(
+    pub fn new_with_config(
         custom_providers: Option<
             std::collections::HashMap<String, crate::config::CustomProviderConfig>,
         >,
