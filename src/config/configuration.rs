@@ -481,8 +481,6 @@ pub struct MergedConfig {
     pub compaction: CompactionConfig,
     pub watcher: WatcherConfig,
     pub formatter: HashMap<String, FormatterConfig>,
-    pub disabled_providers: HashSet<String>,
-    pub enabled_providers: Option<HashSet<String>>,
 }
 
 impl MergedConfig {
