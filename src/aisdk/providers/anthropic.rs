@@ -118,39 +118,9 @@ impl Provider for Anthropic {
             }
         }
 
-        let user_messages: Vec<serde_json::Value> = messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::User(u) => Some(serde_json::json!({
-                    "role": "user",
-                    "content": anthropic_user_content(u),
-                })),
-                Message::Assistant(a) => Some(serde_json::json!({
-                    "role": "assistant",
-                    "content": a.content,
-                })),
-                Message::ToolCall(t) => Some(serde_json::json!({
-                    "role": "assistant",
-                    "content": [{
-                        "type": "tool_use",
-                        "id": t.call_id,
-                        "name": t.name,
-                        "input": serde_json::from_str::<serde_json::Value>(&t.arguments)
-                            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-                    }],
-                })),
-                Message::ToolOutput(t) => Some(serde_json::json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": t.call_id,
-                        "content": anthropic_tool_output_content(t),
-                        "is_error": t.is_error,
-                    }],
-                })),
-                _ => None,
-            })
-            .collect();
+        // Anthropic requires adjacent tool_use blocks in one assistant message,
+        // immediately followed by tool_result blocks in one user message.
+        let user_messages = anthropic_messages(messages);
 
         let tool_params: Vec<serde_json::Value> = tools
             .iter()
@@ -434,6 +404,86 @@ fn anthropic_user_content(user: &crate::message::UserMessage) -> serde_json::Val
     serde_json::Value::Array(parts)
 }
 
+/// Convert internal messages into Anthropic Messages API history.
+///
+/// Adjacent `ToolCall`s are merged into one assistant message with multiple
+/// `tool_use` blocks; adjacent `ToolOutput`s become one user message with
+/// multiple `tool_result` blocks. Anthropic (and Kimi coding) reject
+/// unpaired / non-adjacent multi-tool turns.
+fn anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut pending_tool_uses: Vec<serde_json::Value> = Vec::new();
+    let mut pending_tool_results: Vec<serde_json::Value> = Vec::new();
+
+    let flush_tool_uses = |pending: &mut Vec<serde_json::Value>,
+                           out: &mut Vec<serde_json::Value>| {
+        if pending.is_empty() {
+            return;
+        }
+        out.push(serde_json::json!({
+            "role": "assistant",
+            "content": std::mem::take(pending),
+        }));
+    };
+
+    let flush_tool_results = |pending: &mut Vec<serde_json::Value>,
+                              out: &mut Vec<serde_json::Value>| {
+        if pending.is_empty() {
+            return;
+        }
+        out.push(serde_json::json!({
+            "role": "user",
+            "content": std::mem::take(pending),
+        }));
+    };
+
+    for message in messages {
+        match message {
+            Message::User(u) => {
+                flush_tool_uses(&mut pending_tool_uses, &mut out);
+                flush_tool_results(&mut pending_tool_results, &mut out);
+                out.push(serde_json::json!({
+                    "role": "user",
+                    "content": anthropic_user_content(u),
+                }));
+            }
+            Message::Assistant(a) => {
+                flush_tool_uses(&mut pending_tool_uses, &mut out);
+                flush_tool_results(&mut pending_tool_results, &mut out);
+                out.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": a.content,
+                }));
+            }
+            Message::ToolCall(t) => {
+                flush_tool_results(&mut pending_tool_results, &mut out);
+                let input = serde_json::from_str::<serde_json::Value>(&t.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+                pending_tool_uses.push(serde_json::json!({
+                    "type": "tool_use",
+                    "id": t.call_id,
+                    "name": t.name,
+                    "input": input,
+                }));
+            }
+            Message::ToolOutput(t) => {
+                flush_tool_uses(&mut pending_tool_uses, &mut out);
+                pending_tool_results.push(serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": t.call_id,
+                    "content": anthropic_tool_output_content(t),
+                    "is_error": t.is_error,
+                }));
+            }
+            Message::System(_) => {}
+        }
+    }
+
+    flush_tool_uses(&mut pending_tool_uses, &mut out);
+    flush_tool_results(&mut pending_tool_results, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,6 +597,34 @@ mod tests {
                 reason: Some(FinishReason::EndTurn)
             }
         ));
+    }
+
+    #[test]
+    fn groups_adjacent_tool_calls_and_results() {
+        let messages = vec![
+            Message::user("hi"),
+            Message::tool_call("call_a", "edit", r#"{"file_path":"a.rs"}"#),
+            Message::tool_call("call_b", "edit", r#"{"file_path":"b.rs"}"#),
+            Message::tool_output("call_a", "edit", "ok a", false),
+            Message::tool_output("call_b", "edit", "ok b", false),
+            Message::assistant("done"),
+        ];
+
+        let encoded = anthropic_messages(&messages);
+        assert_eq!(encoded.len(), 4);
+        assert_eq!(encoded[0]["role"], "user");
+        assert_eq!(encoded[1]["role"], "assistant");
+        assert_eq!(encoded[1]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(encoded[1]["content"][0]["type"], "tool_use");
+        assert_eq!(encoded[1]["content"][0]["id"], "call_a");
+        assert_eq!(encoded[1]["content"][1]["id"], "call_b");
+        assert_eq!(encoded[2]["role"], "user");
+        assert_eq!(encoded[2]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(encoded[2]["content"][0]["type"], "tool_result");
+        assert_eq!(encoded[2]["content"][0]["tool_use_id"], "call_a");
+        assert_eq!(encoded[2]["content"][1]["tool_use_id"], "call_b");
+        assert_eq!(encoded[3]["role"], "assistant");
+        assert_eq!(encoded[3]["content"], "done");
     }
 }
 
