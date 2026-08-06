@@ -1122,23 +1122,14 @@ impl App {
 
         let chat_state = init_chat(chat, &agent, &colors);
         let session_rename_dialog_state = init_session_rename_dialog(colors);
-        let mut agent_policies = crate::tools::AgentToolPolicies::default();
-        for (mode, tools) in agent_registry.tool_policy_map() {
-            agent_policies = agent_policies.with_custom_tools(mode.clone(), tools.clone());
-        }
-        let tool_permissions = crate::tools::ToolPermissions::new(cwd_path.clone())
-            .with_agent_policies(agent_policies)
-            .with_global_tool_config(loaded_config.merged_config.tools.clone())
-            .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
-            .with_agent_permission_rules(agent_registry.permission_rules_map());
-
-        let discovery = crate::model::discovery::Discovery::new_with_config(
-            Some(loaded_config.merged_config.custom_providers.clone()),
-            loaded_config.merged_config.disabled_providers.clone(),
-            loaded_config.merged_config.enabled_providers.clone(),
-        )
-        .ok();
-        let custom_instructions = loaded_config.merged_config.instructions.join("\n\n");
+        let runtime = crate::config::ConfigRuntime::from_merged(
+            &loaded_config.merged_config,
+            cwd_path.clone(),
+            crate::config::ConfigRuntimeOptions::default(),
+        );
+        let tool_permissions = runtime.tool_permissions;
+        let discovery = runtime.discovery;
+        let custom_instructions = runtime.custom_instructions;
         let now = std::time::Instant::now();
 
         Ok(Self {

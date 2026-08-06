@@ -354,7 +354,7 @@ impl Discovery {
         }
     }
 
-    fn provider_is_enabled(&self, provider_id: &str) -> bool {
+    pub fn provider_is_enabled(&self, provider_id: &str) -> bool {
         !self.disabled_providers.contains(provider_id)
             && self
                 .enabled_providers
