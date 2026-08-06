@@ -859,6 +859,7 @@ pub struct App {
     pub websearch: crate::config::configuration::WebsearchConfig,
     pub mcp: crate::config::configuration::McpConfig,
     pub config_raw_merged: serde_json::Value,
+    custom_instructions: String,
     terminal_focused: bool,
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
@@ -1017,8 +1018,13 @@ impl App {
             })
             .collect();
         input.autocomplete = Some(
-            AutoComplete::new_at(crate::autocomplete::CommandAuto::new(&registry), &cwd_path)
-                .with_agents(agent_suggestions),
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::new(&registry),
+                &cwd_path,
+                loaded_config.merged_config.watcher.is_enabled(),
+                loaded_config.merged_config.watcher.ignored_paths().to_vec(),
+            )
+            .with_agents(agent_suggestions),
         );
 
         if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
@@ -1116,19 +1122,14 @@ impl App {
 
         let chat_state = init_chat(chat, &agent, &colors);
         let session_rename_dialog_state = init_session_rename_dialog(colors);
-        let mut agent_policies = crate::tools::AgentToolPolicies::default();
-        for (mode, tools) in agent_registry.tool_policy_map() {
-            agent_policies = agent_policies.with_custom_tools(mode.clone(), tools.clone());
-        }
-        let tool_permissions = crate::tools::ToolPermissions::new(cwd_path.clone())
-            .with_agent_policies(agent_policies)
-            .with_permission_rules(loaded_config.merged_config.permission_rules.clone())
-            .with_agent_permission_rules(agent_registry.permission_rules_map());
-
-        let discovery = crate::model::discovery::Discovery::new_with_custom(Some(
-            loaded_config.merged_config.custom_providers.clone(),
-        ))
-        .ok();
+        let runtime = crate::config::ConfigRuntime::from_merged(
+            &loaded_config.merged_config,
+            cwd_path.clone(),
+            crate::config::ConfigRuntimeOptions::default(),
+        );
+        let tool_permissions = runtime.tool_permissions;
+        let discovery = runtime.discovery;
+        let custom_instructions = runtime.custom_instructions;
         let now = std::time::Instant::now();
 
         Ok(Self {
@@ -1204,6 +1205,7 @@ impl App {
             websearch: loaded_config.merged_config.websearch,
             mcp: mcp_config,
             config_raw_merged: loaded_config.raw_merged,
+            custom_instructions,
             terminal_focused: true,
             tool_permissions,
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
@@ -9406,6 +9408,7 @@ impl App {
         let agent_registry = self.agent_registry.clone();
         let websearch_config = self.websearch.clone();
         let mcp_config = self.mcp.clone();
+        let custom_instructions = self.custom_instructions.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -9451,7 +9454,8 @@ impl App {
             )
             .with_tool_registry(prompt_registry)
             .with_agent_registry(agent_registry.clone())
-            .with_active_agent(agent_mode.clone());
+            .with_active_agent(agent_mode.clone())
+            .with_custom_instructions(custom_instructions);
             let system_prompt = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async { composer.compose().await })
             });
@@ -10998,6 +11002,7 @@ mod tests {
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             config_raw_merged: serde_json::json!({}),
+            custom_instructions: String::new(),
             terminal_focused: true,
             tool_permissions: crate::tools::ToolPermissions::new(".".to_string()),
             skills_dirs: Vec::new(),

@@ -339,7 +339,20 @@ async fn run_print_mode(
         })
         .flatten();
     let requested_reasoning = reasoning_override.or(saved_reasoning);
-    let discovery = crate::model::discovery::Discovery::new().ok();
+
+    let cwd = loaded_config.cwd.to_string_lossy().to_string();
+    let runtime = crate::config::ConfigRuntime::from_merged(
+        &loaded_config.merged_config,
+        std::path::PathBuf::from(&cwd),
+        crate::config::ConfigRuntimeOptions {
+            print_mode: true,
+            dangerously_skip_permissions,
+        },
+    );
+    let discovery = runtime.discovery;
+    let tool_permissions = runtime.tool_permissions;
+    let custom_instructions = runtime.custom_instructions;
+
     let reasoning_effort = discovery
         .as_ref()
         .and_then(|discovery| discovery.get_model_reasoning_capability(&provider_name, &model_id))
@@ -352,8 +365,6 @@ async fn run_print_mode(
             }
         });
 
-    let cwd = loaded_config.cwd.to_string_lossy().to_string();
-
     let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
     let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -361,17 +372,6 @@ async fn run_print_mode(
     let agent_registry = loaded_config.merged_config.agent_registry.clone();
     let websearch_config = loaded_config.merged_config.websearch.clone();
     let mcp_config = loaded_config.merged_config.mcp.clone();
-    let mut agent_policies = crate::tools::AgentToolPolicies::default();
-    for (mode, tools) in agent_registry.tool_policy_map() {
-        agent_policies = agent_policies.with_custom_tools(mode, tools);
-    }
-    let permission_rules =
-        print_mode_permission_rules(loaded_config.merged_config.permission_rules.clone());
-    let tool_permissions = crate::tools::ToolPermissions::new(std::path::PathBuf::from(&cwd))
-        .with_agent_policies(agent_policies)
-        .with_permission_rules(permission_rules)
-        .with_agent_permission_rules(agent_registry.permission_rules_map())
-        .dangerously_skip_permissions(dangerously_skip_permissions);
     let agent_max_steps = agent_registry
         .get(&agent_mode)
         .and_then(|agent| agent.max_steps);
@@ -404,6 +404,7 @@ async fn run_print_mode(
     )
     .with_tool_registry(prompt_registry.clone())
     .with_agent_registry(agent_registry.clone())
+    .with_custom_instructions(custom_instructions)
     .with_print_mode(true);
     let system_prompt = composer.compose().await;
     let messages = vec![Message::system(system_prompt), Message::user(prompt)];
@@ -559,19 +560,6 @@ fn estimate_prompt_tokens(messages: &[crate::session::types::Message]) -> usize 
 
 fn estimate_text_tokens(content: &str) -> usize {
     content.chars().count().max(1) / 4
-}
-
-fn print_mode_permission_rules(
-    mut rules: crate::tools::PermissionRules,
-) -> crate::tools::PermissionRules {
-    for tool_id in ["question", "update_plan"] {
-        rules.push(crate::tools::PermissionRule {
-            permission: tool_id.to_string(),
-            pattern: "*".to_string(),
-            action: crate::tools::PermissionPolicyAction::Deny,
-        });
-    }
-    rules
 }
 
 fn parse_reasoning_effort_arg(
@@ -1199,18 +1187,21 @@ mod tests {
 
     #[test]
     fn print_mode_denies_interactive_tools() {
-        let rules = print_mode_permission_rules(Vec::new());
+        let rt = crate::config::ConfigRuntime::from_merged(
+            &crate::config::configuration::MergedConfig::default(),
+            "/tmp/workspace",
+            crate::config::ConfigRuntimeOptions {
+                print_mode: true,
+                ..Default::default()
+            },
+        );
 
-        assert!(rules.iter().any(|rule| {
-            rule.permission == "question"
-                && rule.pattern == "*"
-                && rule.action == crate::tools::PermissionPolicyAction::Deny
-        }));
-        assert!(rules.iter().any(|rule| {
-            rule.permission == "update_plan"
-                && rule.pattern == "*"
-                && rule.action == crate::tools::PermissionPolicyAction::Deny
-        }));
+        assert!(!rt
+            .tool_permissions
+            .is_tool_visible_for_agent("build", "question"));
+        assert!(!rt
+            .tool_permissions
+            .is_tool_visible_for_agent("build", "update_plan"));
     }
 }
 
