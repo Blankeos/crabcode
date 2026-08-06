@@ -8,6 +8,7 @@ mod auth;
 mod autocomplete;
 mod command;
 mod config;
+mod herdr;
 mod llm;
 mod logging;
 mod mcp;
@@ -853,6 +854,8 @@ async fn main() -> Result<()> {
     }
 
     let mut app = App::new_with_model_override(args.model.as_deref())?;
+    // Keep herdr authority until this guard drops (normal exit or panic).
+    let _herdr = crate::herdr::Session::start();
 
     if let Some(ref session_id) = args.session {
         if app.session_manager.ensure_session_loaded(session_id) {
