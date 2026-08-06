@@ -21,11 +21,11 @@ dist-build *args:
 preview:
     ./target/release/crabcode
 
-dpreview:
-    ./target/debug/crabcode
+dpreview *args:
+    ./target/debug/crabcode {{ args }}
 
-gen-themes:
-    bun run scripts/gen-themes.ts
+gen-themes *args:
+    bun run scripts/gen-themes.ts {{ args }}
 
 bench-agents *args:
     bun run scripts/bench-agents.ts {{ args }}

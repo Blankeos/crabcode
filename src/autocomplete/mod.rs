@@ -22,9 +22,18 @@ impl AutoComplete {
     }
 
     pub fn new_at(command_auto: CommandAuto, root: impl Into<std::path::PathBuf>) -> Self {
+        Self::new_at_with_file_config(command_auto, root, true, Vec::new())
+    }
+
+    pub fn new_at_with_file_config(
+        command_auto: CommandAuto,
+        root: impl Into<std::path::PathBuf>,
+        watcher_enabled: bool,
+        ignored_paths: Vec<String>,
+    ) -> Self {
         Self {
             command_auto,
-            file_auto: FileAuto::new_at(root),
+            file_auto: FileAuto::new_at_with_config(root, watcher_enabled, ignored_paths),
             agents: Vec::new(),
             mode: AutoCompleteMode::Command,
         }

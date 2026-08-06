@@ -40,13 +40,13 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 | `notifications` |  | ✅ | crabcode-specific sounds, desktop notifications, and terminal alert signals such as Zed tab dots. |
 | `mcp` | ✅ | ✅ | Uses the OpenCode MCP config shape. Enabled servers are connected at runtime and their tools are exposed as crabcode tools. |
 | `permission` | ✅ | ✅ | Global tool permission rules are enforced during AI SDK tool execution. |
-| `instructions` | ✅ |  | Accepted at the top level, but config-driven instruction files are not loaded yet. |
-| `tools` | ✅ |  | Accepted at the top level, not used as global tool config yet. |
-| `compaction` | ✅ |  | Accepted at the top level, not used as config yet. |
-| `watcher` | ✅ |  | Accepted at the top level, not used as config yet. |
-| `formatter` | ✅ |  | Accepted at the top level, not used as config yet. |
-| `disabled_providers` | ✅ |  | Accepted at the top level, not applied yet. |
-| `enabled_providers` | ✅ |  | Accepted at the top level, not applied yet. |
+| `instructions` | ✅ | ✅ | Loads the listed files relative to the project root (or from absolute and `~/` paths) and appends their contents to the system prompt. Unreadable files produce a config warning. |
+| `tools` | ✅ | ✅ | Global tool enable/disable map. Disabled tools are removed before agent-specific tool policies are applied. |
+| `compaction` | ✅ |  | Accepted and parsed (`false` or `{ "auto", "prune" }`), but compaction behavior is not applied yet. |
+| `watcher` | ✅ | ✅ | Controls file suggestions in command autocomplete. Use `false` to disable them or `{ "ignore": ["path"] }` to exclude paths. |
+| `formatter` | ✅ |  | Accepted and parsed by file extension, but configured formatter commands are not run yet. |
+| `disabled_providers` | ✅ | ✅ | Removes the listed provider IDs from model discovery and selection. |
+| `enabled_providers` | ✅ | ✅ | Restricts model discovery and selection to the listed provider IDs. `disabled_providers` takes precedence when both are set. |
 | `keybinds` | ✅ | ❌ | Ignored because crabcode does not use OpenCode keybind config. |
 | `share` | ✅ | ❌ | Ignored. |
 | `tui` | ✅ | ❌ | Ignored. crabcode owns its terminal UI. |
