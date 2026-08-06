@@ -221,11 +221,24 @@ fn anthropic_stream_chunk(
     value: &serde_json::Value,
 ) -> Option<Result<ChunkType>> {
     match event_type {
+        "message_start" => {
+            // Partial usage early in the stream (cache fields may already appear).
+            if let Some(usage) = value.get("message").and_then(|m| m.get("usage")) {
+                log_anthropic_usage(usage);
+            }
+            None
+        }
         "content_block_start" => anthropic_tool_call_start(value)
             .map(ChunkType::ToolCall)
             .map(Ok),
         "content_block_delta" => anthropic_content_block_delta(value).map(Ok),
-        "message_delta" => anthropic_message_delta(value).map(Ok),
+        "message_delta" => {
+            // Final usage wins for cache_read / cache_creation.
+            if let Some(usage) = value.get("usage") {
+                log_anthropic_usage(usage);
+            }
+            anthropic_message_delta(value).map(Ok)
+        }
         "message_stop" => Some(Ok(ChunkType::End { reason: None })),
         "error" => {
             let error_msg = value["error"]["message"]
@@ -235,6 +248,34 @@ fn anthropic_stream_chunk(
         }
         _ => None,
     }
+}
+
+/// Log Anthropic usage to `app.log` so cache hits are verifiable without dashboards.
+/// Note: `input_tokens` is non-cached only; total input ≈ input + cache_read + cache_creation.
+fn log_anthropic_usage(usage: &serde_json::Value) {
+    let input = usage.get("input_tokens").and_then(|v| v.as_u64());
+    let output = usage.get("output_tokens").and_then(|v| v.as_u64());
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    // Skip empty/partial early frames with no signal.
+    if input.is_none() && output.is_none() && cache_read == 0 && cache_creation == 0 {
+        return;
+    }
+
+    crate::emit_log!(
+        "[prompt-cache] anthropic input={} output={} cache_read={} cache_creation={}",
+        input.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        output.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        cache_read,
+        cache_creation
+    );
 }
 
 fn anthropic_content_block_delta(value: &serde_json::Value) -> Option<ChunkType> {

@@ -396,6 +396,47 @@ fn debug_log(msg: &str) {
         });
 }
 
+/// Log OpenAI-compatible / AI Gateway usage to `app.log`.
+/// Looks for `prompt_tokens_details.cached_tokens` and Anthropic-style fields
+/// that some gateways forward.
+fn log_openai_compatible_usage(usage: &serde_json::Value) {
+    let prompt = usage.get("prompt_tokens").and_then(|v| v.as_u64());
+    let completion = usage.get("completion_tokens").and_then(|v| v.as_u64());
+    let cached = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    if prompt.is_none()
+        && completion.is_none()
+        && cached == 0
+        && cache_read == 0
+        && cache_creation == 0
+    {
+        return;
+    }
+
+    crate::emit_log!(
+        "[prompt-cache] openai-compatible prompt={} completion={} cached_tokens={} cache_read={} cache_creation={}",
+        prompt.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        completion
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into()),
+        cached,
+        cache_read,
+        cache_creation
+    );
+}
+
 fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     let data = data.trim();
 
@@ -426,6 +467,12 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
             .unwrap_or("Unknown error");
         debug_log(&format!("[SSE] API error: {}", msg));
         return vec![Ok(ChunkType::Failed(msg.to_string()))];
+    }
+
+    // Final usage often arrives on a choices-empty (or choices-missing) chunk.
+    // Log cache-related fields so Gateway Anthropic hits are verifiable in app.log.
+    if let Some(usage) = value.get("usage") {
+        log_openai_compatible_usage(usage);
     }
 
     let Some(choices) = value["choices"].as_array() else {
