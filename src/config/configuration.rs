@@ -4,7 +4,7 @@ use crate::tools::{
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -481,17 +481,12 @@ pub struct MergedConfig {
     pub compaction: CompactionConfig,
     pub watcher: WatcherConfig,
     pub formatter: HashMap<String, FormatterConfig>,
-    pub disabled_providers: HashSet<String>,
-    pub enabled_providers: Option<HashSet<String>>,
 }
 
 impl MergedConfig {
     pub fn provider_is_enabled(&self, provider_id: &str) -> bool {
         !self.disabled_providers.contains(provider_id)
-            && self
-                .enabled_providers
-                .as_ref()
-                .is_none_or(|enabled| enabled.contains(provider_id))
+            && (self.enabled_providers.is_empty() || self.enabled_providers.contains(provider_id))
     }
 }
 
@@ -1433,12 +1428,6 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
             _ => None,
         })
         .collect();
-    out.disabled_providers = parse_string_array(obj.get("disabled_providers"))
-        .into_iter()
-        .collect();
-    out.enabled_providers = obj
-        .get("enabled_providers")
-        .map(|value| parse_string_array(Some(value)).into_iter().collect());
 
     out
 }
