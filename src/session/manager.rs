@@ -503,6 +503,12 @@ impl SessionManager {
         if self.sessions.contains_key(id) {
             let _ = self.hydrate_session(id);
             self.current_session_id = Some(id.to_string());
+            let status = self
+                .sessions
+                .get(id)
+                .map(|s| s.status)
+                .unwrap_or(SessionStatus::Idle);
+            crate::herdr::report_session_status(status);
             true
         } else {
             false
@@ -775,6 +781,11 @@ impl SessionManager {
             if let Some(db_id) = self.id_mapping.get(id) {
                 let _ = dao.set_session_status(*db_id, status.as_str(), last_error);
             }
+        }
+
+        // Only the active pane session drives herdr's agent state.
+        if self.current_session_id.as_deref() == Some(id) {
+            crate::herdr::report_session_status(status);
         }
 
         Ok(())
