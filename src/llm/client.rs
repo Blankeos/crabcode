@@ -2106,7 +2106,7 @@ enum ProviderKind {
 impl ProviderKind {
     fn from_provider(_provider_name: &str, npm_package: &str) -> Self {
         match npm_package {
-            "@ai-sdk/openai-compatible" => Self::OpenAICompatible,
+            "@ai-sdk/openai-compatible" | "@ai-sdk/gateway" => Self::OpenAICompatible,
             "@ai-sdk/anthropic" => Self::Anthropic,
             _ => Self::OpenAI,
         }
@@ -2473,7 +2473,7 @@ mod tests {
         assert!(super::is_vercel_ai_gateway("vercel", &route.npm_package));
         assert_eq!(
             ProviderKind::from_provider("vercel", &route.npm_package),
-            ProviderKind::OpenAI
+            ProviderKind::OpenAICompatible
         );
         // Empty api must not fall through to api.openai.com.
         assert_eq!(
@@ -2482,7 +2482,7 @@ mod tests {
             {
                 "https://ai-gateway.vercel.sh".to_string()
             } else {
-                ProviderKind::OpenAI.normalize_base_url(&route.api)
+                ProviderKind::OpenAICompatible.normalize_base_url(&route.api)
             },
             "https://ai-gateway.vercel.sh"
         );
