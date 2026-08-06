@@ -19,6 +19,9 @@ pub struct OpenAICompatible {
     provider_name: String,
     reasoning_effort: Option<String>,
     prompt_cache_key: Option<String>,
+    /// Vercel AI Gateway: set `providerOptions.gateway.caching = "auto"` so
+    /// Anthropic (and MiniMax) models get explicit cache breakpoints.
+    gateway_caching_auto: bool,
 }
 
 impl OpenAICompatible {
@@ -35,6 +38,7 @@ pub struct OpenAICompatibleBuilder {
     provider_name: Option<String>,
     reasoning_effort: Option<String>,
     prompt_cache_key: Option<String>,
+    gateway_caching_auto: bool,
 }
 
 impl OpenAICompatibleBuilder {
@@ -68,6 +72,11 @@ impl OpenAICompatibleBuilder {
         self
     }
 
+    pub fn gateway_caching_auto(mut self, enabled: bool) -> Self {
+        self.gateway_caching_auto = enabled;
+        self
+    }
+
     pub fn build(self) -> Result<OpenAICompatible> {
         Ok(OpenAICompatible {
             base_url: self
@@ -82,6 +91,7 @@ impl OpenAICompatibleBuilder {
                 .unwrap_or_else(|| "openai-compatible".to_string()),
             reasoning_effort: self.reasoning_effort,
             prompt_cache_key: self.prompt_cache_key,
+            gateway_caching_auto: self.gateway_caching_auto,
         })
     }
 }
@@ -146,6 +156,15 @@ impl Provider for OpenAICompatible {
             if !key.is_empty() {
                 body["prompt_cache_key"] = serde_json::Value::String(key.clone());
             }
+        }
+
+        // AI Gateway Chat Completions: enable automatic prompt caching for
+        // providers that need explicit markers (Anthropic / MiniMax).
+        // https://vercel.com/docs/ai-gateway/models-and-providers/automatic-caching
+        if self.gateway_caching_auto {
+            body["providerOptions"] = serde_json::json!({
+                "gateway": { "caching": "auto" }
+            });
         }
 
         let mut request_headers = reqwest::header::HeaderMap::new();
@@ -697,6 +716,29 @@ mod tests {
             .expect("byte stream should parse");
 
         assert_eq!(lines, vec!["[DONE]".to_string()]);
+    }
+
+    #[test]
+    fn gateway_caching_auto_is_off_by_default() {
+        let provider = OpenAICompatible::builder()
+            .base_url("https://ai-gateway.vercel.sh/v1")
+            .model_name("anthropic/claude-sonnet-4.5")
+            .provider_name("vercel")
+            .build()
+            .unwrap();
+        assert!(!provider.gateway_caching_auto);
+    }
+
+    #[test]
+    fn gateway_caching_auto_can_be_enabled() {
+        let provider = OpenAICompatible::builder()
+            .base_url("https://ai-gateway.vercel.sh/v1")
+            .model_name("anthropic/claude-sonnet-4.5")
+            .provider_name("vercel")
+            .gateway_caching_auto(true)
+            .build()
+            .unwrap();
+        assert!(provider.gateway_caching_auto);
     }
 }
 

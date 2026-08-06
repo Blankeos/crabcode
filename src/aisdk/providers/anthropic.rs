@@ -96,7 +96,7 @@ impl Provider for Anthropic {
     ) -> Result<ProviderStream> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
-        let mut system_prompts: Vec<serde_json::Value> = messages
+        let system_prompts: Vec<serde_json::Value> = messages
             .iter()
             .filter_map(|m| match m {
                 Message::System(s) => Some(serde_json::json!({
@@ -106,17 +106,6 @@ impl Provider for Anthropic {
                 _ => None,
             })
             .collect();
-
-        // Anthropic prompt caching: mark the last system block ephemeral so the
-        // stable prefix can be reused across tool steps in a session.
-        if let Some(last) = system_prompts.last_mut() {
-            if let Some(obj) = last.as_object_mut() {
-                obj.insert(
-                    "cache_control".to_string(),
-                    serde_json::json!({ "type": "ephemeral" }),
-                );
-            }
-        }
 
         // Anthropic requires adjacent tool_use blocks in one assistant message,
         // immediately followed by tool_result blocks in one user message.
@@ -152,6 +141,11 @@ impl Provider for Anthropic {
         if let Some(effort) = &self.reasoning_effort {
             body["output_config"] = serde_json::json!({ "effort": effort });
         }
+
+        // Prompt caching (opencode auto parity): last tool + last system +
+        // latest user content block. Stable prefix first so multi-step tool
+        // loops can cache-read tools/system/history.
+        apply_anthropic_prompt_caching(&mut body);
 
         let mut request_headers = reqwest::header::HeaderMap::new();
         request_headers.insert(
@@ -369,6 +363,81 @@ fn anthropic_tool_input_is_empty(value: &serde_json::Value) -> bool {
         serde_json::Value::Object(map) => map.is_empty(),
         serde_json::Value::String(text) => text.trim().is_empty(),
         _ => false,
+    }
+}
+
+/// Anthropic prompt caching (opencode `auto` parity):
+/// mark last tool + last system block + latest user content block.
+/// Cap at 4 breakpoints; each is `{"type":"ephemeral"}`.
+fn apply_anthropic_prompt_caching(body: &mut serde_json::Value) {
+    let mut remaining = 4usize;
+
+    // 1. Last tool (stable schemas — highest value for tool loops)
+    if remaining > 0 {
+        if let Some(tools) = body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+            if let Some(last) = tools.last_mut().and_then(|t| t.as_object_mut()) {
+                last.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({ "type": "ephemeral" }),
+                );
+                remaining -= 1;
+            }
+        }
+    }
+
+    // 2. Last system text block
+    if remaining > 0 {
+        if let Some(system) = body.get_mut("system").and_then(|v| v.as_array_mut()) {
+            if let Some(last) = system.last_mut().and_then(|b| b.as_object_mut()) {
+                last.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({ "type": "ephemeral" }),
+                );
+                remaining -= 1;
+            }
+        }
+    }
+
+    // 3. Latest user message's last content block (after anthropic_messages
+    // regrouping so tool_result groups keep the marker).
+    if remaining > 0 {
+        if let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) {
+            if let Some(user) = messages
+                .iter_mut()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            {
+                mark_latest_user_cache_control(user);
+            }
+        }
+    }
+}
+
+fn mark_latest_user_cache_control(user: &mut serde_json::Value) {
+    let Some(obj) = user.as_object_mut() else {
+        return;
+    };
+
+    // String content must become a text block to host cache_control.
+    if let Some(serde_json::Value::String(text)) = obj.get("content").cloned() {
+        obj.insert(
+            "content".to_string(),
+            serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" }
+            }]),
+        );
+        return;
+    }
+
+    if let Some(blocks) = obj.get_mut("content").and_then(|c| c.as_array_mut()) {
+        if let Some(last) = blocks.last_mut().and_then(|b| b.as_object_mut()) {
+            last.insert(
+                "cache_control".to_string(),
+                serde_json::json!({ "type": "ephemeral" }),
+            );
+        }
     }
 }
 
@@ -625,6 +694,73 @@ mod tests {
         assert_eq!(encoded[2]["content"][1]["tool_use_id"], "call_b");
         assert_eq!(encoded[3]["role"], "assistant");
         assert_eq!(encoded[3]["content"], "done");
+    }
+
+    #[test]
+    fn prompt_caching_marks_last_tool_system_and_latest_user() {
+        let mut body = serde_json::json!({
+            "system": [
+                { "type": "text", "text": "sys a" },
+                { "type": "text", "text": "sys b" },
+            ],
+            "tools": [
+                { "name": "read", "description": "r", "input_schema": { "type": "object" } },
+                { "name": "edit", "description": "e", "input_schema": { "type": "object" } },
+            ],
+            "messages": [
+                { "role": "user", "content": "first" },
+                { "role": "assistant", "content": "ok" },
+                { "role": "user", "content": "second" },
+            ],
+        });
+
+        apply_anthropic_prompt_caching(&mut body);
+
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["system"][1]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        // string user content is wrapped so cache_control can attach
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .map(|s| s == "first")
+                .unwrap_or(false)
+                || body["messages"][0].get("cache_control").is_none()
+        );
+    }
+
+    #[test]
+    fn prompt_caching_marks_last_tool_result_block() {
+        let mut body = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "tool_result", "tool_use_id": "a", "content": "ok a" },
+                    { "type": "tool_result", "tool_use_id": "b", "content": "ok b" },
+                ]
+            }],
+        });
+
+        apply_anthropic_prompt_caching(&mut body);
+
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            body["messages"][0]["content"][1]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
     }
 }
 

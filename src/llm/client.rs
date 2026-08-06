@@ -44,6 +44,8 @@ struct ProviderRequestConfig {
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     supports_image_input: bool,
     openai_options: OpenAIRequestOptions,
+    /// Vercel AI Gateway: enable `providerOptions.gateway.caching = "auto"`.
+    gateway_caching_auto: bool,
 }
 
 impl ProviderRequestConfig {
@@ -65,6 +67,7 @@ impl ProviderRequestConfig {
             reasoning_effort,
             supports_image_input,
             openai_options: OpenAIRequestOptions::default(),
+            gateway_caching_auto: false,
         }
     }
 }
@@ -417,6 +420,7 @@ pub async fn stream_llm_with_cancellation(
         supports_image_input: request_config.supports_image_input,
         openai_options: request_config.openai_options.clone(),
         prompt_cache_key: Some(session_id.clone()),
+        gateway_caching_auto: request_config.gateway_caching_auto,
     };
     crate::agent::config::set_llm_session(llm_session.clone());
     let session_registration =
@@ -634,6 +638,7 @@ pub async fn build_subagent_llm_session(
         supports_image_input: request_config.supports_image_input,
         openai_options: request_config.openai_options,
         prompt_cache_key: None,
+        gateway_caching_auto: request_config.gateway_caching_auto,
     })
 }
 
@@ -816,6 +821,11 @@ async fn prepare_request_config(
         reasoning_effort,
         supports_image_input,
     );
+    // Anthropic via AI Gateway needs explicit cache markers; gateway "auto"
+    // inserts them. Without this, Anthropic traffic never cache-reads.
+    if is_vercel_ai_gateway(provider_name, &model_route.npm_package) {
+        request_config.gateway_caching_auto = true;
+    }
     apply_provider_request_defaults(provider_name, &mut request_config);
 
     maybe_apply_openai_oauth_overrides(
@@ -1215,7 +1225,8 @@ async fn stream_provider_request(
             let mut builder = OpenAICompatible::builder()
                 .base_url(&config.base_url)
                 .model_name(&config.model_name)
-                .provider_name(&config.provider_name);
+                .provider_name(&config.provider_name)
+                .gateway_caching_auto(config.gateway_caching_auto);
             if let Some(effort) = config.reasoning_effort {
                 builder = builder.reasoning_effort(effort.as_str());
             }
