@@ -124,6 +124,7 @@ mod tests {
             free: false,
             local: false,
             reasoning_options: Vec::new(),
+            context_window: None,
         };
 
         assert_eq!(model_ref(&model), "openai/gpt-5");

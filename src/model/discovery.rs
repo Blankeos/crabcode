@@ -287,6 +287,7 @@ impl Discovery {
                     free: false,
                     local: false,
                     reasoning_options: Vec::new(),
+                    context_window: custom_model.context_window,
                 });
             }
         }
@@ -752,6 +753,11 @@ impl Discovery {
                         free,
                         local: false,
                         reasoning_options: model.reasoning_options.clone(),
+                        context_window: model
+                            .limit
+                            .as_ref()
+                            .map(|limit| limit.context)
+                            .filter(|context| *context > 0),
                     });
                 }
             }
@@ -920,6 +926,7 @@ mod tests {
             free: false,
             local: false,
             reasoning_options: Vec::new(),
+            context_window: None,
         };
         let connected_provider_ids = std::collections::HashSet::new();
         let configured_provider_ids =
