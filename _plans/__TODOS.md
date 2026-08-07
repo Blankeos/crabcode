@@ -437,4 +437,10 @@ I think this is how the TUI works already anyway right?
 
 - [x] When I queue (it's supposed to interrupt right? after the most recent tool call..).. What i noticed is if it's doing a subagent just as I queued some message. It finishes the subagent, interrupts... BUt whne I check the subagent it says it's still loadig... AND also it says "interrupted" just after the subagent is supposedly "done".
 
+- [x] When typing subagents names.. highlight them. In the chat input.
+
+- [ ] I wanna imitate grok-build's `/compact-mode` and by default a sticky "most recent message i made" is just sticky top-0 essentially, so no matter where I am, my latest message follows the response it triggered
+
+- [ ] When autocompleting a "command" and my autosuggestions is focusing it and I press 'tab or enter'... It doesnt submit it... It just autocompletes it in the chat, but doesnt submit it.. This matches opencode behavior.. This is only for commands tho.
+
 - [ ] opencode v2-like apis for `crabcode session list` or something. So agents can just use the cli instead of checking the .db on its own.

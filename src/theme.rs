@@ -136,12 +136,28 @@ pub fn contrast_text(background: ratatui::style::Color) -> ratatui::style::Color
 
 pub fn agent_color(agent: &str, colors: &ThemeColors) -> ratatui::style::Color {
     match agent.to_ascii_lowercase().as_str() {
-        // Match OpenCode primary agent colors:
-        // - Build: secondary
-        // - Plan: accent
+        // Match OpenCode visible-agent palette rotation for builtins:
+        // secondary / accent / success / warning / primary / error / info
         "build" => colors.secondary,
         "plan" => colors.accent,
-        _ => colors.primary,
+        "general" => colors.success,
+        "explore" => colors.warning,
+        "executor" => colors.info,
+        other => {
+            let palette = [
+                colors.secondary,
+                colors.accent,
+                colors.success,
+                colors.warning,
+                colors.primary,
+                colors.error,
+                colors.info,
+            ];
+            let hash = other.bytes().fold(0usize, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(b as usize)
+            });
+            palette[hash % palette.len()]
+        }
     }
 }
 

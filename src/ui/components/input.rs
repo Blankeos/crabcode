@@ -1430,6 +1430,7 @@ impl Input {
 
         frame.render_widget(Paragraph::new(text).style(text_style), area);
         self.style_placeholder_ranges(frame.buffer_mut(), area, colors, &visual_lines);
+        self.style_agent_mention_ranges(frame.buffer_mut(), area, colors, &visual_lines);
         self.render_paste_hover_tooltip(frame.buffer_mut(), area, colors, &visual_lines);
     }
 
@@ -1600,6 +1601,108 @@ impl Input {
                         placeholder_style,
                     );
                 }
+            }
+        }
+    }
+
+    fn configured_agent_names(&self) -> Vec<String> {
+        self.autocomplete
+            .as_ref()
+            .map(|autocomplete| {
+                autocomplete
+                    .agents
+                    .iter()
+                    .map(|agent| agent.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn agent_mention_ranges_in_line(
+        line: &str,
+        agent_names: &[String],
+    ) -> Vec<(Range<usize>, String)> {
+        if agent_names.is_empty() || !line.contains('@') {
+            return Vec::new();
+        }
+
+        let mut ranges = Vec::new();
+        let bytes = line.as_bytes();
+        let mut idx = 0;
+
+        while idx < bytes.len() {
+            if bytes[idx] != b'@' {
+                idx += 1;
+                continue;
+            }
+
+            let at_boundary = idx == 0
+                || line[..idx]
+                    .chars()
+                    .next_back()
+                    .map(char::is_whitespace)
+                    .unwrap_or(true);
+            if !at_boundary {
+                idx += 1;
+                continue;
+            }
+
+            let name_start = idx + 1;
+            let name_end = line[name_start..]
+                .char_indices()
+                .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '-' && *c != '_')
+                .map(|(offset, _)| name_start + offset)
+                .unwrap_or(line.len());
+            if name_start >= name_end {
+                idx = name_start;
+                continue;
+            }
+
+            let name = &line[name_start..name_end];
+            if let Some(agent) = agent_names
+                .iter()
+                .find(|agent| agent.eq_ignore_ascii_case(name))
+            {
+                ranges.push((idx..name_end, agent.clone()));
+            }
+
+            idx = name_end;
+        }
+
+        ranges
+    }
+
+    fn style_agent_mention_ranges(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        colors: &ThemeColors,
+        visual_lines: &[VisualLine],
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let agent_names = self.configured_agent_names();
+        if agent_names.is_empty() {
+            return;
+        }
+
+        let lines = self.textarea.lines();
+        for (screen_row, visual_line) in visual_lines
+            .iter()
+            .skip(self.viewport_top)
+            .take(area.height as usize)
+            .enumerate()
+        {
+            let Some(line) = lines.get(visual_line.source_row) else {
+                continue;
+            };
+            let y = area.y + screen_row as u16;
+
+            for (range, agent_name) in Self::agent_mention_ranges_in_line(line, &agent_names) {
+                let style = Style::default().fg(agent_color(&agent_name, colors));
+                Self::style_line_byte_range(buffer, area, y, line, range, visual_line, style);
             }
         }
     }
@@ -3184,5 +3287,74 @@ mod tests {
 
         let visual_idx = input.cursor_visual_row(&visual_lines);
         assert!(visual_idx.is_some());
+    }
+
+    #[test]
+    fn test_agent_mention_ranges_match_configured_names() {
+        let agents = vec![
+            "explore".to_string(),
+            "general".to_string(),
+            "executor".to_string(),
+        ];
+
+        let ranges = Input::agent_mention_ranges_in_line(
+            "use @explore and @General, ignore @unknown and email@explore.com",
+            &agents,
+        );
+        assert_eq!(
+            ranges,
+            vec![
+                (4..12, "explore".to_string()),
+                (17..25, "general".to_string()),
+            ]
+        );
+
+        assert!(Input::agent_mention_ranges_in_line("no mentions", &agents).is_empty());
+    }
+
+    #[test]
+    fn test_agent_mentions_render_with_agent_colors() {
+        use crate::autocomplete::{AutoComplete, CommandAuto, Suggestion};
+        use crate::command::registry::Registry;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut input = Input::new();
+        input.autocomplete = Some(
+            AutoComplete::new(CommandAuto::new(&Registry::new())).with_agents(vec![
+                Suggestion::agent("explore", "Explore agent"),
+                Suggestion::agent("general", "General agent"),
+            ]),
+        );
+        input.insert_str("@explore then @general");
+
+        let colors = test_colors();
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 40, 6),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    &colors,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let explore_pos = find_buffer_text(buffer, 40, 6, "@explore").expect("explore mention");
+        let general_pos = find_buffer_text(buffer, 40, 6, "@general").expect("general mention");
+
+        assert_eq!(
+            buffer.cell(explore_pos).expect("explore cell").style().fg,
+            Some(colors.warning)
+        );
+        assert_eq!(
+            buffer.cell(general_pos).expect("general cell").style().fg,
+            Some(colors.success)
+        );
     }
 }
