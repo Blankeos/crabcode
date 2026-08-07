@@ -134,6 +134,7 @@ pub fn render_chat(
     colors: &ThemeColors,
     is_streaming: bool,
     is_compacting: bool,
+    esc_cancel_primed: bool,
     retry_status: Option<&crate::app::StreamingRetryStatus>,
     usage_text: &str,
     subagent_tabs: Option<SubagentTabs>,
@@ -191,12 +192,20 @@ pub fn render_chat(
                 colors,
                 is_streaming,
                 is_compacting,
+                esc_cancel_primed,
                 retry_status,
                 &mut chat_state.wave_spinner,
             );
         }
     } else {
-        render_queued_messages(f, above_status_chunks[3], queued_messages, &agent, colors);
+        render_queued_messages(
+            f,
+            above_status_chunks[3],
+            queued_messages,
+            &agent,
+            colors,
+            esc_cancel_primed,
+        );
 
         input.render(
             f,
@@ -241,6 +250,7 @@ pub fn render_chat(
             &chat_state.wave_spinner,
             colors,
             is_compacting,
+            esc_cancel_primed,
             retry_status,
         )
     } else {
@@ -270,6 +280,7 @@ pub fn render_chat(
             &chat_state.wave_spinner,
             colors,
             is_compacting,
+            esc_cancel_primed,
             retry_status,
             available_width,
         );
@@ -339,11 +350,33 @@ fn chat_status_layout_widths(
     }
 }
 
+/// OpenCode-style interrupt hint: `esc interrupt` → `esc again to interrupt`.
+fn cancel_hint(esc_cancel_primed: bool) -> &'static str {
+    if esc_cancel_primed {
+        "esc again to interrupt"
+    } else {
+        "esc interrupt"
+    }
+}
+
+/// Armed interrupt uses warning so it stands out from the loading spinner (agent/primary)
+/// and streaming metrics (`info`).
+fn cancel_hint_style(colors: &ThemeColors, esc_cancel_primed: bool) -> Style {
+    if esc_cancel_primed {
+        Style::default().fg(colors.warning)
+    } else {
+        Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM)
+    }
+}
+
 fn streaming_status_desired_width(
     chat: &Chat,
     wave_spinner: &WaveSpinner,
     colors: &ThemeColors,
     is_compacting: bool,
+    esc_cancel_primed: bool,
     retry_status: Option<&crate::app::StreamingRetryStatus>,
 ) -> u16 {
     spans_width(&streaming_status_spans(
@@ -351,6 +384,7 @@ fn streaming_status_desired_width(
         wave_spinner,
         colors,
         is_compacting,
+        esc_cancel_primed,
         retry_status,
         u16::MAX,
     ))
@@ -361,6 +395,7 @@ fn streaming_status_spans(
     wave_spinner: &WaveSpinner,
     colors: &ThemeColors,
     is_compacting: bool,
+    esc_cancel_primed: bool,
     retry_status: Option<&crate::app::StreamingRetryStatus>,
     available_width: u16,
 ) -> Vec<Span<'static>> {
@@ -382,7 +417,7 @@ fn streaming_status_spans(
             "retrying now".to_string()
         };
         let attempt = format!("attempt #{}", retry.attempt);
-        let controls = "esc to stop";
+        let controls = cancel_hint(esc_cancel_primed);
         let fixed_width = spans_width(&streaming_text)
             .saturating_add(1)
             .saturating_add(3)
@@ -415,9 +450,7 @@ fn streaming_status_spans(
         streaming_text.push(Span::raw("  "));
         streaming_text.push(Span::styled(
             controls,
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
+            cancel_hint_style(colors, esc_cancel_primed),
         ));
         return streaming_text;
     }
@@ -427,6 +460,11 @@ fn streaming_status_spans(
         streaming_text.push(Span::styled(
             "compacting context",
             Style::default().fg(colors.info),
+        ));
+        streaming_text.push(Span::raw("  "));
+        streaming_text.push(Span::styled(
+            cancel_hint(esc_cancel_primed),
+            cancel_hint_style(colors, esc_cancel_primed),
         ));
         return streaming_text;
     }
@@ -450,10 +488,8 @@ fn streaming_status_spans(
 
     streaming_text.push(Span::raw("  "));
     streaming_text.push(Span::styled(
-        "esc to stop",
-        Style::default()
-            .fg(colors.text_weak)
-            .add_modifier(Modifier::DIM),
+        cancel_hint(esc_cancel_primed),
+        cancel_hint_style(colors, esc_cancel_primed),
     ));
 
     streaming_text
@@ -463,6 +499,7 @@ fn subagent_streaming_status_spans(
     wave_spinner: &WaveSpinner,
     colors: &ThemeColors,
     is_compacting: bool,
+    esc_cancel_primed: bool,
     retry_status: Option<&crate::app::StreamingRetryStatus>,
     available_width: u16,
     max_width: u16,
@@ -482,6 +519,11 @@ fn subagent_streaming_status_spans(
         streaming_text.push(Span::styled(
             "compacting context",
             Style::default().fg(colors.info),
+        ));
+        streaming_text.push(Span::raw("  "));
+        streaming_text.push(Span::styled(
+            cancel_hint(esc_cancel_primed),
+            cancel_hint_style(colors, esc_cancel_primed),
         ));
     } else if let Some(retry) = retry_status {
         let seconds = retry_seconds_remaining(retry.next_epoch_ms);
@@ -510,10 +552,8 @@ fn subagent_streaming_status_spans(
         ));
     } else {
         streaming_text.push(Span::styled(
-            "esc to stop",
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
+            cancel_hint(esc_cancel_primed),
+            cancel_hint_style(colors, esc_cancel_primed),
         ));
     }
     streaming_text
@@ -559,6 +599,7 @@ fn render_queued_messages(
     messages: &[String],
     agent: &str,
     colors: &ThemeColors,
+    esc_cancel_primed: bool,
 ) {
     if messages.is_empty() || area.width == 0 || area.height == 0 {
         return;
@@ -592,7 +633,11 @@ fn render_queued_messages(
     }
 
     let mut lines = Vec::new();
-    let hint = "esc to interrupt and send immediately";
+    let hint = if esc_cancel_primed {
+        "esc again to interrupt and send immediately"
+    } else {
+        "esc interrupt and send immediately"
+    };
     let title = "Messages to submit after next tool call";
     let title_width = 2 + UnicodeWidthStr::width(title);
     let hint_width = UnicodeWidthStr::width(hint);
@@ -615,9 +660,7 @@ fn render_queued_messages(
         header_spans.push(Span::raw(" ".repeat(spacer_width as usize)));
         header_spans.push(Span::styled(
             hint,
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
+            cancel_hint_style(colors, esc_cancel_primed),
         ));
     }
     lines.push(Line::from(header_spans));
@@ -713,6 +756,7 @@ fn render_subagent_footer(
     colors: &ThemeColors,
     is_streaming: bool,
     is_compacting: bool,
+    esc_cancel_primed: bool,
     retry_status: Option<&crate::app::StreamingRetryStatus>,
     wave_spinner: &mut WaveSpinner,
 ) {
@@ -796,6 +840,7 @@ fn render_subagent_footer(
             wave_spinner,
             colors,
             is_compacting,
+            esc_cancel_primed,
             retry_status,
             area.width,
             chunks[0].width,
@@ -1001,6 +1046,7 @@ mod tests {
             &spinner,
             &colors,
             false,
+            false,
             None,
             STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
         );
@@ -1019,6 +1065,7 @@ mod tests {
             &spinner,
             &colors,
             false,
+            false,
             None,
             STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH - 1,
         );
@@ -1035,6 +1082,7 @@ mod tests {
             &spinner,
             &colors,
             false,
+            false,
             None,
             STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH - 1,
             80,
@@ -1042,6 +1090,7 @@ mod tests {
         let full = subagent_streaming_status_spans(
             &spinner,
             &colors,
+            false,
             false,
             None,
             STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
@@ -1113,7 +1162,7 @@ mod tests {
             next_epoch_ms: now_ms + 2_000,
         };
 
-        let line = streaming_status_spans(&chat, &spinner, &colors, false, Some(&retry), 96)
+        let line = streaming_status_spans(&chat, &spinner, &colors, false, false, Some(&retry), 96)
             .into_iter()
             .map(|span| span.content.into_owned())
             .collect::<String>();
@@ -1121,6 +1170,39 @@ mod tests {
         assert!(line.contains("Too Many Requests"));
         assert!(line.contains("retrying in"));
         assert!(line.contains("attempt #2"));
+        assert!(line.contains("esc interrupt"));
+    }
+
+    #[test]
+    fn streaming_status_shows_esc_again_when_cancel_primed() {
+        let chat = Chat::new();
+        let mut colors = test_colors();
+        colors.warning = Color::Yellow;
+        colors.info = Color::Cyan;
+        colors.text_weak = Color::DarkGray;
+        let spinner = WaveSpinner::new(Color::Blue);
+
+        let primed = streaming_status_spans(&chat, &spinner, &colors, false, true, None, 96);
+        let idle = streaming_status_spans(&chat, &spinner, &colors, false, false, None, 96);
+
+        let primed_line = primed
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(primed_line.contains("esc again to interrupt"));
+
+        let primed_hint = primed
+            .iter()
+            .find(|span| span.content.as_ref() == "esc again to interrupt")
+            .expect("armed interrupt hint span");
+        assert_eq!(primed_hint.style.fg, Some(Color::Yellow));
+        assert_ne!(primed_hint.style.fg, Some(colors.info));
+
+        let idle_hint = idle
+            .iter()
+            .find(|span| span.content.as_ref() == "esc interrupt")
+            .expect("idle interrupt hint span");
+        assert_eq!(idle_hint.style.fg, Some(Color::DarkGray));
     }
 
     #[test]

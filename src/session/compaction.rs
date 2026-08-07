@@ -46,45 +46,98 @@ const TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionSelection {
+    /// Absolute insert index in the full transcript: keep `messages[..summarize_end]`,
+    /// then append summary + marker, then keep `messages[summarize_end..]`.
+    pub summarize_end: usize,
     pub messages_to_summarize: Vec<Message>,
     pub tail_messages: Vec<Message>,
 }
 
+/// First index of the active model context after the latest compaction.
+///
+/// Soft compaction keeps pre-boundary history for UI/DB and only excludes it from
+/// the model request. Active context starts at the latest compaction summary
+/// associated with the last marker (supports both layouts:
+/// `[summary, …tail…, marker]` and `[…history…, summary, marker, …tail…]`).
+pub fn context_start_index(messages: &[Message]) -> usize {
+    let Some(marker_idx) = messages.iter().rposition(is_compaction_marker) else {
+        return 0;
+    };
+
+    // Prefer the summary paired with this marker. If none exists (legacy/partial
+    // state), keep preceding messages — the marker itself is never model input.
+    messages[..=marker_idx]
+        .iter()
+        .rposition(is_compaction_summary)
+        .unwrap_or(0)
+}
+
+/// Messages the model should see: from the latest compaction summary onward,
+/// with compaction markers removed.
+pub fn filter_messages_for_context(messages: &[Message]) -> Vec<Message> {
+    let start = context_start_index(messages);
+    messages[start..]
+        .iter()
+        .filter(|message| !is_compaction_marker(message))
+        .cloned()
+        .collect()
+}
+
+/// Indices into `messages` that participate in the active context (no markers).
+fn context_work_indices(messages: &[Message]) -> Vec<usize> {
+    let start = context_start_index(messages);
+    (start..messages.len())
+        .filter(|&idx| !is_compaction_marker(&messages[idx]))
+        .collect()
+}
+
 pub fn select_messages(messages: &[Message], tail_turns: usize) -> Option<CompactionSelection> {
-    if messages.is_empty()
-        || !messages
-            .iter()
-            .any(|msg| matches!(msg.role, MessageRole::User))
-    {
+    let work_indices = context_work_indices(messages);
+    if work_indices.is_empty() {
         return None;
     }
 
-    let user_indices: Vec<usize> = messages
+    let user_work_positions: Vec<usize> = work_indices
         .iter()
         .enumerate()
-        .filter_map(|(idx, msg)| matches!(msg.role, MessageRole::User).then_some(idx))
+        .filter_map(|(work_pos, &full_idx)| {
+            matches!(messages[full_idx].role, MessageRole::User).then_some(work_pos)
+        })
         .collect();
 
-    let tail_start = if tail_turns > 0 && user_indices.len() > tail_turns {
-        user_indices[user_indices.len() - tail_turns]
+    if user_work_positions.is_empty() {
+        return None;
+    }
+
+    let tail_start_work = if tail_turns > 0 && user_work_positions.len() > tail_turns {
+        user_work_positions[user_work_positions.len() - tail_turns]
     } else {
-        messages.len()
+        work_indices.len()
     };
 
-    let messages_to_summarize = if tail_start == messages.len() {
-        messages.to_vec()
-    } else {
-        messages[..tail_start].to_vec()
-    };
-    let tail_messages = if tail_start == messages.len() {
-        Vec::new()
-    } else {
-        messages[tail_start..].to_vec()
-    };
+    let head_indices = &work_indices[..tail_start_work];
+    let tail_indices = &work_indices[tail_start_work..];
+    if head_indices.is_empty() {
+        return None;
+    }
+
+    // Insert summary+marker before the first retained tail message (or after the head).
+    let summarize_end = tail_indices
+        .first()
+        .copied()
+        .unwrap_or_else(|| head_indices.last().copied().unwrap_or(0) + 1)
+        .min(messages.len());
 
     Some(CompactionSelection {
-        messages_to_summarize,
-        tail_messages,
+        summarize_end,
+        messages_to_summarize: head_indices
+            .iter()
+            .map(|&idx| messages[idx].clone())
+            .collect(),
+        tail_messages: tail_indices
+            .iter()
+            .map(|&idx| messages[idx].clone())
+            .collect(),
     })
 }
 
@@ -133,6 +186,25 @@ pub fn build_prompt(messages: &[Message]) -> String {
     prompt
 }
 
+fn build_summary_message(
+    summary: &str,
+    model: Option<String>,
+    provider: Option<String>,
+    agent_mode: Option<String>,
+    timestamp: Option<std::time::SystemTime>,
+) -> Message {
+    let mut summary_message = Message::user(format!("{}\n{}", SUMMARY_PREFIX, summary.trim()));
+    summary_message.model = model;
+    summary_message.provider = provider;
+    summary_message.agent_mode = agent_mode;
+    summary_message.token_count = Some(estimate_tokens(&summary_message.content));
+    if let Some(timestamp) = timestamp {
+        summary_message.timestamp = timestamp;
+    }
+    summary_message
+}
+
+/// Hard-replace helper used by tests and legacy call sites: summary + tail (+ optional marker).
 pub fn build_compacted_messages(
     summary: &str,
     tail_messages: Vec<Message>,
@@ -141,17 +213,13 @@ pub fn build_compacted_messages(
     agent_mode: Option<String>,
     stats: Option<CompactionStats>,
 ) -> Vec<Message> {
-    let mut summary_message = Message::user(format!("{}\n{}", SUMMARY_PREFIX, summary.trim()));
-    summary_message.model = model;
-    summary_message.provider = provider;
-    summary_message.agent_mode = agent_mode;
-    summary_message.token_count = Some(estimate_tokens(&summary_message.content));
-    if let Some(first_tail) = tail_messages.first() {
-        summary_message.timestamp = first_tail
+    let timestamp = tail_messages.first().map(|message| {
+        message
             .timestamp
             .checked_sub(std::time::Duration::from_secs(1))
-            .unwrap_or(first_tail.timestamp);
-    }
+            .unwrap_or(message.timestamp)
+    });
+    let summary_message = build_summary_message(summary, model, provider, agent_mode, timestamp);
 
     let mut messages = vec![summary_message];
     messages.extend(tail_messages);
@@ -161,8 +229,51 @@ pub fn build_compacted_messages(
     messages
 }
 
+/// OpenCode-style soft compaction: keep pre-boundary history for UI/DB reading,
+/// insert summary + marker, then keep the retained tail.
+pub fn apply_soft_compaction(
+    messages: &[Message],
+    selection: &CompactionSelection,
+    summary: &str,
+    model: Option<String>,
+    provider: Option<String>,
+    agent_mode: Option<String>,
+    stats: CompactionStats,
+) -> Vec<Message> {
+    let summarize_end = selection.summarize_end.min(messages.len());
+    let timestamp = selection
+        .tail_messages
+        .first()
+        .map(|message| {
+            message
+                .timestamp
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or(message.timestamp)
+        })
+        .or_else(|| {
+            messages
+                .get(summarize_end.saturating_sub(1))
+                .map(|message| message.timestamp)
+        });
+
+    let mut result = Vec::with_capacity(messages.len() + 2);
+    result.extend_from_slice(&messages[..summarize_end]);
+    result.push(build_summary_message(
+        summary, model, provider, agent_mode, timestamp,
+    ));
+    append_compaction_marker(&mut result, stats);
+    if summarize_end < messages.len() {
+        result.extend_from_slice(&messages[summarize_end..]);
+    }
+    result
+}
+
+/// Token count for the active model context (post-boundary), not full UI history.
 pub fn total_context_tokens(messages: &[Message]) -> usize {
-    messages.iter().map(message_context_tokens).sum()
+    filter_messages_for_context(messages)
+        .iter()
+        .map(message_context_tokens)
+        .sum()
 }
 
 pub fn message_context_tokens(message: &Message) -> usize {
@@ -527,6 +638,49 @@ mod tests {
         assert!(compacted[0].content.starts_with(SUMMARY_PREFIX));
         assert_eq!(compacted[1].content, "tail");
         assert!(compacted[0].timestamp <= compacted[1].timestamp);
+    }
+
+    #[test]
+    fn soft_compaction_keeps_pre_boundary_history() {
+        let messages = vec![
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("u2"),
+            Message::assistant("a2"),
+        ];
+        let selection = select_messages_for_compaction(&messages, 1).expect("selection");
+        let stats = CompactionStats {
+            before_tokens: 1_000,
+            after_tokens: 100,
+            before_messages: 4,
+            after_messages: 3,
+        };
+
+        let soft = apply_soft_compaction(
+            &messages,
+            &selection,
+            "handoff summary",
+            None,
+            None,
+            None,
+            stats,
+        );
+
+        // Pre-boundary history is retained for UI/DB reading.
+        assert!(soft.iter().any(|m| m.content == "u1"));
+        assert!(soft.iter().any(|m| m.content == "a1"));
+        assert!(soft.iter().any(is_compaction_summary));
+        assert!(soft.iter().any(is_compaction_marker));
+        assert!(soft.iter().any(|m| m.content == "u2"));
+
+        let context = filter_messages_for_context(&soft);
+        assert!(context.iter().any(is_compaction_summary));
+        assert!(!context.iter().any(|m| m.content == "u1"));
+        assert!(context.iter().any(|m| m.content == "u2"));
+        assert_eq!(
+            total_context_tokens(&soft),
+            context.iter().map(message_context_tokens).sum::<usize>()
+        );
     }
 
     #[test]

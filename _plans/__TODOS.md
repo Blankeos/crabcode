@@ -442,5 +442,13 @@ I think this is how the TUI works already anyway right?
 - [ ] I wanna imitate grok-build's `/compact-mode` and by default a sticky "most recent message i made" is just sticky top-0 essentially, so no matter where I am, my latest message follows the response it triggered
 
 - [x] When autocompleting a "command" and my autosuggestions is focusing it and I press 'tab or enter'... It doesnt submit it... It just autocompletes it in the chat, but doesnt submit it.. This matches opencode behavior.. This is only for commands tho.
+  - Clarified: only **custom** commands fill without submit; **builtins** (`/compact`, `/refreshmodels`, …) auto-submit.
 
 - [ ] opencode v2-like apis for `crabcode session list` or something. So agents can just use the cli instead of checking the .db on its own.
+
+- [x] Massively improve compaction, shouldnt remove the history for future reading, I think that's what's happening right now... Idk how others work but they dont really get rid of history in the db.. probabyl just make a summary and disable the other previous messages before compaction (that is my assumption)
+  - [x] Be able to cancel compact
+  - [x] Be able to queue a /compact
+  - Soft compaction (OpenCode-style): keep full transcript in UI/DB, filter model context from latest summary boundary
+  - Cancel compact with esc esc (same arm as stream interrupt)
+  - Queue `/compact` while streaming/compacting

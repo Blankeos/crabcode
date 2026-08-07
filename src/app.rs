@@ -315,6 +315,9 @@ enum CompactionTaskMessage {
         session_id: String,
         error: String,
     },
+    Cancelled {
+        session_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -356,6 +359,7 @@ pub struct RemoteLaunchRequest {
 struct CompactionPending {
     session_id: String,
     before_tokens: usize,
+    cancel_token: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Debug)]
@@ -748,6 +752,36 @@ fn reasoning_effort_overrides_from_prefs(
     overrides
 }
 
+#[derive(Debug, Clone)]
+struct QueuedUserMessage {
+    text: String,
+    image_paths: Vec<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+enum QueuedItem {
+    Message(QueuedUserMessage),
+    Compact,
+}
+
+impl QueuedItem {
+    fn preview(&self) -> String {
+        match self {
+            Self::Message(message) => {
+                if !message.text.trim().is_empty() {
+                    return message.text.replace('\n', " ");
+                }
+                match message.image_paths.len() {
+                    0 => String::new(),
+                    1 => "[Image]".to_string(),
+                    count => format!("[{} images]", count),
+                }
+            }
+            Self::Compact => "/compact".to_string(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ClientSessionState {
     chat: Chat,
@@ -755,16 +789,10 @@ struct ClientSessionState {
     stream: Option<SessionStreamState>,
     external_stream: Option<ExternalStreamState>,
     tool_calls: ToolCallViewState,
-    queued_messages: std::collections::VecDeque<QueuedUserMessage>,
+    queued_items: std::collections::VecDeque<QueuedItem>,
     find_bar: FindBar,
     unread_completed: bool,
     retry_status: Option<StreamingRetryStatus>,
-}
-
-#[derive(Debug, Clone)]
-struct QueuedUserMessage {
-    text: String,
-    image_paths: Vec<std::path::PathBuf>,
 }
 
 impl ClientSessionState {
@@ -775,7 +803,7 @@ impl ClientSessionState {
             stream: None,
             external_stream: None,
             tool_calls: ToolCallViewState::default(),
-            queued_messages: std::collections::VecDeque::new(),
+            queued_items: std::collections::VecDeque::new(),
             find_bar: FindBar::new(),
             unread_completed: false,
             retry_status: None,
@@ -815,7 +843,9 @@ pub struct App {
     pub title_dialog_state: TitleDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
-    esc_timeline_primed: bool,
+    /// First Esc arms a double-Esc gesture (cancel while streaming, timeline when idle).
+    /// Matches OpenCode: second Esc confirms; arm expires after [`Self::ESC_ARM_TIMEOUT`].
+    esc_primed_at: Option<std::time::Instant>,
     pub copy_actions_dialog: Option<ActionDialog>,
     pub message_actions_index: Option<usize>,
     pub message_actions_dialog: Option<ActionDialog>,
@@ -1164,7 +1194,7 @@ impl App {
             title_dialog_state,
             which_key_state,
             timeline_dialog_state,
-            esc_timeline_primed: false,
+            esc_primed_at: None,
             copy_actions_dialog: None,
             message_actions_index: None,
             message_actions_dialog: None,
@@ -2085,32 +2115,25 @@ impl App {
 
         self.session_view_states
             .get(session_id)
-            .map(|state| {
-                state
-                    .queued_messages
-                    .iter()
-                    .map(Self::queued_message_preview)
-                    .collect()
-            })
+            .map(|state| state.queued_items.iter().map(QueuedItem::preview).collect())
             .unwrap_or_default()
-    }
-
-    fn queued_message_preview(message: &QueuedUserMessage) -> String {
-        if !message.text.trim().is_empty() {
-            return message.text.replace('\n', " ");
-        }
-
-        match message.image_paths.len() {
-            0 => String::new(),
-            1 => "[Image]".to_string(),
-            count => format!("[{} images]", count),
-        }
     }
 
     fn has_queued_messages_for_session(&self, session_id: &str) -> bool {
         self.session_view_states
             .get(session_id)
-            .is_some_and(|state| !state.queued_messages.is_empty())
+            .is_some_and(|state| !state.queued_items.is_empty())
+    }
+
+    fn has_queued_user_messages_for_session(&self, session_id: &str) -> bool {
+        self.session_view_states
+            .get(session_id)
+            .is_some_and(|state| {
+                state
+                    .queued_items
+                    .iter()
+                    .any(|item| matches!(item, QueuedItem::Message(_)))
+            })
     }
 
     fn queue_message_for_current_session(
@@ -2118,25 +2141,43 @@ impl App {
         text: String,
         image_paths: Vec<std::path::PathBuf>,
     ) -> bool {
+        self.queue_item_for_current_session(QueuedItem::Message(QueuedUserMessage {
+            text,
+            image_paths,
+        }))
+    }
+
+    fn queue_compact_for_current_session(&mut self) -> bool {
+        self.queue_item_for_current_session(QueuedItem::Compact)
+    }
+
+    fn queue_item_for_current_session(&mut self, item: QueuedItem) -> bool {
         let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
             return false;
         };
 
         self.ensure_session_view_state(&session_id);
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
-            state
-                .queued_messages
-                .push_back(QueuedUserMessage { text, image_paths });
+            // Avoid stacking duplicate /compact entries.
+            if matches!(item, QueuedItem::Compact)
+                && state
+                    .queued_items
+                    .iter()
+                    .any(|queued| matches!(queued, QueuedItem::Compact))
+            {
+                return true;
+            }
+            state.queued_items.push_back(item);
             return true;
         }
 
         false
     }
 
-    fn drain_queued_messages_for_session(&mut self, session_id: &str) -> Vec<QueuedUserMessage> {
+    fn drain_queued_items_for_session(&mut self, session_id: &str) -> Vec<QueuedItem> {
         self.session_view_states
             .get_mut(session_id)
-            .map(|state| state.queued_messages.drain(..).collect())
+            .map(|state| state.queued_items.drain(..).collect())
             .unwrap_or_default()
     }
 
@@ -2242,12 +2283,17 @@ impl App {
     }
 
     fn sync_active_streaming_flag(&mut self) {
+        let was_streaming = self.is_streaming;
         self.is_streaming = self.compaction_receiver.is_some()
             || self
                 .session_manager
                 .get_current_session_id()
                 .and_then(|id| self.session_view_states.get(id))
                 .is_some_and(|state| state.stream.is_some() || state.external_stream.is_some());
+        // Drop a cancel-arm if the stream finished before the second Esc.
+        if was_streaming && !self.is_streaming {
+            self.reset_esc_primed_state();
+        }
     }
 
     fn get_random_placeholder() -> String {
@@ -2945,7 +2991,7 @@ impl App {
             }
             KeyCode::Esc if key.modifiers == event::KeyModifiers::NONE => {
                 self.dismiss_selection_actions();
-                self.reset_esc_timeline_state();
+                self.reset_esc_primed_state();
                 true
             }
             _ => false,
@@ -3049,7 +3095,7 @@ impl App {
         };
 
         if key.code != KeyCode::Esc {
-            self.reset_esc_timeline_state();
+            self.reset_esc_primed_state();
         }
 
         if self.overlay_focus == OverlayFocus::TerminalSessionDialog
@@ -3867,22 +3913,14 @@ impl App {
             KeyCode::Esc => {
                 // If text is selected, clear selection first
                 if self.clear_selection() {
-                    self.reset_esc_timeline_state();
+                    self.reset_esc_primed_state();
                     return true;
                 }
                 if self.is_streaming {
-                    self.reset_esc_timeline_state();
-                    if let Some(session_id) = self.session_manager.get_current_session_id().cloned()
-                    {
-                        if self.interrupt_streaming_to_send_queued_for_session(&session_id) {
-                            return true;
-                        }
-                    }
-                    self.cancel_streaming();
-                    return true;
+                    return self.handle_streaming_esc_key(key);
                 }
                 if self.overlay_focus == OverlayFocus::SuggestionsPopup {
-                    self.reset_esc_timeline_state();
+                    self.reset_esc_primed_state();
                     self.input.clear();
                     clear_suggestions(&mut self.suggestions_popup_state);
                     self.overlay_focus = OverlayFocus::None;
@@ -4005,8 +4043,49 @@ impl App {
         Ok(true)
     }
 
-    fn reset_esc_timeline_state(&mut self) {
-        self.esc_timeline_primed = false;
+    /// OpenCode-style arm window for double-Esc cancel (see session.interrupt).
+    const ESC_ARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn reset_esc_primed_state(&mut self) {
+        self.esc_primed_at = None;
+    }
+
+    fn esc_is_primed(&self) -> bool {
+        self.esc_primed_at
+            .is_some_and(|primed_at| primed_at.elapsed() < Self::ESC_ARM_TIMEOUT)
+    }
+
+    fn refresh_esc_primed_state(&mut self) {
+        if self.esc_primed_at.is_some() && !self.esc_is_primed() {
+            self.esc_primed_at = None;
+        }
+    }
+
+    fn arm_esc_primed(&mut self) {
+        self.esc_primed_at = Some(std::time::Instant::now());
+    }
+
+    fn handle_streaming_esc_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers != event::KeyModifiers::NONE {
+            self.reset_esc_primed_state();
+            return false;
+        }
+
+        // OpenCode: first Esc arms, second Esc within ESC_ARM_TIMEOUT interrupts.
+        self.refresh_esc_primed_state();
+        if self.esc_is_primed() {
+            self.reset_esc_primed_state();
+            if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
+                if self.interrupt_streaming_to_send_queued_for_session(&session_id) {
+                    return true;
+                }
+            }
+            self.cancel_streaming();
+            return true;
+        }
+
+        self.arm_esc_primed();
+        true
     }
 
     fn handle_timeline_esc_key(&mut self, key: KeyEvent) -> bool {
@@ -4015,15 +4094,16 @@ impl App {
             || !self.input.is_empty()
             || self.is_subagent_session_active()
         {
-            self.reset_esc_timeline_state();
+            self.reset_esc_primed_state();
             return false;
         }
 
-        if self.esc_timeline_primed {
-            self.reset_esc_timeline_state();
+        self.refresh_esc_primed_state();
+        if self.esc_is_primed() {
+            self.reset_esc_primed_state();
             self.open_timeline_dialog();
         } else {
-            self.esc_timeline_primed = true;
+            self.arm_esc_primed();
         }
 
         true
@@ -5192,10 +5272,24 @@ impl App {
 
     fn autocomplete_and_submit(&mut self) {
         if let Some(selected) = get_selected_suggestion(&self.suggestions_popup_state).cloned() {
-            // Commands only fill the input (OpenCode-style); never auto-submit.
-            // Agent/File also fill only — user submits separately with Enter.
-            self.input.apply_suggestion(&selected);
-            self.update_suggestions();
+            match selected.kind {
+                crate::autocomplete::SuggestionKind::Command => {
+                    if self.command_registry.is_custom_command(&selected.name) {
+                        // Custom commands may take args — fill `/cmd ` only.
+                        self.input.apply_suggestion(&selected);
+                        self.update_suggestions();
+                    } else {
+                        // Builtins (`/compact`, `/refreshmodels`, …) run immediately.
+                        let command = format!("/{}", selected.replacement);
+                        self.process_command_from_input(&command);
+                    }
+                }
+                crate::autocomplete::SuggestionKind::Agent
+                | crate::autocomplete::SuggestionKind::File => {
+                    self.input.apply_suggestion(&selected);
+                    self.update_suggestions();
+                }
+            }
         }
         self.clear_suggestions_and_blur();
     }
@@ -5733,25 +5827,6 @@ impl App {
     }
 
     async fn compact_current_session(&mut self) {
-        if self.compaction_receiver.is_some() {
-            push_toast(Toast::new(
-                "Compaction is already running",
-                ToastLevel::Info,
-                Some(std::time::Duration::from_secs(3)),
-            ));
-            return;
-        }
-
-        if self.is_streaming {
-            self.play_sound_event(crate::sound::SoundEvent::Error);
-            push_toast(Toast::new(
-                "Cannot compact while a response is running",
-                ToastLevel::Error,
-                Some(std::time::Duration::from_secs(3)),
-            ));
-            return;
-        }
-
         let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
             self.play_sound_event(crate::sound::SoundEvent::Error);
             push_toast(Toast::new(
@@ -5762,7 +5837,54 @@ impl App {
             return;
         };
 
-        let messages = self.chat_state.chat.messages.clone();
+        // Queue like a message when busy (OpenCode/Grok-style).
+        if self.session_has_active_stream(&session_id)
+            || self.session_has_active_compaction(&session_id)
+            || self.is_streaming
+        {
+            if self.queue_compact_for_current_session() {
+                push_toast(Toast::new(
+                    "Queued /compact",
+                    ToastLevel::Info,
+                    Some(std::time::Duration::from_secs(2)),
+                ));
+            }
+            return;
+        }
+
+        self.start_compact_session(&session_id);
+    }
+
+    fn start_compact_session(&mut self, session_id: &str) {
+        if self.compaction_receiver.is_some() {
+            push_toast(Toast::new(
+                "Compaction is already running",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        if self.session_has_active_stream(session_id) {
+            if self.queue_compact_for_current_session() {
+                push_toast(Toast::new(
+                    "Queued /compact",
+                    ToastLevel::Info,
+                    Some(std::time::Duration::from_secs(2)),
+                ));
+            }
+            return;
+        }
+
+        let messages = if self.is_active_session(session_id) {
+            self.chat_state.chat.messages.clone()
+        } else {
+            self.session_manager
+                .get_session_ref(session_id)
+                .map(|session| session.messages.clone())
+                .unwrap_or_default()
+        };
+
         let Some(selection) = crate::session::compaction::select_messages_for_compaction(
             &messages,
             crate::session::compaction::DEFAULT_TAIL_TURNS,
@@ -5777,18 +5899,21 @@ impl App {
         };
 
         let before_tokens = crate::session::compaction::total_context_tokens(&messages);
-        let before_messages = messages.len();
+        let before_messages =
+            crate::session::compaction::filter_messages_for_context(&messages).len();
         let prompt = crate::session::compaction::build_prompt(&selection.messages_to_summarize);
+        let cancel_token = tokio_util::sync::CancellationToken::new();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<CompactionTaskMessage>();
         self.compaction_receiver = Some(receiver);
         self.compaction_pending = Some(CompactionPending {
-            session_id: session_id.clone(),
+            session_id: session_id.to_string(),
             before_tokens,
+            cancel_token: cancel_token.clone(),
         });
         self.is_streaming = true;
         self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         let _ = self.session_manager.set_session_status(
-            &session_id,
+            session_id,
             crate::session::types::SessionStatus::Waiting,
             None,
         );
@@ -5802,8 +5927,8 @@ impl App {
         let model = self.model.clone();
         let reasoning_effort = self.active_reasoning_effort();
         let agent = self.agent.clone();
-        let tail_messages = selection.tail_messages;
-        let task_session_id = session_id.clone();
+        let original_messages = messages;
+        let task_session_id = session_id.to_string();
 
         tokio::spawn(async move {
             let result = crate::llm::client::summarize_for_compaction(
@@ -5811,23 +5936,38 @@ impl App {
                 model.clone(),
                 reasoning_effort,
                 prompt,
+                cancel_token.clone(),
             )
             .await
             .and_then(|summary| {
-                let mut messages = crate::session::compaction::build_compacted_messages(
+                if cancel_token.is_cancelled() {
+                    return Err(anyhow::anyhow!("Compaction cancelled by user").into());
+                }
+
+                // First pass builds the soft transcript; token stats are computed from
+                // the filtered model context and written onto the marker.
+                let mut messages = crate::session::compaction::apply_soft_compaction(
+                    &original_messages,
+                    &selection,
                     &summary,
-                    tail_messages,
                     Some(model),
                     Some(provider_name),
                     Some(agent),
-                    None,
+                    crate::session::types::CompactionStats {
+                        before_tokens,
+                        after_tokens: 0,
+                        before_messages,
+                        after_messages: 0,
+                    },
                 );
                 let after_tokens = crate::session::compaction::total_context_tokens(&messages);
+                let after_messages =
+                    crate::session::compaction::filter_messages_for_context(&messages).len();
                 let stats = crate::session::types::CompactionStats {
                     before_tokens,
                     after_tokens,
                     before_messages,
-                    after_messages: messages.len(),
+                    after_messages,
                 };
                 if after_tokens >= before_tokens {
                     return Err(anyhow::anyhow!(
@@ -5836,7 +5976,13 @@ impl App {
                     )
                     .into());
                 }
-                crate::session::compaction::append_compaction_marker(&mut messages, stats);
+                if let Some(marker) = messages
+                    .iter_mut()
+                    .rev()
+                    .find(|message| crate::session::compaction::is_compaction_marker(message))
+                {
+                    marker.compaction_stats = Some(stats);
+                }
                 Ok((messages, stats))
             });
 
@@ -5846,10 +5992,21 @@ impl App {
                     messages,
                     stats,
                 },
-                Err(err) => CompactionTaskMessage::Failed {
-                    session_id: task_session_id,
-                    error: err.to_string(),
-                },
+                Err(err) => {
+                    let error = err.to_string();
+                    if cancel_token.is_cancelled()
+                        || error.to_ascii_lowercase().contains("cancelled")
+                    {
+                        CompactionTaskMessage::Cancelled {
+                            session_id: task_session_id,
+                        }
+                    } else {
+                        CompactionTaskMessage::Failed {
+                            session_id: task_session_id,
+                            error,
+                        }
+                    }
+                }
             };
             let _ = sender.send(message);
         });
@@ -6495,7 +6652,7 @@ impl App {
     }
 
     fn open_timeline_dialog(&mut self) {
-        self.reset_esc_timeline_state();
+        self.reset_esc_primed_state();
 
         let messages: Vec<crate::session::types::Message> =
             match self.session_manager.get_current_session() {
@@ -8125,6 +8282,20 @@ impl App {
                     ));
                     completed_compaction_sessions.push(completed_session_id);
                 }
+                CompactionTaskMessage::Cancelled { session_id } => {
+                    let completed_session_id = session_id.clone();
+                    let _ = self.session_manager.set_session_status(
+                        &session_id,
+                        crate::session::types::SessionStatus::Idle,
+                        None,
+                    );
+                    push_toast(Toast::new(
+                        "Compaction cancelled",
+                        ToastLevel::Info,
+                        Some(std::time::Duration::from_secs(2)),
+                    ));
+                    completed_compaction_sessions.push(completed_session_id);
+                }
             }
         }
 
@@ -8365,11 +8536,18 @@ impl App {
                 self.cancel_streaming_for_session(&parent_id);
             }
         }
+
+        // Compact rides the same Esc interrupt path as streaming turns.
+        if self.session_has_active_compaction(session_id) {
+            if let Some(pending) = self.compaction_pending.as_ref() {
+                pending.cancel_token.cancel();
+            }
+        }
     }
 
     fn interrupt_streaming_to_send_queued_for_session(&mut self, session_id: &str) -> bool {
         if !self.is_active_session(session_id)
-            || !self.has_queued_messages_for_session(session_id)
+            || !self.has_queued_user_messages_for_session(session_id)
             || !self.session_has_active_stream(session_id)
         {
             return false;
@@ -10127,32 +10305,78 @@ impl App {
         session_id: &str,
         turn_guidance: Option<&str>,
     ) -> bool {
-        if !self.is_active_session(session_id) || self.session_has_active_stream(session_id) {
+        if !self.is_active_session(session_id)
+            || self.session_has_active_stream(session_id)
+            || self.session_has_active_compaction(session_id)
+        {
             return false;
         }
 
-        let queued_messages = self.drain_queued_messages_for_session(session_id);
-        if queued_messages.is_empty() {
+        let queued_items = self.drain_queued_items_for_session(session_id);
+        if queued_items.is_empty() {
             return false;
+        }
+
+        // Preserve order: batch leading messages, then /compact, then re-queue the rest.
+        let mut leading_messages = Vec::new();
+        let mut rest = Vec::new();
+        let mut saw_compact = false;
+        let mut run_compact = false;
+
+        for item in queued_items {
+            if saw_compact {
+                rest.push(item);
+                continue;
+            }
+            match item {
+                QueuedItem::Message(message) => leading_messages.push(message),
+                QueuedItem::Compact => {
+                    saw_compact = true;
+                    run_compact = true;
+                }
+            }
+        }
+
+        if let Some(state) = self.session_view_states.get_mut(session_id) {
+            for item in rest {
+                state.queued_items.push_back(item);
+            }
         }
 
         self.base_focus = BaseFocus::Chat;
-        let queued = Self::combine_queued_messages(queued_messages);
-        let prompt = queued.text.clone();
-        self.append_user_message_to_current_session(queued.text, queued.image_paths);
 
-        if let Err(e) = self.start_llm_streaming_with_guidance(&prompt, turn_guidance) {
-            self.play_sound_event(crate::sound::SoundEvent::Error);
-            self.notify_terminal_event(crate::sound::SoundEvent::Error);
-            push_toast(Toast::new(
-                format!("LLM error: {}", e),
-                ToastLevel::Error,
-                None,
-            ));
-            return false;
+        if !leading_messages.is_empty() {
+            // Re-queue compact so it runs after this message turn finishes.
+            if run_compact {
+                if let Some(state) = self.session_view_states.get_mut(session_id) {
+                    state.queued_items.push_front(QueuedItem::Compact);
+                }
+            }
+
+            let queued = Self::combine_queued_messages(leading_messages);
+            let prompt = queued.text.clone();
+            self.append_user_message_to_current_session(queued.text, queued.image_paths);
+
+            if let Err(e) = self.start_llm_streaming_with_guidance(&prompt, turn_guidance) {
+                self.play_sound_event(crate::sound::SoundEvent::Error);
+                self.notify_terminal_event(crate::sound::SoundEvent::Error);
+                push_toast(Toast::new(
+                    format!("LLM error: {}", e),
+                    ToastLevel::Error,
+                    None,
+                ));
+                return false;
+            }
+
+            return true;
         }
 
-        true
+        if run_compact {
+            self.start_compact_session(session_id);
+            return true;
+        }
+
+        false
     }
 
     fn run_custom_command_prompt(
@@ -10318,6 +10542,9 @@ impl App {
                 self.chat_state
                     .chat
                     .set_scroll_bottom_padding(scroll_padding);
+                let is_streaming = self.is_streaming;
+                let is_compacting = self.compaction_receiver.is_some();
+                let esc_cancel_primed = is_streaming && self.esc_is_primed();
                 render_chat(
                     f,
                     &mut self.chat_state,
@@ -10330,8 +10557,9 @@ impl App {
                     self.provider_name.clone(),
                     reasoning_effort,
                     &colors,
-                    self.is_streaming,
-                    self.compaction_receiver.is_some(),
+                    is_streaming,
+                    is_compacting,
+                    esc_cancel_primed,
                     retry_status.as_ref(),
                     &usage_text,
                     subagent_tabs,
@@ -10950,7 +11178,7 @@ mod tests {
             title_dialog_state: init_title_dialog(),
             which_key_state: crate::views::which_key::init_which_key(),
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
-            esc_timeline_primed: false,
+            esc_primed_at: None,
             copy_actions_dialog: None,
             message_actions_index: None,
             message_actions_dialog: None,
@@ -12192,14 +12420,120 @@ mod tests {
         app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         let state = app.session_view_states.get(&session_id).unwrap();
-        assert_eq!(state.queued_messages.len(), 1);
-        assert_eq!(state.queued_messages[0].text, "Then about riolu");
+        assert_eq!(state.queued_items.len(), 1);
+        assert!(matches!(
+            &state.queued_items[0],
+            QueuedItem::Message(m) if m.text == "Then about riolu"
+        ));
         assert_eq!(
             app.queued_message_previews_for_current_session(),
             vec!["Then about riolu".to_string()]
         );
         assert!(app.input.is_empty());
         assert!(app.chat_state.chat.messages.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_command_suggestion_autosubmits() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.create_new_session(Some("Compact suggest".to_string()));
+        app.input.insert_str("/comp");
+        set_suggestions(
+            &mut app.suggestions_popup_state,
+            vec![crate::autocomplete::Suggestion::command(
+                "compact",
+                "Compact conversation",
+            )],
+        );
+
+        app.autocomplete_and_submit();
+
+        // Builtin ran immediately — input should not keep `/compact `.
+        assert!(app.input.is_empty());
+        assert!(!is_suggestions_visible(&app.suggestions_popup_state));
+    }
+
+    #[test]
+    fn custom_command_suggestion_fills_without_submit() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.command_registry
+            .register_custom(crate::command::custom::CustomCommand {
+                name: "shipit".to_string(),
+                description: Some("Ship it".to_string()),
+                agent: None,
+                model: None,
+                subtask: None,
+                template: "Ship $ARGUMENTS".to_string(),
+                source: crate::command::custom::CustomCommandSource::Config(
+                    std::path::PathBuf::from("test"),
+                ),
+                workdir: std::path::PathBuf::from("."),
+            });
+        app.input.insert_str("/ship");
+        set_suggestions(
+            &mut app.suggestions_popup_state,
+            vec![crate::autocomplete::Suggestion::command(
+                "shipit", "Ship it",
+            )],
+        );
+
+        app.autocomplete_and_submit();
+
+        assert_eq!(app.input.get_text(), "/shipit ");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_while_streaming_is_queued() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Queue compact".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState::new(
+            receiver,
+            tokio_util::sync::CancellationToken::new(),
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            0,
+        ));
+        app.is_streaming = true;
+
+        app.compact_current_session().await;
+
+        assert!(app.compaction_receiver.is_none());
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert!(matches!(
+            state.queued_items.front(),
+            Some(QueuedItem::Compact)
+        ));
+        assert_eq!(
+            app.queued_message_previews_for_current_session(),
+            vec!["/compact".to_string()]
+        );
+    }
+
+    #[test]
+    fn double_esc_cancels_active_compaction() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Cancel compact".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let observed = cancel_token.clone();
+        app.compaction_receiver = Some(receiver);
+        app.compaction_pending = Some(CompactionPending {
+            session_id: session_id.clone(),
+            before_tokens: 1_000,
+            cancel_token,
+        });
+        app.is_streaming = true;
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!observed.is_cancelled());
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(observed.is_cancelled());
     }
 
     #[test]
@@ -12212,6 +12546,7 @@ mod tests {
         app.compaction_pending = Some(CompactionPending {
             session_id: session_id.clone(),
             before_tokens: 1_000,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
         });
         app.sync_active_streaming_flag();
         app.input.insert_str("Then about eevee");
@@ -12219,8 +12554,11 @@ mod tests {
         app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         let state = app.session_view_states.get(&session_id).unwrap();
-        assert_eq!(state.queued_messages.len(), 1);
-        assert_eq!(state.queued_messages[0].text, "Then about eevee");
+        assert_eq!(state.queued_items.len(), 1);
+        assert!(matches!(
+            &state.queued_items[0],
+            QueuedItem::Message(m) if m.text == "Then about eevee"
+        ));
         assert_eq!(
             app.queued_message_previews_for_current_session(),
             vec!["Then about eevee".to_string()]
@@ -12745,10 +13083,12 @@ mod tests {
             .tool_call_message_indices
             .insert("call_1".to_string(), 0);
         state.tool_calls.tool_call_order.push("call_1".to_string());
-        state.queued_messages.push_back(QueuedUserMessage {
-            text: "then about pikachu".to_string(),
-            image_paths: Vec::new(),
-        });
+        state
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "then about pikachu".to_string(),
+                image_paths: Vec::new(),
+            }));
         app.is_streaming = true;
 
         app.add_tool_result_to_session(
@@ -12762,6 +13102,99 @@ mod tests {
         );
 
         assert!(observed_cancel_token.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn single_esc_does_not_cancel_streaming() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Single esc".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let boundary = app.chat_state.chat.messages.len();
+        app.chat_state
+            .chat
+            .add_assistant_message("partial response");
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let observed_cancel_token = cancel_token.clone();
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState::new(
+            receiver,
+            cancel_token,
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            boundary,
+        ));
+        app.is_streaming = true;
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!observed_cancel_token.is_cancelled());
+        assert!(app.esc_is_primed());
+        assert!(app.is_streaming);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn double_esc_cancels_streaming() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Double esc".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let boundary = app.chat_state.chat.messages.len();
+        app.chat_state
+            .chat
+            .add_assistant_message("partial response");
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let observed_cancel_token = cancel_token.clone();
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState::new(
+            receiver,
+            cancel_token,
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            boundary,
+        ));
+        app.is_streaming = true;
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(observed_cancel_token.is_cancelled());
+        assert!(!app.esc_is_primed());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn esc_arm_expires_before_second_press() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Esc arm timeout".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let boundary = app.chat_state.chat.messages.len();
+        app.chat_state
+            .chat
+            .add_assistant_message("partial response");
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let observed_cancel_token = cancel_token.clone();
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state.stream = Some(SessionStreamState::new(
+            receiver,
+            cancel_token,
+            Some("test-model".to_string()),
+            Some("test-provider".to_string()),
+            boundary,
+        ));
+        app.is_streaming = true;
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.esc_is_primed());
+        // Simulate OpenCode's 5s arm window expiring.
+        app.esc_primed_at = Some(
+            std::time::Instant::now() - App::ESC_ARM_TIMEOUT - std::time::Duration::from_millis(1),
+        );
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!observed_cancel_token.is_cancelled());
+        assert!(app.esc_is_primed());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -12784,20 +13217,27 @@ mod tests {
             Some("test-provider".to_string()),
             boundary,
         ));
-        state.queued_messages.push_back(QueuedUserMessage {
-            text: "Then about riolu".to_string(),
-            image_paths: Vec::new(),
-        });
+        state
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "Then about riolu".to_string(),
+                image_paths: Vec::new(),
+            }));
         app.is_streaming = true;
+
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!observed_cancel_token.is_cancelled());
+        assert!(app.esc_is_primed());
 
         app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         assert!(observed_cancel_token.is_cancelled());
+        assert!(!app.esc_is_primed());
         assert!(app
             .session_view_states
             .get(&session_id)
             .unwrap()
-            .queued_messages
+            .queued_items
             .is_empty());
         assert!(app
             .chat_state
@@ -12817,16 +13257,18 @@ mod tests {
         app.base_focus = BaseFocus::Chat;
         let state = app.session_view_states.get_mut(&session_id).unwrap();
         for text in ["nice", "nice", "nice"] {
-            state.queued_messages.push_back(QueuedUserMessage {
-                text: text.to_string(),
-                image_paths: Vec::new(),
-            });
+            state
+                .queued_items
+                .push_back(QueuedItem::Message(QueuedUserMessage {
+                    text: text.to_string(),
+                    image_paths: Vec::new(),
+                }));
         }
 
         assert!(app.submit_queued_messages_for_session(&session_id));
 
         let state = app.session_view_states.get(&session_id).unwrap();
-        assert!(state.queued_messages.is_empty());
+        assert!(state.queued_items.is_empty());
         assert!(state.stream.is_some());
         assert_eq!(
             app.chat_state
@@ -12886,14 +13328,18 @@ mod tests {
         let session_id = app.create_new_session(Some("Queue images".to_string()));
         app.base_focus = BaseFocus::Chat;
         let state = app.session_view_states.get_mut(&session_id).unwrap();
-        state.queued_messages.push_back(QueuedUserMessage {
-            text: "first [Image #1]".to_string(),
-            image_paths: vec![std::path::PathBuf::from("/tmp/first.png")],
-        });
-        state.queued_messages.push_back(QueuedUserMessage {
-            text: "second [Image #1]".to_string(),
-            image_paths: vec![std::path::PathBuf::from("/tmp/second.png")],
-        });
+        state
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "first [Image #1]".to_string(),
+                image_paths: vec![std::path::PathBuf::from("/tmp/first.png")],
+            }));
+        state
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "second [Image #1]".to_string(),
+                image_paths: vec![std::path::PathBuf::from("/tmp/second.png")],
+            }));
 
         assert!(app.submit_queued_messages_for_session(&session_id));
 
@@ -13412,6 +13858,7 @@ mod tests {
         app.compaction_pending = Some(CompactionPending {
             session_id: session_id.clone(),
             before_tokens: stats.before_tokens,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
         });
         app.is_streaming = true;
 
@@ -13437,11 +13884,11 @@ mod tests {
         app.session_view_states
             .get_mut(&session_id)
             .unwrap()
-            .queued_messages
-            .push_back(QueuedUserMessage {
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
                 text: "Then about jolteon".to_string(),
                 image_paths: Vec::new(),
-            });
+            }));
 
         let stats = crate::session::types::CompactionStats {
             before_tokens: 1_000,
@@ -13463,13 +13910,14 @@ mod tests {
         app.compaction_pending = Some(CompactionPending {
             session_id: session_id.clone(),
             before_tokens: stats.before_tokens,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
         });
         app.is_streaming = true;
 
         app.process_compaction_events();
 
         let state = app.session_view_states.get(&session_id).unwrap();
-        assert!(state.queued_messages.is_empty());
+        assert!(state.queued_items.is_empty());
         assert!(state.stream.is_some());
         assert!(app.is_streaming);
         assert_eq!(

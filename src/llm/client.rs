@@ -654,16 +654,38 @@ pub async fn summarize_for_compaction(
     model: String,
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     prompt: String,
+    cancel_token: CancellationToken,
 ) -> Result<String, DynError> {
+    if cancel_token.is_cancelled() {
+        return Err(anyhow::anyhow!("Compaction cancelled by user").into());
+    }
+
     let (warning_sender, _warning_receiver) = tokio::sync::mpsc::unbounded_channel();
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &warning_sender).await?;
     let messages = vec![AisdkMessage::user(prompt)];
-    let mut response =
-        stream_provider_request(&request_config, messages, Vec::new(), None, None).await?;
+    let mut response = stream_provider_request(
+        &request_config,
+        messages,
+        Vec::new(),
+        None,
+        Some(cancel_token.clone()),
+    )
+    .await?;
 
     let mut summary = String::new();
-    while let Some(chunk) = response.stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(anyhow::anyhow!("Compaction cancelled by user").into());
+            }
+            chunk = response.stream.next() => chunk,
+        };
+
+        let Some(chunk) = chunk else {
+            break;
+        };
+
         match chunk {
             ChunkType::Text(text) => summary.push_str(&text),
             ChunkType::Failed(err) => {
@@ -689,6 +711,10 @@ pub async fn summarize_for_compaction(
                 }
             }
         }
+    }
+
+    if cancel_token.is_cancelled() {
+        return Err(anyhow::anyhow!("Compaction cancelled by user").into());
     }
 
     let summary = summary.trim().to_string();
@@ -1681,8 +1707,11 @@ fn convert_messages_for_model(
     show_vlm_agent_hint: bool,
 ) -> Vec<AisdkMessage> {
     let mut aisdk_messages = Vec::new();
+    // Soft compaction keeps full UI history; only the active post-boundary
+    // slice is sent to the model (OpenCode-style filterCompacted).
+    let context_messages = crate::session::compaction::filter_messages_for_context(messages);
 
-    for msg in messages {
+    for msg in &context_messages {
         if crate::session::compaction::is_compaction_marker(msg) {
             continue;
         }
@@ -3051,6 +3080,44 @@ mod tests {
             AisdkMessage::User(message) => assert_eq!(message.content, "tail"),
             other => panic!("expected user message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn soft_compaction_history_is_hidden_from_model_request() {
+        let stats = crate::session::types::CompactionStats {
+            before_tokens: 12_000,
+            after_tokens: 360,
+            before_messages: 8,
+            after_messages: 2,
+        };
+        let summary = crate::session::types::Message::user(format!(
+            "{}\nhandoff",
+            crate::session::compaction::SUMMARY_PREFIX
+        ));
+        let marker = crate::session::compaction::compaction_marker(stats);
+        let history = vec![
+            crate::session::types::Message::user("old user"),
+            crate::session::types::Message::assistant("old assistant"),
+            summary,
+            marker,
+            crate::session::types::Message::user("tail"),
+        ];
+
+        let messages = convert_messages(&history);
+        let rendered = messages
+            .iter()
+            .map(|message| match message {
+                AisdkMessage::User(m) => m.content.clone(),
+                AisdkMessage::Assistant(m) => m.content.clone(),
+                AisdkMessage::System(m) => m.content.clone(),
+                AisdkMessage::ToolCall(_) | AisdkMessage::ToolOutput(_) => String::new(),
+            })
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|c| c.contains("handoff")));
+        assert!(rendered.iter().any(|c| c == "tail"));
+        assert!(!rendered.iter().any(|c| c == "old user"));
+        assert!(!rendered.iter().any(|c| c == "old assistant"));
     }
 }
 fn content_with_vlm_agent_hint(content: &str, image_paths: &[String]) -> String {
