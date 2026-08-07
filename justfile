@@ -18,8 +18,8 @@ dist-build *args:
     just remote-client-build
     dist build {{ args }}
 
-preview:
-    ./target/release/crabcode
+preview *args:
+    ./target/release/crabcode {{ args }}
 
 dpreview *args:
     ./target/debug/crabcode {{ args }}
