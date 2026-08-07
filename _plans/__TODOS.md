@@ -441,6 +441,6 @@ I think this is how the TUI works already anyway right?
 
 - [ ] I wanna imitate grok-build's `/compact-mode` and by default a sticky "most recent message i made" is just sticky top-0 essentially, so no matter where I am, my latest message follows the response it triggered
 
-- [ ] When autocompleting a "command" and my autosuggestions is focusing it and I press 'tab or enter'... It doesnt submit it... It just autocompletes it in the chat, but doesnt submit it.. This matches opencode behavior.. This is only for commands tho.
+- [x] When autocompleting a "command" and my autosuggestions is focusing it and I press 'tab or enter'... It doesnt submit it... It just autocompletes it in the chat, but doesnt submit it.. This matches opencode behavior.. This is only for commands tho.
 
 - [ ] opencode v2-like apis for `crabcode session list` or something. So agents can just use the cli instead of checking the .db on its own.

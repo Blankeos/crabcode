@@ -2046,7 +2046,8 @@ impl Input {
     pub fn apply_suggestion(&mut self, suggestion: &Suggestion) {
         match suggestion.kind {
             SuggestionKind::Command => {
-                let replacement = format!("/{}", suggestion.replacement);
+                // Trailing space so cursor sits after the command (OpenCode-style).
+                let replacement = format!("/{} ", suggestion.replacement);
                 let text = self.get_text();
                 self.replace_range(0..text.len(), &replacement);
             }

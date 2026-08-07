@@ -5192,21 +5192,10 @@ impl App {
 
     fn autocomplete_and_submit(&mut self) {
         if let Some(selected) = get_selected_suggestion(&self.suggestions_popup_state).cloned() {
-            match selected.kind {
-                crate::autocomplete::SuggestionKind::Command => {
-                    let command = format!("/{}", selected.name);
-
-                    self.process_command_from_input(&command);
-                }
-                crate::autocomplete::SuggestionKind::Agent => {
-                    self.input.apply_suggestion(&selected);
-                    self.update_suggestions();
-                }
-                crate::autocomplete::SuggestionKind::File => {
-                    self.input.apply_suggestion(&selected);
-                    self.update_suggestions();
-                }
-            }
+            // Commands only fill the input (OpenCode-style); never auto-submit.
+            // Agent/File also fill only — user submits separately with Enter.
+            self.input.apply_suggestion(&selected);
+            self.update_suggestions();
         }
         self.clear_suggestions_and_blur();
     }
