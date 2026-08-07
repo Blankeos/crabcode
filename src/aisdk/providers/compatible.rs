@@ -425,15 +425,32 @@ fn log_openai_compatible_usage(usage: &serde_json::Value) {
         return;
     }
 
+    // Prefer OpenAI-style cached_tokens; fall back to Anthropic-style cache_read.
+    let effective_cached = if cached > 0 { cached } else { cache_read };
+    let prompt_v = prompt.unwrap_or(0);
+    let hit_pct = if prompt_v > 0 {
+        (effective_cached as f64 * 100.0) / prompt_v as f64
+    } else if effective_cached > 0 || cache_creation > 0 {
+        let total = effective_cached.saturating_add(cache_creation);
+        if total > 0 {
+            (effective_cached as f64 * 100.0) / total as f64
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
     crate::emit_log!(
-        "[prompt-cache] openai-compatible prompt={} completion={} cached_tokens={} cache_read={} cache_creation={}",
+        "[prompt-cache] openai-compatible prompt={} completion={} cached_tokens={} cache_read={} cache_creation={} hit_pct={:.1}",
         prompt.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
         completion
             .map(|v| v.to_string())
             .unwrap_or_else(|| "-".into()),
         cached,
         cache_read,
-        cache_creation
+        cache_creation,
+        hit_pct
     );
 }
 

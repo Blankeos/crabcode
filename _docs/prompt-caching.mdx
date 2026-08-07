@@ -30,13 +30,37 @@ What crabcode does today for each routing path:
 
 ## What gets marked (direct Anthropic)
 
-Aligned with OpenCode's `auto` policy:
+Hybrid of OpenCode `auto` + Grok Build placement:
 
 1. **Last tool** — tool schemas are large and stable across a tool loop  
 2. **Last system block** — instructions / project context  
-3. **Latest user content block** — conversation prefix through the current turn (including tool-result groups)
+3. **Transcript tip** — last markable content block (skips `thinking` / `redacted_thinking`)  
+4. **Previous user tip** — where the prior request ended, so turns past the 20-block lookback still hit cache  
+
+At most **4** breakpoints; the 4th slot stays free when tools or previous-user are missing so gateways can auto-mark.
 
 Breakpoints are applied **after** message regrouping so adjacent tool_use / tool_result blocks stay valid.
+
+### xAI Grok Build (cli-chat-proxy)
+
+In addition to sticky `prompt_cache_key = session_id`, crabcode stamps Grok Build–style affinity headers:
+
+| Header | Value |
+| --- | --- |
+| `x-grok-session-id` | Session id (sticky) |
+| `x-grok-conv-id` | Same as session for main turns (sticky) |
+| `x-grok-req-id` | Unique per model invocation |
+| `x-grok-turn-idx` | 0-based user-turn index |
+| `x-grok-agent-id` | Process-stable agent id |
+
+**Parent-cached aux** (e.g. max-steps text-only summary): keeps parent `prompt_cache_key` + session/conv so the conversation prefix can reuse the main turn's KV cache; assigns a fresh `aux-…` req id.
+
+**Subagents** use the **child** session id on purpose. They have a different system prompt and tool set, so parent-prefix reuse would miss and can pollute sticky routing. Isolation beats a false shared key.
+
+### Prefix stability (anti-bust)
+
+- **Empty system/user rows** are dropped before the wire (they pad the sticky prefix).  
+- **Images** use hysteresis: compact only above a trigger (~6 MiB total data-urls), then reclaim to a lower target (~3 MiB) so later turns stay cache-warm instead of re-evicting every step.
 
 ---
 
@@ -53,21 +77,27 @@ Logging writes to `app.log` in the working directory when `--emit-logs` is set.
 ### Direct Anthropic
 
 ```
-[prompt-cache] anthropic input=… output=… cache_read=… cache_creation=…
+[prompt-cache] anthropic input=… output=… cache_read=… cache_creation=… total_input=… hit_pct=…
 ```
 
 ### AI Gateway / OpenAI-compatible
 
 ```
-[prompt-cache] openai-compatible prompt=… completion=… cached_tokens=… cache_read=… cache_creation=…
+[prompt-cache] openai-compatible prompt=… completion=… cached_tokens=… cache_read=… cache_creation=… hit_pct=…
+```
+
+### OpenAI / xAI Responses
+
+```
+[prompt-cache] openai-responses input=… output=… cached_tokens=… hit_pct=…
 ```
 
 ### Healthy multi-step session
 
 | Step | What you want to see |
 | --- | --- |
-| First request | `cache_creation` / write > 0, or full input billed once |
-| Later tool steps (same tools + system + prefix) | `cache_read` / `cached_tokens` > 0 and growing |
+| First request | `cache_creation` / write > 0, or full input billed once; `hit_pct` near 0 |
+| Later tool steps (same tools + system + prefix) | `cache_read` / `cached_tokens` > 0 and `hit_pct` climbing (often 70%+) |
 
 Notes:
 
