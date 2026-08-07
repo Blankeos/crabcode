@@ -469,8 +469,8 @@ pub struct MergedConfig {
     pub agent_permission_rules: HashMap<String, PermissionRules>,
     pub agent_steps: HashMap<String, usize>,
     pub provider_timeouts: HashMap<String, ProviderTimeout>,
-    pub disabled_providers: HashSet<String>,
-    pub enabled_providers: Option<HashSet<String>>,
+    pub disabled_providers: BTreeSet<String>,
+    pub enabled_providers: BTreeSet<String>,
     pub custom_providers: HashMap<String, CustomProviderConfig>,
     pub notifications: NotificationsConfig,
     pub images: ImagesConfig,
@@ -486,10 +486,7 @@ pub struct MergedConfig {
 impl MergedConfig {
     pub fn provider_is_enabled(&self, provider_id: &str) -> bool {
         !self.disabled_providers.contains(provider_id)
-            && self
-                .enabled_providers
-                .as_ref()
-                .is_none_or(|enabled| enabled.contains(provider_id))
+            && (self.enabled_providers.is_empty() || self.enabled_providers.contains(provider_id))
     }
 }
 
@@ -1351,13 +1348,20 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
         .get("enabled_providers")
         .or_else(|| obj.get("enabledProviders"));
     out.enabled_providers = enabled_providers
-        .map(|value| parse_provider_id_set(Some(value), diagnostics, "enabled_providers"));
+        .map(|value| {
+            parse_provider_id_set(Some(value), diagnostics, "enabled_providers")
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
     out.disabled_providers = parse_provider_id_set(
         obj.get("disabled_providers")
             .or_else(|| obj.get("disabledProviders")),
         diagnostics,
         "disabled_providers",
-    );
+    )
+    .into_iter()
+    .collect();
     out.custom_providers = parse_custom_providers(obj.get("provider"), diagnostics);
 
     let mut notifications = NotificationsConfig::default();
@@ -1430,12 +1434,6 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
             _ => None,
         })
         .collect();
-    out.disabled_providers = parse_string_array(obj.get("disabled_providers"))
-        .into_iter()
-        .collect();
-    out.enabled_providers = obj
-        .get("enabled_providers")
-        .map(|value| parse_string_array(Some(value)).into_iter().collect());
 
     out
 }

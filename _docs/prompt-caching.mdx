@@ -1,0 +1,93 @@
+---
+title: Prompt Caching
+description: How crabcode reuses prompt prefixes across providers to cut cost and latency.
+---
+
+# Reuse stable prefixes
+
+Prompt caching reuses the stable part of a request (system prompt, tool schemas, conversation prefix) so multi-step tool loops do not re-pay full input cost every turn.
+
+Most providers either cache automatically or need only a sticky session key. Anthropic is the exception: it needs explicit cache breakpoints (or a gateway that inserts them).
+
+---
+
+## Provider matrix
+
+What crabcode does today for each routing path:
+
+| Path | Typical models | Crabcode behavior | What the provider needs | Default-friendly? |
+| --- | --- | --- | --- | --- |
+| **Vercel AI Gateway** (`@ai-sdk/gateway`) | Anthropic, OpenAI, etc. via one key | Sends `providerOptions.gateway.caching = "auto"` | Gateway inserts markers for Anthropic / MiniMax | Gateway handles it |
+| **Direct Anthropic** (`@ai-sdk/anthropic`) | Claude | Marks last **tool** + last **system** + latest **user** with `cache_control: ephemeral` (≤4 breakpoints) | Explicit breakpoints on content blocks | No — must opt in per request |
+| **OpenAI** (Responses API) | GPT, Codex | Sticky `prompt_cache_key` = session id | Automatic prefix caching when prefix is stable | Yes — key helps routing stickiness |
+| **xAI** (OpenAI-shaped) | Grok | Sticky `prompt_cache_key` | Same OpenAI-style automatic caching | Yes |
+| **OpenAI-compatible** (generic) | OpenRouter, local, etc. | Sticky `prompt_cache_key` when set | Provider-dependent; many auto-cache | Often yes |
+| **Other gateways** | Various | Same as OpenAI-compatible unless detected as Vercel | Check provider docs | Varies |
+
+> **Anthropic is the unfriendly one.** Without `cache_control` (or Gateway `caching: auto`), Claude traffic does **not** cache-read. That was the main gap crabcode fixed.
+
+---
+
+## What gets marked (direct Anthropic)
+
+Aligned with OpenCode's `auto` policy:
+
+1. **Last tool** — tool schemas are large and stable across a tool loop  
+2. **Last system block** — instructions / project context  
+3. **Latest user content block** — conversation prefix through the current turn (including tool-result groups)
+
+Breakpoints are applied **after** message regrouping so adjacent tool_use / tool_result blocks stay valid.
+
+---
+
+## How to verify it works
+
+Run with logs enabled and watch `app.log` for `[prompt-cache]` lines:
+
+```bash
+crabcode --emit-logs
+```
+
+Logging writes to `app.log` in the working directory when `--emit-logs` is set.
+
+### Direct Anthropic
+
+```
+[prompt-cache] anthropic input=… output=… cache_read=… cache_creation=…
+```
+
+### AI Gateway / OpenAI-compatible
+
+```
+[prompt-cache] openai-compatible prompt=… completion=… cached_tokens=… cache_read=… cache_creation=…
+```
+
+### Healthy multi-step session
+
+| Step | What you want to see |
+| --- | --- |
+| First request | `cache_creation` / write > 0, or full input billed once |
+| Later tool steps (same tools + system + prefix) | `cache_read` / `cached_tokens` > 0 and growing |
+
+Notes:
+
+- Anthropic's `input_tokens` is **non-cached only**. Total input ≈ `input` + `cache_read` + `cache_creation`.
+- Gateway may surface cache as `prompt_tokens_details.cached_tokens` and/or forwarded Anthropic fields — crabcode logs both when present.
+- No dashboard required: stream finals carry usage; crabcode logs them when logging is enabled.
+
+---
+
+## What we intentionally do **not** do
+
+| Idea | Why not |
+| --- | --- |
+| Use `prompt_cache_key` for Anthropic | OpenAI/xAI sticky routing only; Anthropic ignores it for breakpoints |
+| Mark every message | Anthropic caps breakpoints (4); auto policy uses 3 carefully placed ones |
+| Rely only on provider dashboards | Stream usage is the same source used for billing |
+
+---
+
+## Related
+
+- AI Gateway automatic caching: [Vercel docs](https://vercel.com/docs/ai-gateway/models-and-providers/automatic-caching)
+- Anthropic prompt caching: provider docs for `cache_control` / `ephemeral`

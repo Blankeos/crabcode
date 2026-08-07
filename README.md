@@ -108,6 +108,7 @@ I tried crabcode specifically for these providers:
 - [x] **ollama** (Local CLI)
 - [x] **ollama-cloud**
 - [x] **zai**
+- [x] **kimi**
 - [x] **xiaomi-token-plan-sgp**
 - [x] **minimax**
 - [x] **fireworks**

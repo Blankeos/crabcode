@@ -319,7 +319,8 @@ async fn start_subagent_stream(
                 .base_url(&session.base_url)
                 .model_name(&session.model)
                 .provider_name(&session.provider_name)
-                .api_key(session.api_key.as_deref().unwrap_or(""));
+                .api_key(session.api_key.as_deref().unwrap_or(""))
+                .gateway_caching_auto(session.gateway_caching_auto);
             if let Some(effort) = session.reasoning_effort {
                 builder = builder.reasoning_effort(effort.as_str());
             }
@@ -633,6 +634,7 @@ mod tests {
             supports_image_input: false,
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
             prompt_cache_key: None,
+            gateway_caching_auto: false,
         }
     }
 }

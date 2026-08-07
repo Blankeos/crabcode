@@ -90,6 +90,8 @@ pub struct LlmSessionConfig {
     pub openai_options: OpenAIRequestOptions,
     /// Sticky prompt-cache key for this session (OpenAI/xAI/compatible).
     pub prompt_cache_key: Option<String>,
+    /// Vercel AI Gateway: `providerOptions.gateway.caching = "auto"`.
+    pub gateway_caching_auto: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +141,7 @@ mod tests {
             supports_image_input: false,
             openai_options: OpenAIRequestOptions::default(),
             prompt_cache_key: None,
+            gateway_caching_auto: false,
         }
     }
 

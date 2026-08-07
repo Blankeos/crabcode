@@ -93,7 +93,7 @@ fn deny_print_mode_interactive_tools(mut rules: PermissionRules) -> PermissionRu
 mod tests {
     use super::*;
     use crate::config::configuration::MergedConfig;
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
 
     #[test]
     fn applies_global_tool_disable() {
@@ -155,8 +155,8 @@ mod tests {
     #[test]
     fn threads_provider_filters_into_discovery() {
         let mut merged = MergedConfig::default();
-        merged.disabled_providers = HashSet::from(["openai".into()]);
-        merged.enabled_providers = Some(HashSet::from(["anthropic".into()]));
+        merged.disabled_providers = BTreeSet::from(["openai".into()]);
+        merged.enabled_providers = BTreeSet::from(["anthropic".into()]);
 
         let rt =
             ConfigRuntime::from_merged(&merged, "/tmp/workspace", ConfigRuntimeOptions::default());

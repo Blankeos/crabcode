@@ -19,6 +19,9 @@ pub struct OpenAICompatible {
     provider_name: String,
     reasoning_effort: Option<String>,
     prompt_cache_key: Option<String>,
+    /// Vercel AI Gateway: set `providerOptions.gateway.caching = "auto"` so
+    /// Anthropic (and MiniMax) models get explicit cache breakpoints.
+    gateway_caching_auto: bool,
 }
 
 impl OpenAICompatible {
@@ -35,6 +38,7 @@ pub struct OpenAICompatibleBuilder {
     provider_name: Option<String>,
     reasoning_effort: Option<String>,
     prompt_cache_key: Option<String>,
+    gateway_caching_auto: bool,
 }
 
 impl OpenAICompatibleBuilder {
@@ -68,6 +72,11 @@ impl OpenAICompatibleBuilder {
         self
     }
 
+    pub fn gateway_caching_auto(mut self, enabled: bool) -> Self {
+        self.gateway_caching_auto = enabled;
+        self
+    }
+
     pub fn build(self) -> Result<OpenAICompatible> {
         Ok(OpenAICompatible {
             base_url: self
@@ -82,6 +91,7 @@ impl OpenAICompatibleBuilder {
                 .unwrap_or_else(|| "openai-compatible".to_string()),
             reasoning_effort: self.reasoning_effort,
             prompt_cache_key: self.prompt_cache_key,
+            gateway_caching_auto: self.gateway_caching_auto,
         })
     }
 }
@@ -146,6 +156,15 @@ impl Provider for OpenAICompatible {
             if !key.is_empty() {
                 body["prompt_cache_key"] = serde_json::Value::String(key.clone());
             }
+        }
+
+        // AI Gateway Chat Completions: enable automatic prompt caching for
+        // providers that need explicit markers (Anthropic / MiniMax).
+        // https://vercel.com/docs/ai-gateway/models-and-providers/automatic-caching
+        if self.gateway_caching_auto {
+            body["providerOptions"] = serde_json::json!({
+                "gateway": { "caching": "auto" }
+            });
         }
 
         let mut request_headers = reqwest::header::HeaderMap::new();
@@ -377,6 +396,47 @@ fn debug_log(msg: &str) {
         });
 }
 
+/// Log OpenAI-compatible / AI Gateway usage to `app.log`.
+/// Looks for `prompt_tokens_details.cached_tokens` and Anthropic-style fields
+/// that some gateways forward.
+fn log_openai_compatible_usage(usage: &serde_json::Value) {
+    let prompt = usage.get("prompt_tokens").and_then(|v| v.as_u64());
+    let completion = usage.get("completion_tokens").and_then(|v| v.as_u64());
+    let cached = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    if prompt.is_none()
+        && completion.is_none()
+        && cached == 0
+        && cache_read == 0
+        && cache_creation == 0
+    {
+        return;
+    }
+
+    crate::emit_log!(
+        "[prompt-cache] openai-compatible prompt={} completion={} cached_tokens={} cache_read={} cache_creation={}",
+        prompt.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        completion
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into()),
+        cached,
+        cache_read,
+        cache_creation
+    );
+}
+
 fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     let data = data.trim();
 
@@ -407,6 +467,12 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
             .unwrap_or("Unknown error");
         debug_log(&format!("[SSE] API error: {}", msg));
         return vec![Ok(ChunkType::Failed(msg.to_string()))];
+    }
+
+    // Final usage often arrives on a choices-empty (or choices-missing) chunk.
+    // Log cache-related fields so Gateway Anthropic hits are verifiable in app.log.
+    if let Some(usage) = value.get("usage") {
+        log_openai_compatible_usage(usage);
     }
 
     let Some(choices) = value["choices"].as_array() else {
@@ -697,6 +763,29 @@ mod tests {
             .expect("byte stream should parse");
 
         assert_eq!(lines, vec!["[DONE]".to_string()]);
+    }
+
+    #[test]
+    fn gateway_caching_auto_is_off_by_default() {
+        let provider = OpenAICompatible::builder()
+            .base_url("https://ai-gateway.vercel.sh/v1")
+            .model_name("anthropic/claude-sonnet-4.5")
+            .provider_name("vercel")
+            .build()
+            .unwrap();
+        assert!(!provider.gateway_caching_auto);
+    }
+
+    #[test]
+    fn gateway_caching_auto_can_be_enabled() {
+        let provider = OpenAICompatible::builder()
+            .base_url("https://ai-gateway.vercel.sh/v1")
+            .model_name("anthropic/claude-sonnet-4.5")
+            .provider_name("vercel")
+            .gateway_caching_auto(true)
+            .build()
+            .unwrap();
+        assert!(provider.gateway_caching_auto);
     }
 }
 

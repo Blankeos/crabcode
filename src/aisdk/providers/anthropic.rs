@@ -106,7 +106,7 @@ impl Provider for Anthropic {
     ) -> Result<ProviderStream> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
-        let mut system_prompts: Vec<serde_json::Value> = messages
+        let system_prompts: Vec<serde_json::Value> = messages
             .iter()
             .filter_map(|m| match m {
                 Message::System(s) => Some(serde_json::json!({
@@ -117,50 +117,9 @@ impl Provider for Anthropic {
             })
             .collect();
 
-        // Anthropic prompt caching: mark the last system block ephemeral so the
-        // stable prefix can be reused across tool steps in a session.
-        if let Some(last) = system_prompts.last_mut() {
-            if let Some(obj) = last.as_object_mut() {
-                obj.insert(
-                    "cache_control".to_string(),
-                    serde_json::json!({ "type": "ephemeral" }),
-                );
-            }
-        }
-
-        let user_messages: Vec<serde_json::Value> = messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::User(u) => Some(serde_json::json!({
-                    "role": "user",
-                    "content": anthropic_user_content(u),
-                })),
-                Message::Assistant(a) => Some(serde_json::json!({
-                    "role": "assistant",
-                    "content": a.content,
-                })),
-                Message::ToolCall(t) => Some(serde_json::json!({
-                    "role": "assistant",
-                    "content": [{
-                        "type": "tool_use",
-                        "id": t.call_id,
-                        "name": t.name,
-                        "input": serde_json::from_str::<serde_json::Value>(&t.arguments)
-                            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-                    }],
-                })),
-                Message::ToolOutput(t) => Some(serde_json::json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": t.call_id,
-                        "content": anthropic_tool_output_content(t),
-                        "is_error": t.is_error,
-                    }],
-                })),
-                _ => None,
-            })
-            .collect();
+        // Anthropic requires adjacent tool_use blocks in one assistant message,
+        // immediately followed by tool_result blocks in one user message.
+        let user_messages = anthropic_messages(messages);
 
         let tool_params: Vec<serde_json::Value> = tools
             .iter()
@@ -192,6 +151,11 @@ impl Provider for Anthropic {
         if let Some(effort) = &self.reasoning_effort {
             body["output_config"] = serde_json::json!({ "effort": effort });
         }
+
+        // Prompt caching (opencode auto parity): last tool + last system +
+        // latest user content block. Stable prefix first so multi-step tool
+        // loops can cache-read tools/system/history.
+        apply_anthropic_prompt_caching(&mut body);
 
         let request_headers = build_anthropic_request_headers(&self.api_key, &self.extra_headers);
 
@@ -284,11 +248,24 @@ fn anthropic_stream_chunk(
     value: &serde_json::Value,
 ) -> Option<Result<ChunkType>> {
     match event_type {
+        "message_start" => {
+            // Partial usage early in the stream (cache fields may already appear).
+            if let Some(usage) = value.get("message").and_then(|m| m.get("usage")) {
+                log_anthropic_usage(usage);
+            }
+            None
+        }
         "content_block_start" => anthropic_tool_call_start(value)
             .map(ChunkType::ToolCall)
             .map(Ok),
         "content_block_delta" => anthropic_content_block_delta(value).map(Ok),
-        "message_delta" => anthropic_message_delta(value).map(Ok),
+        "message_delta" => {
+            // Final usage wins for cache_read / cache_creation.
+            if let Some(usage) = value.get("usage") {
+                log_anthropic_usage(usage);
+            }
+            anthropic_message_delta(value).map(Ok)
+        }
         "message_stop" => Some(Ok(ChunkType::End { reason: None })),
         "error" => {
             let error_msg = value["error"]["message"]
@@ -298,6 +275,34 @@ fn anthropic_stream_chunk(
         }
         _ => None,
     }
+}
+
+/// Log Anthropic usage to `app.log` so cache hits are verifiable without dashboards.
+/// Note: `input_tokens` is non-cached only; total input ≈ input + cache_read + cache_creation.
+fn log_anthropic_usage(usage: &serde_json::Value) {
+    let input = usage.get("input_tokens").and_then(|v| v.as_u64());
+    let output = usage.get("output_tokens").and_then(|v| v.as_u64());
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    // Skip empty/partial early frames with no signal.
+    if input.is_none() && output.is_none() && cache_read == 0 && cache_creation == 0 {
+        return;
+    }
+
+    crate::emit_log!(
+        "[prompt-cache] anthropic input={} output={} cache_read={} cache_creation={}",
+        input.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        output.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        cache_read,
+        cache_creation
+    );
 }
 
 fn anthropic_content_block_delta(value: &serde_json::Value) -> Option<ChunkType> {
@@ -429,6 +434,81 @@ fn anthropic_tool_input_is_empty(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Anthropic prompt caching (opencode `auto` parity):
+/// mark last tool + last system block + latest user content block.
+/// Cap at 4 breakpoints; each is `{"type":"ephemeral"}`.
+fn apply_anthropic_prompt_caching(body: &mut serde_json::Value) {
+    let mut remaining = 4usize;
+
+    // 1. Last tool (stable schemas — highest value for tool loops)
+    if remaining > 0 {
+        if let Some(tools) = body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+            if let Some(last) = tools.last_mut().and_then(|t| t.as_object_mut()) {
+                last.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({ "type": "ephemeral" }),
+                );
+                remaining -= 1;
+            }
+        }
+    }
+
+    // 2. Last system text block
+    if remaining > 0 {
+        if let Some(system) = body.get_mut("system").and_then(|v| v.as_array_mut()) {
+            if let Some(last) = system.last_mut().and_then(|b| b.as_object_mut()) {
+                last.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({ "type": "ephemeral" }),
+                );
+                remaining -= 1;
+            }
+        }
+    }
+
+    // 3. Latest user message's last content block (after anthropic_messages
+    // regrouping so tool_result groups keep the marker).
+    if remaining > 0 {
+        if let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) {
+            if let Some(user) = messages
+                .iter_mut()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            {
+                mark_latest_user_cache_control(user);
+            }
+        }
+    }
+}
+
+fn mark_latest_user_cache_control(user: &mut serde_json::Value) {
+    let Some(obj) = user.as_object_mut() else {
+        return;
+    };
+
+    // String content must become a text block to host cache_control.
+    if let Some(serde_json::Value::String(text)) = obj.get("content").cloned() {
+        obj.insert(
+            "content".to_string(),
+            serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" }
+            }]),
+        );
+        return;
+    }
+
+    if let Some(blocks) = obj.get_mut("content").and_then(|c| c.as_array_mut()) {
+        if let Some(last) = blocks.last_mut().and_then(|b| b.as_object_mut()) {
+            last.insert(
+                "cache_control".to_string(),
+                serde_json::json!({ "type": "ephemeral" }),
+            );
+        }
+    }
+}
+
 fn anthropic_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
     if user.images.is_empty() {
         return serde_json::json!(user.content);
@@ -459,6 +539,86 @@ fn anthropic_user_content(user: &crate::message::UserMessage) -> serde_json::Val
     }));
 
     serde_json::Value::Array(parts)
+}
+
+/// Convert internal messages into Anthropic Messages API history.
+///
+/// Adjacent `ToolCall`s are merged into one assistant message with multiple
+/// `tool_use` blocks; adjacent `ToolOutput`s become one user message with
+/// multiple `tool_result` blocks. Anthropic (and Kimi coding) reject
+/// unpaired / non-adjacent multi-tool turns.
+fn anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut pending_tool_uses: Vec<serde_json::Value> = Vec::new();
+    let mut pending_tool_results: Vec<serde_json::Value> = Vec::new();
+
+    let flush_tool_uses = |pending: &mut Vec<serde_json::Value>,
+                           out: &mut Vec<serde_json::Value>| {
+        if pending.is_empty() {
+            return;
+        }
+        out.push(serde_json::json!({
+            "role": "assistant",
+            "content": std::mem::take(pending),
+        }));
+    };
+
+    let flush_tool_results = |pending: &mut Vec<serde_json::Value>,
+                              out: &mut Vec<serde_json::Value>| {
+        if pending.is_empty() {
+            return;
+        }
+        out.push(serde_json::json!({
+            "role": "user",
+            "content": std::mem::take(pending),
+        }));
+    };
+
+    for message in messages {
+        match message {
+            Message::User(u) => {
+                flush_tool_uses(&mut pending_tool_uses, &mut out);
+                flush_tool_results(&mut pending_tool_results, &mut out);
+                out.push(serde_json::json!({
+                    "role": "user",
+                    "content": anthropic_user_content(u),
+                }));
+            }
+            Message::Assistant(a) => {
+                flush_tool_uses(&mut pending_tool_uses, &mut out);
+                flush_tool_results(&mut pending_tool_results, &mut out);
+                out.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": a.content,
+                }));
+            }
+            Message::ToolCall(t) => {
+                flush_tool_results(&mut pending_tool_results, &mut out);
+                let input = serde_json::from_str::<serde_json::Value>(&t.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+                pending_tool_uses.push(serde_json::json!({
+                    "type": "tool_use",
+                    "id": t.call_id,
+                    "name": t.name,
+                    "input": input,
+                }));
+            }
+            Message::ToolOutput(t) => {
+                flush_tool_uses(&mut pending_tool_uses, &mut out);
+                pending_tool_results.push(serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": t.call_id,
+                    "content": anthropic_tool_output_content(t),
+                    "is_error": t.is_error,
+                }));
+            }
+            Message::System(_) => {}
+        }
+    }
+
+    flush_tool_uses(&mut pending_tool_uses, &mut out);
+    flush_tool_results(&mut pending_tool_results, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -593,6 +753,101 @@ mod tests {
     fn anthropic_default_sends_no_extra_headers() {
         let headers = build_anthropic_request_headers("", &HashMap::new());
         assert!(headers.get(reqwest::header::USER_AGENT).is_none());
+    }
+
+    #[test]
+    fn groups_adjacent_tool_calls_and_results() {
+        let messages = vec![
+            Message::user("hi"),
+            Message::tool_call("call_a", "edit", r#"{"file_path":"a.rs"}"#),
+            Message::tool_call("call_b", "edit", r#"{"file_path":"b.rs"}"#),
+            Message::tool_output("call_a", "edit", "ok a", false),
+            Message::tool_output("call_b", "edit", "ok b", false),
+            Message::assistant("done"),
+        ];
+
+        let encoded = anthropic_messages(&messages);
+        assert_eq!(encoded.len(), 4);
+        assert_eq!(encoded[0]["role"], "user");
+        assert_eq!(encoded[1]["role"], "assistant");
+        assert_eq!(encoded[1]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(encoded[1]["content"][0]["type"], "tool_use");
+        assert_eq!(encoded[1]["content"][0]["id"], "call_a");
+        assert_eq!(encoded[1]["content"][1]["id"], "call_b");
+        assert_eq!(encoded[2]["role"], "user");
+        assert_eq!(encoded[2]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(encoded[2]["content"][0]["type"], "tool_result");
+        assert_eq!(encoded[2]["content"][0]["tool_use_id"], "call_a");
+        assert_eq!(encoded[2]["content"][1]["tool_use_id"], "call_b");
+        assert_eq!(encoded[3]["role"], "assistant");
+        assert_eq!(encoded[3]["content"], "done");
+    }
+
+    #[test]
+    fn prompt_caching_marks_last_tool_system_and_latest_user() {
+        let mut body = serde_json::json!({
+            "system": [
+                { "type": "text", "text": "sys a" },
+                { "type": "text", "text": "sys b" },
+            ],
+            "tools": [
+                { "name": "read", "description": "r", "input_schema": { "type": "object" } },
+                { "name": "edit", "description": "e", "input_schema": { "type": "object" } },
+            ],
+            "messages": [
+                { "role": "user", "content": "first" },
+                { "role": "assistant", "content": "ok" },
+                { "role": "user", "content": "second" },
+            ],
+        });
+
+        apply_anthropic_prompt_caching(&mut body);
+
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["system"][1]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        // string user content is wrapped so cache_control can attach
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .map(|s| s == "first")
+                .unwrap_or(false)
+                || body["messages"][0].get("cache_control").is_none()
+        );
+    }
+
+    #[test]
+    fn prompt_caching_marks_last_tool_result_block() {
+        let mut body = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "tool_result", "tool_use_id": "a", "content": "ok a" },
+                    { "type": "tool_result", "tool_use_id": "b", "content": "ok b" },
+                ]
+            }],
+        });
+
+        apply_anthropic_prompt_caching(&mut body);
+
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            body["messages"][0]["content"][1]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
     }
 }
 

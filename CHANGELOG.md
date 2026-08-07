@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.10] - 2026-08-06
+
+### Bug Fixes
+
+- Treat `@ai-sdk/gateway` as OpenAI-compatible provider by @Blankeos
+- Group adjacent tool calls and outputs in API payload by @Blankeos
+- Bad merge left uplicate enabled_providers/disabled_providers by @Blankeos
+- Correct multibyte character handling in get_selected_text() (#14) by @visitorise in [#14](https://github.com/Blankeos/crabcode/pull/14)
+- Sanitize wrapped lines and honor hard line breaks by @Blankeos
+- Add OpenAI Responses Lite contract for codex models by @Blankeos
+- For kimi-k3 & possibly anthropic models, require explicit non-final stop to request phase-less follow-up by @Blankeos
+- Vercel ai gateway endpoint by @Blankeos
+
+### Features
+
+- Report session activity to herdr agent panel (#17) by @Blankeos in [#17](https://github.com/Blankeos/crabcode/pull/17)
+- Add prompt-caching diagnostics for provider streams + docs by @Blankeos
+- Add Anthropic prompt caching for gateway and direct requests by @Blankeos
+- Apply top-level runtime settings (#12) by @yan-ad in [#12](https://github.com/Blankeos/crabcode/pull/12)
+- Add editor protocol server (#8) by @yan-ad in [#8](https://github.com/Blankeos/crabcode/pull/8)
+- Add continuation guidance for interrupted turns by @Blankeos
+- Add shell completion command (#9) by @yan-ad in [#9](https://github.com/Blankeos/crabcode/pull/9)
+- Add upgrade command (#7) by @yan-ad in [#7](https://github.com/Blankeos/crabcode/pull/7)
+
+
+### New Contributors
+
+- @yan-ad made their first contribution in [#12](https://github.com/Blankeos/crabcode/pull/12)
 ## [0.0.9] - 2026-07-28
 
 ### Bug Fixes

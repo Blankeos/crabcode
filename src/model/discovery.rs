@@ -155,8 +155,8 @@ pub struct Discovery {
     cache_path: PathBuf,
     custom_providers:
         Option<std::collections::HashMap<String, crate::config::CustomProviderConfig>>,
-    disabled_providers: std::collections::HashSet<String>,
-    enabled_providers: Option<std::collections::HashSet<String>>,
+    disabled_providers: std::collections::BTreeSet<String>,
+    enabled_providers: std::collections::BTreeSet<String>,
 }
 
 pub fn is_model_selectable(
@@ -309,7 +309,10 @@ impl Discovery {
             .as_ref()
             .map(|loaded| loaded.merged_config.disabled_providers.clone())
             .unwrap_or_default();
-        let enabled_providers = loaded.and_then(|loaded| loaded.merged_config.enabled_providers);
+        let enabled_providers = loaded
+            .as_ref()
+            .map(|loaded| loaded.merged_config.enabled_providers.clone())
+            .unwrap_or_default();
         Self::new_with_config(custom_providers, disabled_providers, enabled_providers)
     }
 
@@ -318,15 +321,15 @@ impl Discovery {
             std::collections::HashMap<String, crate::config::CustomProviderConfig>,
         >,
     ) -> Result<Self> {
-        Self::new_with_config(custom_providers, Default::default(), None)
+        Self::new_with_config(custom_providers, Default::default(), Default::default())
     }
 
     pub fn new_with_config(
         custom_providers: Option<
             std::collections::HashMap<String, crate::config::CustomProviderConfig>,
         >,
-        disabled_providers: std::collections::HashSet<String>,
-        enabled_providers: Option<std::collections::HashSet<String>>,
+        disabled_providers: std::collections::BTreeSet<String>,
+        enabled_providers: std::collections::BTreeSet<String>,
     ) -> Result<Self> {
         if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
             let cache_dir = PathBuf::from("/tmp/crabcode_test_cache");
@@ -359,10 +362,7 @@ impl Discovery {
 
     pub fn provider_is_enabled(&self, provider_id: &str) -> bool {
         !self.disabled_providers.contains(provider_id)
-            && self
-                .enabled_providers
-                .as_ref()
-                .is_none_or(|enabled| enabled.contains(provider_id))
+            && (self.enabled_providers.is_empty() || self.enabled_providers.contains(provider_id))
     }
 
     pub fn cache_path(&self) -> &PathBuf {
