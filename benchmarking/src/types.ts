@@ -1,4 +1,4 @@
-export type AgentName = 'crabcode' | 'opencode' | 'codex'
+export type AgentName = 'crabcode' | 'opencode' | 'codex' | 'grok-build'
 
 export type BenchmarkDifficulty = 'smoke' | 'medium' | 'hard'
 

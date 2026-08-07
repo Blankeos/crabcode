@@ -1,4 +1,4 @@
-// Make-shift benchmark for comparing crabcode, opencode, and codex on tiny agent tasks.
+// Benchmark for comparing crabcode, opencode, codex, and grok-build on tiny agent tasks.
 // Run via: `just bench-agents`
 
 // @ts-nocheck
@@ -468,9 +468,9 @@ function printPaths() {
   }
   console.log('')
   console.log('Notes')
-  console.log('  Permission-gated actions are auto-approved for opencode and codex in isolated workspaces.')
-  console.log('  Crabcode print mode is run with --dangerously-skip-permissions in isolated workspaces.')
+  console.log('  Auto-approve: crabcode --dangerously-skip-permissions; opencode/codex sandbox flags; grok-build --always-approve.')
   console.log('  Site-fetch tasks use a per-run 127.0.0.1 static server; they do not hit the public internet.')
+  console.log('  OpenAI model ids may fail on grok-build — use an xAI model or drop grok-build from --agents.')
   if (!keep) {
     console.log('  Workspaces are removed at exit. Pass --keep to preserve them.')
   }

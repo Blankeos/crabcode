@@ -1,23 +1,45 @@
 # Benchmarking
 
-The agent benchmark suite compares `crabcode`, `opencode`, and `codex` on small deterministic coding tasks.
+The agent benchmark suite compares `crabcode`, `opencode`, `codex`, and `grok-build` on small deterministic coding tasks.
 
-The developer UX stays anchored on the existing recipe:
+## Agent entry
+
+One recipe — all control is **args / env**:
 
 ```sh
+# Defaults — all tasks × all harnesses, per-task model tier, crabcode reasoning medium
 just bench-agents
-```
 
-Useful filters:
+# Same model for every agent/task
+just bench-agents --model openai/gpt-5.5
+just bench-agents --model grok-4.5
 
-```sh
+# Subset of tasks
 just bench-agents --list-tasks
-just bench-agents --tasks workflow-planner-ts
-just bench-agents --tasks issue-triage-pipeline-ts --agents crabcode,opencode,codex
+just bench-agents --tasks bugfix-js,add-rust-test --model openai/gpt-5.5
+
+# Subset of harnesses
+just bench-agents --agents crabcode,grok-build
+just bench-agents --agents crabcode,opencode --model openai/gpt-5.5
+
+# Combine filters
+just bench-agents --agents crabcode,grok-build --tasks bugfix-js --model grok-4.5
+
+# Crabcode reasoning (env; default medium)
+BENCH_CRABCODE_REASONING=high just bench-agents --model openai/gpt-5.5
+
+# Other flags
 just bench-agents --tags typescript,hidden-tests
 just bench-agents --difficulty hard
-just bench-agents --estimate --agents crabcode,codex
+just bench-agents --estimate
+just bench-agents --help
 ```
+
+**Reasoning:** crabcode via `BENCH_CRABCODE_REASONING` (default `medium`).
+Other harnesses: `BENCH_OPENCODE_CMD` / `BENCH_CODEX_CMD` / `BENCH_GROK_BUILD_CMD` if needed.
+
+**Models:** OpenAI ids for crabcode/opencode/codex; **grok-build** usually needs an xAI model
+(or omit it from `--agents`). Binary: PATH `grok` or `BENCH_GROK_BUILD_BIN`.
 
 ## Models
 
