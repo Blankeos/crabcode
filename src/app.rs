@@ -8322,28 +8322,50 @@ impl App {
                     {
                         Ok(()) => {
                             let is_active = self.is_active_session(&session_id);
-                            // Marker is appended last — pin to bottom so the
-                            // "Context compacted" line is visible without jump.
-                            let mut chat = self.chat_with_messages(messages.clone());
-                            chat.scroll_to_bottom_on_next_render();
-                            if let Some(marker_idx) = messages
+                            // Marker is last in soft layout — pin to bottom so the
+                            // "Context compacted" line is visible without mid-history jump.
+                            // Prefer replace_messages on the live chat: rebuilding via
+                            // chat_with_messages zeros content_height and can desync
+                            // sticky/live scroll state until the next session load.
+                            let marker_idx = messages
                                 .iter()
-                                .rposition(|m| crate::session::compaction::is_compaction_marker(m))
-                            {
-                                chat.set_highlighted_message(Some(marker_idx));
-                            } else {
-                                chat.clear_highlighted_message();
-                            }
-
+                                .rposition(|m| crate::session::compaction::is_compaction_marker(m));
                             if is_active {
-                                self.chat_state.chat = chat.clone();
+                                self.chat_state.chat.replace_messages(messages.clone());
+                                self.chat_state.chat.scroll_to_bottom_on_next_render();
+                                if let Some(marker_idx) = marker_idx {
+                                    self.chat_state
+                                        .chat
+                                        .set_highlighted_message(Some(marker_idx));
+                                } else {
+                                    self.chat_state.chat.clear_highlighted_message();
+                                }
                             }
 
-                            // Always keep view-state in sync so reopen/switch
-                            // shows the same compacted history + marker.
                             self.ensure_session_view_state(&session_id);
+                            // Build parked chat before mutably borrowing session_view_states
+                            // (chat_with_messages needs &self).
+                            let parked_chat = if !is_active {
+                                let mut view_chat = self.chat_with_messages(messages);
+                                view_chat.scroll_to_bottom_on_next_render();
+                                if let Some(marker_idx) = marker_idx {
+                                    view_chat.set_highlighted_message(Some(marker_idx));
+                                } else {
+                                    view_chat.clear_highlighted_message();
+                                }
+                                Some(view_chat)
+                            } else {
+                                None
+                            };
                             if let Some(state) = self.session_view_states.get_mut(&session_id) {
-                                state.chat = chat;
+                                // Keep the active session's live chat out of
+                                // session_view_states (same invariant as
+                                // load_session_view_state / switch_to_session).
+                                // Never park an empty new_chat() here — that would
+                                // wipe the marker on the next session restore.
+                                if let Some(view_chat) = parked_chat {
+                                    state.chat = view_chat;
+                                }
                                 state.tool_calls = ToolCallViewState::default();
                                 state.unread_completed = !is_active;
                             }

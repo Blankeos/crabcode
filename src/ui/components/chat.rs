@@ -3076,6 +3076,10 @@ impl Chat {
     /// immediately after bulk-replacing the message list (e.g. compaction).
     pub fn scroll_to_message_on_next_render(&mut self, idx: usize) {
         self.pending_scroll_to_message = Some(idx);
+        // Prevent pin-to-bottom / autoscroll from overriding the marker jump
+        // on the next frame (replace_messages re-enables autoscroll).
+        self.autoscroll_enabled = false;
+        self.user_scrolled_up = true;
     }
 
     pub fn set_highlighted_message(&mut self, idx: Option<usize>) {
@@ -3920,6 +3924,8 @@ impl Chat {
 
         // Resolve any deferred scroll-to-message request (e.g. after compaction).
         // Keep the pending request if positions are not ready yet (viewport=0).
+        // Must win over pin-to-bottom when applied.
+        let mut forced_message_scroll = false;
         if let Some(target_idx) = self.pending_scroll_to_message {
             if viewport > 0 {
                 if let Some(&line) = positions.get(target_idx) {
@@ -3938,7 +3944,9 @@ impl Chat {
                     // Stick-to-bottom only runs when user_scrolled_up is false;
                     // keep this true so the offset is not immediately overwritten.
                     self.user_scrolled_up = true;
+                    self.autoscroll_enabled = false;
                     self.pending_scroll_to_message = None;
+                    forced_message_scroll = true;
                 }
             }
         }
@@ -3946,8 +3954,9 @@ impl Chat {
         let max_offset = content_height
             .saturating_add(self.scroll_bottom_padding)
             .saturating_sub(viewport);
-        let was_pinned_to_bottom = self.scroll_offset == usize::MAX
-            || (self.scroll_offset >= self.max_scroll_offset() && !self.user_scrolled_up);
+        let was_pinned_to_bottom = !forced_message_scroll
+            && (self.scroll_offset == usize::MAX
+                || (self.scroll_offset >= self.max_scroll_offset() && !self.user_scrolled_up));
         let clamped_scroll = if was_pinned_to_bottom {
             max_offset
         } else {
