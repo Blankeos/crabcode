@@ -312,6 +312,8 @@ pub struct Chat {
     pending_click_anchor: Option<(usize, usize)>,
     /// Index of the message highlighted by timeline navigation (None = no highlight)
     pub highlighted_message_index: Option<usize>,
+    /// Deferred scroll-to-message index resolved during next render after positions are known.
+    pending_scroll_to_message: Option<usize>,
     /// Match ranges for the active rendered-line chat find query.
     search_matches: Vec<ChatSearchMatch>,
     search_active_match: Option<usize>,
@@ -1642,6 +1644,7 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
+            pending_scroll_to_message: None,
         }
     }
 
@@ -1708,6 +1711,7 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
+            pending_scroll_to_message: None,
         }
     }
 
@@ -2755,6 +2759,15 @@ impl Chat {
         self.update_scrollbar();
     }
 
+    /// Queue a scroll to a specific message for the next render cycle.
+    ///
+    /// Unlike [`scroll_to_message_index`], this defers resolution until
+    /// after line positions have been computed during rendering.  Use it
+    /// immediately after bulk-replacing the message list (e.g. compaction).
+    pub fn scroll_to_message_on_next_render(&mut self, idx: usize) {
+        self.pending_scroll_to_message = Some(idx);
+    }
+
     pub fn set_highlighted_message(&mut self, idx: Option<usize>) {
         self.highlighted_message_index = idx;
     }
@@ -3592,9 +3605,30 @@ impl Chat {
 
         let all_lines = &self.cached_lines;
         let positions = &self.cached_positions;
-
         let content_height = all_lines.len();
         let viewport = self.viewport_height;
+
+        // Resolve any deferred scroll-to-message request (e.g. after compaction).
+        if let Some(target_idx) = self.pending_scroll_to_message.take() {
+            if let Some(&line) = positions.get(target_idx) {
+                // Compute the line range for this message block.
+                let block_end = self
+                    .message_block_line_range(target_idx, positions, content_height)
+                    .map(|r| r.1)
+                    .unwrap_or(line);
+                // Try to show the block starting from its first line;
+                // if the block is taller than the viewport, scroll so
+                // the *end* of the block sits near the bottom.
+                let target_line = if block_end.saturating_sub(line) > viewport {
+                    block_end.saturating_sub(viewport / 2)
+                } else {
+                    line
+                };
+                self.scroll_offset = target_line;
+                self.user_scrolled_up = false;
+            }
+        }
+
         let max_offset = content_height
             .saturating_add(self.scroll_bottom_padding)
             .saturating_sub(viewport);

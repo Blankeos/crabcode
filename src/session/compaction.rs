@@ -1,6 +1,17 @@
 use crate::session::types::{CompactionStats, Message, MessageRole};
 
+/// Max recent user turns considered for the preserved tail.
+/// Actual tail is also capped by [`DEFAULT_PRESERVE_RECENT_TOKENS`].
 pub const DEFAULT_TAIL_TURNS: usize = 2;
+
+/// Token budget for recent messages kept verbatim after compaction.
+/// OpenCode: max(12k, min(40k, 25% usable)). We use the 12k floor so
+/// tool-heavy recent turns cannot swallow the entire context.
+pub const DEFAULT_PRESERVE_RECENT_TOKENS: usize = 12_000;
+
+/// Minimum tokens in the head (to summarize) before compaction is worth running.
+/// Grok default is 5k; 2k still skips tiny heads that a fat summary would inflate.
+pub const MIN_COMPACTABLE_TOKENS: usize = 2_000;
 pub const SUMMARY_PREFIX: &str = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
 pub const COMPACTION_MARKER_CONTENT: &str = "[crabcode:context-compacted]";
 
@@ -92,6 +103,28 @@ fn context_work_indices(messages: &[Message]) -> Vec<usize> {
 }
 
 pub fn select_messages(messages: &[Message], tail_turns: usize) -> Option<CompactionSelection> {
+    select_messages_with_budget(
+        messages,
+        tail_turns,
+        DEFAULT_PRESERVE_RECENT_TOKENS,
+        0, // unit tests use tiny fixtures; min enforced in for_compaction
+    )
+}
+
+/// OpenCode/Grok-style head/tail split:
+///
+/// 1. Consider at most `max_tail_turns` newest user-turns as tail candidates.
+/// 2. Walk newest-first; keep whole turns while `sum(tail) <= preserve_tokens`.
+/// 3. If nothing can be kept under budget (or the keep would start at the first
+///    message), summarize the entire active context (empty tail) — matches
+///    OpenCode's "tail fallback" / short-session path.
+/// 4. Refuse when the resulting head is below `min_compactable_tokens`.
+fn select_messages_with_budget(
+    messages: &[Message],
+    max_tail_turns: usize,
+    preserve_tokens: usize,
+    min_compactable_tokens: usize,
+) -> Option<CompactionSelection> {
     let work_indices = context_work_indices(messages);
     if work_indices.is_empty() {
         return None;
@@ -109,10 +142,41 @@ pub fn select_messages(messages: &[Message], tail_turns: usize) -> Option<Compac
         return None;
     }
 
-    let tail_start_work = if tail_turns > 0 && user_work_positions.len() > tail_turns {
-        user_work_positions[user_work_positions.len() - tail_turns]
-    } else {
-        work_indices.len()
+    // Per-turn token costs over work indices.
+    let mut turn_tokens: Vec<usize> = Vec::with_capacity(user_work_positions.len());
+    for (i, &start_work) in user_work_positions.iter().enumerate() {
+        let end_work = user_work_positions
+            .get(i + 1)
+            .copied()
+            .unwrap_or(work_indices.len());
+        let tokens = work_indices[start_work..end_work]
+            .iter()
+            .map(|&full_idx| message_context_tokens(&messages[full_idx]))
+            .sum();
+        turn_tokens.push(tokens);
+    }
+
+    // Candidate recent turns = last max_tail_turns (OpenCode `all.slice(-limit)`).
+    let candidate_start = user_work_positions.len().saturating_sub(max_tail_turns);
+
+    let mut tail_start_work: Option<usize> = None;
+    let mut kept_tokens = 0usize;
+
+    if max_tail_turns > 0 {
+        for i in (candidate_start..user_work_positions.len()).rev() {
+            let size = turn_tokens[i];
+            if kept_tokens.saturating_add(size) > preserve_tokens {
+                break;
+            }
+            tail_start_work = Some(user_work_positions[i]);
+            kept_tokens = kept_tokens.saturating_add(size);
+        }
+    }
+
+    // OpenCode: if no keep, or keep would start at work index 0, summarize all.
+    let tail_start_work = match tail_start_work {
+        Some(0) | None => work_indices.len(),
+        Some(start) => start,
     };
 
     let head_indices = &work_indices[..tail_start_work];
@@ -121,7 +185,28 @@ pub fn select_messages(messages: &[Message], tail_turns: usize) -> Option<Compac
         return None;
     }
 
-    // Insert summary+marker before the first retained tail message (or after the head).
+    let head_tokens: usize = head_indices
+        .iter()
+        .map(|&full_idx| message_context_tokens(&messages[full_idx]))
+        .sum();
+    if head_tokens < min_compactable_tokens {
+        crate::emit_log!(
+            "[compaction] skip: head {} tokens < min_compactable {}",
+            head_tokens,
+            min_compactable_tokens
+        );
+        return None;
+    }
+
+    crate::emit_log!(
+        "[compaction] select: head_msgs={} head_tok={} tail_msgs={} tail_tok={} preserve_budget={}",
+        head_indices.len(),
+        head_tokens,
+        tail_indices.len(),
+        kept_tokens,
+        preserve_tokens
+    );
+
     let summarize_end = tail_indices
         .first()
         .copied()
@@ -146,7 +231,14 @@ pub fn select_messages_for_compaction(
     preferred_tail_turns: usize,
 ) -> Option<CompactionSelection> {
     for tail_turns in (0..=preferred_tail_turns).rev() {
-        let selection = select_messages(messages, tail_turns)?;
+        let Some(selection) = select_messages_with_budget(
+            messages,
+            tail_turns,
+            DEFAULT_PRESERVE_RECENT_TOKENS,
+            MIN_COMPACTABLE_TOKENS,
+        ) else {
+            continue;
+        };
         if selection
             .messages_to_summarize
             .iter()
@@ -563,6 +655,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn select_messages_drops_heavy_tail_turn_over_preserve_budget() {
+        // Last turn alone exceeds preserve budget → empty tail, whole session summarized.
+        let mut heavy = Message::assistant("a-heavy");
+        heavy.token_count = Some(DEFAULT_PRESERVE_RECENT_TOKENS + 1);
+        let messages = vec![
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("u2"),
+            heavy,
+        ];
+
+        let selected = select_messages_with_budget(&messages, 2, DEFAULT_PRESERVE_RECENT_TOKENS, 0)
+            .expect("selection");
+
+        assert!(selected.tail_messages.is_empty());
+        assert_eq!(selected.messages_to_summarize.len(), 4);
+    }
+
+    #[test]
+    fn select_messages_keeps_only_turns_under_preserve_budget() {
+        // Each turn ~5k; preserve 12k → keep last 2 turns (10k), summarize first.
+        let mut a1 = Message::assistant("a1");
+        a1.token_count = Some(5_000);
+        let mut a2 = Message::assistant("a2");
+        a2.token_count = Some(5_000);
+        let mut a3 = Message::assistant("a3");
+        a3.token_count = Some(5_000);
+        let messages = vec![
+            Message::user("u1"),
+            a1,
+            Message::user("u2"),
+            a2,
+            Message::user("u3"),
+            a3,
+        ];
+
+        let selected = select_messages_with_budget(&messages, 3, 12_000, 0).expect("selection");
+
+        assert_eq!(selected.tail_messages.len(), 4); // u2,a2,u3,a3
+        assert_eq!(selected.messages_to_summarize[0].content, "u1");
+    }
+
+    #[test]
+    fn select_messages_with_budget_skips_tiny_head() {
+        // Head is only ~100 tokens of fluff; min_compactable refuses that split.
+        let mut heavy = Message::assistant("heavy-tail");
+        heavy.token_count = Some(10_000);
+        let messages = vec![
+            Message::user("hi"),
+            Message::assistant("yo"),
+            Message::user("continue"),
+            heavy,
+        ];
+        assert!(select_messages_with_budget(
+            &messages,
+            1,
+            DEFAULT_PRESERVE_RECENT_TOKENS,
+            MIN_COMPACTABLE_TOKENS,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn select_messages_keeps_recent_tail_turns_when_available() {
         let messages = vec![
             Message::user("u1"),
@@ -593,17 +748,23 @@ mod tests {
 
     #[test]
     fn adaptive_selection_reduces_tail_when_prefix_is_only_prior_summary() {
-        let summary = Message::user(format!("{}\nold summary", SUMMARY_PREFIX));
+        // Pad so reduced-tail head clears MIN_COMPACTABLE_TOKENS.
+        let mut summary = Message::user(format!("{}\nold summary", SUMMARY_PREFIX));
+        summary.token_count = Some(1_500);
+        let mut a1 = Message::assistant("a1");
+        a1.token_count = Some(1_500);
         let messages = vec![
             summary,
             Message::user("u1"),
-            Message::assistant("a1"),
+            a1,
             Message::user("u2"),
             Message::assistant("a2"),
         ];
 
         let selected = select_messages_for_compaction(&messages, 2).expect("selection");
 
+        // Preferred tail=2 leaves only prior summary as head (not meaningful)
+        // → adaptive reduces to tail=1: summarize summary+u1+a1, keep u2+a2.
         assert_eq!(selected.messages_to_summarize.len(), 3);
         assert_eq!(selected.messages_to_summarize[1].content, "u1");
         assert_eq!(selected.tail_messages.len(), 2);
@@ -642,9 +803,11 @@ mod tests {
 
     #[test]
     fn soft_compaction_keeps_pre_boundary_history() {
+        let mut a1 = Message::assistant("a1");
+        a1.token_count = Some(3_000); // clear MIN_COMPACTABLE_TOKENS for head
         let messages = vec![
             Message::user("u1"),
-            Message::assistant("a1"),
+            a1,
             Message::user("u2"),
             Message::assistant("a2"),
         ];

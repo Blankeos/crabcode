@@ -8232,8 +8232,19 @@ impl App {
                             let is_active = self.is_active_session(&session_id);
                             if is_active {
                                 self.chat_state.chat = self.chat_with_messages(messages.clone());
-                                self.chat_state.chat.scroll_to_bottom_on_next_render();
-                                self.chat_state.chat.clear_highlighted_message();
+                                if let Some(marker_idx) = messages.iter().position(|m| {
+                                    crate::session::compaction::is_compaction_marker(m)
+                                }) {
+                                    self.chat_state
+                                        .chat
+                                        .scroll_to_message_on_next_render(marker_idx);
+                                    self.chat_state
+                                        .chat
+                                        .set_highlighted_message(Some(marker_idx));
+                                } else {
+                                    self.chat_state.chat.scroll_to_bottom_on_next_render();
+                                    self.chat_state.chat.clear_highlighted_message();
+                                }
                             }
 
                             let view_chat = if is_active {
