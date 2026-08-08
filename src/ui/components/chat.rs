@@ -4075,13 +4075,13 @@ impl Chat {
             .add_modifier(Modifier::BOLD);
         let title_style = Style::default()
             .fg(colors.text_weak)
-            .add_modifier(Modifier::BOLD | Modifier::ITALIC);
+            .add_modifier(Modifier::BOLD);
         let hint_key_style = Style::default()
             .fg(colors.text_weak)
             .add_modifier(Modifier::BOLD);
         let hint_style = Style::default()
             .fg(colors.text_weak)
-            .add_modifier(Modifier::DIM | Modifier::ITALIC);
+            .add_modifier(Modifier::DIM);
         let gutter_style = Style::default()
             .fg(colors.text_weak)
             .add_modifier(Modifier::DIM);
@@ -4127,10 +4127,7 @@ impl Chat {
             .map(|mut line| {
                 line.style = line.style.patch(Style::default().fg(colors.text_weak));
                 for span in &mut line.spans {
-                    span.style = Style::default()
-                        .fg(colors.text_weak)
-                        .add_modifier(Modifier::ITALIC)
-                        .patch(span.style);
+                    span.style = Style::default().fg(colors.text_weak).patch(span.style);
                 }
                 line
             })
