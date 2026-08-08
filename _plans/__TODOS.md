@@ -470,3 +470,5 @@ I think this is how the TUI works already anyway right?
 
 - [x] Light mode themes + grok build theme (people like the monochrome aesthetic)
   - [ ] Add the background now, no more transparent background - but 'transparency' is activateable
+
+- [ ] Thought time with Thought for 0.2s, and Thinking...
