@@ -464,3 +464,6 @@ I think this is how the TUI works already anyway right?
   - [x] Audit absolute `crate::chunk` / `crate::retry` / etc. under extract (tree becomes crate root, not a submodule) — bundled with previous
   - [x] Rename product-leaky debug artifacts (e.g. `/tmp/crabcode_sse_debug.log` in compatible provider) or feature-gate them — **~8.5 → ~8.7**
   - [x] Strip or move crabcode-flavored comments/tests (subagent / OpenCode / Grok Build history) out of the SDK tree — **~8.7 → ~9**
+
+- [ ] More accurate token spend? It doesn't really think about how many loops, it's just an estimate. Is opencode more accurate?
+- [ ] compacting context but when done, it doesnt show the 'Context compacted (56.1K -> 19.2K, saved 66%)' message part in the UI scrollable part.. Only see it after I close and open.

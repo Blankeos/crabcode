@@ -243,6 +243,9 @@ fn mentioned_path(candidates: &[PathMentionCandidate], text: &str) -> Option<std
 #[derive(Debug, Clone, Default)]
 pub struct Chat {
     pub messages: Vec<Message>,
+    /// Agent names that can be mentioned with `@name` in user messages.
+    /// Used to re-style `@mentions` in submitted (rendered) messages.
+    pub agent_mention_names: Vec<String>,
     pub scroll_offset: usize,
     pub scrollbar_state: ScrollbarState,
     pub is_dragging_scrollbar: bool,
@@ -1579,6 +1582,7 @@ impl Chat {
     pub fn new() -> Self {
         Self {
             messages: Vec::new(),
+            agent_mention_names: Vec::new(),
             scroll_offset: 0,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
@@ -1644,6 +1648,7 @@ impl Chat {
     pub fn with_messages(messages: Vec<Message>) -> Self {
         Self {
             messages,
+            agent_mention_names: Vec::new(),
             scroll_offset: 0,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
@@ -1704,6 +1709,20 @@ impl Chat {
             hovered_image: None,
             hovered_hyperlink: None,
         }
+    }
+
+    /// Set the agent names that can be mentioned with `@name` in user messages.
+    pub fn set_agent_mention_names(&mut self, names: Vec<String>) {
+        if self.agent_mention_names != names {
+            self.agent_mention_names = names;
+            self.invalidate_cache();
+        }
+    }
+
+    /// Builder-style variant of [`set_agent_mention_names`].
+    pub fn with_agent_mention_names(mut self, names: Vec<String>) -> Self {
+        self.set_agent_mention_names(names);
+        self
     }
 
     pub fn add_message(&mut self, message: Message) {
@@ -4209,8 +4228,10 @@ impl Chat {
                     .split('\n')
                     .flat_map(|content_line| {
                         let content_line = content_line.strip_suffix('\r').unwrap_or(content_line);
-                        let styled_content = Line::from(spans_with_image_placeholders(
+                        let styled_content = Line::from(style_agent_mentions_in_line(
                             content_line,
+                            &self.agent_mention_names,
+                            colors,
                             text_style,
                             &image_style,
                         ));
@@ -6623,6 +6644,186 @@ where
     }
 
     spans
+}
+
+/// Style a user-message content line, applying image placeholders and
+/// `@agent` mention colors.
+///
+/// Detection runs on the full content line (same rules as the chat input),
+/// then ranges are mapped onto spans by absolute byte offset so image
+/// placeholders never need a boundary flag.
+fn style_agent_mentions_in_line<F>(
+    content_line: &str,
+    agent_names: &[String],
+    colors: &ThemeColors,
+    text_style: Style,
+    image_style: &F,
+) -> Vec<Span<'static>>
+where
+    F: Fn(&str) -> Style,
+{
+    let base_spans = spans_with_image_placeholders(content_line, text_style, image_style);
+    if agent_names.is_empty() {
+        return base_spans;
+    }
+
+    let mentions = crate::agent::mention::agent_mention_ranges_in_line(content_line, agent_names);
+    if mentions.is_empty() {
+        return base_spans;
+    }
+
+    // Walk absolute byte offsets and emit spans, splitting any base span that
+    // intersects a mention range.
+    let mut out = Vec::with_capacity(base_spans.len() + mentions.len());
+    let mut abs = 0usize;
+    let mut mention_idx = 0usize;
+
+    for span in base_spans {
+        let Span { content, style } = span;
+        let text = content.as_ref();
+        let span_start = abs;
+        let span_end = abs + text.len();
+        let mut cursor = 0usize; // offset within this span
+
+        while mention_idx < mentions.len() {
+            let (ref range, ref agent_name) = mentions[mention_idx];
+            if range.end <= span_start {
+                mention_idx += 1;
+                continue;
+            }
+            if range.start >= span_end {
+                break;
+            }
+
+            let rel_start = range.start.saturating_sub(span_start).max(cursor);
+            let rel_end = range.end.min(span_end) - span_start;
+            if rel_start > cursor {
+                out.push(Span::styled(text[cursor..rel_start].to_owned(), style));
+            }
+            if rel_end > rel_start {
+                let mention_style =
+                    style.patch(Style::default().fg(crate::theme::agent_color(agent_name, colors)));
+                out.push(Span::styled(
+                    text[rel_start..rel_end].to_owned(),
+                    mention_style,
+                ));
+            }
+            cursor = rel_end;
+            if range.end <= span_end {
+                mention_idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        if cursor < text.len() {
+            out.push(Span::styled(text[cursor..].to_owned(), style));
+        }
+        abs = span_end;
+    }
+
+    if out.is_empty() {
+        out.push(Span::styled(String::new(), text_style));
+    }
+    out
+}
+
+#[cfg(test)]
+mod agent_mention_style_tests {
+    use super::*;
+    use crate::theme::Theme;
+    use ratatui::style::{Color, Style};
+
+    fn test_colors() -> ThemeColors {
+        Theme::load_builtin_default().get_colors(true)
+    }
+
+    #[test]
+    fn styles_mentions_in_plain_user_line() {
+        let colors = test_colors();
+        let agents = vec!["executor".to_string(), "general".to_string()];
+        let text_style = Style::default().fg(Color::White);
+        let image_style = Style::default().fg(Color::Blue);
+
+        let spans = style_agent_mentions_in_line(
+            "please @executor and @General help",
+            &agents,
+            &colors,
+            text_style,
+            &|_| image_style,
+        );
+
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "please @executor and @General help");
+
+        let mention_spans: Vec<_> = spans
+            .iter()
+            .filter(|s| s.content.as_ref().starts_with('@'))
+            .collect();
+        assert_eq!(mention_spans.len(), 2);
+        assert_eq!(mention_spans[0].content.as_ref(), "@executor");
+        assert_eq!(mention_spans[1].content.as_ref(), "@General");
+        assert_eq!(
+            mention_spans[0].style.fg,
+            Some(crate::theme::agent_color("executor", &colors))
+        );
+        assert_eq!(
+            mention_spans[1].style.fg,
+            Some(crate::theme::agent_color("general", &colors))
+        );
+    }
+
+    #[test]
+    fn leaves_emails_and_unknown_agents_unstyled() {
+        let colors = test_colors();
+        let agents = vec!["explore".to_string()];
+        let text_style = Style::default().fg(Color::White);
+        let image_style = Style::default().fg(Color::Blue);
+
+        let spans = style_agent_mentions_in_line(
+            "mail me@explore.com and @unknown",
+            &agents,
+            &colors,
+            text_style,
+            &|_| image_style,
+        );
+
+        let explore_color = crate::theme::agent_color("explore", &colors);
+        assert!(spans.iter().all(|s| s.style.fg != Some(explore_color)));
+    }
+
+    #[test]
+    fn styles_mention_alongside_image_placeholder() {
+        let colors = test_colors();
+        let agents = vec!["explore".to_string()];
+        let text_style = Style::default().fg(Color::White);
+        let image_style = Style::default().fg(Color::Blue);
+
+        let spans = style_agent_mentions_in_line(
+            "see [Image #1] then @explore",
+            &agents,
+            &colors,
+            text_style,
+            &|_| image_style,
+        );
+
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "see [Image #1] then @explore");
+
+        let mention = spans
+            .iter()
+            .find(|s| s.content.as_ref() == "@explore")
+            .expect("mention span");
+        assert_eq!(
+            mention.style.fg,
+            Some(crate::theme::agent_color("explore", &colors))
+        );
+        let image = spans
+            .iter()
+            .find(|s| s.content.as_ref() == "[Image #1]")
+            .expect("image span");
+        assert_eq!(image.style.fg, Some(Color::Blue));
+    }
 }
 
 fn placeholder_at_line_col(line: &Line<'_>, target_col: usize) -> Option<String> {

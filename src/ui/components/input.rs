@@ -1618,60 +1618,6 @@ impl Input {
             .unwrap_or_default()
     }
 
-    fn agent_mention_ranges_in_line(
-        line: &str,
-        agent_names: &[String],
-    ) -> Vec<(Range<usize>, String)> {
-        if agent_names.is_empty() || !line.contains('@') {
-            return Vec::new();
-        }
-
-        let mut ranges = Vec::new();
-        let bytes = line.as_bytes();
-        let mut idx = 0;
-
-        while idx < bytes.len() {
-            if bytes[idx] != b'@' {
-                idx += 1;
-                continue;
-            }
-
-            let at_boundary = idx == 0
-                || line[..idx]
-                    .chars()
-                    .next_back()
-                    .map(char::is_whitespace)
-                    .unwrap_or(true);
-            if !at_boundary {
-                idx += 1;
-                continue;
-            }
-
-            let name_start = idx + 1;
-            let name_end = line[name_start..]
-                .char_indices()
-                .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '-' && *c != '_')
-                .map(|(offset, _)| name_start + offset)
-                .unwrap_or(line.len());
-            if name_start >= name_end {
-                idx = name_start;
-                continue;
-            }
-
-            let name = &line[name_start..name_end];
-            if let Some(agent) = agent_names
-                .iter()
-                .find(|agent| agent.eq_ignore_ascii_case(name))
-            {
-                ranges.push((idx..name_end, agent.clone()));
-            }
-
-            idx = name_end;
-        }
-
-        ranges
-    }
-
     fn style_agent_mention_ranges(
         &self,
         buffer: &mut Buffer,
@@ -1700,7 +1646,9 @@ impl Input {
             };
             let y = area.y + screen_row as u16;
 
-            for (range, agent_name) in Self::agent_mention_ranges_in_line(line, &agent_names) {
+            for (range, agent_name) in
+                crate::agent::mention::agent_mention_ranges_in_line(line, &agent_names)
+            {
                 let style = Style::default().fg(agent_color(&agent_name, colors));
                 Self::style_line_byte_range(buffer, area, y, line, range, visual_line, style);
             }
@@ -3283,7 +3231,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 5);
 
         let visual_lines = input.visual_lines(area.width as usize);
-        let (row, col) = input.textarea.cursor();
+        let (_row, col) = input.textarea.cursor();
         assert_eq!(col, 6);
 
         let visual_idx = input.cursor_visual_row(&visual_lines);
@@ -3298,7 +3246,7 @@ mod tests {
             "executor".to_string(),
         ];
 
-        let ranges = Input::agent_mention_ranges_in_line(
+        let ranges = crate::agent::mention::agent_mention_ranges_in_line(
             "use @explore and @General, ignore @unknown and email@explore.com",
             &agents,
         );
@@ -3310,7 +3258,9 @@ mod tests {
             ]
         );
 
-        assert!(Input::agent_mention_ranges_in_line("no mentions", &agents).is_empty());
+        assert!(
+            crate::agent::mention::agent_mention_ranges_in_line("no mentions", &agents).is_empty()
+        );
     }
 
     #[test]

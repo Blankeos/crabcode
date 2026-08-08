@@ -796,9 +796,9 @@ struct ClientSessionState {
 }
 
 impl ClientSessionState {
-    fn with_messages(messages: Vec<crate::session::types::Message>) -> Self {
+    fn with_chat(chat: Chat) -> Self {
         Self {
-            chat: Chat::with_messages(messages),
+            chat,
             input_draft: String::new(),
             stream: None,
             external_stream: None,
@@ -975,7 +975,7 @@ impl App {
 
         let home_state = init_home();
         let mut agent = "Build".to_string();
-        let chat = Chat::new();
+        let mut chat = Chat::new();
         let suggestions_popup_state = init_suggestions_popup(Popup::new());
         let agents_dialog_state = init_agents_dialog("Select agent", vec![]);
         let models_dialog_state = init_models_dialog("Models", vec![]);
@@ -1037,6 +1037,7 @@ impl App {
         }
         crate::command::handlers::register_skill_commands(&mut registry);
         let agent_registry = loaded_config.merged_config.agent_registry.clone();
+        chat.set_agent_mention_names(agent_registry.visible_agent_names_for_mentions());
         let agent_suggestions = agent_registry
             .visible_subagents()
             .into_iter()
@@ -1563,6 +1564,17 @@ impl App {
             .is_some_and(|current| current == session_id)
     }
 
+    /// Build a Chat pre-seeded with the current agent mention names so
+    /// `@mentions` render with the same colors as the input composer.
+    fn new_chat(&self) -> Chat {
+        Chat::new().with_agent_mention_names(self.agent_registry.visible_agent_names_for_mentions())
+    }
+
+    fn chat_with_messages(&self, messages: Vec<crate::session::types::Message>) -> Chat {
+        Chat::with_messages(messages)
+            .with_agent_mention_names(self.agent_registry.visible_agent_names_for_mentions())
+    }
+
     fn ensure_session_view_state(&mut self, session_id: &str) {
         if self.session_view_states.contains_key(session_id) {
             return;
@@ -1576,7 +1588,7 @@ impl App {
 
         self.session_view_states.insert(
             session_id.to_string(),
-            ClientSessionState::with_messages(messages),
+            ClientSessionState::with_chat(self.chat_with_messages(messages)),
         );
     }
 
@@ -1975,7 +1987,7 @@ impl App {
         let session_id = self.session_manager.create_session(title);
         self.session_view_states.insert(
             session_id.clone(),
-            ClientSessionState::with_messages(Vec::new()),
+            ClientSessionState::with_chat(self.new_chat()),
         );
         self.chat_state.chat.clear();
         self.input.clear();
@@ -8219,18 +8231,19 @@ impl App {
                         Ok(()) => {
                             let is_active = self.is_active_session(&session_id);
                             if is_active {
-                                self.chat_state.chat = Chat::with_messages(messages.clone());
+                                self.chat_state.chat = self.chat_with_messages(messages.clone());
                                 self.chat_state.chat.scroll_to_bottom_on_next_render();
                                 self.chat_state.chat.clear_highlighted_message();
                             }
 
+                            let view_chat = if is_active {
+                                self.new_chat()
+                            } else {
+                                self.chat_with_messages(messages)
+                            };
                             self.ensure_session_view_state(&session_id);
                             if let Some(state) = self.session_view_states.get_mut(&session_id) {
-                                state.chat = if is_active {
-                                    Chat::new()
-                                } else {
-                                    Chat::with_messages(messages)
-                                };
+                                state.chat = view_chat;
                                 state.tool_calls = ToolCallViewState::default();
                                 state.unread_completed = !is_active;
                             }
@@ -9012,8 +9025,9 @@ impl App {
         user_message.model = model.clone();
         user_message.provider = provider.clone();
 
+        let fresh_chat = self.new_chat();
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
-            state.chat = Chat::with_messages(Vec::new());
+            state.chat = fresh_chat;
             state.tool_calls = ToolCallViewState::default();
             state.chat.add_message(user_message.clone());
             state.chat.add_assistant_message("");
