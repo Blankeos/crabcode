@@ -142,9 +142,9 @@ impl Provider for Anthropic {
             body["output_config"] = serde_json::json!({ "effort": effort });
         }
 
-        // Prompt caching (opencode auto parity): last tool + last system +
-        // latest user content block. Stable prefix first so multi-step tool
-        // loops can cache-read tools/system/history.
+        // Prompt caching: last tool + last system + latest user content block.
+        // Stable prefix first so multi-step tool loops can cache-read
+        // tools/system/history.
         apply_anthropic_prompt_caching(&mut body);
 
         let mut request_headers = reqwest::header::HeaderMap::new();
@@ -250,7 +250,7 @@ fn anthropic_stream_chunk(
     }
 }
 
-/// Log Anthropic usage to `app.log` so cache hits are verifiable without dashboards.
+/// Log Anthropic usage via the host logger so cache hits are verifiable.
 /// Note: `input_tokens` is non-cached only; total input ≈ input + cache_read + cache_creation.
 fn log_anthropic_usage(usage: &serde_json::Value) {
     let input = usage.get("input_tokens").and_then(|v| v.as_u64());
@@ -279,7 +279,7 @@ fn log_anthropic_usage(usage: &serde_json::Value) {
         0.0
     };
 
-    crate::emit_log!(
+    crate::log::log(&format!(
         "[prompt-cache] anthropic input={} output={} cache_read={} cache_creation={} total_input={} hit_pct={:.1}",
         input.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
         output.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
@@ -287,7 +287,7 @@ fn log_anthropic_usage(usage: &serde_json::Value) {
         cache_creation,
         total_input,
         hit_pct
-    );
+    ));
 }
 
 fn anthropic_content_block_delta(value: &serde_json::Value) -> Option<ChunkType> {
@@ -419,7 +419,7 @@ fn anthropic_tool_input_is_empty(value: &serde_json::Value) -> bool {
     }
 }
 
-/// Anthropic prompt caching (Grok Build / OpenCode hybrid):
+/// Anthropic prompt caching breakpoints:
 /// 1. last tool (stable schemas — high value in tool loops)
 /// 2. last system block
 /// 3. tip of transcript (last markable block; skips thinking)
@@ -471,7 +471,7 @@ fn apply_anthropic_prompt_caching(body: &mut serde_json::Value) {
     }
 
     // Where the previous request ended: skip the whole trailing user run after
-    // the last assistant, then mark that earlier user tip (Grok Build placement).
+    // the last assistant, then mark that earlier user tip.
     if remaining > 0 {
         if let Some(tip) = tip {
             if let Some(prev) = messages[..tip]
@@ -820,7 +820,7 @@ mod tests {
             body["messages"][2]["content"][0]["cache_control"],
             serde_json::json!({ "type": "ephemeral" })
         );
-        // previous user tip also marked (Grok Build placement)
+        // previous user tip also marked
         assert_eq!(
             body["messages"][0]["content"][0]["cache_control"],
             serde_json::json!({ "type": "ephemeral" })

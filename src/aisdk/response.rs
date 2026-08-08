@@ -15,7 +15,6 @@ const PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT: usize = 1;
 const PROVIDER_STEP_MAX_RETRIES: usize = 10;
 
 /// Keep the newest N tool outputs intact for the model; older ones are pruned.
-/// Matches Grok Build / OpenCode mid-session tool-result retention behavior.
 const KEEP_RECENT_TOOL_OUTPUTS: usize = 6;
 /// Tool outputs older than this many user turns are hard-cleared (turn-age gate).
 const KEEP_RECENT_USER_TURNS: usize = 2;
@@ -25,7 +24,7 @@ const TOOL_OUTPUT_SOFT_TRIM_HEAD: usize = 1_500;
 const TOOL_OUTPUT_SOFT_TRIM_TAIL: usize = 1_500;
 const PRUNED_TOOL_OUTPUT_PLACEHOLDER: &str = "[Old tool result content cleared]";
 
-/// Image compact hysteresis (Grok Build-inspired):
+/// Image compact hysteresis:
 /// - Gate eviction only when total image payload exceeds the **trigger**
 /// - Once firing, reclaim down to the lower **target** so the next few turns
 ///   stay under the ceiling (avoids re-busting the KV prefix every step)
@@ -796,7 +795,7 @@ fn rollback_provider_attempt(
 /// provider request. Durable UI/history copies are left intact — this only
 /// mutates the request-facing message list.
 ///
-/// Strategy (Grok Build / OpenCode inspired):
+/// Strategy:
 /// - Keep the newest [`KEEP_RECENT_TOOL_OUTPUTS`] results full-size
 /// - Soft-trim large older results to head+tail
 /// - Hard-clear anything older than 2× the keep window **or** older than
@@ -2047,7 +2046,7 @@ mod tests {
             let chunks = match request {
                 0 | 1 => vec![
                     Ok(ChunkType::ToolCall(
-                        r#"[{"index":0,"id":"call_repeat","type":"function","function":{"name":"task","arguments":"{\"description\":\"Write haiku\",\"prompt\":\"Write a haiku\",\"subagent_type\":\"general\"}"}}]"#
+                        r#"[{"index":0,"id":"call_repeat","type":"function","function":{"name":"task","arguments":"{\"description\":\"Write haiku\",\"prompt\":\"Write a haiku\",\"agent_type\":\"general\"}"}}]"#
                             .to_string(),
                     )),
                     Ok(ChunkType::End {
@@ -2656,13 +2655,13 @@ mod tests {
         let tool_executions = executions.clone();
         let task_tool = Tool::builder()
             .name("task")
-            .description("launch subagent")
+            .description("launch nested agent")
             .input_schema(Schema::from(true))
             .execute(ToolExecute::new(move |_input| {
                 let executions = tool_executions.clone();
                 async move {
                     executions.fetch_add(1, Ordering::SeqCst);
-                    Ok("subagent result".to_string())
+                    Ok("nested agent result".to_string())
                 }
             }))
             .build()

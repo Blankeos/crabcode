@@ -95,6 +95,11 @@ vt100 = "0.15.2"
 [dev-dependencies]
 tokio-test = "0.4"
 
+[features]
+default = []
+# Write OpenAI-compatible SSE debug traces (path: AISDK_SSE_DEBUG_LOG or /tmp/aisdk_sse_debug.log)
+aisdk-sse-debug = []
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

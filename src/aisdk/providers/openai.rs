@@ -1576,13 +1576,13 @@ fn log_openai_responses_usage(usage: &serde_json::Value) {
         0.0
     };
 
-    crate::emit_log!(
+    crate::log::log(&format!(
         "[prompt-cache] openai-responses input={} output={} cached_tokens={} hit_pct={:.1}",
         input.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
         output.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
         cached,
         hit_pct
-    );
+    ));
 }
 
 fn responses_provider_error_message(value: &serde_json::Value, fallback: &str) -> String {

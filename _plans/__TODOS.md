@@ -441,7 +441,7 @@ I think this is how the TUI works already anyway right?
 
 - [ ] Cool Grok features
   - [ ] I wanna imitate grok-build's `/compact-mode` and by default a sticky "most recent message i made" is just sticky top-0 essentially, so no matter where I am, my latest message follows the response it triggered
-  - [ ] /create-workflow /workflows [new] /workflow
+  - [ ] /create-workflow /workflows /workflow ??
   - [ ] memory??
 
 - [x] When autocompleting a "command" and my autosuggestions is focusing it and I press 'tab or enter'... It doesnt submit it... It just autocompletes it in the chat, but doesnt submit it.. This matches opencode behavior.. This is only for commands tho.
@@ -449,6 +449,7 @@ I think this is how the TUI works already anyway right?
 
 - [ ] opencode v2-like
   - [ ] apis for `crabcode session list` or something. So agents can just use the cli instead of checking the .db on its own.
+  - [ ] toolsearch and codemode built-in https://x.com/thdxr/status/2085865399195779308 saves a lot of tokens
 
 - [x] Massively improve compaction, shouldnt remove the history for future reading, I think that's what's happening right now... Idk how others work but they dont really get rid of history in the db.. probabyl just make a summary and disable the other previous messages before compaction (that is my assumption)
   - [x] Be able to cancel compact
@@ -457,9 +458,9 @@ I think this is how the TUI works already anyway right?
   - Cancel compact with esc esc (same arm as stream interrupt)
   - Queue `/compact` while streaming/compacting
 
-- [ ] aisdk extract readiness (`src/aisdk/`) — **7/10 → 9/10** after these (10/10 = external users + API freeze). Domain is already SDK-shaped; these are packaging/host hooks, not product coupling. See `src/aisdk/README.md`.
-  - [ ] Replace `crate::emit_log!` in providers with a neutral story (`tracing`, optional log callback, or host-injected hook) — **7 → ~8**
-  - [ ] Drop `crate::aisdk::...` paths in `mod.rs` / re-exports so the tree is valid as a crate root — **~8 → ~8.5**
-  - [ ] Audit absolute `crate::chunk` / `crate::retry` / etc. under extract (tree becomes crate root, not a submodule) — bundled with previous
-  - [ ] Rename product-leaky debug artifacts (e.g. `/tmp/crabcode_sse_debug.log` in compatible provider) or feature-gate them — **~8.5 → ~8.7**
-  - [ ] Strip or move crabcode-flavored comments/tests (subagent / OpenCode / Grok Build history) out of the SDK tree — **~8.7 → ~9**
+- [x] aisdk extract readiness (`src/aisdk/`) — **7/10 → 9/10** (10/10 = external users + API freeze). Domain is already SDK-shaped; these are packaging/host hooks, not product coupling. See `src/aisdk/README.md`.
+  - [x] Replace `crate::emit_log!` in providers with a neutral story (`tracing`, optional log callback, or host-injected hook) — **7 → ~8**
+  - [x] Drop `crate::aisdk::...` paths in `mod.rs` / re-exports so the tree is valid as a crate root — **~8 → ~8.5**
+  - [x] Audit absolute `crate::chunk` / `crate::retry` / etc. under extract (tree becomes crate root, not a submodule) — bundled with previous
+  - [x] Rename product-leaky debug artifacts (e.g. `/tmp/crabcode_sse_debug.log` in compatible provider) or feature-gate them — **~8.5 → ~8.7**
+  - [x] Strip or move crabcode-flavored comments/tests (subagent / OpenCode / Grok Build history) out of the SDK tree — **~8.7 → ~9**

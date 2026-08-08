@@ -386,17 +386,25 @@ fn openai_compatible_image_content(
 }
 
 fn debug_log(msg: &str) {
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/crabcode_sse_debug.log")
-        .and_then(|mut f| {
-            use std::io::Write;
-            writeln!(f, "{}", msg)
-        });
+    #[cfg(feature = "aisdk-sse-debug")]
+    {
+        use std::env;
+        use std::io::Write;
+        let path = env::var("AISDK_SSE_DEBUG_LOG")
+            .unwrap_or_else(|_| "/tmp/aisdk_sse_debug.log".to_string());
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| writeln!(f, "{}", msg));
+    }
+    #[cfg(not(feature = "aisdk-sse-debug"))]
+    {
+        let _ = msg;
+    }
 }
 
-/// Log OpenAI-compatible / AI Gateway usage to `app.log`.
+/// Log OpenAI-compatible / AI Gateway usage via the host logger.
 /// Looks for `prompt_tokens_details.cached_tokens` and Anthropic-style fields
 /// that some gateways forward.
 fn log_openai_compatible_usage(usage: &serde_json::Value) {
@@ -441,7 +449,7 @@ fn log_openai_compatible_usage(usage: &serde_json::Value) {
         0.0
     };
 
-    crate::emit_log!(
+    crate::log::log(&format!(
         "[prompt-cache] openai-compatible prompt={} completion={} cached_tokens={} cache_read={} cache_creation={} hit_pct={:.1}",
         prompt.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
         completion
@@ -451,7 +459,7 @@ fn log_openai_compatible_usage(usage: &serde_json::Value) {
         cache_read,
         cache_creation,
         hit_pct
-    );
+    ));
 }
 
 fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
@@ -487,7 +495,7 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     }
 
     // Final usage often arrives on a choices-empty (or choices-missing) chunk.
-    // Log cache-related fields so Gateway Anthropic hits are verifiable in app.log.
+    // Log cache-related fields so gateway Anthropic hits are verifiable.
     if let Some(usage) = value.get("usage") {
         log_openai_compatible_usage(usage);
     }
@@ -657,9 +665,9 @@ mod tests {
     #[test]
     fn kimi_tool_call_message_includes_empty_reasoning_content_fallback() {
         let provider = OpenAICompatible::builder()
-            .base_url("https://opencode.ai/zen/go/v1")
+            .base_url("https://api.example.com/v1")
             .model_name("kimi-k2.6")
-            .provider_name("OpenCode Go")
+            .provider_name("Example")
             .build()
             .unwrap();
         let message = Message::tool_call("call_1", "read", r#"{"file_path":"src/lib.rs"}"#);

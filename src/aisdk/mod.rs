@@ -1,5 +1,12 @@
+// AI SDK — multi-provider streaming LLM client (vendored; extractable).
+//
+// Paths under `core` use `super::` so this tree is valid as a crate root.
+// Host binary re-exports `chunk`/`error`/… at crate root for internal
+// `crate::chunk` paths used throughout providers/response.
+
 pub mod chunk;
 pub mod error;
+pub mod log;
 pub mod message;
 pub mod provider;
 pub mod providers;
@@ -9,26 +16,26 @@ pub mod stop;
 pub mod tool;
 
 pub mod core {
-    pub use crate::aisdk::message::Message;
-    pub use crate::aisdk::tool::Tool;
+    pub use super::message::Message;
+    pub use super::tool::Tool;
 
     pub mod tools {
-        pub use crate::aisdk::tool::{ToolExecute, ToolOutput};
+        pub use super::super::tool::{ToolExecute, ToolOutput};
     }
 
     pub mod chunk {
-        pub use crate::aisdk::chunk::{ChunkType, MessagePhase};
+        pub use super::super::chunk::{ChunkType, MessagePhase};
     }
 
     pub mod response {
-        pub use crate::aisdk::response::{
+        pub use super::super::response::{
             stream_with_tools, LanguageModelStream, StreamTextResponse,
         };
     }
 
     pub mod stop {
-        pub use crate::aisdk::stop::StopReason;
+        pub use super::super::stop::StopReason;
     }
 }
 
-pub use crate::aisdk::providers::{Anthropic, OpenAI, OpenAICompatible};
+pub use providers::{Anthropic, OpenAI, OpenAICompatible};
