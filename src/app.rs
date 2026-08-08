@@ -3064,7 +3064,10 @@ impl App {
     }
 
     fn current_chat_area(&self) -> Rect {
-        self.chat_area_for_size(self.last_frame_size)
+        // Prefer the last-rendered chat content rect (excludes compact chrome).
+        self.chat_state
+            .last_chat_area
+            .unwrap_or_else(|| self.chat_area_for_size(self.last_frame_size))
     }
 
     /// Forward chat mouse events while a permission/question dialog is open.
@@ -4914,6 +4917,24 @@ impl App {
             if self.base_focus == BaseFocus::Chat {
                 let chat_area = self.current_chat_area();
 
+                // Compact-mode sticky user message: click to scroll to that message.
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    && mouse.modifiers.is_empty()
+                {
+                    if let Some((sticky_rect, msg_idx)) = self.chat_state.sticky_click_target {
+                        if sticky_rect.contains(Position::new(mouse.column, mouse.row)) {
+                            self.chat_state.chat.scroll_to_message_index(msg_idx);
+                            // Clear sticky state so the scrolled-to message re-enters
+                            // the viewport cleanly without residual sticky chrome.
+                            self.chat_state.sticky_message_index = None;
+                            self.chat_state.chat.faded_message_index = None;
+                            self.chat_state.sticky_click_target = None;
+                            self.pending_chat_message_click = None;
+                            return;
+                        }
+                    }
+                }
+
                 match mouse.kind {
                     MouseEventKind::Moved
                         if !self.chat_state.chat.has_selection()
@@ -6166,6 +6187,19 @@ impl App {
                     }
                     return;
                 }
+                if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
+                    self.chat_state.compact_mode = !self.chat_state.compact_mode;
+                    push_toast(Toast::new(
+                        if self.chat_state.compact_mode {
+                            "Compact mode enabled"
+                        } else {
+                            "Compact mode disabled"
+                        },
+                        ToastLevel::Info,
+                        Some(std::time::Duration::from_secs(2)),
+                    ));
+                    return;
+                }
                 if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat
                 {
                     self.handle_fork_command(&parsed.args);
@@ -6393,6 +6427,19 @@ impl App {
             } else {
                 self.compact_current_session().await;
             }
+            return;
+        }
+        if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
+            self.chat_state.compact_mode = !self.chat_state.compact_mode;
+            push_toast(Toast::new(
+                if self.chat_state.compact_mode {
+                    "Compact mode enabled"
+                } else {
+                    "Compact mode disabled"
+                },
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
             return;
         }
         if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat {
@@ -10616,6 +10663,9 @@ impl App {
                     &queued_messages,
                     &mut self.find_bar,
                     self.overlay_focus == OverlayFocus::None,
+                    self.session_manager
+                        .get_current_session()
+                        .map(|s| s.title.as_str()),
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)

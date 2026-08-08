@@ -9,12 +9,14 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::session::types::MessageRole;
 use crate::theme::ThemeColors;
 use crate::ui::components::chat::Chat;
 use crate::ui::components::find::FindBar;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
 use crate::ui::components::wave_spinner::WaveSpinner;
+use crate::ui::selection::non_selectable_style;
 
 pub const SUBAGENT_FOOTER_HEIGHT: u16 = 3;
 const QUEUED_MESSAGES_MAX_VISIBLE: usize = 3;
@@ -72,6 +74,14 @@ pub fn render_subagent_spinner_only(
 pub struct ChatState {
     pub chat: Chat,
     pub wave_spinner: WaveSpinner,
+    pub compact_mode: bool,
+    /// Index of the most recent user message that has scrolled past the top
+    /// of the viewport, shown as a sticky message in compact mode.
+    pub sticky_message_index: Option<usize>,
+    /// Last-rendered chat content rect (excludes compact chrome). Used for mouse hit-testing.
+    pub last_chat_area: Option<Rect>,
+    /// Clickable sticky user-message bar from the last render: (rect, message_index).
+    pub sticky_click_target: Option<(Rect, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +107,10 @@ impl ChatState {
         Self {
             chat,
             wave_spinner: WaveSpinner::with_speed(agent_color, 40),
+            compact_mode: true,
+            sticky_message_index: None,
+            last_chat_area: None,
+            sticky_click_target: None,
         }
     }
 }
@@ -141,6 +155,7 @@ pub fn render_chat(
     queued_messages: &[String],
     find_bar: &mut FindBar,
     show_terminal_cursor: bool,
+    session_title: Option<&str>,
 ) {
     let size = f.area();
     let is_subagent_view = subagent_tabs
@@ -179,9 +194,283 @@ pub fn render_chat(
         )
         .split(main_chunks[0]);
 
-    chat_state
-        .chat
-        .render(f, above_status_chunks[1], &agent, &model, colors);
+    // Compact mode: sticky header (session title) + sticky scrolled-past user message.
+    //
+    // Sticky rules (scroll_offset = S, user message start/end = si / ei):
+    //
+    // A message is only eligible to be sticky once it is FULLY above the
+    // viewport (ei <= S). While any part of it is still in the viewport, the
+    // real message is shown — never sticky + faded at the same time.
+    //
+    // Scroll DOWN:
+    //   - Sticky Ui appears only when ei <= S (fully scrolled off).
+    //   - Sticky disappears when the next user message is within GAP rows of
+    //     the viewport top: S >= s{i+1} - GAP. Only the real next message is
+    //     shown (not sticky yet).
+    //   - U{i+1} becomes sticky only once it too is fully above the viewport.
+    //
+    // Scroll UP:
+    //   - Sticky Ui remains while ei <= S.
+    //   - Once S drops so Ui is no longer fully above, sticky disappears.
+    //   - Previous message is NOT shown immediately; wait until there is
+    //     UP_HYSTERESIS + GAP rows of space above Ui's start, then show it.
+    let chat_area = if chat_state.compact_mode {
+        const GAP: usize = 1;
+        const UP_HYSTERESIS: usize = 5;
+
+        let scroll_offset = chat_state.chat.scroll_offset;
+        let positions = &chat_state.chat.message_line_positions;
+        let content_height = chat_state.chat.content_height;
+
+        let msg_end_line = |idx: usize| -> usize {
+            (idx + 1..positions.len())
+                .find_map(|i| positions.get(i).copied())
+                .unwrap_or(content_height)
+        };
+
+        // (message_index, start_line) for every non-compaction user message.
+        let user_messages: Vec<(usize, usize)> = chat_state
+            .chat
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                m.role == MessageRole::User
+                    && !crate::session::compaction::is_compaction_display_item(m)
+            })
+            .filter_map(|(i, _)| positions.get(i).map(|&start| (i, start)))
+            .collect();
+
+        // Natural sticky (scroll-down rules): last user message FULLY above the
+        // viewport, unless we're within GAP of the next user message's top.
+        let natural_sticky = {
+            let prev = user_messages
+                .iter()
+                .rev()
+                .find(|(idx, _)| msg_end_line(*idx) <= scroll_offset)
+                .copied();
+            match prev {
+                Some((idx, _)) => {
+                    let next_start = user_messages
+                        .iter()
+                        .find(|(i, _)| *i > idx)
+                        .map(|(_, start)| *start);
+                    match next_start {
+                        // Next message is about to / has entered the top — no sticky.
+                        // Real viewport message must remain visible.
+                        Some(ns) if scroll_offset >= ns.saturating_sub(GAP) => None,
+                        _ => Some(idx),
+                    }
+                }
+                None => None,
+            }
+        };
+
+        // Apply scroll-up hysteresis using the remembered sticky index.
+        // sticky_message_index is a memory of the last sticky even when hidden.
+        let display_sticky = match (chat_state.sticky_message_index, natural_sticky) {
+            // No memory yet — follow natural.
+            (None, nat) => nat,
+
+            // Natural is None — dead zone or message still partially in viewport.
+            // Never re-show memory once natural has cleared.
+            (Some(_memory), None) => None,
+
+            // Natural caught up to or passed memory (scroll down / same) — follow natural.
+            (Some(memory), Some(nat)) if nat >= memory => Some(nat),
+
+            // Natural wants an older message (scroll up) — require clearance above `memory`.
+            (Some(memory), Some(nat)) => {
+                let memory_start = positions.get(memory).copied().unwrap_or(0);
+                if scroll_offset + GAP + UP_HYSTERESIS <= memory_start {
+                    // Enough space above the remembered message → show older sticky.
+                    Some(nat)
+                } else if msg_end_line(memory) <= scroll_offset {
+                    // Memory is still fully above viewport → keep it sticky.
+                    Some(memory)
+                } else {
+                    // Memory has re-entered the viewport — no sticky.
+                    None
+                }
+            }
+        };
+
+        // Update memory: remember last displayed sticky; clear only when scrolled
+        // above the first user message (nothing left to be sticky about).
+        if let Some(idx) = display_sticky {
+            chat_state.sticky_message_index = Some(idx);
+        } else {
+            let first_start = user_messages.first().map(|(_, s)| *s).unwrap_or(0);
+            if scroll_offset <= first_start {
+                chat_state.sticky_message_index = None;
+            }
+            // else keep memory for hysteresis while in dead/transition zones
+        }
+
+        // Only fade a message that is fully above the viewport. If it's still
+        // partially visible we never set display_sticky, so this stays None and
+        // sticky/viewport never intersect.
+        chat_state.chat.faded_message_index = display_sticky;
+
+        let sticky_height: u16 = if let Some(idx) = display_sticky {
+            let msg_start = positions.get(idx).copied().unwrap_or(0);
+            let msg_end = msg_end_line(idx);
+            // User messages are rendered as: top pad + content + bottom pad + trailing blank.
+            // The trailing blank is inter-message spacing, not part of the sticky body.
+            let msg_body_lines = msg_end.saturating_sub(msg_start).saturating_sub(1);
+            // 1-line body → 3 rows (pad + content + pad); clamp to 5.
+            msg_body_lines.min(5).max(3) as u16
+        } else {
+            0
+        };
+
+        let sticky_idx = display_sticky;
+
+        let compact_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),             // header (no bg)
+                Constraint::Length(sticky_height), // sticky (0 if invisible)
+                Constraint::Min(0),                // chat content
+            ])
+            .split(above_status_chunks[1]);
+
+        // Render compact header with session title. No background fill; the
+        // title sits on the middle row in accent + bold. Top/bottom rows are
+        // truly empty (no bg).
+        if let Some(title) = session_title {
+            let header_inner = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(
+                    [
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                    ]
+                    .as_ref(),
+                )
+                .split(compact_chunks[0]);
+            // Title line (accent + bold, no background)
+            f.render_widget(
+                Paragraph::new(title).style(
+                    Style::default()
+                        .fg(colors.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                header_inner[1],
+            );
+        }
+
+        // Render sticky message (only if sticky_height > 0 AND sticky_idx is Some)
+        if sticky_height > 0 {
+            if let Some(idx) = sticky_idx {
+                let sticky_rect = compact_chunks[1];
+                chat_state.sticky_click_target = Some((sticky_rect, idx));
+
+                let max_width = sticky_rect.width as usize;
+                let sticky_msg = chat_state.chat.messages.get(idx);
+
+                let border_color = crate::theme::agent_mode_color(
+                    sticky_msg.and_then(|m| m.agent_mode.as_deref()),
+                    colors,
+                );
+                let bg = colors.background_element;
+                let border_style = non_selectable_style(Style::default().fg(border_color));
+                let pad_style = non_selectable_style(Style::default().bg(bg));
+                let text_style = Style::default().fg(colors.text).bg(bg);
+                // ▲ affordance: weak text so it reads as a clickable cue, not content.
+                let arrow_style = non_selectable_style(Style::default().fg(colors.text_weak).bg(bg));
+
+                let horizontal_padding = 2usize;
+                let right_padding = 2usize;
+                let content_width = max_width
+                    .saturating_sub(1 + horizontal_padding + right_padding)
+                    .max(1);
+
+                let padding_line = || {
+                    let mut line = Line::from(vec![
+                        Span::styled("▌", border_style),
+                        Span::styled(" ".repeat(max_width.saturating_sub(1)), pad_style),
+                    ]);
+                    line.style = Style::default().bg(bg);
+                    line
+                };
+
+                // Bottom padding with a horizontally-centered ▲ click affordance.
+                let bottom_padding_line = || {
+                    // Layout: "▌" + spaces + "▲" + spaces, total width = max_width.
+                    let body_width = max_width.saturating_sub(1); // after border
+                    let arrow = "▲";
+                    let arrow_w = 1usize;
+                    let left = body_width.saturating_sub(arrow_w) / 2;
+                    let right = body_width.saturating_sub(left + arrow_w);
+                    let mut line = Line::from(vec![
+                        Span::styled("▌", border_style),
+                        Span::styled(" ".repeat(left), pad_style),
+                        Span::styled(arrow, arrow_style),
+                        Span::styled(" ".repeat(right), pad_style),
+                    ]);
+                    line.style = Style::default().bg(bg);
+                    line
+                };
+
+                // Number of content rows = sticky height minus top/bottom padding.
+                let content_rows = sticky_height.saturating_sub(2) as usize;
+                let mut sticky_lines: Vec<Line> = Vec::with_capacity(sticky_height as usize);
+                sticky_lines.push(padding_line());
+
+                // Content rows: split by newlines, take up to `content_rows`, truncate each line.
+                if let Some(message) = sticky_msg {
+                    for content in message.content.split('\n').take(content_rows) {
+                        let clamped = truncate_to_width(content, content_width);
+                        let line_width = UnicodeWidthStr::width(clamped.as_str());
+                        let trailing_padding = " "
+                            .repeat(max_width.saturating_sub(1 + horizontal_padding + line_width));
+                        let mut spans = Vec::with_capacity(4);
+                        spans.push(Span::styled("▌", border_style));
+                        spans.push(Span::styled(" ".repeat(horizontal_padding), pad_style));
+                        spans.push(Span::styled(clamped, text_style));
+                        spans.push(Span::styled(trailing_padding, pad_style));
+                        let mut panel_line = Line::from(spans);
+                        panel_line.style = Style::default().bg(bg);
+                        sticky_lines.push(panel_line);
+                    }
+                    // Fill remaining content rows if the message has fewer lines.
+                    while sticky_lines.len() < content_rows + 1 {
+                        sticky_lines.push(padding_line());
+                    }
+                } else {
+                    for _ in 0..content_rows {
+                        sticky_lines.push(padding_line());
+                    }
+                }
+
+                sticky_lines.push(bottom_padding_line());
+
+                f.render_widget(
+                    Paragraph::new(sticky_lines)
+                        .style(Style::default().bg(colors.background_element)),
+                    sticky_rect,
+                );
+            } else {
+                chat_state.sticky_click_target = None;
+            }
+        } else {
+            chat_state.sticky_click_target = None;
+        }
+
+        chat_state.last_chat_area = Some(compact_chunks[2]);
+        compact_chunks[2]
+    } else {
+        // Leaving compact mode: clear sticky state so re-enabling starts clean.
+        chat_state.sticky_message_index = None;
+        chat_state.chat.faded_message_index = None;
+        chat_state.sticky_click_target = None;
+        chat_state.last_chat_area = Some(above_status_chunks[1]);
+        above_status_chunks[1]
+    };
+
+    chat_state.chat.render(f, chat_area, &agent, &model, colors);
 
     if is_subagent_view {
         if let Some(tabs) = subagent_tabs.as_ref() {
