@@ -20,6 +20,7 @@ include = [
     "/build.rs",
     "/src/**/*.rs",
     "/src/**/*.json",
+    "/src/**/*.jsonc",
     "/README.md",
     "/LICENSE",
     "/crabcode-logo.txt",

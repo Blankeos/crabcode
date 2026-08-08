@@ -113,6 +113,7 @@ I tried crabcode specifically for these providers:
 - [x] **minimax**
 - [x] **fireworks**
 - [x] **baseten**
+- [x] **crof**
 
 > Feel free to create an issue / add to this list if you tried
 

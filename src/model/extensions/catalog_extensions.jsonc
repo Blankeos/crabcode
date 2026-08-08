@@ -1,3 +1,5 @@
+// Model catalog extensions, applied on top of models.dev (parsed as JSONC).
+// Unknown model ids are added; existing ids are deep-merged with these fields winning.
 {
   "xai": {
     "id": "xai",
@@ -28,6 +30,22 @@
           "output": 2.5,
           "cache_read": 0.2
         }
+      }
+    }
+  },
+
+  // crof.ai/pricing marks these as vision models, models.dev doesn't. Checked 2026-08-08. Remove after https://github.com/anomalyco/models.dev/pull/4363/changes is merged
+  "crof": {
+    "models": {
+      "greg-1-mini": {
+        "attachment": true,
+        "modalities": {
+          "input": ["text", "image"]
+        }
+      },
+      "kimi-k2.5-lightning": {
+        // modalities already include "image"; only the attachment flag is wrong.
+        "attachment": true
       }
     }
   }
