@@ -377,7 +377,7 @@ pub fn render_chat(
                 let bg = colors.background_element;
                 let border_style = non_selectable_style(Style::default().fg(border_color));
                 let pad_style = non_selectable_style(Style::default().bg(bg));
-                // ▲ affordance: weak text so it reads as a clickable cue, not content.
+                // ▴ affordance: weak text so it reads as a clickable cue, not content.
                 let arrow_style =
                     non_selectable_style(Style::default().fg(colors.text_weak).bg(bg));
 
@@ -392,11 +392,11 @@ pub fn render_chat(
                     line
                 };
 
-                // Bottom padding with a horizontally-centered ▲ click affordance.
+                // Bottom padding with a horizontally-centered ▴ click affordance.
                 let bottom_padding_line = || {
-                    // Layout: "▌" + spaces + "▲" + spaces, total width = max_width.
+                    // Layout: "▌" + spaces + "▴" + spaces, total width = max_width.
                     let body_width = max_width.saturating_sub(1); // after border
-                    let arrow = "▲";
+                    let arrow = "▴";
                     let arrow_w = 1usize;
                     let left = body_width.saturating_sub(arrow_w) / 2;
                     let right = body_width.saturating_sub(left + arrow_w);
