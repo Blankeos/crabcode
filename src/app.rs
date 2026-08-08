@@ -5849,11 +5849,18 @@ impl App {
             return;
         };
 
-        // Queue like a message when busy (OpenCode/Grok-style).
-        if self.session_has_active_stream(&session_id)
-            || self.session_has_active_compaction(&session_id)
-            || self.is_streaming
-        {
+        // Never stack another /compact while one is already in flight.
+        if self.session_has_active_compaction(&session_id) || self.compaction_receiver.is_some() {
+            push_toast(Toast::new(
+                "Already compacting...",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
+            return;
+        }
+
+        // Queue like a message when the session is streaming a normal reply.
+        if self.session_has_active_stream(&session_id) || self.is_streaming {
             if self.queue_compact_for_current_session() {
                 push_toast(Toast::new(
                     "Queued /compact",
@@ -12566,6 +12573,30 @@ mod tests {
             app.queued_message_previews_for_current_session(),
             vec!["/compact".to_string()]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_while_already_compacting_is_rejected() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Already compacting".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.compaction_receiver = Some(receiver);
+        app.compaction_pending = Some(CompactionPending {
+            session_id: session_id.clone(),
+            before_tokens: 1_000,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+        });
+        app.is_streaming = true;
+
+        app.compact_current_session().await;
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert!(
+            state.queued_items.is_empty(),
+            "should not queue another /compact while compacting"
+        );
+        assert!(app.compaction_receiver.is_some());
     }
 
     #[test]
