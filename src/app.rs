@@ -3070,7 +3070,7 @@ impl App {
             .unwrap_or_else(|| self.chat_area_for_size(self.last_frame_size))
     }
 
-    /// Forward chat mouse events while a permission/question dialog is open.
+/// Forward chat mouse events while a permission/question dialog is open.
     /// Clicks on dialog controls are handled by the dialog; everything else
     /// (scroll + text selection) reaches the chat behind it.
     fn forward_chat_mouse_through_dialog(&mut self, mouse: MouseEvent) {
@@ -3114,13 +3114,35 @@ impl App {
         }
     }
 
+    /// Region where a mouse wheel scrolls the chat. In compact mode this
+    /// extends above the chat content to include the 3-row header and any
+    /// sticky bar, so scrolling works even when the pointer is over that chrome.
+    fn chat_scroll_region(&self) -> Rect {
+        let chat_area = self.current_chat_area();
+        if !self.chat_state.compact_mode {
+            return chat_area;
+        }
+        let sticky_top = self
+            .chat_state
+            .sticky_click_target
+            .map(|(r, _)| r.y)
+            .unwrap_or(chat_area.y);
+        let top = sticky_top.saturating_sub(3); // header rows
+        Rect {
+            x: chat_area.x,
+            y: top,
+            width: chat_area.width,
+            height: chat_area.bottom().saturating_sub(top),
+        }
+    }
+
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
         if matches!(
             self.overlay_focus,
             OverlayFocus::None | OverlayFocus::FindBar
         ) && self.base_focus == BaseFocus::Chat
         {
-            let chat_area = self.current_chat_area();
+            let chat_area = self.chat_scroll_region();
             if chat_area.contains(Position::new(mouse.column, mouse.row))
                 && self
                     .chat_state
