@@ -27,10 +27,8 @@ pub fn discover_themes(
     let mut layers: Vec<Vec<PathBuf>> = Vec::new();
 
     let mut built_in = Vec::new();
-    if PathBuf::from("src/theme.json").is_file() {
-        built_in.push(PathBuf::from("src/theme.json"));
-    }
     built_in.extend(list_json_files(Path::new("src/generated_themes")));
+    built_in.extend(list_json_files(Path::new("src/themes")));
     layers.push(built_in);
 
     layers.push(list_json_files(

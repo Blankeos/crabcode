@@ -14,7 +14,7 @@ type GitHubFile = {
 type ThemeMode = 'dark' | 'light'
 
 const OPENCODE_REF = process.env.OPENCODE_REF ?? 'production'
-const GITHUB_API_URL = `https://api.github.com/repos/anomalyco/opencode/contents/packages/opencode/src/cli/cmd/tui/context/theme?ref=${encodeURIComponent(
+const GITHUB_API_URL = `https://api.github.com/repos/anomalyco/opencode/contents/packages/tui/src/theme/assets?ref=${encodeURIComponent(
   OPENCODE_REF,
 )}`
 const THEMES_DIR = join(process.cwd(), 'src', 'generated_themes')

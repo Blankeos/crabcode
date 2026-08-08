@@ -467,3 +467,6 @@ I think this is how the TUI works already anyway right?
 
 - [ ] More accurate token spend? It doesn't really think about how many loops, it's just an estimate. Is opencode more accurate?
 - [ ] compacting context but when done, it doesnt show the 'Context compacted (56.1K -> 19.2K, saved 66%)' message part in the UI scrollable part.. Only see it after I close and open.
+
+- [x] Light mode themes + grok build theme (people like the monochrome aesthetic)
+- [ ] Add the background now, no more transparent background - but 'transparency' is activateable
