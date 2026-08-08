@@ -5171,9 +5171,9 @@ impl Chat {
 
     /// Format a user message's content into wrapped, styled lines, mirroring
     /// `format_message`'s user branch exactly (image-placeholder colors,
-    /// wrap width, horizontal padding). Returns content lines only — no
-    /// border/padding rows. Used by the compact-mode sticky message so it
-    /// renders like a real user message.
+    /// `@agent` mention colors, wrap width, horizontal padding). Returns
+    /// content lines only — no border/padding rows. Used by the compact-mode
+    /// sticky message so it renders like a real user message.
     pub fn format_user_message_content_lines(
         &self,
         idx: usize,
@@ -5212,8 +5212,10 @@ impl Chat {
             .split('\n')
             .flat_map(|content_line| {
                 let content_line = content_line.strip_suffix('\r').unwrap_or(content_line);
-                let styled_content = Line::from(spans_with_image_placeholders(
+                let styled_content = Line::from(style_agent_mentions_in_line(
                     content_line,
+                    &self.agent_mention_names,
+                    colors,
                     text_style,
                     &image_style,
                 ));
