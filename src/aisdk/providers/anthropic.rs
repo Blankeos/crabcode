@@ -269,12 +269,24 @@ fn log_anthropic_usage(usage: &serde_json::Value) {
         return;
     }
 
+    let input_v = input.unwrap_or(0);
+    let total_input = input_v
+        .saturating_add(cache_read)
+        .saturating_add(cache_creation);
+    let hit_pct = if total_input > 0 {
+        (cache_read as f64 * 100.0) / total_input as f64
+    } else {
+        0.0
+    };
+
     crate::emit_log!(
-        "[prompt-cache] anthropic input={} output={} cache_read={} cache_creation={}",
+        "[prompt-cache] anthropic input={} output={} cache_read={} cache_creation={} total_input={} hit_pct={:.1}",
         input.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
         output.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
         cache_read,
-        cache_creation
+        cache_creation,
+        total_input,
+        hit_pct
     );
 }
 
@@ -407,9 +419,13 @@ fn anthropic_tool_input_is_empty(value: &serde_json::Value) -> bool {
     }
 }
 
-/// Anthropic prompt caching (opencode `auto` parity):
-/// mark last tool + last system block + latest user content block.
-/// Cap at 4 breakpoints; each is `{"type":"ephemeral"}`.
+/// Anthropic prompt caching (Grok Build / OpenCode hybrid):
+/// 1. last tool (stable schemas — high value in tool loops)
+/// 2. last system block
+/// 3. tip of transcript (last markable block; skips thinking)
+/// 4. previous user tip (covers turns past the 20-block lookback)
+/// Cap at 4 breakpoints; each is `{"type":"ephemeral"}`. The 4th slot stays
+/// free when tools or previous-user are missing so gateways can still auto-mark.
 fn apply_anthropic_prompt_caching(body: &mut serde_json::Value) {
     let mut remaining = 4usize;
 
@@ -439,27 +455,48 @@ fn apply_anthropic_prompt_caching(body: &mut serde_json::Value) {
         }
     }
 
-    // 3. Latest user message's last content block (after anthropic_messages
-    // regrouping so tool_result groups keep the marker).
+    // 3–4. Transcript tip + previous user tip (skip thinking blocks).
+    if remaining == 0 {
+        return;
+    }
+    let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+
+    let tip = (0..messages.len())
+        .rev()
+        .find(|&i| mark_message_cache_breakpoint(&mut messages[i]));
+    if tip.is_some() {
+        remaining = remaining.saturating_sub(1);
+    }
+
+    // Where the previous request ended: skip the whole trailing user run after
+    // the last assistant, then mark that earlier user tip (Grok Build placement).
     if remaining > 0 {
-        if let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) {
-            if let Some(user) = messages
-                .iter_mut()
-                .rev()
-                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        if let Some(tip) = tip {
+            if let Some(prev) = messages[..tip]
+                .iter()
+                .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+                .and_then(|assistant| {
+                    messages[..assistant]
+                        .iter()
+                        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                })
             {
-                mark_latest_user_cache_control(user);
+                let _ = mark_message_cache_breakpoint(&mut messages[prev]);
             }
         }
     }
 }
 
-fn mark_latest_user_cache_control(user: &mut serde_json::Value) {
-    let Some(obj) = user.as_object_mut() else {
-        return;
+/// Marks the last content block that can carry a breakpoint, scanning back past
+/// `thinking` / `redacted_thinking` which the API rejects.
+fn mark_message_cache_breakpoint(message: &mut serde_json::Value) -> bool {
+    let Some(obj) = message.as_object_mut() else {
+        return false;
     };
 
-    // String content must become a text block to host cache_control.
+    // Plain string content must become a text block to host cache_control.
     if let Some(serde_json::Value::String(text)) = obj.get("content").cloned() {
         obj.insert(
             "content".to_string(),
@@ -469,17 +506,28 @@ fn mark_latest_user_cache_control(user: &mut serde_json::Value) {
                 "cache_control": { "type": "ephemeral" }
             }]),
         );
-        return;
+        return true;
     }
 
-    if let Some(blocks) = obj.get_mut("content").and_then(|c| c.as_array_mut()) {
-        if let Some(last) = blocks.last_mut().and_then(|b| b.as_object_mut()) {
-            last.insert(
-                "cache_control".to_string(),
-                serde_json::json!({ "type": "ephemeral" }),
-            );
+    let Some(blocks) = obj.get_mut("content").and_then(|c| c.as_array_mut()) else {
+        return false;
+    };
+
+    for block in blocks.iter_mut().rev() {
+        let Some(block_obj) = block.as_object_mut() else {
+            continue;
+        };
+        let block_type = block_obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if block_type == "thinking" || block_type == "redacted_thinking" {
+            continue;
         }
+        block_obj.insert(
+            "cache_control".to_string(),
+            serde_json::json!({ "type": "ephemeral" }),
+        );
+        return true;
     }
+    false
 }
 
 fn anthropic_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
@@ -738,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_caching_marks_last_tool_system_and_latest_user() {
+    fn prompt_caching_marks_last_tool_system_tip_and_previous_user() {
         let mut body = serde_json::json!({
             "system": [
                 { "type": "text", "text": "sys a" },
@@ -767,17 +815,15 @@ mod tests {
             body["system"][1]["cache_control"],
             serde_json::json!({ "type": "ephemeral" })
         );
-        // string user content is wrapped so cache_control can attach
+        // tip (latest user) wrapped with cache_control
         assert_eq!(
             body["messages"][2]["content"][0]["cache_control"],
             serde_json::json!({ "type": "ephemeral" })
         );
-        assert!(
-            body["messages"][0]["content"]
-                .as_str()
-                .map(|s| s == "first")
-                .unwrap_or(false)
-                || body["messages"][0].get("cache_control").is_none()
+        // previous user tip also marked (Grok Build placement)
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
         );
     }
 
@@ -802,6 +848,29 @@ mod tests {
             body["messages"][0]["content"][1]["cache_control"],
             serde_json::json!({ "type": "ephemeral" })
         );
+    }
+
+    #[test]
+    fn prompt_caching_skips_thinking_blocks_when_marking_tip() {
+        let mut body = serde_json::json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "answer" },
+                    { "type": "thinking", "thinking": "secret" },
+                ]
+            }],
+        });
+
+        apply_anthropic_prompt_caching(&mut body);
+
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert!(body["messages"][0]["content"][1]
+            .get("cache_control")
+            .is_none());
     }
 }
 
