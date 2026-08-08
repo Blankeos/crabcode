@@ -179,6 +179,9 @@ export type SidebarController = {
   activeProjectPath: Accessor<string>
   token: Accessor<string>
   currentSessionId: Accessor<string | null | undefined>
+  /** When set, sidebar scrolls this session into view once (e.g. cmd palette). */
+  scrollToSessionId: Accessor<string | null>
+  onScrollToSessionHandled: () => void
   onToggleProject: (key: string) => void
   onToggleAllProjects: () => void
   onNewSession: (workspacePath?: string) => MaybePromise
@@ -272,6 +275,8 @@ export type ThreadController = {
   setContentRef: RefSetter<HTMLDivElement>
   isAtTop: Accessor<boolean>
   isAtBottom: Accessor<boolean>
+  /** Suppress stick-to-bottom while a rail/programmatic jump owns scroll. */
+  setNavigationLock?: (locked: boolean) => void
   isEmptyChat: Accessor<boolean>
   /** App chrome is up but remote state has not arrived yet. */
   shellLoading: Accessor<boolean>

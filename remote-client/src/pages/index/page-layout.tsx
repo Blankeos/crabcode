@@ -7,6 +7,11 @@ import {
   CommandItem,
   CommandList,
 } from "cmdk-solid"
+import {
+  MessageMarkerRail,
+  isRailMessage,
+  messageDomIdsFromThreadItems,
+} from "./message-marker-rail"
 import { useIsMobileViewport } from "./mobile-utils"
 import { IconBrainGlyph, IconClockCounterClockwise, IconF7ChevronDownSquare, IconGitDiff } from "../../assets/icons"
 import { FadedEdgeEffect } from "../../components/remote/faded-edge-effect"
@@ -25,7 +30,7 @@ import { QuestionRequestPanel, PermissionRequestPanel } from "./request-panels"
 import { SubagentSessionFooter } from "./subagent-footer"
 import { ImagePreviewDialog, ThreadItemView } from "./thread-view"
 import { ThreadTabsBar } from "./thread-tabs"
-import { GitDiffFile } from "./git-diff-viewer"
+import { GitDiffBatch, GitDiffFile } from "./git-diff-viewer"
 import { isActiveServer } from "./server-utils"
 import { relativeTime } from "./shared-utils"
 
@@ -245,6 +250,8 @@ function RemoteSidebar(props: { sidebar: SidebarController }) {
           activeProjectPath={sidebar.activeProjectPath}
           token={sidebar.token}
           currentSessionId={sidebar.currentSessionId}
+          scrollToSessionId={sidebar.scrollToSessionId}
+          onScrollToSessionHandled={sidebar.onScrollToSessionHandled}
           onToggleProject={sidebar.onToggleProject}
           onNewSession={sidebar.onNewSession}
           onSwitchSession={sidebar.onSwitchSession}
@@ -480,11 +487,7 @@ function GitStatusView(props: {
                 </div>
               }
             >
-              <div class="grid min-w-0 gap-2">
-                <For each={status().diff_files}>
-                  {(file) => <GitDiffFile file={file} compact wrap={props.wrapLines()} />}
-                </For>
-              </div>
+              <GitDiffBatch files={status().diff_files} compact wrap={props.wrapLines()} />
             </Show>
           </Show>
         </section>
@@ -910,13 +913,27 @@ function ServerPopover(props: { servers: ServerPanelController }) {
 
 function ThreadViewport(props: { thread: ThreadController }) {
   const thread = props.thread
+  const [scrollEl, setScrollEl] = createSignal<HTMLDivElement | null>(null)
+  // Ids from threadItems so they match rendered message objects (assistant
+  // turns with tools are split into new objects and break WeakMap-by-visibleMessages).
+  const messageDomIds = createMemo(() => messageDomIdsFromThreadItems(thread.threadItems()))
+
+  const showMarkerRail = createMemo(
+    () => !thread.isEmptyChat() && !thread.shellLoading() && !thread.isSubagentView()
+  )
 
   return (
     <div class="relative min-h-0 flex-1">
       <div
-        ref={thread.setScrollRef}
+        ref={(el) => {
+          setScrollEl(el)
+          thread.setScrollRef(el)
+        }}
         class={cx(
-          "remote-thread-scroll h-full min-h-0 overflow-y-auto overflow-x-hidden px-4 pt-5 overscroll-contain",
+          // Equal left/right gutter so the rail lane doesn't shift content off-center.
+          "remote-thread-scroll h-full min-h-0 overflow-y-auto overflow-x-hidden pt-5 overscroll-contain",
+          "px-4",
+          showMarkerRail() && "md:px-10",
           thread.isEmptyChat()
             ? "overflow-hidden pb-[clamp(8rem,22vh,12rem)] max-[900px]:pb-4"
             : thread.isSubagentView()
@@ -950,6 +967,11 @@ function ThreadViewport(props: { thread: ThreadController }) {
                     status={thread.status}
                     streaming={thread.streaming}
                     token={thread.token}
+                    messageDomId={() => {
+                      const current = item()
+                      if (current.type !== "message" || !isRailMessage(current.message)) return undefined
+                      return messageDomIds().get(current.message)
+                    }}
                     onPreviewImage={thread.onPreviewImage}
                     onOpenSubagentSession={thread.tabs.onOpenSubagentSession}
                   />
@@ -959,6 +981,14 @@ function ThreadViewport(props: { thread: ThreadController }) {
           </Show>
         </div>
       </div>
+      <MessageMarkerRail
+        threadItems={thread.threadItems}
+        scrollEl={scrollEl}
+        hidden={() => !showMarkerRail()}
+        // Match composer-dock footprint so the stack centers above the input.
+        bottomInset={() => "13rem"}
+        setNavigationLock={thread.setNavigationLock}
+      />
       <FadedEdgeEffect direction="top" hidden={thread.isAtTop()} size="3rem" color="#171717" />
       <FadedEdgeEffect direction="bottom" hidden={thread.isAtBottom()} size="7rem" color="#171717" />
     </div>

@@ -66,6 +66,7 @@ export default function RemoteClient() {
   const [permissionBusy, setPermissionBusy] = createSignal(false)
   const [questionBusy, setQuestionBusy] = createSignal(false)
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
+  const [sidebarScrollSessionId, setSidebarScrollSessionId] = createSignal<string | null>(null)
   const [projectOpenKeys, setProjectOpenKeys] = useLocalStorage<string[]>({
     key: OPEN_PROJECTS_KEY,
     defaultValue: [],
@@ -103,6 +104,7 @@ export default function RemoteClient() {
   const [gitLoadedPath, setGitLoadedPath] = createSignal("")
   const [gitSelectedPath, setGitSelectedPath] = createSignal<string | null>(null)
   const [gitViewMode, setGitViewMode] = createSignal<"file" | "all">("all")
+  let gitRequestRevision = 0
   const [agentOpen, setAgentOpen] = createSignal(false)
   const [reasoningOpen, setReasoningOpen] = createSignal(false)
   const [modelOpen, setModelOpen] = createSignal(false)
@@ -234,7 +236,9 @@ export default function RemoteClient() {
 
   createEffect(() => {
     projectPath()
+    gitRequestRevision += 1
     setGitOpen(false)
+    setGitLoading(false)
     setGitStatus(null)
     setGitLoadedPath("")
     setGitError("")
@@ -550,13 +554,17 @@ export default function RemoteClient() {
     await selectWorkspace(projectPathInput())
   }
 
-  const switchSession = async (id: string, options?: { focusComposer?: boolean }) => {
+  const switchSession = async (
+    id: string,
+    options?: { focusComposer?: boolean; scrollSidebar?: boolean }
+  ) => {
     closeCommandPalette()
     try {
       const next = await api().switchSession(id)
       applyRemoteState(next)
       const cwd = next.status.cwd?.trim()
       if (cwd) ensureProjectExpanded(cwd)
+      if (options?.scrollSidebar) setSidebarScrollSessionId(id)
       setSidebarOpen(false)
       if (options?.focusComposer !== false && !next.thread_tabs?.is_child_session) {
         promptRef?.focus()
@@ -1329,18 +1337,21 @@ export default function RemoteClient() {
     if (!gitSummary()?.is_repo || !cwd || gitLoading()) return
     if (!force && gitStatus() && gitLoadedPath() === cwd) return
 
+    const requestRevision = ++gitRequestRevision
     setGitLoading(true)
     setGitError("")
     try {
       const next = await api().gitStatus()
-      if (projectPath() !== cwd) return
+      if (requestRevision !== gitRequestRevision || projectPath() !== cwd) return
       setGitStatus(next)
       setGitLoadedPath(cwd)
     } catch (error) {
-      if (projectPath() !== cwd) return
+      if (requestRevision !== gitRequestRevision || projectPath() !== cwd) return
       setGitError(errorToastMessage(error, "Could not load git changes."))
     } finally {
-      setGitLoading(false)
+      if (requestRevision === gitRequestRevision && projectPath() === cwd) {
+        setGitLoading(false)
+      }
     }
   }
 
@@ -1614,6 +1625,8 @@ export default function RemoteClient() {
       activeProjectPath: projectPath,
       token,
       currentSessionId: () => state()?.current_session_id,
+      scrollToSessionId: sidebarScrollSessionId,
+      onScrollToSessionHandled: () => setSidebarScrollSessionId(null),
       onToggleProject: toggleProject,
       allProjectsExpanded,
       onToggleAllProjects: toggleAllProjects,
@@ -1659,6 +1672,7 @@ export default function RemoteClient() {
       setContentRef: (element) => setThreadContentEl(element),
       isAtTop: threadScroll.isAtTop,
       isAtBottom: threadScroll.isAtBottom,
+      setNavigationLock: threadScroll.setNavigationLock,
       isEmptyChat,
       shellLoading: () => !pairRequired() && state() === null,
       streaming: () => Boolean(state()?.is_streaming),
@@ -1783,7 +1797,7 @@ export default function RemoteClient() {
       onNewSession: startNewSession,
       projectResults: projectCommandResults,
       sessionResults: commandResults,
-      onSwitchSession: switchSession,
+      onSwitchSession: (id: string) => switchSession(id, { scrollSidebar: true }),
     },
     servers: serversController,
     imagePreview,

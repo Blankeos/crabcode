@@ -98,6 +98,8 @@ export function useStickToBottom(
   const bottomThreshold = 32
   const topThreshold = 8
   let shouldStickToBottom = true
+  /** When true, resize auto-stick is suppressed (e.g. rail jump in flight). */
+  let navigationLock = false
 
   const measure = () => {
     const el = scrollEl()
@@ -105,7 +107,8 @@ export function useStickToBottom(
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight
     const nextIsAtBottom = distance <= bottomThreshold
     setIsAtBottom(nextIsAtBottom)
-    shouldStickToBottom = nextIsAtBottom
+    // Don't re-enable stick-to-bottom while a programmatic nav jump owns scroll.
+    if (!navigationLock) shouldStickToBottom = nextIsAtBottom
     setIsAtTop(el.scrollTop <= topThreshold)
   }
 
@@ -125,6 +128,12 @@ export function useStickToBottom(
 
   const getScrollTop = () => scrollEl()?.scrollTop ?? 0
 
+  const setNavigationLock = (locked: boolean) => {
+    navigationLock = locked
+    if (locked) shouldStickToBottom = false
+    else measure()
+  }
+
   onMount(() => {
     queueMicrotask(() => scrollToBottom(false))
   })
@@ -137,7 +146,7 @@ export function useStickToBottom(
     el.addEventListener("scroll", measure, { passive: true })
 
     const resizeObserver = new ResizeObserver(() => {
-      if (shouldStickToBottom) scrollToBottom(false)
+      if (shouldStickToBottom && !navigationLock) scrollToBottom(false)
       else measure()
     })
     resizeObserver.observe(content ?? el)
@@ -148,7 +157,15 @@ export function useStickToBottom(
     })
   })
 
-  return { isAtTop, isAtBottom, scrollToBottom, scrollTo, getScrollTop, measure }
+  return {
+    isAtTop,
+    isAtBottom,
+    scrollToBottom,
+    scrollTo,
+    getScrollTop,
+    measure,
+    setNavigationLock,
+  }
 }
 
 export function cuid() {

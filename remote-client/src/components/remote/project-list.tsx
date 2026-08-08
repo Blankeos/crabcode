@@ -25,7 +25,9 @@ type ProjectListProps = {
   activeProjectPath: Accessor<string | null | undefined>
   token: Accessor<string>
   currentSessionId: Accessor<string | null | undefined>
-  sidebarOpen?: Accessor<boolean>
+  /** Explicit one-shot scroll request (cmd palette). Sidebar clicks must not set this. */
+  scrollToSessionId?: Accessor<string | null>
+  onScrollToSessionHandled?: () => void
   onToggleProject: (key: string) => void
   onNewSession: (workspacePath?: string) => void
   onSwitchSession: (id: string) => void
@@ -37,40 +39,78 @@ export function ProjectList(props: ProjectListProps) {
   const [scrollEl, setScrollEl] = createSignal<HTMLDivElement>()
   const edges = useScrollEdges(scrollEl)
   const activeProjectKey = createMemo(() => projectKeyForActivePath(props.activeProjectPath(), props.projects()))
-  let lastScrolledPath = ""
   let scrollAttemptTimers: number[] = []
+  let scrollRaf = 0
 
   const clearScrollAttempts = () => {
     for (const timer of scrollAttemptTimers) window.clearTimeout(timer)
     scrollAttemptTimers = []
+    if (scrollRaf) {
+      cancelAnimationFrame(scrollRaf)
+      scrollRaf = 0
+    }
   }
 
-  const scrollActiveProjectIntoView = (path: string, key: string | undefined) => {
-    window.requestAnimationFrame(() => {
-      const root = scrollEl()
-      if (!root) return
-      const row = root.querySelector<HTMLElement>("[data-active-project='true']")
-        ?? (key ? root.querySelector<HTMLElement>(`[data-project-key="${cssEscapeAttr(key)}"]`) : null)
-        ?? root.querySelector<HTMLElement>(`[data-project-path="${cssEscapeAttr(path)}"]`)
-      row?.scrollIntoView({ block: "start", behavior: "smooth" })
-    })
+  const scrollSessionIntoView = (sessionId: string): boolean => {
+    const root = scrollEl()
+    if (!root) return false
+    const row = root.querySelector<HTMLElement>(`[data-session-id="${cssEscapeAttr(sessionId)}"]`)
+    if (!row || row.offsetParent === null || row.clientHeight <= 0) return false
+
+    // Manual position so we center the session row in the sidebar scroller,
+    // not the whole project section (scrollIntoView was imprecise here).
+    const rootRect = root.getBoundingClientRect()
+    const rowRect = row.getBoundingClientRect()
+    const rowTop = rowRect.top - rootRect.top + root.scrollTop
+    const targetTop = Math.max(0, rowTop - Math.max(0, (root.clientHeight - row.clientHeight) / 2))
+    root.scrollTo({ top: targetTop, behavior: "smooth" })
+    window.setTimeout(edges.update, 350)
+    return true
   }
 
   onCleanup(clearScrollAttempts)
 
+  // Scroll only on explicit request (cmd palette). Never on sidebar session clicks.
   createEffect(() => {
-    if (props.sidebarOpen && !props.sidebarOpen()) return
-    const path = props.activeProjectPath()?.trim()
-    const key = activeProjectKey()
-    const projectCount = props.projects().length
-    const target = key ?? path
-    if (!path || !target || projectCount === 0 || target === lastScrolledPath) return
-    lastScrolledPath = target
+    const sessionId = props.scrollToSessionId?.()?.trim()
+    // Track project list / open state so expand completes before we give up.
+    void props.projects().length
+    void props.openProjects().size
+    void props.currentSessionId()
+
     clearScrollAttempts()
+    if (!sessionId) return
+
+    let attempts = 0
+    let done = false
+    const finish = (scrolled: boolean) => {
+      if (done) return
+      if (!scrolled && attempts < 24) return
+      done = true
+      clearScrollAttempts()
+      props.onScrollToSessionHandled?.()
+    }
+    const tryScroll = () => {
+      if (done) return
+      if (scrollSessionIntoView(sessionId)) {
+        finish(true)
+        return
+      }
+      attempts += 1
+      if (attempts >= 24) {
+        finish(false)
+        return
+      }
+      scrollRaf = requestAnimationFrame(tryScroll)
+    }
     queueMicrotask(() => {
-      scrollActiveProjectIntoView(path, key)
-      scrollAttemptTimers = [80, 240].map((delay) =>
-        window.setTimeout(() => scrollActiveProjectIntoView(path, key), delay)
+      tryScroll()
+      // Collapsible expand animation may delay a measurable session row.
+      scrollAttemptTimers = [80, 200, 360].map((delay) =>
+        window.setTimeout(() => {
+          if (done) return
+          if (scrollSessionIntoView(sessionId)) finish(true)
+        }, delay)
       )
     })
   })
@@ -217,6 +257,7 @@ function SessionRow(props: {
             props.active && "bg-white/[0.055] text-[var(--text)]"
           )}
           type="button"
+          data-session-id={props.session.id}
           onClick={props.onClick}
         >
           <span class={cx("h-2 w-2 rounded-full", statusClass(props.session.status))} />
