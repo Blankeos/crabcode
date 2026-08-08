@@ -919,7 +919,11 @@ function ThreadViewport(props: { thread: ThreadController }) {
   const messageDomIds = createMemo(() => messageDomIdsFromThreadItems(thread.threadItems()))
 
   const showMarkerRail = createMemo(
-    () => !thread.isEmptyChat() && !thread.shellLoading() && !thread.isSubagentView()
+    () =>
+      !thread.isEmptyChat() &&
+      !thread.shellLoading() &&
+      !thread.sessionSwitching() &&
+      !thread.isSubagentView()
   )
 
   return (
@@ -945,38 +949,53 @@ function ThreadViewport(props: { thread: ThreadController }) {
           ref={thread.setContentRef}
           class={cx(
             "mx-auto w-[min(100%,64rem)] min-w-0 max-w-full",
-            (thread.isEmptyChat() || thread.shellLoading()) && "grid h-full"
+            (thread.isEmptyChat() || thread.shellLoading() || thread.sessionSwitching()) && "grid h-full"
           )}
         >
-          <Show when={!thread.shellLoading()} fallback={<div class="min-h-0" aria-busy="true" aria-label="Loading" />}>
-            <Show
-              when={thread.visibleMessages().length > 0}
-              fallback={
-                <EmptyThread
-                  projectName={thread.projectName()}
-                  mascotFrame={thread.mascotFrame()}
-                  recentSessions={thread.recentSessions}
-                  onSwitchSession={thread.onSwitchSession}
-                />
-              }
-            >
-              <Index each={thread.threadItems()}>
-                {(item) => (
-                  <ThreadItemView
-                    item={item}
-                    status={thread.status}
-                    streaming={thread.streaming}
-                    token={thread.token}
-                    messageDomId={() => {
-                      const current = item()
-                      if (current.type !== "message" || !isRailMessage(current.message)) return undefined
-                      return messageDomIds().get(current.message)
-                    }}
-                    onPreviewImage={thread.onPreviewImage}
-                    onOpenSubagentSession={thread.tabs.onOpenSubagentSession}
-                  />
-                )}
-              </Index>
+          <Show
+            when={!thread.shellLoading() && !thread.sessionSwitching()}
+            fallback={<div class="min-h-0" aria-busy="true" aria-label="Loading" />}
+          >
+            {/* String key so 0 (initial load) still mounts; remounts on switch to re-run entry animation. */}
+            <Show when={String(thread.chatRevealKey())} keyed>
+              {(_key) => (
+                <div
+                  class={cx(
+                    "w-full min-w-0",
+                    thread.chatRevealKey() > 0 && "animate-flyDownFade"
+                  )}
+                >
+                  <Show
+                    when={thread.visibleMessages().length > 0}
+                    fallback={
+                      <EmptyThread
+                        projectName={thread.projectName()}
+                        mascotFrame={thread.mascotFrame()}
+                        recentSessions={thread.recentSessions}
+                        onSwitchSession={thread.onSwitchSession}
+                      />
+                    }
+                  >
+                    <Index each={thread.threadItems()}>
+                      {(item) => (
+                        <ThreadItemView
+                          item={item}
+                          status={thread.status}
+                          streaming={thread.streaming}
+                          token={thread.token}
+                          messageDomId={() => {
+                            const current = item()
+                            if (current.type !== "message" || !isRailMessage(current.message)) return undefined
+                            return messageDomIds().get(current.message)
+                          }}
+                          onPreviewImage={thread.onPreviewImage}
+                          onOpenSubagentSession={thread.tabs.onOpenSubagentSession}
+                        />
+                      )}
+                    </Index>
+                  </Show>
+                </div>
+              )}
             </Show>
           </Show>
         </div>

@@ -154,6 +154,9 @@ export default function RemoteClient() {
   let commandCloseTimer: number | undefined
   let parentScrollRestore: { rootId: string; top: number } | null = null
   let skipNextThreadScrollToBottom = false
+  let switchRevision = 0
+  const [pendingSwitchId, setPendingSwitchId] = createSignal<string | null>(null)
+  const [chatRevealKey, setChatRevealKey] = createSignal(0)
   const [threadSwitching, setThreadSwitching] = createSignal(false)
 
   const openCommandPalette = () => {
@@ -270,9 +273,13 @@ export default function RemoteClient() {
   })
 
   const applyRemoteState = (next: RemoteState) => {
+    // While a switch is in flight, ignore snapshots for any other session.
+    const pending = pendingSwitchId()
+    if (pending && next.current_session_id !== pending) {
+      return
+    }
     setState(next)
     setOptimisticMessages([])
-
   }
 
   const loadStateSnapshot = async () => {
@@ -479,7 +486,10 @@ export default function RemoteClient() {
     (state()?.sessions ?? []).find((session) => session.id === currentSessionId())
   )
   const threadItems = createMemo(() => buildThreadItems(visibleMessages(), projectPath()))
-  const isEmptyChat = createMemo(() => threadItems().length === 0 && !state()?.is_streaming)
+  const isEmptyChat = createMemo(
+    () => threadItems().length === 0 && !state()?.is_streaming && !pendingSwitchId()
+  )
+  const sessionSwitching = createMemo(() => pendingSwitchId() !== null)
 
   createEffect(() => {
     currentSessionId()
@@ -559,18 +569,65 @@ export default function RemoteClient() {
     options?: { focusComposer?: boolean; scrollSidebar?: boolean }
   ) => {
     closeCommandPalette()
-    try {
-      const next = await api().switchSession(id)
-      applyRemoteState(next)
-      const cwd = next.status.cwd?.trim()
-      if (cwd) ensureProjectExpanded(cwd)
+    if (!id.trim()) return
+
+    const alreadyCurrent =
+      state()?.current_session_id === id && pendingSwitchId() === null
+    if (alreadyCurrent) {
       if (options?.scrollSidebar) setSidebarScrollSessionId(id)
       setSidebarOpen(false)
+      if (options?.focusComposer !== false && !state()?.thread_tabs?.is_child_session) {
+        promptRef?.focus()
+      }
+      return
+    }
+
+    const revision = ++switchRevision
+    setPendingSwitchId(id)
+
+    // Optimistic: highlight target + clear main panel immediately.
+    setState((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        current_session_id: id,
+        messages: [],
+        is_streaming: false,
+        queued_messages: [],
+        pending_permission: null,
+        pending_question: null,
+        thread_tabs: null,
+      }
+    })
+    setOptimisticMessages([])
+    setOptimisticQueuedMessages([])
+
+    if (options?.scrollSidebar) setSidebarScrollSessionId(id)
+    setSidebarOpen(false)
+    if (options?.focusComposer !== false) {
+      promptRef?.focus()
+    }
+
+    try {
+      const next = await api().switchSession(id)
+      if (revision !== switchRevision) return
+      applyRemoteState(next)
+      setPendingSwitchId(null)
+      setChatRevealKey((key) => key + 1)
+      const cwd = next.status.cwd?.trim()
+      if (cwd) ensureProjectExpanded(cwd)
       if (options?.focusComposer !== false && !next.thread_tabs?.is_child_session) {
         promptRef?.focus()
       }
     } catch (error) {
+      if (revision !== switchRevision) return
+      setPendingSwitchId(null)
       showErrorToast(error, "Could not switch chat.")
+      try {
+        await loadStateSnapshot()
+      } catch {
+        // Keep the optimistic empty panel if resync also fails.
+      }
     }
   }
 
@@ -1675,6 +1732,8 @@ export default function RemoteClient() {
       setNavigationLock: threadScroll.setNavigationLock,
       isEmptyChat,
       shellLoading: () => !pairRequired() && state() === null,
+      sessionSwitching,
+      chatRevealKey,
       streaming: () => Boolean(state()?.is_streaming),
       visibleMessages,
       threadItems,

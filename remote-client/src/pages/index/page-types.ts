@@ -280,6 +280,10 @@ export type ThreadController = {
   isEmptyChat: Accessor<boolean>
   /** App chrome is up but remote state has not arrived yet. */
   shellLoading: Accessor<boolean>
+  /** Optimistic session switch in flight — main panel should stay blank. */
+  sessionSwitching: Accessor<boolean>
+  /** Bumps when a switched session finishes loading (entry animation key). */
+  chatRevealKey: Accessor<number>
   streaming: Accessor<boolean>
   visibleMessages: Accessor<RemoteMessage[]>
   threadItems: Accessor<ThreadItem[]>
