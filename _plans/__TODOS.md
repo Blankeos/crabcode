@@ -456,3 +456,10 @@ I think this is how the TUI works already anyway right?
   - Soft compaction (OpenCode-style): keep full transcript in UI/DB, filter model context from latest summary boundary
   - Cancel compact with esc esc (same arm as stream interrupt)
   - Queue `/compact` while streaming/compacting
+
+- [ ] aisdk extract readiness (`src/aisdk/`) — **7/10 → 9/10** after these (10/10 = external users + API freeze). Domain is already SDK-shaped; these are packaging/host hooks, not product coupling. See `src/aisdk/README.md`.
+  - [ ] Replace `crate::emit_log!` in providers with a neutral story (`tracing`, optional log callback, or host-injected hook) — **7 → ~8**
+  - [ ] Drop `crate::aisdk::...` paths in `mod.rs` / re-exports so the tree is valid as a crate root — **~8 → ~8.5**
+  - [ ] Audit absolute `crate::chunk` / `crate::retry` / etc. under extract (tree becomes crate root, not a submodule) — bundled with previous
+  - [ ] Rename product-leaky debug artifacts (e.g. `/tmp/crabcode_sse_debug.log` in compatible provider) or feature-gate them — **~8.5 → ~8.7**
+  - [ ] Strip or move crabcode-flavored comments/tests (subagent / OpenCode / Grok Build history) out of the SDK tree — **~8.7 → ~9**
