@@ -472,3 +472,5 @@ I think this is how the TUI works already anyway right?
   - [ ] Add the background now, no more transparent background - but 'transparency' is activateable
 
 - [ ] Thought time with Thought for 0.2s, and Thinking...
+
+- [x] I wanna be able to type `/compact|` (imagine "|" is my cursor) and press `ctrl-t` or `ctrl-x m`.. Right now doing those kinda make me stay in the focus of the autosuggestions popover, so I think it's an event handling thing, but it's such an often thing that happens that I wanna make a special case for it.

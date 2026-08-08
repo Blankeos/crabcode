@@ -3149,6 +3149,33 @@ impl App {
             return;
         }
 
+        // ctrl-t / ctrl-x must work while slash suggestions are open (e.g. `/compact|`).
+        if key.code == KeyCode::Char('t')
+            && key.modifiers == event::KeyModifiers::CONTROL
+            && matches!(
+                self.overlay_focus,
+                OverlayFocus::None | OverlayFocus::SuggestionsPopup
+            )
+        {
+            self.cycle_active_reasoning_effort();
+            self.record_overlay_close_after_key(overlay_before_key);
+            return;
+        }
+        if key.code == KeyCode::Char('x')
+            && key.modifiers == event::KeyModifiers::CONTROL
+            && matches!(
+                self.overlay_focus,
+                OverlayFocus::None | OverlayFocus::SuggestionsPopup
+            )
+        {
+            self.overlay_focus = OverlayFocus::WhichKey;
+            self.which_key_state
+                .set_chat_active(self.base_focus == BaseFocus::Chat);
+            self.which_key_state.show();
+            self.record_overlay_close_after_key(overlay_before_key);
+            return;
+        }
+
         if self.handle_selection_action_key(key) {
             self.record_overlay_close_after_key(overlay_before_key);
             return;
@@ -3889,17 +3916,9 @@ impl App {
     }
 
     fn handle_base_keys(&mut self, key: KeyEvent) -> bool {
+        // ctrl-t / ctrl-x are handled earlier in handle_keys so they also work
+        // while OverlayFocus::SuggestionsPopup is open.
         match key.code {
-            KeyCode::Char('x') if key.modifiers == event::KeyModifiers::CONTROL => {
-                self.overlay_focus = OverlayFocus::WhichKey;
-                self.which_key_state
-                    .set_chat_active(self.base_focus == BaseFocus::Chat);
-                self.which_key_state.show();
-                true
-            }
-            KeyCode::Char('t') if key.modifiers == event::KeyModifiers::CONTROL => {
-                self.cycle_active_reasoning_effort()
-            }
             KeyCode::Left
                 if key.modifiers == event::KeyModifiers::NONE
                     && self.should_handle_child_session_arrow() =>
