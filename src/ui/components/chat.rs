@@ -3609,23 +3609,27 @@ impl Chat {
         let viewport = self.viewport_height;
 
         // Resolve any deferred scroll-to-message request (e.g. after compaction).
-        if let Some(target_idx) = self.pending_scroll_to_message.take() {
-            if let Some(&line) = positions.get(target_idx) {
-                // Compute the line range for this message block.
-                let block_end = self
-                    .message_block_line_range(target_idx, positions, content_height)
-                    .map(|r| r.1)
-                    .unwrap_or(line);
-                // Try to show the block starting from its first line;
-                // if the block is taller than the viewport, scroll so
-                // the *end* of the block sits near the bottom.
-                let target_line = if block_end.saturating_sub(line) > viewport {
-                    block_end.saturating_sub(viewport / 2)
-                } else {
-                    line
-                };
-                self.scroll_offset = target_line;
-                self.user_scrolled_up = false;
+        // Keep the pending request if positions are not ready yet (viewport=0).
+        if let Some(target_idx) = self.pending_scroll_to_message {
+            if viewport > 0 {
+                if let Some(&line) = positions.get(target_idx) {
+                    let block_end = self
+                        .message_block_line_range(target_idx, positions, content_height)
+                        .map(|r| r.1)
+                        .unwrap_or(line);
+                    // Prefer the start of the block; if taller than the viewport,
+                    // center near the end so the marker line stays visible.
+                    let target_line = if block_end.saturating_sub(line) > viewport {
+                        block_end.saturating_sub(viewport / 2)
+                    } else {
+                        line
+                    };
+                    self.scroll_offset = target_line;
+                    // Stick-to-bottom only runs when user_scrolled_up is false;
+                    // keep this true so the offset is not immediately overwritten.
+                    self.user_scrolled_up = true;
+                    self.pending_scroll_to_message = None;
+                }
             }
         }
 
@@ -6083,7 +6087,7 @@ fn format_compaction_marker<'a>(
         Span::styled(
             "Context compacted",
             Style::default()
-                .fg(colors.text_weak)
+                .fg(colors.info)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(

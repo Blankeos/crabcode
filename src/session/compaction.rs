@@ -68,8 +68,8 @@ pub struct CompactionSelection {
 ///
 /// Soft compaction keeps pre-boundary history for UI/DB and only excludes it from
 /// the model request. Active context starts at the latest compaction summary
-/// associated with the last marker (supports both layouts:
-/// `[summary, …tail…, marker]` and `[…history…, summary, marker, …tail…]`).
+/// associated with the last marker (canonical layout:
+/// `[…history…][summary][…tail…][marker]`).
 pub fn context_start_index(messages: &[Message]) -> usize {
     let Some(marker_idx) = messages.iter().rposition(is_compaction_marker) else {
         return 0;
@@ -230,12 +230,22 @@ pub fn select_messages_for_compaction(
     messages: &[Message],
     preferred_tail_turns: usize,
 ) -> Option<CompactionSelection> {
+    select_messages_for_compaction_with_min(messages, preferred_tail_turns, MIN_COMPACTABLE_TOKENS)
+}
+
+/// Like [`select_messages_for_compaction`], but with an explicit min head size.
+/// Manual `/compact` passes `0` so short chats still compact (OpenCode/Grok).
+pub fn select_messages_for_compaction_with_min(
+    messages: &[Message],
+    preferred_tail_turns: usize,
+    min_compactable_tokens: usize,
+) -> Option<CompactionSelection> {
     for tail_turns in (0..=preferred_tail_turns).rev() {
         let Some(selection) = select_messages_with_budget(
             messages,
             tail_turns,
             DEFAULT_PRESERVE_RECENT_TOKENS,
-            MIN_COMPACTABLE_TOKENS,
+            min_compactable_tokens,
         ) else {
             continue;
         };
@@ -322,7 +332,7 @@ pub fn build_compacted_messages(
 }
 
 /// OpenCode-style soft compaction: keep pre-boundary history for UI/DB reading,
-/// insert summary + marker, then keep the retained tail.
+/// insert summary, keep the retained tail, then append the marker at the end.
 pub fn apply_soft_compaction(
     messages: &[Message],
     selection: &CompactionSelection,
@@ -348,15 +358,18 @@ pub fn apply_soft_compaction(
                 .map(|message| message.timestamp)
         });
 
+    // Layout: [pre-boundary history…][summary][retained tail…][marker]
+    // Marker goes last so it is visible at the bottom of the chat without
+    // forcing a mid-history scroll jump (summary itself stays UI-hidden).
     let mut result = Vec::with_capacity(messages.len() + 2);
     result.extend_from_slice(&messages[..summarize_end]);
     result.push(build_summary_message(
         summary, model, provider, agent_mode, timestamp,
     ));
-    append_compaction_marker(&mut result, stats);
     if summarize_end < messages.len() {
         result.extend_from_slice(&messages[summarize_end..]);
     }
+    append_compaction_marker(&mut result, stats);
     result
 }
 
@@ -835,6 +848,8 @@ mod tests {
         assert!(soft.iter().any(is_compaction_summary));
         assert!(soft.iter().any(is_compaction_marker));
         assert!(soft.iter().any(|m| m.content == "u2"));
+        // Marker is last so "Context compacted" is visible at chat bottom.
+        assert!(is_compaction_marker(soft.last().expect("non-empty")));
 
         let context = filter_messages_for_context(&soft);
         assert!(context.iter().any(is_compaction_summary));

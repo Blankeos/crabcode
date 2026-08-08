@@ -5897,9 +5897,13 @@ impl App {
                 .unwrap_or_default()
         };
 
-        let Some(selection) = crate::session::compaction::select_messages_for_compaction(
+        // Manual /compact is seamless (OpenCode/Grok): allow tiny heads.
+        // Auto paths still use MIN_COMPACTABLE_TOKENS via the default selector
+        // when they call select_messages_for_compaction directly later.
+        let Some(selection) = crate::session::compaction::select_messages_for_compaction_with_min(
             &messages,
             crate::session::compaction::DEFAULT_TAIL_TURNS,
+            0,
         ) else {
             self.play_sound_event(crate::sound::SoundEvent::Error);
             push_toast(Toast::new(
@@ -5937,7 +5941,32 @@ impl App {
 
         let provider_name = self.provider_name.clone();
         let model = self.model.clone();
-        let reasoning_effort = self.active_reasoning_effort();
+        // Compaction is a rewrite, not a reasoning task. Only clamp when the
+        // active model actually exposes effort levels; non-reasoning models
+        // keep None so we never send an unsupported parameter.
+        let reasoning_effort =
+            match self.reasoning_capability_for_model(&self.provider_name, &self.model) {
+                Some(cap) if !cap.values().is_empty() => {
+                    use crate::model::reasoning::ReasoningEffort;
+                    let preferred = [
+                        ReasoningEffort::None,
+                        ReasoningEffort::Minimal,
+                        ReasoningEffort::Low,
+                    ];
+                    preferred
+                        .into_iter()
+                        .find(|e| cap.values().contains(e))
+                        .or_else(|| self.active_reasoning_effort())
+                        .and_then(|e| {
+                            if e == ReasoningEffort::None {
+                                None
+                            } else {
+                                Some(e)
+                            }
+                        })
+                }
+                _ => None,
+            };
         let agent = self.agent.clone();
         let original_messages = messages;
         let task_session_id = session_id.to_string();
@@ -5972,6 +6001,8 @@ impl App {
                         after_messages: 0,
                     },
                 );
+                // Count post-boundary context only (new layout:
+                // [history][summary][tail…][marker] — marker excluded).
                 let after_tokens = crate::session::compaction::total_context_tokens(&messages);
                 let after_messages =
                     crate::session::compaction::filter_messages_for_context(&messages).len();
@@ -5981,9 +6012,10 @@ impl App {
                     before_messages,
                     after_messages,
                 };
+                // Reject growth/no-shrink so we never commit a worse context.
                 if after_tokens >= before_tokens {
                     return Err(anyhow::anyhow!(
-                        "Compaction did not reduce context: {}",
+                        "Compaction did not reduce context ({})",
                         crate::session::compaction::format_compaction_stats(stats)
                     )
                     .into());
@@ -8230,31 +8262,28 @@ impl App {
                     {
                         Ok(()) => {
                             let is_active = self.is_active_session(&session_id);
-                            if is_active {
-                                self.chat_state.chat = self.chat_with_messages(messages.clone());
-                                if let Some(marker_idx) = messages.iter().position(|m| {
-                                    crate::session::compaction::is_compaction_marker(m)
-                                }) {
-                                    self.chat_state
-                                        .chat
-                                        .scroll_to_message_on_next_render(marker_idx);
-                                    self.chat_state
-                                        .chat
-                                        .set_highlighted_message(Some(marker_idx));
-                                } else {
-                                    self.chat_state.chat.scroll_to_bottom_on_next_render();
-                                    self.chat_state.chat.clear_highlighted_message();
-                                }
+                            // Marker is appended last — pin to bottom so the
+                            // "Context compacted" line is visible without jump.
+                            let mut chat = self.chat_with_messages(messages.clone());
+                            chat.scroll_to_bottom_on_next_render();
+                            if let Some(marker_idx) = messages
+                                .iter()
+                                .rposition(|m| crate::session::compaction::is_compaction_marker(m))
+                            {
+                                chat.set_highlighted_message(Some(marker_idx));
+                            } else {
+                                chat.clear_highlighted_message();
                             }
 
-                            let view_chat = if is_active {
-                                self.new_chat()
-                            } else {
-                                self.chat_with_messages(messages)
-                            };
+                            if is_active {
+                                self.chat_state.chat = chat.clone();
+                            }
+
+                            // Always keep view-state in sync so reopen/switch
+                            // shows the same compacted history + marker.
                             self.ensure_session_view_state(&session_id);
                             if let Some(state) = self.session_view_states.get_mut(&session_id) {
-                                state.chat = view_chat;
+                                state.chat = chat;
                                 state.tool_calls = ToolCallViewState::default();
                                 state.unread_completed = !is_active;
                             }
@@ -8268,7 +8297,7 @@ impl App {
                             self.refresh_sessions_dialog();
                             push_toast(Toast::new(
                                 format!(
-                                    "Session compacted: {}",
+                                    "Context compacted ({})",
                                     crate::session::compaction::format_compaction_stats(stats)
                                 ),
                                 ToastLevel::Info,
