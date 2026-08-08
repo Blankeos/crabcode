@@ -377,15 +377,11 @@ pub fn render_chat(
                 let bg = colors.background_element;
                 let border_style = non_selectable_style(Style::default().fg(border_color));
                 let pad_style = non_selectable_style(Style::default().bg(bg));
-                let text_style = Style::default().fg(colors.text).bg(bg);
                 // ▲ affordance: weak text so it reads as a clickable cue, not content.
-                let arrow_style = non_selectable_style(Style::default().fg(colors.text_weak).bg(bg));
+                let arrow_style =
+                    non_selectable_style(Style::default().fg(colors.text_weak).bg(bg));
 
                 let horizontal_padding = 2usize;
-                let right_padding = 2usize;
-                let content_width = max_width
-                    .saturating_sub(1 + horizontal_padding + right_padding)
-                    .max(1);
 
                 let padding_line = || {
                     let mut line = Line::from(vec![
@@ -419,28 +415,27 @@ pub fn render_chat(
                 let mut sticky_lines: Vec<Line> = Vec::with_capacity(sticky_height as usize);
                 sticky_lines.push(padding_line());
 
-                // Content rows: split by newlines, take up to `content_rows`, truncate each line.
-                if let Some(message) = sticky_msg {
-                    for content in message.content.split('\n').take(content_rows) {
-                        let clamped = truncate_to_width(content, content_width);
-                        let line_width = UnicodeWidthStr::width(clamped.as_str());
+                // Content rows: mirror real user-message rendering (image
+                // placeholders styled, text wrapped), limited to content_rows.
+                let content_lines = chat_state
+                    .chat
+                    .format_user_message_content_lines(idx, max_width, colors);
+                let mut content_iter = content_lines.into_iter();
+                for _ in 0..content_rows {
+                    if let Some(content_line) = content_iter.next() {
+                        let line_width = content_line.width();
                         let trailing_padding = " "
                             .repeat(max_width.saturating_sub(1 + horizontal_padding + line_width));
-                        let mut spans = Vec::with_capacity(4);
+                        let mut spans = Vec::with_capacity(content_line.spans.len() + 3);
                         spans.push(Span::styled("▌", border_style));
                         spans.push(Span::styled(" ".repeat(horizontal_padding), pad_style));
-                        spans.push(Span::styled(clamped, text_style));
+                        spans.extend(content_line.spans);
                         spans.push(Span::styled(trailing_padding, pad_style));
                         let mut panel_line = Line::from(spans);
                         panel_line.style = Style::default().bg(bg);
                         sticky_lines.push(panel_line);
-                    }
-                    // Fill remaining content rows if the message has fewer lines.
-                    while sticky_lines.len() < content_rows + 1 {
-                        sticky_lines.push(padding_line());
-                    }
-                } else {
-                    for _ in 0..content_rows {
+                    } else {
+                        // Message has fewer lines than the sticky can show.
                         sticky_lines.push(padding_line());
                     }
                 }

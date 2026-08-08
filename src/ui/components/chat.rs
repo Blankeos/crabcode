@@ -5169,6 +5169,59 @@ impl Chat {
         (lines, locations)
     }
 
+    /// Format a user message's content into wrapped, styled lines, mirroring
+    /// `format_message`'s user branch exactly (image-placeholder colors,
+    /// wrap width, horizontal padding). Returns content lines only — no
+    /// border/padding rows. Used by the compact-mode sticky message so it
+    /// renders like a real user message.
+    pub fn format_user_message_content_lines(
+        &self,
+        idx: usize,
+        max_width: usize,
+        colors: &ThemeColors,
+    ) -> Vec<Line<'static>> {
+        let Some(message) = self.messages.get(idx) else {
+            return Vec::new();
+        };
+        if message.role != MessageRole::User {
+            return Vec::new();
+        }
+
+        let max_width = max_width.max(1);
+        let bg = colors.background_element;
+        let text_style = Style::default().fg(colors.text).bg(bg);
+        let image_style = |placeholder: &str| {
+            let is_hovered = self.hovered_image.as_ref().is_some_and(|target| {
+                target.message_index == idx && target.placeholder == placeholder
+            });
+            if is_hovered {
+                Style::default().fg(colors.markdown_image_text).bg(bg)
+            } else {
+                Style::default().fg(colors.markdown_image).bg(bg)
+            }
+        };
+
+        let horizontal_padding = 2usize;
+        let right_padding = 2usize;
+        let wrap_width = max_width
+            .saturating_sub(1 + horizontal_padding + right_padding)
+            .max(1);
+
+        message
+            .content
+            .split('\n')
+            .flat_map(|content_line| {
+                let content_line = content_line.strip_suffix('\r').unwrap_or(content_line);
+                let styled_content = Line::from(spans_with_image_placeholders(
+                    content_line,
+                    text_style,
+                    &image_style,
+                ));
+                wrap_styled_line(&styled_content, WrapOptions::new(wrap_width))
+            })
+            .collect::<Vec<_>>()
+    }
+
     fn format_tool_row<'a>(
         &'a self,
         message: &'a Message,
