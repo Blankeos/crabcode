@@ -1160,7 +1160,18 @@ impl App {
             .unwrap_or_else(theme::Theme::load_builtin_default);
         let colors = theme_for_colors.get_colors(true);
 
-        let chat_state = init_chat(chat, &agent, &colors);
+        let configured_compact_mode = loaded_config.merged_config.tui_compact_mode;
+        let persisted_compact_mode = if configured_compact_mode.is_none() {
+            prefs_dao
+                .as_ref()
+                .and_then(|dao| dao.get_compact_mode().ok().flatten())
+        } else {
+            None
+        };
+        let compact_mode = configured_compact_mode
+            .or(persisted_compact_mode)
+            .unwrap_or(true);
+        let chat_state = init_chat(chat, &agent, &colors, compact_mode);
         let session_rename_dialog_state = init_session_rename_dialog(colors);
         let runtime = crate::config::ConfigRuntime::from_merged(
             &loaded_config.merged_config,
@@ -6450,6 +6461,11 @@ impl App {
         }
         if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
             self.chat_state.compact_mode = !self.chat_state.compact_mode;
+            if let Some(dao) = &self.prefs_dao {
+                if let Err(error) = dao.set_compact_mode(self.chat_state.compact_mode) {
+                    eprintln!("Failed to persist compact mode preference: {error}");
+                }
+            }
             push_toast(Toast::new(
                 if self.chat_state.compact_mode {
                     "Compact mode enabled"
@@ -11295,7 +11311,7 @@ mod tests {
             command_registry: registry,
             session_manager: SessionManager::new(),
             home_state: init_home(),
-            chat_state: init_chat(Chat::new(), "Build", &colors),
+            chat_state: init_chat(Chat::new(), "Build", &colors, true),
             suggestions_popup_state: init_suggestions_popup(Popup::new()),
             agents_dialog_state: init_agents_dialog("Select agent", vec![]),
             models_dialog_state: init_models_dialog("Models", vec![]),

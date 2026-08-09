@@ -103,11 +103,11 @@ pub struct SubagentTabs {
 }
 
 impl ChatState {
-    pub fn new(chat: Chat, agent_color: ratatui::style::Color) -> Self {
+    pub fn new(chat: Chat, agent_color: ratatui::style::Color, compact_mode: bool) -> Self {
         Self {
             chat,
             wave_spinner: WaveSpinner::with_speed(agent_color, 40),
-            compact_mode: true,
+            compact_mode,
             sticky_message_index: None,
             last_chat_area: None,
             sticky_click_target: None,
@@ -115,9 +115,9 @@ impl ChatState {
     }
 }
 
-pub fn init_chat(chat: Chat, agent: &str, colors: &ThemeColors) -> ChatState {
+pub fn init_chat(chat: Chat, agent: &str, colors: &ThemeColors, compact_mode: bool) -> ChatState {
     let agent_color = crate::theme::agent_color(agent, colors);
-    ChatState::new(chat, agent_color)
+    ChatState::new(chat, agent_color, compact_mode)
 }
 
 pub fn agent_color_for_tab(agent_index: usize, colors: &ThemeColors) -> ratatui::style::Color {
