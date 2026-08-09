@@ -3115,19 +3115,16 @@ impl App {
     }
 
     /// Region where a mouse wheel scrolls the chat. In compact mode this
-    /// extends above the chat content to include the 3-row header and any
-    /// sticky bar, so scrolling works even when the pointer is over that chrome.
+    /// extends above the chat content to include the 3-row header (and the
+    /// sticky overlay which sits inside the transcript top), so scrolling
+    /// works even when the pointer is over that chrome.
     fn chat_scroll_region(&self) -> Rect {
         let chat_area = self.current_chat_area();
         if !self.chat_state.compact_mode {
             return chat_area;
         }
-        let sticky_top = self
-            .chat_state
-            .sticky_click_target
-            .map(|(r, _)| r.y)
-            .unwrap_or(chat_area.y);
-        let top = sticky_top.saturating_sub(3); // header rows
+        // Sticky is an overlay inside chat_area; only the header sits above it.
+        let top = chat_area.y.saturating_sub(3); // header rows
         Rect {
             x: chat_area.x,
             y: top,

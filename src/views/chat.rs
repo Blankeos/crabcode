@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
     Frame,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -196,40 +196,36 @@ pub fn render_chat(
 
     // Compact mode: sticky header (session title) + sticky scrolled-past user message.
     //
-    // Sticky rules (scroll_offset = S, user message start/end = si / ei):
+    // Layout: the sticky bar is an *overlay* painted on top of the transcript,
+    // not a layout row. Showing/hiding sticky must not change transcript
+    // viewport height or scroll extent (header is always 3 rows; chat fills the
+    // rest of the content area).
     //
-    // A message is only eligible to be sticky once it is FULLY above the
-    // viewport (ei <= S). While any part of it is still in the viewport, the
-    // real message is shown — never sticky + faded at the same time.
-    //
-    // Scroll DOWN:
-    //   - Sticky Ui appears only when ei <= S (fully scrolled off).
-    //   - Sticky disappears when the next user message is within GAP rows of
-    //     the viewport top: S >= s{i+1} - GAP. Only the real next message is
-    //     shown (not sticky yet).
-    //   - U{i+1} becomes sticky only once it too is fully above the viewport.
-    //
-    // Scroll UP:
-    //   - Sticky Ui remains while ei <= S.
-    //   - Once S drops so Ui is no longer fully above, sticky disappears.
-    //   - Previous message is NOT shown immediately; wait until there is
-    //     UP_HYSTERESIS + GAP rows of space above Ui's start, then show it.
-    let chat_area = if chat_state.compact_mode {
-        const GAP: usize = 1;
-        const UP_HYSTERESIS: usize = 5;
+    // Sticky visibility is driven by transcript line offsets vs scroll_offset.
+    // Eligibility: a prior user once its body has left the top (`body_end <= S`).
+    // Hide: when the next user message enters the sticky overlay's covered top
+    // region (`S + sticky_height > next_user_start`). Overlay height defines that
+    // visual coverage only — it never shrinks chat_area / scroll extent.
+    // Assistant/tool blocks between users do not suppress sticky.
+    let (chat_area, sticky_overlay) = if chat_state.compact_mode {
+        // Fixed layout first so chat_area is independent of sticky overlay height.
+        let (header_area, chat_area) = compact_transcript_layout(above_status_chunks[1]);
 
         let scroll_offset = chat_state.chat.scroll_offset;
-        let positions = &chat_state.chat.message_line_positions;
+        // One start line per transcript message / rendered block (groups share a start).
+        let rendered_message_starts = &chat_state.chat.message_line_positions;
         let content_height = chat_state.chat.content_height;
 
         let msg_end_line = |idx: usize| -> usize {
-            (idx + 1..positions.len())
-                .find_map(|i| positions.get(i).copied())
+            (idx + 1..rendered_message_starts.len())
+                .find_map(|i| rendered_message_starts.get(i).copied())
                 .unwrap_or(content_height)
         };
 
-        // (message_index, start_line) for every non-compaction user message.
-        let user_messages: Vec<(usize, usize)> = chat_state
+        // (message_index, start_line, body_end) for every non-compaction user message.
+        // body_end excludes the trailing inter-message blank so sticky appears as
+        // soon as the real message body has fully left the viewport top.
+        let user_messages: Vec<(usize, usize, usize)> = chat_state
             .chat
             .messages
             .iter()
@@ -238,69 +234,26 @@ pub fn render_chat(
                 m.role == MessageRole::User
                     && !crate::session::compaction::is_compaction_display_item(m)
             })
-            .filter_map(|(i, _)| positions.get(i).map(|&start| (i, start)))
+            .filter_map(|(i, _)| {
+                rendered_message_starts.get(i).map(|&start| {
+                    let end = msg_end_line(i);
+                    (i, start, user_message_body_end(end))
+                })
+            })
             .collect();
 
-        // Natural sticky (scroll-down rules): last user message FULLY above the
-        // viewport, unless we're within GAP of the next user message's top.
-        let natural_sticky = {
-            let prev = user_messages
-                .iter()
-                .rev()
-                .find(|(idx, _)| msg_end_line(*idx) <= scroll_offset)
-                .copied();
-            match prev {
-                Some((idx, _)) => {
-                    let next_start = user_messages
-                        .iter()
-                        .find(|(i, _)| *i > idx)
-                        .map(|(_, start)| *start);
-                    match next_start {
-                        // Next message is about to / has entered the top — no sticky.
-                        // Real viewport message must remain visible.
-                        Some(ns) if scroll_offset >= ns.saturating_sub(GAP) => None,
-                        _ => Some(idx),
-                    }
-                }
-                None => None,
-            }
-        };
-
-        // Apply scroll-up hysteresis using the remembered sticky index.
-        // sticky_message_index is a memory of the last sticky even when hidden.
-        let display_sticky = match (chat_state.sticky_message_index, natural_sticky) {
-            // No memory yet — follow natural.
-            (None, nat) => nat,
-
-            // Natural is None — dead zone or message still partially in viewport.
-            // Never re-show memory once natural has cleared.
-            (Some(_memory), None) => None,
-
-            // Natural caught up to or passed memory (scroll down / same) — follow natural.
-            (Some(memory), Some(nat)) if nat >= memory => Some(nat),
-
-            // Natural wants an older message (scroll up) — require clearance above `memory`.
-            (Some(memory), Some(nat)) => {
-                let memory_start = positions.get(memory).copied().unwrap_or(0);
-                if scroll_offset + GAP + UP_HYSTERESIS <= memory_start {
-                    // Enough space above the remembered message → show older sticky.
-                    Some(nat)
-                } else if msg_end_line(memory) <= scroll_offset {
-                    // Memory is still fully above viewport → keep it sticky.
-                    Some(memory)
-                } else {
-                    // Memory has re-entered the viewport — no sticky.
-                    None
-                }
-            }
-        };
+        let display_sticky = resolve_sticky_display(
+            &user_messages,
+            scroll_offset,
+            chat_state.sticky_message_index,
+        );
 
         // Update memory: remember last displayed sticky; clear only when scrolled
         // above the first user message (nothing left to be sticky about).
         if let Some(idx) = display_sticky {
             chat_state.sticky_message_index = Some(idx);
         } else {
-            let first_start = user_messages.first().map(|(_, s)| *s).unwrap_or(0);
+            let first_start = user_messages.first().map(|(_, s, _)| *s).unwrap_or(0);
             if scroll_offset <= first_start {
                 chat_state.sticky_message_index = None;
             }
@@ -313,27 +266,12 @@ pub fn render_chat(
         chat_state.chat.faded_message_index = display_sticky;
 
         let sticky_height: u16 = if let Some(idx) = display_sticky {
-            let msg_start = positions.get(idx).copied().unwrap_or(0);
+            let msg_start = rendered_message_starts.get(idx).copied().unwrap_or(0);
             let msg_end = msg_end_line(idx);
-            // User messages are rendered as: top pad + content + bottom pad + trailing blank.
-            // The trailing blank is inter-message spacing, not part of the sticky body.
-            let msg_body_lines = msg_end.saturating_sub(msg_start).saturating_sub(1);
-            // 1-line body → 3 rows (pad + content + pad); clamp to 5.
-            msg_body_lines.min(5).max(3) as u16
+            sticky_overlay_height_for_span(msg_start, user_message_body_end(msg_end)) as u16
         } else {
             0
         };
-
-        let sticky_idx = display_sticky;
-
-        let compact_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),             // header (no bg)
-                Constraint::Length(sticky_height), // sticky (0 if invisible)
-                Constraint::Min(0),                // chat content
-            ])
-            .split(above_status_chunks[1]);
 
         // Render compact header with session title. No background fill; the
         // title sits on the middle row in accent + bold. Top/bottom rows are
@@ -349,7 +287,7 @@ pub fn render_chat(
                     ]
                     .as_ref(),
                 )
-                .split(compact_chunks[0]);
+                .split(header_area);
             // Title line (accent + bold, no background)
             f.render_widget(
                 Paragraph::new(title).style(
@@ -361,111 +299,125 @@ pub fn render_chat(
             );
         }
 
-        // Render sticky message (only if sticky_height > 0 AND sticky_idx is Some)
-        if sticky_height > 0 {
-            if let Some(idx) = sticky_idx {
-                let sticky_rect = compact_chunks[1];
-                chat_state.sticky_click_target = Some((sticky_rect, idx));
+        chat_state.last_chat_area = Some(chat_area);
+        // Clear previous sticky target; set only when an overlay bar is drawn.
+        chat_state.sticky_click_target = None;
 
-                let max_width = sticky_rect.width as usize;
-                let sticky_msg = chat_state.chat.messages.get(idx);
+        let sticky_overlay = display_sticky
+            .and_then(|idx| sticky_overlay_rect(chat_area, sticky_height).map(|rect| (rect, idx)));
 
-                let border_color = crate::theme::agent_mode_color(
-                    sticky_msg.and_then(|m| m.agent_mode.as_deref()),
-                    colors,
-                );
-                let bg = colors.background_element;
-                let border_style = non_selectable_style(Style::default().fg(border_color));
-                let pad_style = non_selectable_style(Style::default().bg(bg));
-                // ▴ affordance: weak text so it reads as a clickable cue, not content.
-                let arrow_style =
-                    non_selectable_style(Style::default().fg(colors.text_weak).bg(bg));
-
-                let horizontal_padding = 2usize;
-
-                let padding_line = || {
-                    let mut line = Line::from(vec![
-                        Span::styled("▌", border_style),
-                        Span::styled(" ".repeat(max_width.saturating_sub(1)), pad_style),
-                    ]);
-                    line.style = Style::default().bg(bg);
-                    line
-                };
-
-                // Bottom padding with a horizontally-centered ▴ click affordance.
-                let bottom_padding_line = || {
-                    // Layout: "▌" + spaces + "▴" + spaces, total width = max_width.
-                    let body_width = max_width.saturating_sub(1); // after border
-                    let arrow = "▴";
-                    let arrow_w = 1usize;
-                    let left = body_width.saturating_sub(arrow_w) / 2;
-                    let right = body_width.saturating_sub(left + arrow_w);
-                    let mut line = Line::from(vec![
-                        Span::styled("▌", border_style),
-                        Span::styled(" ".repeat(left), pad_style),
-                        Span::styled(arrow, arrow_style),
-                        Span::styled(" ".repeat(right), pad_style),
-                    ]);
-                    line.style = Style::default().bg(bg);
-                    line
-                };
-
-                // Number of content rows = sticky height minus top/bottom padding.
-                let content_rows = sticky_height.saturating_sub(2) as usize;
-                let mut sticky_lines: Vec<Line> = Vec::with_capacity(sticky_height as usize);
-                sticky_lines.push(padding_line());
-
-                // Content rows: mirror real user-message rendering (image
-                // placeholders styled, text wrapped), limited to content_rows.
-                let content_lines = chat_state
-                    .chat
-                    .format_user_message_content_lines(idx, max_width, colors);
-                let mut content_iter = content_lines.into_iter();
-                for _ in 0..content_rows {
-                    if let Some(content_line) = content_iter.next() {
-                        let line_width = content_line.width();
-                        let trailing_padding = " "
-                            .repeat(max_width.saturating_sub(1 + horizontal_padding + line_width));
-                        let mut spans = Vec::with_capacity(content_line.spans.len() + 3);
-                        spans.push(Span::styled("▌", border_style));
-                        spans.push(Span::styled(" ".repeat(horizontal_padding), pad_style));
-                        spans.extend(content_line.spans);
-                        spans.push(Span::styled(trailing_padding, pad_style));
-                        let mut panel_line = Line::from(spans);
-                        panel_line.style = Style::default().bg(bg);
-                        sticky_lines.push(panel_line);
-                    } else {
-                        // Message has fewer lines than the sticky can show.
-                        sticky_lines.push(padding_line());
-                    }
-                }
-
-                sticky_lines.push(bottom_padding_line());
-
-                f.render_widget(
-                    Paragraph::new(sticky_lines)
-                        .style(Style::default().bg(colors.background_element)),
-                    sticky_rect,
-                );
-            } else {
-                chat_state.sticky_click_target = None;
-            }
-        } else {
-            chat_state.sticky_click_target = None;
-        }
-
-        chat_state.last_chat_area = Some(compact_chunks[2]);
-        compact_chunks[2]
+        (chat_area, sticky_overlay)
     } else {
         // Leaving compact mode: clear sticky state so re-enabling starts clean.
         chat_state.sticky_message_index = None;
         chat_state.chat.faded_message_index = None;
         chat_state.sticky_click_target = None;
         chat_state.last_chat_area = Some(above_status_chunks[1]);
-        above_status_chunks[1]
+        (above_status_chunks[1], None)
     };
 
+    // Transcript first so the sticky overlay (if any) paints on top of it.
     chat_state.chat.render(f, chat_area, &agent, &model, colors);
+
+    // Paint sticky as an overlay over the top of the transcript. This keeps
+    // transcript viewport height / scroll extent independent of sticky state.
+    if let Some((sticky_rect, idx)) = sticky_overlay {
+        chat_state.sticky_click_target = Some((sticky_rect, idx));
+
+        let max_width = sticky_rect.width as usize;
+        let sticky_height = sticky_rect.height;
+        let sticky_msg = chat_state.chat.messages.get(idx);
+
+        let border_color = crate::theme::agent_mode_color(
+            sticky_msg.and_then(|m| m.agent_mode.as_deref()),
+            colors,
+        );
+        let bg = colors.background_element;
+        let border_style = non_selectable_style(Style::default().fg(border_color));
+        let pad_style = non_selectable_style(Style::default().bg(bg));
+        // ▴ affordance: weak text so it reads as a clickable cue, not content.
+        let arrow_style = non_selectable_style(Style::default().fg(colors.text_weak).bg(bg));
+
+        let horizontal_padding = 2usize;
+
+        let padding_line = || {
+            let mut line = Line::from(vec![
+                Span::styled("▌", border_style),
+                Span::styled(" ".repeat(max_width.saturating_sub(1)), pad_style),
+            ]);
+            line.style = Style::default().bg(bg);
+            line
+        };
+
+        // Bottom padding with a horizontally-centered ▴ click affordance.
+        let bottom_padding_line = || {
+            // Layout: "▌" + spaces + "▴" + spaces, total width = max_width.
+            let body_width = max_width.saturating_sub(1); // after border
+            let arrow = "▴";
+            let arrow_w = 1usize;
+            let left = body_width.saturating_sub(arrow_w) / 2;
+            let right = body_width.saturating_sub(left + arrow_w);
+            let mut line = Line::from(vec![
+                Span::styled("▌", border_style),
+                Span::styled(" ".repeat(left), pad_style),
+                Span::styled(arrow, arrow_style),
+                Span::styled(" ".repeat(right), pad_style),
+            ]);
+            line.style = Style::default().bg(bg);
+            line
+        };
+
+        // Number of content rows = sticky height minus top/bottom padding.
+        let content_rows = sticky_height.saturating_sub(2) as usize;
+        let mut sticky_lines: Vec<Line> = Vec::with_capacity(sticky_height as usize);
+        sticky_lines.push(padding_line());
+
+        // Content rows: mirror real user-message rendering (image
+        // placeholders styled, text wrapped), limited to content_rows.
+        let content_lines = chat_state
+            .chat
+            .format_user_message_content_lines(idx, max_width, colors);
+        let mut content_iter = content_lines.into_iter();
+        for _ in 0..content_rows {
+            if let Some(content_line) = content_iter.next() {
+                let line_width = content_line.width();
+                let trailing_padding =
+                    " ".repeat(max_width.saturating_sub(1 + horizontal_padding + line_width));
+                let mut spans = Vec::with_capacity(content_line.spans.len() + 3);
+                spans.push(Span::styled("▌", border_style));
+                spans.push(Span::styled(" ".repeat(horizontal_padding), pad_style));
+                spans.extend(content_line.spans);
+                spans.push(Span::styled(trailing_padding, pad_style));
+                let mut panel_line = Line::from(spans);
+                panel_line.style = Style::default().bg(bg);
+                sticky_lines.push(panel_line);
+            } else {
+                // Message has fewer lines than the sticky can show.
+                sticky_lines.push(padding_line());
+            }
+        }
+
+        sticky_lines.push(bottom_padding_line());
+
+        // Paragraph patches styles onto existing cells and only rewrites
+        // grapheme-covered cells. Clear first so bold/fg/bg from the
+        // underlying transcript cannot leak into the sticky rectangle.
+        paint_sticky_overlay(
+            f.buffer_mut(),
+            sticky_rect,
+            sticky_lines,
+            colors.background_element,
+        );
+        // Chat paints its scrollbar before this overlay. Re-paint so the thumb
+        // stays above the sticky bar. Overlay geometry / click target are
+        // unchanged — only paint order is adjusted.
+        chat_state.chat.render_scrollbar_over(
+            f,
+            chat_area,
+            colors.background_element,
+            colors.text_weak,
+        );
+    }
 
     if is_subagent_view {
         if let Some(tabs) = subagent_tabs.as_ref() {
@@ -600,6 +552,169 @@ pub fn render_chat(
         );
         find_bar.render(f, above_status_chunks[1], colors);
     }
+}
+
+/// Fixed compact-mode layout: 3-row header + full remaining height for the
+/// transcript. Sticky is an overlay and does not participate in this split.
+fn compact_transcript_layout(area: Rect) -> (Rect, Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+    (chunks[0], chunks[1])
+}
+
+/// Sticky overlay rect at the top of the transcript area, clamped so it never
+/// exceeds the transcript height.
+fn sticky_overlay_rect(chat_area: Rect, sticky_height: u16) -> Option<Rect> {
+    if sticky_height == 0 || chat_area.height == 0 || chat_area.width == 0 {
+        return None;
+    }
+    let height = sticky_height.min(chat_area.height);
+    Some(Rect {
+        x: chat_area.x,
+        y: chat_area.y,
+        width: chat_area.width,
+        height,
+    })
+}
+
+/// Extra clearance (in rows) required when scrolling up before the previous
+/// sticky is allowed to replace the remembered one.
+const STICKY_UP_HYSTERESIS: usize = 5;
+
+/// User messages are laid out as: top pad + content + bottom pad + trailing blank.
+/// The trailing blank is inter-message spacing, not part of the message body.
+/// Sticky must appear as soon as the body has fully left the viewport top —
+/// one scroll row earlier than treating `msg_end` (which includes the blank).
+fn user_message_body_end(msg_end_including_trailing_blank: usize) -> usize {
+    msg_end_including_trailing_blank.saturating_sub(1)
+}
+
+/// Sticky overlay row count for a user message whose body occupies
+/// `[msg_start, body_end)` in the transcript.
+///
+/// User messages render as top pad + content + bottom pad (+ trailing blank
+/// excluded from body_end). Overlay height clamps to 3..=5 rows and is used
+/// only for the visual covered region / hide boundary — never for scroll extent.
+fn sticky_overlay_height_for_span(msg_start: usize, body_end: usize) -> usize {
+    let msg_body_lines = body_end.saturating_sub(msg_start);
+    msg_body_lines.min(5).max(3)
+}
+
+/// Start line of the next user message after `message_index`, if any.
+///
+/// The sticky overlay must not cover the next *user* message in the viewport.
+/// Intermediate assistant/tool blocks do not suppress sticky — otherwise a
+/// normal user→assistant transcript would hide sticky as soon as the prior
+/// user's body leaves the top.
+fn next_user_start_after(
+    user_messages: &[(usize, usize, usize)],
+    message_index: usize,
+) -> Option<usize> {
+    user_messages
+        .iter()
+        .find(|(idx, _, _)| *idx > message_index)
+        .map(|(_, start, _)| *start)
+}
+
+/// Natural sticky candidate while scrolling down.
+///
+/// `user_messages` entries are `(message_index, start_line, body_end)` sorted in
+/// transcript order.
+///
+/// Show: last user message whose body is fully above the viewport (`body_end <= S`).
+/// Hide: when the next user message's first row enters the sticky overlay's
+/// half-open top coverage `[S, S + sticky_height)` — i.e.
+/// `S + sticky_height > next_user_start` (still visible when equal).
+/// Sticky height defines that covered region only; it does not change scroll
+/// extent. Intermediate assistant/tool rows do not hide sticky.
+fn natural_sticky_index(
+    user_messages: &[(usize, usize, usize)],
+    scroll_offset: usize,
+) -> Option<usize> {
+    let prev = user_messages
+        .iter()
+        .rev()
+        .find(|(_, _, body_end)| *body_end <= scroll_offset)
+        .copied();
+    match prev {
+        Some((idx, start, body_end)) => {
+            let sticky_height = sticky_overlay_height_for_span(start, body_end);
+            let next_start = next_user_start_after(user_messages, idx);
+            match next_start {
+                // Next user message's first row is inside the sticky-covered top
+                // region; hide immediately. Equal bottom edge keeps sticky visible.
+                Some(ns) if scroll_offset.saturating_add(sticky_height) > ns => None,
+                _ => Some(idx),
+            }
+        }
+        None => None,
+    }
+}
+
+/// Resolve which sticky (if any) to display, applying scroll-up hysteresis via
+/// the remembered sticky index.
+///
+/// `user_messages` entries are `(message_index, start_line, body_end)`.
+/// When natural selection is `None`, memory is never resurrected.
+fn resolve_sticky_display(
+    user_messages: &[(usize, usize, usize)],
+    scroll_offset: usize,
+    memory: Option<usize>,
+) -> Option<usize> {
+    let natural = natural_sticky_index(user_messages, scroll_offset);
+
+    match (memory, natural) {
+        // No memory yet — follow natural.
+        (None, nat) => nat,
+
+        // Natural is None — dead zone, next user under sticky, or body still visible.
+        // Never re-show / resurrect memory once natural has cleared.
+        (Some(_memory), None) => None,
+
+        // Natural caught up to or passed memory (scroll down / same) — follow natural.
+        (Some(mem), Some(nat)) if nat >= mem => Some(nat),
+
+        // Natural wants an older message (scroll up) — require clearance above `memory`.
+        (Some(mem), Some(nat)) => {
+            let memory_entry = user_messages.iter().find(|(i, _, _)| *i == mem);
+            let (memory_start, memory_body_end) = match memory_entry {
+                Some((_, start, body_end)) => (*start, *body_end),
+                None => return Some(nat),
+            };
+            // Clearance uses the same one-row hide offset as the natural hide
+            // boundary (+1) so directional hysteresis stays consistent.
+            if scroll_offset
+                .saturating_add(1)
+                .saturating_add(STICKY_UP_HYSTERESIS)
+                <= memory_start
+            {
+                // Enough space above the remembered message → show older sticky.
+                Some(nat)
+            } else if memory_body_end <= scroll_offset {
+                // Memory is still fully above viewport → keep it sticky.
+                Some(mem)
+            } else {
+                // Memory has re-entered the viewport — no sticky.
+                None
+            }
+        }
+    }
+}
+
+/// Clear the sticky rectangle, then paint the sticky Paragraph so styles from
+/// the underlying transcript cannot leak into unwritten sticky cells.
+fn paint_sticky_overlay(
+    buf: &mut Buffer,
+    sticky_area: Rect,
+    sticky_lines: Vec<Line<'static>>,
+    bg: Color,
+) {
+    Clear.render(sticky_area, buf);
+    Paragraph::new(sticky_lines)
+        .style(Style::default().bg(bg))
+        .render(sticky_area, buf);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1235,13 +1350,23 @@ fn centered_subagent_footer_content(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_status_layout_widths, display_agent_name, render_subagent_spinner_only,
+        chat_status_layout_widths, compact_transcript_layout, display_agent_name,
+        natural_sticky_index, paint_sticky_overlay, render_chat, render_subagent_spinner_only,
+        resolve_sticky_display, sticky_overlay_height_for_span, sticky_overlay_rect,
         streaming_status_spans, subagent_nav_width, subagent_streaming_status_spans,
-        ChatStatusLayoutWidths, STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
+        user_message_body_end, ChatState, ChatStatusLayoutWidths, STICKY_UP_HYSTERESIS,
+        STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
     };
     use crate::theme::ThemeColors;
-    use crate::ui::components::{chat::Chat, wave_spinner::WaveSpinner};
-    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use crate::ui::components::{
+        chat::Chat, find::FindBar, input::Input, wave_spinner::WaveSpinner,
+    };
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+    };
 
     fn test_colors() -> ThemeColors {
         ThemeColors {
@@ -1496,5 +1621,584 @@ mod tests {
         assert_eq!(subagent_nav_width(4, true, 24), 0);
         assert_eq!(subagent_nav_width(20, true, 24), 12);
         assert_eq!(subagent_nav_width(20, false, 24), 20);
+    }
+
+    #[test]
+    fn compact_transcript_layout_keeps_header_and_full_chat_height() {
+        let area = Rect::new(0, 0, 80, 30);
+        let (header, chat) = compact_transcript_layout(area);
+        assert_eq!(header, Rect::new(0, 0, 80, 3));
+        assert_eq!(chat, Rect::new(0, 3, 80, 27));
+        // Sticky is not a layout row: chat fills everything below the header.
+        assert_eq!(header.height + chat.height, area.height);
+    }
+
+    #[test]
+    fn sticky_overlay_rect_sits_on_top_of_transcript_without_shrinking_it() {
+        let chat_area = Rect::new(0, 3, 80, 27);
+        let sticky = sticky_overlay_rect(chat_area, 5).expect("sticky overlay");
+        assert_eq!(sticky, Rect::new(0, 3, 80, 5));
+        // Overlay occupies the top of the transcript; chat area itself is unchanged.
+        assert_eq!(sticky.x, chat_area.x);
+        assert_eq!(sticky.y, chat_area.y);
+        assert_eq!(sticky.width, chat_area.width);
+        assert!(sticky.height < chat_area.height);
+    }
+
+    #[test]
+    fn sticky_overlay_rect_is_none_when_height_or_area_is_zero() {
+        let chat_area = Rect::new(0, 3, 80, 27);
+        assert!(sticky_overlay_rect(chat_area, 0).is_none());
+        assert!(sticky_overlay_rect(Rect::new(0, 0, 0, 10), 3).is_none());
+        assert!(sticky_overlay_rect(Rect::new(0, 0, 10, 0), 3).is_none());
+    }
+
+    #[test]
+    fn sticky_overlay_rect_clamps_to_transcript_height() {
+        let chat_area = Rect::new(0, 3, 80, 2);
+        let sticky = sticky_overlay_rect(chat_area, 5).expect("clamped sticky");
+        assert_eq!(sticky.height, 2);
+        assert_eq!(sticky.y, chat_area.y);
+    }
+
+    #[test]
+    fn sticky_overlay_does_not_leak_underlying_cell_styles() {
+        // Paragraph patches styles and only rewrites grapheme-covered cells.
+        // Pre-fill the sticky rect with conspicuous formatting, then ensure
+        // paint_sticky_overlay clears before drawing so bold/fg/bg cannot leak
+        // into sticky cells (including trailing/unwritten ones).
+        let sticky = Rect::new(0, 0, 20, 3);
+        let sticky_bg = Color::Rgb(30, 30, 40);
+        let leak_style = Style::default()
+            .fg(Color::Rgb(255, 0, 0))
+            .bg(Color::Rgb(0, 255, 0))
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 5));
+        for y in sticky.y..sticky.bottom() {
+            for x in sticky.x..sticky.right() {
+                let cell = buf.cell_mut((x, y)).expect("pre-fill cell");
+                cell.set_symbol("X");
+                cell.set_style(leak_style);
+            }
+        }
+
+        // Short sticky content leaves many trailing cells on each row.
+        let sticky_lines = vec![
+            Line::from(Span::styled(
+                "▌ ",
+                Style::default().fg(Color::Gray).bg(sticky_bg),
+            )),
+            Line::from(vec![
+                Span::styled("▌ ", Style::default().fg(Color::Gray).bg(sticky_bg)),
+                Span::styled("hi", Style::default().fg(Color::White).bg(sticky_bg)),
+            ]),
+            Line::from(Span::styled(
+                "▌  ▴  ",
+                Style::default().fg(Color::Gray).bg(sticky_bg),
+            )),
+        ];
+        paint_sticky_overlay(&mut buf, sticky, sticky_lines, sticky_bg);
+
+        for y in sticky.y..sticky.bottom() {
+            for x in sticky.x..sticky.right() {
+                let cell = buf.cell((x, y)).expect("sticky cell");
+                assert_ne!(
+                    cell.symbol(),
+                    "X",
+                    "sticky cell ({x},{y}) retained pre-fill symbol"
+                );
+                assert_eq!(
+                    cell.bg, sticky_bg,
+                    "sticky cell ({x},{y}) missing sticky background"
+                );
+                assert_ne!(
+                    cell.fg,
+                    Color::Rgb(255, 0, 0),
+                    "sticky cell ({x},{y}) leaked underlying foreground"
+                );
+                assert!(
+                    !cell.modifier.contains(Modifier::BOLD),
+                    "sticky cell ({x},{y}) leaked bold"
+                );
+                assert!(
+                    !cell.modifier.contains(Modifier::UNDERLINED),
+                    "sticky cell ({x},{y}) leaked underline"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sticky_visibility_does_not_change_transcript_viewport_height() {
+        // Simulates the compact layout: chat area is always full-height below
+        // the header, whether or not a sticky overlay would be painted.
+        let content_area = Rect::new(0, 0, 100, 40);
+        let (header, chat_without_sticky) = compact_transcript_layout(content_area);
+        let (_, chat_with_sticky) = compact_transcript_layout(content_area);
+        let sticky = sticky_overlay_rect(chat_with_sticky, 5).expect("sticky");
+
+        assert_eq!(header.height, 3);
+        assert_eq!(chat_without_sticky.height, chat_with_sticky.height);
+        assert_eq!(chat_with_sticky.height, content_area.height - header.height);
+        // Overlay lives inside the chat rect; it does not reduce chat height.
+        assert!(sticky.y >= chat_with_sticky.y);
+        assert!(sticky.bottom() <= chat_with_sticky.bottom());
+        assert_eq!(chat_with_sticky.height, 37);
+    }
+
+    /// Build synthetic `(index, start, body_end)` user-message rows.
+    ///
+    /// `body_lines` is the full layout height of the user message including the
+    /// trailing inter-message blank (top pad + content + bottom pad + blank).
+    /// Body end used for sticky is therefore `start + body_lines - 1`.
+    fn synthetic_user_messages(specs: &[(usize, usize, usize)]) -> Vec<(usize, usize, usize)> {
+        specs
+            .iter()
+            .map(|&(idx, start, body_lines)| {
+                let end_including_blank = start + body_lines;
+                (idx, start, user_message_body_end(end_including_blank))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sticky_appears_for_normal_user_assistant_transcript() {
+        // Normal conversation: user → assistant → (later) user.
+        // Sticky must appear once the prior user's body has left the top, even
+        // though the assistant occupies the next rendered block and is fully
+        // inside the viewport. Intermediate assistant/tool rows do not hide
+        // sticky — only the next *user* message does, via sticky coverage.
+        //
+        // U0: start=0, body_lines=4 → body_end=3, sticky_height=3.
+        // Assistant at 4 (ignored for hide). Next user U1 at 40.
+        let msgs = synthetic_user_messages(&[
+            (0, 0, 4),  // U0 body_end = 3
+            (2, 40, 4), // U1 body_end = 43
+        ]);
+
+        assert_eq!(msgs[0].2, 3, "1-line body_end excludes trailing blank");
+        assert_eq!(
+            sticky_overlay_height_for_span(msgs[0].1, msgs[0].2),
+            3,
+            "1-line content → 3-row sticky overlay"
+        );
+
+        assert_eq!(natural_sticky_index(&msgs, 2), None, "body still in view");
+        assert_eq!(
+            natural_sticky_index(&msgs, 3),
+            Some(0),
+            "sticky appears for normal user→assistant once body fully leaves"
+        );
+        assert_eq!(
+            natural_sticky_index(&msgs, 4),
+            Some(0),
+            "assistant immediately below user does not suppress sticky"
+        );
+        assert_eq!(
+            natural_sticky_index(&msgs, 20),
+            Some(0),
+            "sticky stays while scrolling through assistant content"
+        );
+        // Still well above U1's sticky-coverage boundary (40 - 3 = 37).
+        assert_eq!(natural_sticky_index(&msgs, 30), Some(0));
+    }
+
+    #[test]
+    fn sticky_appears_immediately_when_message_body_fully_leaves_viewport() {
+        // 1-line user content → layout is 4 rows: pad + content + pad + blank.
+        // body_end = start + 3. Sticky must appear at S == body_end, not one row
+        // later (which would wait for the trailing blank).
+        let msgs = synthetic_user_messages(&[
+            (0, 0, 4),  // U0: lines 0..4, body_end = 3
+            (2, 40, 4), // U1 later
+        ]);
+
+        assert_eq!(msgs[0].2, 3, "1-line body_end excludes trailing blank");
+        assert_eq!(natural_sticky_index(&msgs, 2), None, "body still in view");
+        assert_eq!(
+            natural_sticky_index(&msgs, 3),
+            Some(0),
+            "sticky appears the row the body fully leaves"
+        );
+        assert_eq!(natural_sticky_index(&msgs, 4), Some(0));
+
+        // 3-line user content → layout is 6 rows: pad + 3 content + pad + blank.
+        // body_end = start + 5. Same "appear immediately" rule.
+        let tall = synthetic_user_messages(&[
+            (0, 0, 6), // body_end = 5
+            (2, 50, 6),
+        ]);
+        assert_eq!(tall[0].2, 5, "3-line body_end excludes trailing blank");
+        assert_eq!(natural_sticky_index(&tall, 4), None);
+        assert_eq!(
+            natural_sticky_index(&tall, 5),
+            Some(0),
+            "tall sticky appears as soon as body leaves, not after blank"
+        );
+    }
+
+    #[test]
+    fn sticky_hides_when_next_user_enters_sticky_covered_region() {
+        // Adjacent examples from the product requirement:
+        // sticky rendered rows 1..3 and next viewport message rows 4..6 → hide on
+        // the first scroll increment where the next message enters the sticky-
+        // covered top region. Same for sticky rows 1..5.
+        //
+        // Hide formula: S + sticky_height > next_user_start (half-open coverage).
+        // Equal bottom edge keeps sticky visible.
+
+        // 1-line / 3-row sticky. Place next user so body_end + sticky_height
+        // lands exactly on next_user_start: body_end=3, sticky_height=3 →
+        // next_user_start=6. Visible at S=3 (3+3==6), hidden at S=4 (4+3>6).
+        let short = synthetic_user_messages(&[
+            (0, 0, 4), // body_end = 3, sticky_height = 3
+            (2, 6, 4), // next user starts at row 6
+        ]);
+        assert_eq!(sticky_overlay_height_for_span(0, 3), 3);
+        assert_eq!(
+            natural_sticky_index(&short, 3),
+            Some(0),
+            "adjacent 3-row sticky: equal edge (S+H == next_start) stays visible"
+        );
+        assert_eq!(
+            natural_sticky_index(&short, 4),
+            None,
+            "adjacent 3-row sticky: first increment past equal edge hides"
+        );
+
+        // 3-line / 5-row sticky. body_end=5, sticky_height=5 → next_user_start=10.
+        // Visible at S=5 (5+5==10), hidden at S=6 (6+5>10) — one increment later.
+        let tall = synthetic_user_messages(&[
+            (0, 0, 6),  // body_end = 5, sticky_height = 5
+            (2, 10, 6), // next user starts at row 10
+        ]);
+        assert_eq!(sticky_overlay_height_for_span(0, 5), 5);
+        assert_eq!(
+            natural_sticky_index(&tall, 5),
+            Some(0),
+            "adjacent 5-row sticky: equal edge keeps sticky visible"
+        );
+        assert_eq!(
+            natural_sticky_index(&tall, 6),
+            None,
+            "adjacent 5-row sticky: first increment past equal edge hides"
+        );
+
+        // Non-adjacent: next user far below. Sticky remains while scrolling
+        // through intermediate content until the covered region reaches it.
+        let gap = synthetic_user_messages(&[
+            (0, 0, 4),  // body_end = 3, sticky_height = 3
+            (2, 40, 4), // next user at 40
+        ]);
+        // Hide when S + 3 > 40 → S >= 38.
+        assert_eq!(natural_sticky_index(&gap, 37), Some(0));
+        assert_eq!(
+            natural_sticky_index(&gap, 38),
+            None,
+            "next user first row enters sticky-covered top region"
+        );
+    }
+
+    #[test]
+    fn sticky_hide_uses_sticky_coverage_not_viewport_height() {
+        // Hide is driven by sticky overlay coverage vs next *user* start, not
+        // full viewport height and not intermediate assistant/tool blocks.
+        // Short (3-row) and tall (5-row) stickies therefore hide at different
+        // offsets for the same next_user_start — sticky_height matters for the
+        // visual covered region, but never for scroll extent / layout.
+        let short = synthetic_user_messages(&[
+            (0, 0, 4), // body_end = 3; sticky_height = 3
+            (2, 20, 4),
+        ]);
+        let tall = synthetic_user_messages(&[
+            (0, 0, 6), // body_end = 5; sticky_height = 5
+            (2, 20, 6),
+        ]);
+
+        // Short: hide when S + 3 > 20 → S >= 18.
+        assert_eq!(natural_sticky_index(&short, 3), Some(0));
+        assert_eq!(natural_sticky_index(&short, 17), Some(0));
+        assert_eq!(
+            natural_sticky_index(&short, 18),
+            None,
+            "short sticky hides at S + sticky_height > next_user"
+        );
+
+        // Tall: hide when S + 5 > 20 → S >= 16 — earlier than short because the
+        // taller overlay covers more of the top region.
+        assert_eq!(natural_sticky_index(&tall, 5), Some(0));
+        assert_eq!(natural_sticky_index(&tall, 15), Some(0));
+        assert_eq!(
+            natural_sticky_index(&tall, 16),
+            None,
+            "tall sticky hides earlier by sticky_height, not by viewport height"
+        );
+    }
+
+    #[test]
+    fn sticky_ignores_assistant_and_tool_blocks_between_users() {
+        // Transcript: U0 (idx 0) → assistant (1) → tool (2) → U1 (3).
+        // Sticky for U0 must remain while scrolling through assistant/tool and
+        // only hide when U1 enters the sticky-covered top region.
+        let msgs = synthetic_user_messages(&[
+            (0, 0, 4),  // U0 body_end = 3, sticky_height = 3
+            (3, 50, 4), // U1 body_end = 53
+        ]);
+
+        assert_eq!(
+            natural_sticky_index(&msgs, 3),
+            Some(0),
+            "U0 sticky while assistant immediately follows"
+        );
+        assert_eq!(
+            natural_sticky_index(&msgs, 25),
+            Some(0),
+            "assistant/tool content does not suppress sticky"
+        );
+        // Hide when S + 3 > 50 → S >= 48.
+        assert_eq!(natural_sticky_index(&msgs, 47), Some(0));
+        assert_eq!(
+            natural_sticky_index(&msgs, 48),
+            None,
+            "hide only when next *user* enters sticky coverage"
+        );
+        // U1 sticky once its body is fully above.
+        assert_eq!(
+            natural_sticky_index(&msgs, 53),
+            Some(3),
+            "selected sticky remains the previous user message (U1)"
+        );
+    }
+
+    #[test]
+    fn sticky_display_uses_up_hysteresis_without_overlay_geometry() {
+        // U0 body_end=3 sticky_height=3, U1 start=40 body_end=43 sticky_height=3.
+        // Hide U0 sticky when S + 3 > 40, i.e. S >= 38.
+        let msgs = synthetic_user_messages(&[(0, 0, 4), (2, 40, 4)]);
+
+        // Scroll down: memory tracks natural.
+        assert_eq!(resolve_sticky_display(&msgs, 3, None), Some(0));
+        assert_eq!(resolve_sticky_display(&msgs, 20, Some(0)), Some(0));
+
+        // Past hide boundary for U0, before U1 body is fully above → no sticky.
+        // natural == None must not resurrect remembered state.
+        assert_eq!(
+            resolve_sticky_display(&msgs, 38, Some(0)),
+            None,
+            "natural None cannot resurrect memory"
+        );
+        assert_eq!(resolve_sticky_display(&msgs, 40, Some(0)), None);
+        assert_eq!(resolve_sticky_display(&msgs, 43, Some(0)), Some(2));
+
+        // Scroll up from U1 sticky: hand-off to U0 requires natural to want U0
+        // (S + sticky_height <= U1_start) and clearance
+        // S + 1 + UP_HYSTERESIS <= memory_start.
+        assert_eq!(STICKY_UP_HYSTERESIS, 5);
+        assert_eq!(
+            resolve_sticky_display(&msgs, 36, Some(2)),
+            None,
+            "within sticky-coverage of U1 → natural None"
+        );
+        assert_eq!(
+            resolve_sticky_display(&msgs, 37, Some(2)),
+            None,
+            "U1 body re-entered viewport → no sticky"
+        );
+        // S=30: natural wants U0 (30+3 <= 40) and clearance 30+1+5=36 <= 40.
+        assert_eq!(
+            resolve_sticky_display(&msgs, 30, Some(2)),
+            Some(0),
+            "clearance met and next user not under sticky coverage → hand off"
+        );
+        // Body of the remembered sticky re-entered → clear.
+        assert_eq!(resolve_sticky_display(&msgs, 2, Some(0)), None);
+    }
+
+    #[test]
+    fn compact_render_keeps_chat_area_stable_when_sticky_appears() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut chat_state = ChatState {
+            chat: Chat::new(),
+            wave_spinner: WaveSpinner::new(Color::Blue),
+            compact_mode: true,
+            sticky_message_index: None,
+            sticky_click_target: None,
+            last_chat_area: None,
+        };
+        // Sticky appears for a prior user once its body leaves the top, even with
+        // a following assistant. Tall assistant content gives room to scroll the
+        // first user fully above the viewport while remaining well clear of the
+        // next user sticky-coverage boundary.
+        chat_state.chat.add_user_message("sticky candidate");
+        chat_state
+            .chat
+            .add_assistant_message("assistant reply\n".repeat(40));
+        chat_state.chat.add_user_message("later user");
+
+        let mut input = Input::new();
+        let mut find_bar = FindBar::new();
+        let colors = test_colors();
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        // First paint: near top, no sticky expected. Record chat area height.
+        terminal
+            .draw(|f| {
+                render_chat(
+                    f,
+                    &mut chat_state,
+                    &mut input,
+                    "0.0.0".into(),
+                    "/tmp".into(),
+                    None,
+                    "build".into(),
+                    "model".into(),
+                    "provider".into(),
+                    None,
+                    &colors,
+                    false,
+                    false,
+                    false,
+                    None,
+                    "",
+                    None,
+                    &[],
+                    &mut find_bar,
+                    Some("Session"),
+                );
+            })
+            .expect("draw without sticky");
+
+        let area_without = chat_state.last_chat_area.expect("chat area without sticky");
+        let viewport_without = chat_state.chat.viewport_height;
+        assert!(
+            chat_state.sticky_click_target.is_none(),
+            "sticky should be hidden near the top of the transcript"
+        );
+
+        // Scroll so the first user message is fully above the viewport, but the
+        // later user has not entered the sticky-covered top region yet.
+        // Use the first user's body_end as the scroll target.
+        let first_user_body_end = {
+            let starts = &chat_state.chat.message_line_positions;
+            let end = starts
+                .get(1)
+                .copied()
+                .unwrap_or(chat_state.chat.content_height);
+            user_message_body_end(end)
+        };
+        chat_state.chat.scroll_offset = first_user_body_end;
+
+        terminal
+            .draw(|f| {
+                render_chat(
+                    f,
+                    &mut chat_state,
+                    &mut input,
+                    "0.0.0".into(),
+                    "/tmp".into(),
+                    None,
+                    "build".into(),
+                    "model".into(),
+                    "provider".into(),
+                    None,
+                    &colors,
+                    false,
+                    false,
+                    false,
+                    None,
+                    "",
+                    None,
+                    &[],
+                    &mut find_bar,
+                    Some("Session"),
+                );
+            })
+            .expect("draw with sticky");
+
+        let area_with = chat_state.last_chat_area.expect("chat area with sticky");
+        let viewport_with = chat_state.chat.viewport_height;
+
+        assert_eq!(
+            area_without, area_with,
+            "sticky overlay must not change the transcript layout rect"
+        );
+        assert_eq!(
+            viewport_without, viewport_with,
+            "sticky overlay must not change Chat::viewport_height / scroll extent"
+        );
+        let (sticky_rect, sticky_idx) = chat_state
+            .sticky_click_target
+            .expect("sticky click target for normal user→assistant after body leaves");
+        // First user message is index 0 (user, assistant, later user).
+        assert_eq!(sticky_idx, 0);
+        assert_eq!(sticky_rect.x, area_with.x);
+        assert_eq!(sticky_rect.y, area_with.y);
+        assert_eq!(sticky_rect.width, area_with.width);
+        assert!(sticky_rect.height >= 3 && sticky_rect.height <= 5);
+        assert_eq!(chat_state.chat.faded_message_index, Some(sticky_idx));
+    }
+
+    #[test]
+    fn compact_render_without_sticky_leaves_full_transcript_area() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut chat_state = ChatState {
+            chat: Chat::new(),
+            wave_spinner: WaveSpinner::new(Color::Blue),
+            compact_mode: true,
+            sticky_message_index: None,
+            sticky_click_target: None,
+            last_chat_area: None,
+        };
+        chat_state
+            .chat
+            .add_user_message("only message still in view");
+
+        let mut input = Input::new();
+        let mut find_bar = FindBar::new();
+        let colors = test_colors();
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| {
+                render_chat(
+                    f,
+                    &mut chat_state,
+                    &mut input,
+                    "0.0.0".into(),
+                    "/tmp".into(),
+                    None,
+                    "build".into(),
+                    "model".into(),
+                    "provider".into(),
+                    None,
+                    &colors,
+                    false,
+                    false,
+                    false,
+                    None,
+                    "",
+                    None,
+                    &[],
+                    &mut find_bar,
+                    Some("Session"),
+                );
+            })
+            .expect("draw");
+
+        let chat_area = chat_state.last_chat_area.expect("chat area");
+        // Transcript is everything below the fixed 3-row compact header.
+        // Input/help/status rows reduce available height, but sticky is not a
+        // layout row so the chat area is still "full" relative to that chrome.
+        assert_eq!(chat_area.y, 3, "chat starts immediately under the header");
+        assert!(chat_area.height > 0);
+        assert!(chat_state.sticky_click_target.is_none());
+        assert!(chat_state.chat.faded_message_index.is_none());
+        // Overlay helpers agree: no sticky height → no overlay rect.
+        assert!(sticky_overlay_rect(chat_area, 0).is_none());
     }
 }

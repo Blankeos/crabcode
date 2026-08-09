@@ -2988,6 +2988,37 @@ impl Chat {
             .saturating_add(self.scroll_bottom_padding)
     }
 
+    /// Re-paint the vertical scrollbar over `area` (rightmost column).
+    /// Used by overlays (e.g. compact sticky) that would otherwise cover the thumb.
+    pub fn render_scrollbar_over(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        track_color: Color,
+        thumb_color: Color,
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+        render_scrollbar(
+            f,
+            ScrollMetrics::new(
+                self.scroll_content_height(),
+                self.viewport_height,
+                self.scroll_offset,
+            ),
+            scrollbar_area,
+            track_color,
+            thumb_color,
+        );
+    }
+
     pub fn set_search_query(
         &mut self,
         query: &str,
