@@ -389,10 +389,12 @@ mod tests {
         // The file is JSONC: comments and trailing commas must not break it.
         let catalog = parse_catalog_extensions();
 
-        // Comments next to the crof overrides are part of the file, so both
-        // override entries must parse.
+        // Comments next to the crof overrides are part of the file, so every
+        // override entry must parse.
         let crof = catalog.get("crof").expect("crof catalog extension");
         let models = crof.get("models").expect("crof models");
+        assert!(models.get("deepseek-v4-flash-0731").is_some());
+        assert!(models.get("deepseek-v4-flash").is_some());
         assert!(models.get("greg-1-mini").is_some());
         assert!(models.get("kimi-k2.5-lightning").is_some());
     }
@@ -512,6 +514,54 @@ mod tests {
         );
         assert_eq!(model.name, "Greg 1 Mini");
         assert!(model.tool_call);
+    }
+
+    #[test]
+    fn catalog_extensions_add_max_effort_to_crof_deepseek_flash() {
+        let mut providers = HashMap::from([(
+            "crof".to_string(),
+            Provider {
+                id: "crof".to_string(),
+                name: "Crof".to_string(),
+                api: String::new(),
+                doc: String::new(),
+                env: vec!["CROF_API_KEY".to_string()],
+                npm: String::new(),
+                models: HashMap::from([(
+                    "deepseek-v4-flash-0731".to_string(),
+                    Model {
+                        id: "deepseek-v4-flash-0731".to_string(),
+                        name: "DeepSeek V4 Flash 0731".to_string(),
+                        family: "deepseek".to_string(),
+                        attachment: false,
+                        reasoning: true,
+                        reasoning_options: vec![crate::model::reasoning::ReasoningOption {
+                            kind: "effort".to_string(),
+                            values: vec!["none".to_string(), "low".to_string()],
+                        }],
+                        tool_call: true,
+                        structured_output: false,
+                        temperature: false,
+                        knowledge: String::new(),
+                        release_date: String::new(),
+                        last_updated: String::new(),
+                        status: None,
+                        modalities: None,
+                        open_weights: true,
+                        cost: None,
+                        limit: None,
+                        provider: None,
+                    },
+                )]),
+            },
+        )]);
+
+        assert!(merge_catalog_extensions(&mut providers));
+
+        let efforts = providers["crof"].models["deepseek-v4-flash-0731"]
+            .reasoning_efforts()
+            .expect("reasoning efforts");
+        assert!(efforts.contains(&crate::model::reasoning::ReasoningEffort::Max));
     }
 
     #[test]
