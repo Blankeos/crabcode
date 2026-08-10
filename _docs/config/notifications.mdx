@@ -46,6 +46,18 @@ Notifications are crabcode-specific and apply only to `crabcode` config files. E
 
 Events are `complete`, `subagentComplete`, `error`, `permission`, and `question`.
 
+For headless servers, disable sounds on completion events so crabcode does not invoke
+local audio backends:
+
+```jsonc title="crabcode.jsonc"
+{
+  "notifications": {
+    "complete": { "soundEnabled": false },
+    "subagentComplete": { "soundEnabled": false }
+  }
+}
+```
+
 | Field          | Behavior                                                                                     |
 | -------------- | -------------------------------------------------------------------------------------------- |
 | `terminal`     | Emits a terminal BEL (`\x07`) for editor or orchestrator alerts.                             |

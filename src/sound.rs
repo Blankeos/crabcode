@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SoundEvent {
@@ -215,16 +215,30 @@ pub fn play_file(path: &Path) {
 
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("afplay").arg(path).spawn();
+        let _ = Command::new("afplay")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
         return;
     }
 
     #[cfg(target_os = "linux")]
     {
-        if Command::new("paplay").arg(path).spawn().is_ok() {
+        if Command::new("paplay")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+        {
             return;
         }
-        let _ = Command::new("aplay").arg(path).spawn();
+        let _ = Command::new("aplay")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
         return;
     }
 
