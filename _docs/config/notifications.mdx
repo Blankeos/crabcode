@@ -46,18 +46,6 @@ Notifications are crabcode-specific and apply only to `crabcode` config files. E
 
 Events are `complete`, `subagentComplete`, `error`, `permission`, and `question`.
 
-For headless servers, disable sounds on completion events so crabcode does not invoke
-local audio backends:
-
-```jsonc title="crabcode.jsonc"
-{
-  "notifications": {
-    "complete": { "soundEnabled": false },
-    "subagentComplete": { "soundEnabled": false }
-  }
-}
-```
-
 | Field          | Behavior                                                                                     |
 | -------------- | -------------------------------------------------------------------------------------------- |
 | `terminal`     | Emits a terminal BEL (`\x07`) for editor or orchestrator alerts.                             |
@@ -66,6 +54,39 @@ local audio backends:
 | `desktop`      | Sends a native desktop notification.                                                         |
 
 `complete`, `subagentComplete`, and `error` default to `soundEnabled: true` and use their own bundled sounds when `soundFile` is unset. `subagentComplete` runs whenever a subagent finishes. When omitted, it inherits the `complete` event's enable, terminal, and desktop settings, but not its custom `soundFile`; the dedicated bundled subagent completion sound is used instead. Configure `subagentComplete` separately to use a custom sound or notification behavior. `permission` and `question` default to silent unless you enable them and provide a file.
+
+## Sound Playback
+
+Crabcode plays event sounds through the OS player when available:
+
+| Platform | Players |
+| -------- | ------- |
+| macOS    | `afplay` |
+| Linux    | `paplay` (Pulse/PipeWire), then `aplay` (ALSA) |
+
+Playback is skipped when no usable audio backend is detected (for example a headless server with `aplay` installed but no sound device). Player stdout and stderr are discarded so ALSA or Pulse warnings do not pollute the TUI.
+
+### Disable sound
+
+Per event:
+
+```jsonc title="crabcode.jsonc"
+{
+  "notifications": {
+    "complete": { "soundEnabled": false },
+    "subagentComplete": { "soundEnabled": false },
+    "error": { "soundEnabled": false },
+  },
+}
+```
+
+Process-wide kill switch (overrides detection; still respects per-event `soundEnabled`):
+
+```bash
+export CRABCODE_SOUND=0
+```
+
+Accepted values: `0` / `false` / `no` / `off` to force off; `1` / `true` / `yes` / `on` to force on when a player binary is on `PATH`.
 
 ## Terminal Notifications
 

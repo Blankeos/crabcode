@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SoundEvent {
@@ -213,37 +214,132 @@ pub fn play_file(path: &Path) {
         return;
     }
 
+    if !sound_playback_available() {
+        return;
+    }
+
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("afplay")
-            .arg(path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        let _ = spawn_player("afplay", path);
         return;
     }
 
     #[cfg(target_os = "linux")]
     {
-        if Command::new("paplay")
-            .arg(path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-        {
+        if spawn_player("paplay", path).is_ok() {
             return;
         }
-        let _ = Command::new("aplay")
-            .arg(path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        let _ = spawn_player("aplay", path);
         return;
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = path;
+    }
+}
+
+/// Whether this process should attempt local audio playback.
+///
+/// - `CRABCODE_SOUND=0|false|no|off` forces off
+/// - `CRABCODE_SOUND=1|true|yes|on` forces on (still requires a player binary)
+/// - otherwise probes once for a usable player / audio backend
+fn sound_playback_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(detect_sound_playback_available)
+}
+
+fn detect_sound_playback_available() -> bool {
+    match env_sound_override() {
+        Some(false) => return false,
+        Some(true) | None => {}
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return player_on_path("afplay");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Prefer Pulse/PipeWire (`paplay`); fall back to ALSA (`aplay`) only when a
+        // sound device is present so headless servers do not fork `aplay` every event.
+        if player_on_path("paplay") && pulse_or_pipewire_available() {
+            return true;
+        }
+        if player_on_path("aplay") && alsa_device_available() {
+            return true;
+        }
+        // Forced on via env: allow spawn attempts even without a detected device.
+        if env_sound_override() == Some(true) {
+            return player_on_path("paplay") || player_on_path("aplay");
+        }
+        return false;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
+}
+
+fn env_sound_override() -> Option<bool> {
+    let value = std::env::var("CRABCODE_SOUND").ok()?;
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "0" | "false" | "no" | "off" => Some(false),
+        "1" | "true" | "yes" | "on" => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn spawn_player(player: &str, path: &Path) -> std::io::Result<std::process::Child> {
+    Command::new(player)
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn player_on_path(player: &str) -> bool {
+    // Scan PATH instead of spawning the player (afplay treats unknown flags as files).
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        let candidate = dir.join(player);
+        candidate.is_file()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn pulse_or_pipewire_available() -> bool {
+    if std::env::var_os("PULSE_SERVER").is_some() {
+        return true;
+    }
+    let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return false;
+    };
+    let runtime_dir = PathBuf::from(runtime_dir);
+    runtime_dir.join("pulse/native").exists()
+        || runtime_dir.join("pipewire-0").exists()
+        || runtime_dir.join("pipewire-0-manager").exists()
+}
+
+#[cfg(target_os = "linux")]
+fn alsa_device_available() -> bool {
+    // Common device nodes / proc entries when a sound card is present.
+    if Path::new("/dev/snd/controlC0").exists() || Path::new("/dev/dsp").exists() {
+        return true;
+    }
+    match fs::read_to_string("/proc/asound/cards") {
+        Ok(contents) => contents.lines().any(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.contains("no soundcards")
+        }),
+        Err(_) => false,
     }
 }
