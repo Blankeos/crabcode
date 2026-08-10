@@ -78,10 +78,20 @@ impl Popup {
         }
 
         let popup_height = (self.visible_range().len() as u16) + 2;
+        // The popup is displayed above the input, with a three-row gap. On a
+        // short terminal, avoid rendering past the top edge of the frame.
+        let available_height = area.y.saturating_sub(3);
+        let popup_height = popup_height.min(available_height);
+
+        // A bordered list needs a top border, one item row, and a bottom
+        // border. Hide it until there is enough vertical space to render one.
+        if popup_height < 3 {
+            return None;
+        }
 
         Some(Rect {
             x: area.x,
-            y: area.y.saturating_sub(popup_height).saturating_sub(3),
+            y: available_height.saturating_sub(popup_height),
             width: area.width,
             height: popup_height,
         })
@@ -472,6 +482,30 @@ mod tests {
         let mut popup = Popup::new();
         popup.set_suggestions(vec![]);
         assert!(!popup.is_visible());
+    }
+
+    #[test]
+    fn test_popup_area_clamps_to_space_above_anchor() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(
+            (0..MAX_VISIBLE_ITEMS)
+                .map(|index| suggestion(&format!("item{index}"), "desc"))
+                .collect(),
+        );
+
+        let area = popup
+            .popup_area(Rect::new(0, 7, 40, 2))
+            .expect("popup area");
+
+        assert_eq!(area, Rect::new(0, 0, 40, 4));
+    }
+
+    #[test]
+    fn test_popup_area_hides_when_too_short_for_border_and_item() {
+        let mut popup = Popup::new();
+        popup.set_suggestions(vec![suggestion("item1", "desc1")]);
+
+        assert_eq!(popup.popup_area(Rect::new(0, 5, 40, 2)), None);
     }
 
     #[test]
