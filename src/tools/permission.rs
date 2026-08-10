@@ -22,6 +22,19 @@ pub enum PermissionAction {
     Unknown,
 }
 
+fn external_directory_pattern_matches(candidate: &str, grant: &str) -> bool {
+    if grant == "*" {
+        return true;
+    }
+
+    let Some(grant_root) = grant.strip_suffix("/*") else {
+        return wildcard_match(candidate, grant);
+    };
+    let candidate_root = candidate.strip_suffix("/*").unwrap_or(candidate);
+
+    Path::new(candidate_root).starts_with(Path::new(grant_root))
+}
+
 fn is_safe_workspace_read_like_action(action: PermissionAction) -> bool {
     matches!(
         action,
@@ -111,7 +124,10 @@ impl PermissionGrant {
         other.patterns.iter().any(|candidate| {
             self.patterns
                 .iter()
-                .any(|grant| wildcard_match(candidate, grant))
+                .any(|grant| match self.permission.as_str() {
+                    "external_directory" => external_directory_pattern_matches(candidate, grant),
+                    _ => wildcard_match(candidate, grant),
+                })
         })
     }
 }
