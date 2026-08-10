@@ -187,6 +187,7 @@ impl TryFrom<Message> for SessionMessage {
             } else {
                 None
             },
+            reasoning_started_at: None,
             t0_ms: msg
                 .t0_ms
                 .and_then(|v| if v > 0 { Some(v as u64) } else { None }),

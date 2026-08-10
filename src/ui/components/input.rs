@@ -419,6 +419,7 @@ impl Input {
         provider_name: &str,
         reasoning_effort: Option<&str>,
         colors: &ThemeColors,
+        show_terminal_cursor: bool,
     ) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -490,8 +491,10 @@ impl Input {
         // Set the physical terminal cursor position to the textarea's cursor
         // location so that the IME candidate window appears at the correct position.
         // This is essential for CJK input methods.
-        if let Some(area) = self.textarea_area {
-            self.set_terminal_cursor_position(frame, area);
+        if show_terminal_cursor {
+            if let Some(area) = self.textarea_area {
+                self.set_terminal_cursor_position(frame, area);
+            }
         }
 
         let mut info_spans = vec![

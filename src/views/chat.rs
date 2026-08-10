@@ -140,6 +140,7 @@ pub fn render_chat(
     subagent_tabs: Option<SubagentTabs>,
     queued_messages: &[String],
     find_bar: &mut FindBar,
+    show_terminal_cursor: bool,
 ) {
     let size = f.area();
     let is_subagent_view = subagent_tabs
@@ -215,6 +216,7 @@ pub fn render_chat(
             &provider_name,
             reasoning_effort.as_deref(),
             colors,
+            show_terminal_cursor,
         );
     }
 

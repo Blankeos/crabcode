@@ -45,7 +45,6 @@ fn assistant_tool_part_info(
             if result_ids.contains(id) {
                 return None;
             }
-
             let mut info = parsed_tool_message_from_object(part.data.as_object()?, false);
             if part.data.get("status").is_none() {
                 info.status = "running".to_string();
@@ -394,6 +393,14 @@ const TOOL_RESULT_MAX_SCREEN_LINES: usize = 8;
 const PATCH_DIFF_PREVIEW_MAX_LINES: usize = 40;
 const TOOL_MARKER_ACTIVE: &str = "⬡";
 const TOOL_MARKER_DONE: &str = "⬢";
+
+fn format_thought_duration(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        format!("{}ms", duration_ms.max(1))
+    } else {
+        format!("{:.1}s", duration_ms as f64 / 1_000.0)
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ParsedToolMessage {
@@ -1868,7 +1875,6 @@ impl Chat {
             self.streaming_first_token_time = Some(now);
             self.streaming_t1_ms = Some(now_epoch_ms());
         }
-
         self.update_streaming_token_count(chunk_str);
         if self.should_autoscroll() {
             self.scroll_offset = usize::MAX;
@@ -1888,11 +1894,13 @@ impl Chat {
             appended_idx = self.messages.len().saturating_sub(1);
             if let Some(msg) = self.messages.last_mut() {
                 msg.append_reasoning(chunk_str);
+                msg.start_reasoning_timer(std::time::Instant::now());
             }
         } else {
             appended_idx = self.messages.len();
             let mut msg = Message::incomplete("");
             msg.append_reasoning(chunk_str);
+            msg.start_reasoning_timer(std::time::Instant::now());
             self.messages.push(msg);
         }
 
@@ -2261,6 +2269,7 @@ impl Chat {
     }
 
     pub fn finalize_streaming_metrics(&mut self) {
+        let finalized_at = std::time::Instant::now();
         let token_count = self.streaming_token_count;
 
         let t0_ms = self.streaming_t0_ms;
@@ -2291,6 +2300,7 @@ impl Chat {
                 msg.output_tokens = Some(token_count);
                 msg.token_count = Some(token_count);
                 msg.duration_ms = Some(decode_duration_ms);
+                msg.finish_reasoning_timer(finalized_at);
                 msg.t0_ms = t0_ms;
                 msg.t1_ms = t1_ms;
                 msg.tn_ms = tn_ms;
@@ -4122,6 +4132,7 @@ impl Chat {
     fn format_thinking_block(
         &self,
         reasoning: &str,
+        reasoning_duration_ms: Option<u64>,
         max_width: usize,
         colors: &ThemeColors,
         cached_rendered: Option<&[Line<'static>]>,
@@ -4145,10 +4156,10 @@ impl Chat {
         let gutter_style = non_selectable_style(gutter_style);
 
         let mut out = Vec::new();
-        let label = if self.thinking_visible {
-            "Thinking"
+        let label = if let Some(duration_ms) = reasoning_duration_ms {
+            format!("Thought for {}", format_thought_duration(duration_ms))
         } else {
-            "Thinking collapsed"
+            "Thinking…".to_string()
         };
         let action = if self.thinking_visible {
             "collapse"
@@ -4453,6 +4464,9 @@ impl Chat {
                                 lines.extend(
                                     self.format_thinking_block(
                                         reasoning,
+                                        part.data
+                                            .get("duration_ms")
+                                            .and_then(serde_json::Value::as_u64),
                                         max_width,
                                         colors,
                                         (is_streaming
@@ -4704,6 +4718,13 @@ impl Chat {
                         lines.extend(
                             self.format_thinking_block(
                                 reasoning_trimmed,
+                                message
+                                    .parts
+                                    .iter()
+                                    .rev()
+                                    .find(|part| part.part_type == "reasoning")
+                                    .and_then(|part| part.data.get("duration_ms"))
+                                    .and_then(serde_json::Value::as_u64),
                                 max_width,
                                 colors,
                                 is_streaming
@@ -9792,6 +9813,13 @@ codex exec --skip-git-repo-check \
             area,
         ));
         assert!(!chat.has_active_selection_edge_scroll());
+    }
+
+    #[test]
+    fn test_format_thought_duration() {
+        assert_eq!(format_thought_duration(0), "1ms");
+        assert_eq!(format_thought_duration(232), "232ms");
+        assert_eq!(format_thought_duration(1_200), "1.2s");
     }
 
     #[test]

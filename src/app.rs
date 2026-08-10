@@ -10645,6 +10645,7 @@ impl App {
                     subagent_tabs,
                     &queued_messages,
                     &mut self.find_bar,
+                    self.overlay_focus == OverlayFocus::None,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
