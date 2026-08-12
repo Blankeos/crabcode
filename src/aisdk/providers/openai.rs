@@ -1522,6 +1522,9 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
                 return Some(Ok(responses_error_chunk(&value, event_type)));
             }
             let resp = &value["response"];
+            if let Some(usage) = resp.get("usage") {
+                log_openai_responses_usage(usage);
+            }
             Some(Ok(ChunkType::ResponseCompleted {
                 end_turn: resp.get("end_turn").and_then(|value| value.as_bool()),
             }))
@@ -1542,6 +1545,44 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
             }
         }
     }
+}
+
+/// Log Responses API usage for prompt-cache visibility.
+/// Looks for `input_tokens_details.cached_tokens` (OpenAI/xAI shape).
+fn log_openai_responses_usage(usage: &serde_json::Value) {
+    let input = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(|v| v.as_u64());
+    let output = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(|v| v.as_u64());
+    let cached = usage
+        .pointer("/input_tokens_details/cached_tokens")
+        .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+
+    if input.is_none() && output.is_none() && cached == 0 {
+        return;
+    }
+
+    let input_v = input.unwrap_or(0);
+    let hit_pct = if input_v > 0 {
+        (cached as f64 * 100.0) / input_v as f64
+    } else {
+        0.0
+    };
+
+    crate::log::log(&format!(
+        "[prompt-cache] openai-responses input={} output={} cached_tokens={} hit_pct={:.1}",
+        input.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        output.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        cached,
+        hit_pct
+    ));
 }
 
 fn responses_provider_error_message(value: &serde_json::Value, fallback: &str) -> String {

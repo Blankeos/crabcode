@@ -113,7 +113,7 @@ I tried crabcode specifically for these providers:
 - [x] **minimax**
 - [x] **fireworks**
 - [x] **baseten**
-- [x] **kimi-for-coding** (API key, Anthropic-protocol endpoint)
+- [x] **crof**
 
 > Feel free to create an issue / add to this list if you tried
 

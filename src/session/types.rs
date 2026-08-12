@@ -167,6 +167,7 @@ pub struct Message {
     pub agent_mode: Option<String>,
     pub token_count: Option<usize>,
     pub duration_ms: Option<u64>,
+    pub reasoning_started_at: Option<std::time::Instant>,
     // Streaming timing primitives (epoch milliseconds)
     // Used to derive TTFT/TPS/full latency.
     pub t0_ms: Option<u64>,
@@ -199,6 +200,7 @@ impl Message {
             agent_mode: None,
             token_count: None,
             duration_ms: None,
+            reasoning_started_at: None,
             t0_ms: None,
             t1_ms: None,
             tn_ms: None,
@@ -245,6 +247,7 @@ impl Message {
             agent_mode: None,
             token_count: None,
             duration_ms: None,
+            reasoning_started_at: None,
             t0_ms: None,
             t1_ms: None,
             tn_ms: None,
@@ -262,6 +265,8 @@ impl Message {
         if chunk.is_empty() {
             return;
         }
+
+        self.finish_reasoning_timer(std::time::Instant::now());
 
         let starts_new_text_part = !self
             .parts
@@ -315,6 +320,31 @@ impl Message {
         }
     }
 
+    pub fn start_reasoning_timer(&mut self, now: std::time::Instant) {
+        if self
+            .parts
+            .last()
+            .is_some_and(|part| part.part_type == "reasoning")
+        {
+            self.reasoning_started_at.get_or_insert(now);
+        }
+    }
+
+    pub fn finish_reasoning_timer(&mut self, now: std::time::Instant) {
+        let Some(started) = self.reasoning_started_at.take() else {
+            return;
+        };
+        let Some(part) = self
+            .parts
+            .last_mut()
+            .filter(|part| part.part_type == "reasoning")
+        else {
+            return;
+        };
+
+        part.data["duration_ms"] = JsonValue::from(now.duration_since(started).as_millis() as u64);
+    }
+
     pub fn rollback_streamed_output(&mut self, text: &str, reasoning: &str) -> bool {
         if !parts_end_with(&self.parts, "text", text)
             || !parts_end_with(&self.parts, "reasoning", reasoning)
@@ -337,10 +367,12 @@ impl Message {
         name: impl Into<String>,
         args: JsonValue,
     ) {
+        self.finish_reasoning_timer(std::time::Instant::now());
         self.parts.push(MessagePart::tool_call(id, name, args));
     }
 
     pub fn add_or_update_tool_result_part(&mut self, payload: JsonValue) {
+        self.finish_reasoning_timer(std::time::Instant::now());
         let Some(call_id) = payload
             .get("id")
             .or_else(|| payload.get("call_id"))

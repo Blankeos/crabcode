@@ -47,7 +47,24 @@ pub async fn run_subagent(
     use futures::StreamExt;
     use std::collections::HashMap;
 
-    let session = resolve_subagent_session(&agent, parent_session, sender.as_ref()).await?;
+    let mut session = resolve_subagent_session(&agent, parent_session, sender.as_ref()).await?;
+    // Child cache key on purpose: subagents have a different system prompt and tool set,
+    // so parent-prefix reuse would miss (and risk sticky-routing pollution). See
+    // SessionAffinity::child_session docs.
+    session.prompt_cache_key = Some(session_id.clone());
+    session.openai_options.prompt_cache_key = Some(session_id.clone());
+    if crate::llm::xai_build::is_build_transport(&session.openai_options.additional_headers) {
+        let affinity = crate::llm::xai_build::SessionAffinity::child_session(&session_id);
+        crate::llm::xai_build::inject_session_affinity_headers(
+            &mut session.openai_options.additional_headers,
+            &affinity,
+        );
+        crate::emit_log!(
+            "[prompt-cache] xai-build affinity kind=child session_id={} req_id={}",
+            affinity.session_id,
+            affinity.req_id
+        );
+    }
 
     let scoped_registry = build_scoped_registry(full_registry, &agent).await;
 

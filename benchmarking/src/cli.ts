@@ -79,7 +79,7 @@ export function printHelp(tasks: BenchmarkTask[]) {
 
 Options:
   --model provider/model             Force one model for every task (overrides per-task defaults).
-  --agents crabcode,opencode,codex   Agents to run.
+  --agents crabcode,opencode,codex,grok-build   Agents to run.
   --tasks id-a,id-b                  Task IDs to run.
   --tags typescript,hidden-tests     Run tasks containing every listed tag.
   --difficulty hard                  Run tasks by difficulty: smoke, medium, hard.
@@ -120,9 +120,14 @@ Command overrides:
   BENCH_CRABCODE_CMD='crabcode -p -m {model} --reasoning-effort medium --no-session-persistence --dangerously-skip-permissions {prompt}'
   BENCH_OPENCODE_CMD='opencode run --dangerously-skip-permissions -m {model} {prompt}'
   BENCH_CODEX_CMD='codex exec --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m {model} {prompt}'
+  BENCH_GROK_BUILD_CMD='grok --always-approve -m {model} -p {prompt}'
+
+Binary overrides:
+  BENCH_CRABCODE_BIN, BENCH_GROK_BUILD_BIN
 
 Template tokens: {prompt}, {model}, {repo}
-Note: {model} is agent-aware; codex strips a leading openai/ provider prefix.
+Note: {model} is agent-aware — codex strips openai/; grok-build strips a provider/ prefix.
+  Same-model runs with OpenAI ids may fail on grok-build (xAI models only unless configured).
 `)
 }
 

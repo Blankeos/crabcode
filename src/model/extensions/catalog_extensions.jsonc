@@ -1,0 +1,66 @@
+// Model catalog extensions, applied on top of models.dev (parsed as JSONC).
+// Unknown model ids are added; existing ids are deep-merged with these fields winning.
+{
+  "xai": {
+    "id": "xai",
+    "name": "xAI",
+    "models": {
+      "grok-composer-2.5-fast": {
+        "id": "grok-composer-2.5-fast",
+        "name": "Composer 2.5",
+        "family": "grok-build",
+        "attachment": false,
+        "reasoning": false,
+        "tool_call": true,
+        "structured_output": true,
+        "temperature": true,
+        "release_date": "2026-06-01",
+        "last_updated": "2026-06-05",
+        "modalities": {
+          "input": ["text", "pdf"],
+          "output": ["text"]
+        },
+        "open_weights": false,
+        "limit": {
+          "context": 256000,
+          "output": 256000
+        },
+        "cost": {
+          "input": 0.5,
+          "output": 2.5,
+          "cache_read": 0.2
+        }
+      }
+    }
+  },
+
+  // CROF-specific metadata absent from models.dev. Checked 2026-08-09.
+  // Remove once models.dev includes the corresponding upstream fixes.
+  "crof": {
+    "models": {
+      // DeepSeek V4 Flash 0731 natively supports low, high, and max effort.
+      // CROF accepts OpenAI-compatible `reasoning_effort`; manual verification
+      // confirmed `max` also works on its undated alias.
+      "deepseek-v4-flash-0731": {
+        "reasoning_options": [
+          { "type": "effort", "values": ["none", "low", "medium", "high", "max"] }
+        ]
+      },
+      "deepseek-v4-flash": {
+        "reasoning_options": [
+          { "type": "effort", "values": ["none", "low", "medium", "high", "max"] }
+        ]
+      },
+      "greg-1-mini": {
+        "attachment": true,
+        "modalities": {
+          "input": ["text", "image"]
+        }
+      },
+      "kimi-k2.5-lightning": {
+        // modalities already include "image"; only the attachment flag is wrong.
+        "attachment": true
+      }
+    }
+  }
+}

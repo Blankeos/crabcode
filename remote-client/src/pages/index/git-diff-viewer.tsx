@@ -5,23 +5,16 @@ import {
   type FileDiffMetadata,
   type FileDiffOptions,
 } from "@pierre/diffs"
-import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import type { GitViewerController } from "./page-types"
 import { cx } from "../../lib/cx"
 
-type DiffFile = NonNullable<ReturnType<GitViewerController["status"]>>["diff_files"][number]
+export type DiffFile = NonNullable<ReturnType<GitViewerController["status"]>>["diff_files"][number]
 
 let highlighterReady: Promise<void> | null = null
 
-/**
- * Pierre paints line backgrounds on grid tracks sized with `1fr`, so red/green
- * only spans the viewport. When the user scrolls horizontally the color stops.
- *
- * Important: do NOT set width:100% on line rows — that collapses the track back
- * to the viewport. Use min-width:max(100%, max-content) on content cells only.
- */
+/** Keep Crabcode's chrome while leaving Pierre's responsive code grid intact. */
 function pierreChromeCss(opts: { compact?: boolean; wrap?: boolean }): string {
-  const overflow = opts.wrap ? "wrap" : "scroll"
   return `
     :host {
       --diffs-font-size: 12px;
@@ -126,41 +119,8 @@ function pierreChromeCss(opts: { compact?: boolean; wrap?: boolean }): string {
     }
 
     ${
-      overflow === "scroll"
+      opts.wrap
         ? `
-    /* Grow the content track past the viewport when lines are long. */
-    [data-diff],
-    [data-file] {
-      --diffs-code-grid: var(--diffs-grid-number-column-width) minmax(max-content, 100%);
-    }
-
-    [data-overflow="scroll"] [data-code] {
-      grid-template-columns: var(--diffs-code-grid) !important;
-      width: max-content;
-      min-width: 100%;
-      column-gap: 0 !important;
-    }
-
-    /*
-     * Fill the grown track without forcing the track width back to 100%.
-     * width:100% was collapsing max-content → viewport and re-breaking backgrounds.
-     */
-    [data-overflow="scroll"] [data-content],
-    [data-overflow="scroll"] [data-line],
-    [data-overflow="scroll"] [data-no-newline],
-    [data-overflow="scroll"] [data-line-annotation],
-    [data-overflow="scroll"] [data-merge-conflict],
-    [data-overflow="scroll"] [data-merge-conflict-actions] {
-      min-width: 100%;
-      width: auto;
-    }
-
-    /* Keep sticky gutter above scrolled code; keep red/green number paint intact. */
-    [data-overflow="scroll"] [data-gutter] {
-      z-index: 4;
-    }
-    `
-        : `
     /* Wrap mode: full width, no horizontal scroll. */
     [data-diff],
     [data-file] {
@@ -180,6 +140,20 @@ function pierreChromeCss(opts: { compact?: boolean; wrap?: boolean }): string {
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: break-word;
+    }
+    `
+        : `
+    /* Pierre owns this scroll grid. Replacing both tracks with max-content can
+     * strand a narrow card on its sticky number gutter while highlighted code
+     * sits outside the initial viewport. */
+    [data-overflow="scroll"] [data-code] {
+      min-width: 0;
+      max-width: 100%;
+      column-gap: 0 !important;
+    }
+
+    [data-overflow="scroll"] [data-content] {
+      min-width: 0;
     }
     `
     }
@@ -305,6 +279,148 @@ function findPierreHeader(root: HTMLElement): HTMLElement | null {
   )
 }
 
+function hasRenderedDiffLines(root: HTMLElement, collapsed: boolean): boolean {
+  const host = root.matches?.("diffs-container")
+    ? root
+    : (root.querySelector("diffs-container") as HTMLElement | null)
+  const shadow = host?.shadowRoot
+  if (!shadow) return false
+  if (collapsed) return findPierreHeader(root) !== null
+  // onPostRender also fires for Pierre's placeholder pass. Real highlighted
+  // output has non-empty code content; placeholder rows can already have line
+  // nodes but do not contain source text yet.
+  const content = shadow.querySelector("[data-content]")
+  const line = content?.querySelector("[data-line], [data-no-newline], [data-line-annotation]")
+  return line !== null && (content?.textContent ?? "").replaceAll(" ", "").trim().length > 0
+}
+
+function hashText(hash: number, value: string): number {
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+/** Stable across git status polls when this file's rendered content is unchanged. */
+function diffFileRenderKey(file: DiffFile): string {
+  let hash = hashText(
+    2166136261,
+    [file.path, file.old_path ?? "", file.status, file.binary, file.truncated].join("|")
+  )
+  for (const line of file.lines) {
+    hash = hashText(
+      hash,
+      [line.kind, line.old_line ?? "", line.new_line ?? "", line.text].join("|")
+    )
+  }
+  return `${file.path}:${file.lines.length}:${hash.toString(36)}`
+}
+
+/**
+ * Keep Pierre cards hidden until all have completed their first real render.
+ * This prevents its internal loading bars and early truncation badges from
+ * flashing as a stack of malformed-looking cards.
+ */
+export function GitDiffBatch(props: {
+  files: DiffFile[]
+  compact?: boolean
+  wrap?: boolean
+}) {
+  const entries = createMemo<{ file: DiffFile; key: string }[]>((previous = []) => {
+    const mounted = new Map(previous.map((entry) => [entry.key, entry]))
+    return props.files.map((file, index) => {
+      const key = `${index}:${diffFileRenderKey(file)}`
+      // Preserve object identity so Solid's <For> retains the already-rendered
+      // Pierre instance when polling returns equivalent diff content.
+      return mounted.get(key) ?? { file, key }
+    })
+  })
+  const [readyKeys, setReadyKeys] = createSignal<ReadonlySet<string>>(new Set())
+  const [revealedBatchKey, setRevealedBatchKey] = createSignal<string | null>(null)
+  const batchKey = createMemo(() => entries().map((entry) => entry.key).join("\n"))
+
+  createEffect(() => {
+    const valid = new Set(entries().map((entry) => entry.key))
+    setReadyKeys((current) => new Set([...current].filter((key) => valid.has(key))))
+  })
+
+  const allReady = createMemo(() => {
+    const ready = readyKeys()
+    const current = entries()
+    return current.length === 0 || current.every((entry) => ready.has(entry.key))
+  })
+
+  // Reveal is tied to the exact content key. When status data arrives or changes,
+  // the key mismatch hides cards synchronously—there is no effect-sized frame in
+  // which new truncation badges can appear under an old `revealed = true` value.
+  const revealed = () =>
+    allReady() && batchKey().length > 0 && revealedBatchKey() === batchKey()
+
+  // Once every Pierre instance is ready, wait two paint frames before exposing
+  // the batch so shadow-DOM CSS and syntax token styles have settled too.
+  createEffect(() => {
+    if (!allReady()) {
+      return
+    }
+    const key = batchKey()
+    if (!key) return
+    let secondFrame = 0
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        if (batchKey() === key && allReady()) setRevealedBatchKey(key)
+      })
+    })
+    onCleanup(() => {
+      cancelAnimationFrame(firstFrame)
+      if (secondFrame) cancelAnimationFrame(secondFrame)
+    })
+  })
+
+  const onReady = (key: string) => {
+    setReadyKeys((current) => {
+      if (current.has(key)) return current
+      const next = new Set(current)
+      next.add(key)
+      return next
+    })
+  }
+
+  return (
+    <div class="relative min-h-[3.5rem] min-w-0">
+      <Show when={!revealed()}>
+        <div
+          class="absolute inset-x-0 top-0 flex min-h-[3.5rem] items-center gap-2 rounded-md border border-[var(--line)] bg-white/[0.018] px-3 text-[0.72rem] text-[var(--faint)]"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="size-3 animate-spin rounded-full border border-white/15 border-t-[var(--muted)]" />
+          <span>Preparing highlighted diffs…</span>
+        </div>
+      </Show>
+
+      <div
+        class={cx(
+          "grid min-w-0 gap-2",
+          !revealed() && "pointer-events-none invisible absolute inset-x-0 top-0"
+        )}
+        aria-hidden={!revealed()}
+      >
+        <For each={entries()}>
+          {(entry) => (
+            <GitDiffFile
+              file={entry.file}
+              compact={props.compact}
+              wrap={props.wrap}
+              onReady={() => onReady(entry.key)}
+            />
+          )}
+        </For>
+      </div>
+    </div>
+  )
+}
+
 function wireHeaderAccordion(
   root: HTMLElement,
   isCollapsed: () => boolean,
@@ -344,6 +460,8 @@ export function GitDiffFile(props: {
   compact?: boolean
   /** Soft-wrap long lines instead of horizontal scroll. */
   wrap?: boolean
+  /** Called once Pierre has rendered real content or a terminal fallback. */
+  onReady?: () => void
 }) {
   const [host, setHost] = createSignal<HTMLDivElement | undefined>()
   const [failed, setFailed] = createSignal(false)
@@ -371,7 +489,10 @@ export function GitDiffFile(props: {
     if (!el) return
 
     el.replaceChildren()
-    if (file.binary || file.lines.length === 0) return
+    if (file.binary || file.lines.length === 0) {
+      props.onReady?.()
+      return
+    }
 
     let cancelled = false
     let diff: FileDiff | undefined
@@ -386,7 +507,10 @@ export function GitDiffFile(props: {
 
       const fileDiff = parseFileDiff(file)
       if (!fileDiff) {
-        if (!cancelled) setFailed(true)
+        if (!cancelled) {
+          setFailed(true)
+          props.onReady?.()
+        }
         return
       }
 
@@ -399,6 +523,7 @@ export function GitDiffFile(props: {
               () => collapsed(),
               () => setCollapsed((value) => !value)
             )
+            if (hasRenderedDiffLines(node, isCollapsed)) props.onReady?.()
           },
         },
         undefined,
@@ -416,6 +541,7 @@ export function GitDiffFile(props: {
           () => collapsed(),
           () => setCollapsed((value) => !value)
         )
+        if (hasRenderedDiffLines(el, isCollapsed)) props.onReady?.()
         if (!ok) {
           window.setTimeout(() => {
             if (cancelled || host() !== el) return
@@ -425,12 +551,20 @@ export function GitDiffFile(props: {
               shadow?.querySelector("[data-diff], [data-file], pre, [data-line], [data-diffs-header]") ||
                 (container && container.childElementCount > 0)
             )
-            if (!hasContent) setFailed(true)
+            if (!hasContent) {
+              setFailed(true)
+              props.onReady?.()
+            } else if (hasRenderedDiffLines(el, isCollapsed)) {
+              props.onReady?.()
+            }
           }, 1500)
         }
       } catch (error) {
         console.error("Failed to render git diff", error)
-        if (!cancelled) setFailed(true)
+        if (!cancelled) {
+          setFailed(true)
+          props.onReady?.()
+        }
       }
     }
 

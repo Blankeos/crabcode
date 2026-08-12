@@ -45,7 +45,6 @@ fn assistant_tool_part_info(
             if result_ids.contains(id) {
                 return None;
             }
-
             let mut info = parsed_tool_message_from_object(part.data.as_object()?, false);
             if part.data.get("status").is_none() {
                 info.status = "running".to_string();
@@ -243,6 +242,9 @@ fn mentioned_path(candidates: &[PathMentionCandidate], text: &str) -> Option<std
 #[derive(Debug, Clone, Default)]
 pub struct Chat {
     pub messages: Vec<Message>,
+    /// Agent names that can be mentioned with `@name` in user messages.
+    /// Used to re-style `@mentions` in submitted (rendered) messages.
+    pub agent_mention_names: Vec<String>,
     pub scroll_offset: usize,
     pub scrollbar_state: ScrollbarState,
     pub is_dragging_scrollbar: bool,
@@ -309,6 +311,8 @@ pub struct Chat {
     pending_click_anchor: Option<(usize, usize)>,
     /// Index of the message highlighted by timeline navigation (None = no highlight)
     pub highlighted_message_index: Option<usize>,
+    /// Deferred scroll-to-message index resolved during next render after positions are known.
+    pending_scroll_to_message: Option<usize>,
     /// Match ranges for the active rendered-line chat find query.
     search_matches: Vec<ChatSearchMatch>,
     search_active_match: Option<usize>,
@@ -389,6 +393,14 @@ const TOOL_RESULT_MAX_SCREEN_LINES: usize = 8;
 const PATCH_DIFF_PREVIEW_MAX_LINES: usize = 40;
 const TOOL_MARKER_ACTIVE: &str = "⬡";
 const TOOL_MARKER_DONE: &str = "⬢";
+
+fn format_thought_duration(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        format!("{}ms", duration_ms.max(1))
+    } else {
+        format!("{:.1}s", duration_ms as f64 / 1_000.0)
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ParsedToolMessage {
@@ -1579,6 +1591,7 @@ impl Chat {
     pub fn new() -> Self {
         Self {
             messages: Vec::new(),
+            agent_mention_names: Vec::new(),
             scroll_offset: 0,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
@@ -1638,12 +1651,14 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
+            pending_scroll_to_message: None,
         }
     }
 
     pub fn with_messages(messages: Vec<Message>) -> Self {
         Self {
             messages,
+            agent_mention_names: Vec::new(),
             scroll_offset: 0,
             scrollbar_state: ScrollbarState::default(),
             is_dragging_scrollbar: false,
@@ -1703,7 +1718,22 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
+            pending_scroll_to_message: None,
         }
+    }
+
+    /// Set the agent names that can be mentioned with `@name` in user messages.
+    pub fn set_agent_mention_names(&mut self, names: Vec<String>) {
+        if self.agent_mention_names != names {
+            self.agent_mention_names = names;
+            self.invalidate_cache();
+        }
+    }
+
+    /// Builder-style variant of [`set_agent_mention_names`].
+    pub fn with_agent_mention_names(mut self, names: Vec<String>) -> Self {
+        self.set_agent_mention_names(names);
+        self
     }
 
     pub fn add_message(&mut self, message: Message) {
@@ -1845,7 +1875,6 @@ impl Chat {
             self.streaming_first_token_time = Some(now);
             self.streaming_t1_ms = Some(now_epoch_ms());
         }
-
         self.update_streaming_token_count(chunk_str);
         if self.should_autoscroll() {
             self.scroll_offset = usize::MAX;
@@ -1865,11 +1894,13 @@ impl Chat {
             appended_idx = self.messages.len().saturating_sub(1);
             if let Some(msg) = self.messages.last_mut() {
                 msg.append_reasoning(chunk_str);
+                msg.start_reasoning_timer(std::time::Instant::now());
             }
         } else {
             appended_idx = self.messages.len();
             let mut msg = Message::incomplete("");
             msg.append_reasoning(chunk_str);
+            msg.start_reasoning_timer(std::time::Instant::now());
             self.messages.push(msg);
         }
 
@@ -2238,6 +2269,7 @@ impl Chat {
     }
 
     pub fn finalize_streaming_metrics(&mut self) {
+        let finalized_at = std::time::Instant::now();
         let token_count = self.streaming_token_count;
 
         let t0_ms = self.streaming_t0_ms;
@@ -2268,6 +2300,7 @@ impl Chat {
                 msg.output_tokens = Some(token_count);
                 msg.token_count = Some(token_count);
                 msg.duration_ms = Some(decode_duration_ms);
+                msg.finish_reasoning_timer(finalized_at);
                 msg.t0_ms = t0_ms;
                 msg.t1_ms = t1_ms;
                 msg.tn_ms = tn_ms;
@@ -2734,6 +2767,15 @@ impl Chat {
         self.scroll_offset = target_offset.min(max_offset);
         self.user_scrolled_up = true;
         self.update_scrollbar();
+    }
+
+    /// Queue a scroll to a specific message for the next render cycle.
+    ///
+    /// Unlike [`scroll_to_message_index`], this defers resolution until
+    /// after line positions have been computed during rendering.  Use it
+    /// immediately after bulk-replacing the message list (e.g. compaction).
+    pub fn scroll_to_message_on_next_render(&mut self, idx: usize) {
+        self.pending_scroll_to_message = Some(idx);
     }
 
     pub fn set_highlighted_message(&mut self, idx: Option<usize>) {
@@ -3573,9 +3615,34 @@ impl Chat {
 
         let all_lines = &self.cached_lines;
         let positions = &self.cached_positions;
-
         let content_height = all_lines.len();
         let viewport = self.viewport_height;
+
+        // Resolve any deferred scroll-to-message request (e.g. after compaction).
+        // Keep the pending request if positions are not ready yet (viewport=0).
+        if let Some(target_idx) = self.pending_scroll_to_message {
+            if viewport > 0 {
+                if let Some(&line) = positions.get(target_idx) {
+                    let block_end = self
+                        .message_block_line_range(target_idx, positions, content_height)
+                        .map(|r| r.1)
+                        .unwrap_or(line);
+                    // Prefer the start of the block; if taller than the viewport,
+                    // center near the end so the marker line stays visible.
+                    let target_line = if block_end.saturating_sub(line) > viewport {
+                        block_end.saturating_sub(viewport / 2)
+                    } else {
+                        line
+                    };
+                    self.scroll_offset = target_line;
+                    // Stick-to-bottom only runs when user_scrolled_up is false;
+                    // keep this true so the offset is not immediately overwritten.
+                    self.user_scrolled_up = true;
+                    self.pending_scroll_to_message = None;
+                }
+            }
+        }
+
         let max_offset = content_height
             .saturating_add(self.scroll_bottom_padding)
             .saturating_sub(viewport);
@@ -4065,6 +4132,7 @@ impl Chat {
     fn format_thinking_block(
         &self,
         reasoning: &str,
+        reasoning_duration_ms: Option<u64>,
         max_width: usize,
         colors: &ThemeColors,
         cached_rendered: Option<&[Line<'static>]>,
@@ -4075,23 +4143,23 @@ impl Chat {
             .add_modifier(Modifier::BOLD);
         let title_style = Style::default()
             .fg(colors.text_weak)
-            .add_modifier(Modifier::BOLD | Modifier::ITALIC);
+            .add_modifier(Modifier::BOLD);
         let hint_key_style = Style::default()
             .fg(colors.text_weak)
             .add_modifier(Modifier::BOLD);
         let hint_style = Style::default()
             .fg(colors.text_weak)
-            .add_modifier(Modifier::DIM | Modifier::ITALIC);
+            .add_modifier(Modifier::DIM);
         let gutter_style = Style::default()
             .fg(colors.text_weak)
             .add_modifier(Modifier::DIM);
         let gutter_style = non_selectable_style(gutter_style);
 
         let mut out = Vec::new();
-        let label = if self.thinking_visible {
-            "Thinking"
+        let label = if let Some(duration_ms) = reasoning_duration_ms {
+            format!("Thought for {}", format_thought_duration(duration_ms))
         } else {
-            "Thinking collapsed"
+            "Thinking…".to_string()
         };
         let action = if self.thinking_visible {
             "collapse"
@@ -4127,10 +4195,7 @@ impl Chat {
             .map(|mut line| {
                 line.style = line.style.patch(Style::default().fg(colors.text_weak));
                 for span in &mut line.spans {
-                    span.style = Style::default()
-                        .fg(colors.text_weak)
-                        .add_modifier(Modifier::ITALIC)
-                        .patch(span.style);
+                    span.style = Style::default().fg(colors.text_weak).patch(span.style);
                 }
                 line
             })
@@ -4212,8 +4277,10 @@ impl Chat {
                     .split('\n')
                     .flat_map(|content_line| {
                         let content_line = content_line.strip_suffix('\r').unwrap_or(content_line);
-                        let styled_content = Line::from(spans_with_image_placeholders(
+                        let styled_content = Line::from(style_agent_mentions_in_line(
                             content_line,
+                            &self.agent_mention_names,
+                            colors,
                             text_style,
                             &image_style,
                         ));
@@ -4397,6 +4464,9 @@ impl Chat {
                                 lines.extend(
                                     self.format_thinking_block(
                                         reasoning,
+                                        part.data
+                                            .get("duration_ms")
+                                            .and_then(serde_json::Value::as_u64),
                                         max_width,
                                         colors,
                                         (is_streaming
@@ -4648,6 +4718,13 @@ impl Chat {
                         lines.extend(
                             self.format_thinking_block(
                                 reasoning_trimmed,
+                                message
+                                    .parts
+                                    .iter()
+                                    .rev()
+                                    .find(|part| part.part_type == "reasoning")
+                                    .and_then(|part| part.data.get("duration_ms"))
+                                    .and_then(serde_json::Value::as_u64),
                                 max_width,
                                 colors,
                                 is_streaming
@@ -6031,7 +6108,7 @@ fn format_compaction_marker<'a>(
         Span::styled(
             "Context compacted",
             Style::default()
-                .fg(colors.text_weak)
+                .fg(colors.info)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -6626,6 +6703,186 @@ where
     }
 
     spans
+}
+
+/// Style a user-message content line, applying image placeholders and
+/// `@agent` mention colors.
+///
+/// Detection runs on the full content line (same rules as the chat input),
+/// then ranges are mapped onto spans by absolute byte offset so image
+/// placeholders never need a boundary flag.
+fn style_agent_mentions_in_line<F>(
+    content_line: &str,
+    agent_names: &[String],
+    colors: &ThemeColors,
+    text_style: Style,
+    image_style: &F,
+) -> Vec<Span<'static>>
+where
+    F: Fn(&str) -> Style,
+{
+    let base_spans = spans_with_image_placeholders(content_line, text_style, image_style);
+    if agent_names.is_empty() {
+        return base_spans;
+    }
+
+    let mentions = crate::agent::mention::agent_mention_ranges_in_line(content_line, agent_names);
+    if mentions.is_empty() {
+        return base_spans;
+    }
+
+    // Walk absolute byte offsets and emit spans, splitting any base span that
+    // intersects a mention range.
+    let mut out = Vec::with_capacity(base_spans.len() + mentions.len());
+    let mut abs = 0usize;
+    let mut mention_idx = 0usize;
+
+    for span in base_spans {
+        let Span { content, style } = span;
+        let text = content.as_ref();
+        let span_start = abs;
+        let span_end = abs + text.len();
+        let mut cursor = 0usize; // offset within this span
+
+        while mention_idx < mentions.len() {
+            let (ref range, ref agent_name) = mentions[mention_idx];
+            if range.end <= span_start {
+                mention_idx += 1;
+                continue;
+            }
+            if range.start >= span_end {
+                break;
+            }
+
+            let rel_start = range.start.saturating_sub(span_start).max(cursor);
+            let rel_end = range.end.min(span_end) - span_start;
+            if rel_start > cursor {
+                out.push(Span::styled(text[cursor..rel_start].to_owned(), style));
+            }
+            if rel_end > rel_start {
+                let mention_style =
+                    style.patch(Style::default().fg(crate::theme::agent_color(agent_name, colors)));
+                out.push(Span::styled(
+                    text[rel_start..rel_end].to_owned(),
+                    mention_style,
+                ));
+            }
+            cursor = rel_end;
+            if range.end <= span_end {
+                mention_idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        if cursor < text.len() {
+            out.push(Span::styled(text[cursor..].to_owned(), style));
+        }
+        abs = span_end;
+    }
+
+    if out.is_empty() {
+        out.push(Span::styled(String::new(), text_style));
+    }
+    out
+}
+
+#[cfg(test)]
+mod agent_mention_style_tests {
+    use super::*;
+    use crate::theme::Theme;
+    use ratatui::style::{Color, Style};
+
+    fn test_colors() -> ThemeColors {
+        Theme::load_builtin_default().get_colors(true)
+    }
+
+    #[test]
+    fn styles_mentions_in_plain_user_line() {
+        let colors = test_colors();
+        let agents = vec!["executor".to_string(), "general".to_string()];
+        let text_style = Style::default().fg(Color::White);
+        let image_style = Style::default().fg(Color::Blue);
+
+        let spans = style_agent_mentions_in_line(
+            "please @executor and @General help",
+            &agents,
+            &colors,
+            text_style,
+            &|_| image_style,
+        );
+
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "please @executor and @General help");
+
+        let mention_spans: Vec<_> = spans
+            .iter()
+            .filter(|s| s.content.as_ref().starts_with('@'))
+            .collect();
+        assert_eq!(mention_spans.len(), 2);
+        assert_eq!(mention_spans[0].content.as_ref(), "@executor");
+        assert_eq!(mention_spans[1].content.as_ref(), "@General");
+        assert_eq!(
+            mention_spans[0].style.fg,
+            Some(crate::theme::agent_color("executor", &colors))
+        );
+        assert_eq!(
+            mention_spans[1].style.fg,
+            Some(crate::theme::agent_color("general", &colors))
+        );
+    }
+
+    #[test]
+    fn leaves_emails_and_unknown_agents_unstyled() {
+        let colors = test_colors();
+        let agents = vec!["explore".to_string()];
+        let text_style = Style::default().fg(Color::White);
+        let image_style = Style::default().fg(Color::Blue);
+
+        let spans = style_agent_mentions_in_line(
+            "mail me@explore.com and @unknown",
+            &agents,
+            &colors,
+            text_style,
+            &|_| image_style,
+        );
+
+        let explore_color = crate::theme::agent_color("explore", &colors);
+        assert!(spans.iter().all(|s| s.style.fg != Some(explore_color)));
+    }
+
+    #[test]
+    fn styles_mention_alongside_image_placeholder() {
+        let colors = test_colors();
+        let agents = vec!["explore".to_string()];
+        let text_style = Style::default().fg(Color::White);
+        let image_style = Style::default().fg(Color::Blue);
+
+        let spans = style_agent_mentions_in_line(
+            "see [Image #1] then @explore",
+            &agents,
+            &colors,
+            text_style,
+            &|_| image_style,
+        );
+
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "see [Image #1] then @explore");
+
+        let mention = spans
+            .iter()
+            .find(|s| s.content.as_ref() == "@explore")
+            .expect("mention span");
+        assert_eq!(
+            mention.style.fg,
+            Some(crate::theme::agent_color("explore", &colors))
+        );
+        let image = spans
+            .iter()
+            .find(|s| s.content.as_ref() == "[Image #1]")
+            .expect("image span");
+        assert_eq!(image.style.fg, Some(Color::Blue));
+    }
 }
 
 fn placeholder_at_line_col(line: &Line<'_>, target_col: usize) -> Option<String> {
@@ -9556,6 +9813,13 @@ codex exec --skip-git-repo-check \
             area,
         ));
         assert!(!chat.has_active_selection_edge_scroll());
+    }
+
+    #[test]
+    fn test_format_thought_duration() {
+        assert_eq!(format_thought_duration(0), "1ms");
+        assert_eq!(format_thought_duration(232), "232ms");
+        assert_eq!(format_thought_duration(1_200), "1.2s");
     }
 
     #[test]

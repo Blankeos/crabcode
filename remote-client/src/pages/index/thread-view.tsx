@@ -44,6 +44,7 @@ export function ThreadItemView(props: {
   status: Accessor<RemoteStatus | null>
   streaming: Accessor<boolean>
   token: Accessor<string>
+  messageDomId?: Accessor<string | undefined>
   onPreviewImage: (attachment: AttachmentData) => void
   onOpenSubagentSession?: (sessionId: string) => void | Promise<void>
 }) {
@@ -74,6 +75,7 @@ export function ThreadItemView(props: {
             status={props.status}
             streaming={props.streaming}
             token={props.token}
+            messageDomId={props.messageDomId}
             onPreviewImage={props.onPreviewImage}
             onOpenSubagentSession={props.onOpenSubagentSession}
           />
@@ -531,6 +533,7 @@ function MessageView(props: {
   status: Accessor<RemoteStatus | null>
   streaming: Accessor<boolean>
   token: Accessor<string>
+  messageDomId?: Accessor<string | undefined>
   onPreviewImage: (attachment: AttachmentData) => void
   onOpenSubagentSession?: (sessionId: string) => void | Promise<void>
 }) {
@@ -554,7 +557,12 @@ function MessageView(props: {
     visibleAssistantContent().trim().length > 0
   const copyContent = () => (isUser() ? props.message().content : visibleAssistantContent()) || ""
   return (
-    <Message from={props.message().role} class={cx(!isUser() && "w-full items-stretch")}>
+    <Message
+      from={props.message().role}
+      class={cx(!isUser() && "w-full items-stretch")}
+      data-message-id={props.messageDomId?.()}
+      data-message-role={props.message().role}
+    >
       <MessageContent class={cx("w-full", isUser() && "flex flex-col items-end")}>
         <Show when={hasThoughtProcess()}>
           <ThinkingAccordion

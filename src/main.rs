@@ -60,6 +60,10 @@ mod tool {
     pub use crate::aisdk::tool::*;
 }
 
+pub mod log {
+    pub use crate::aisdk::log::*;
+}
+
 use crate::toast::{Toast, ToastManager};
 use anyhow::{Context, Result};
 use app::App;
@@ -770,6 +774,9 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     crate::logging::set_enabled(args.emit_logs);
+    crate::aisdk::log::set_logger(|msg| {
+        let _ = crate::logging::log(msg);
+    });
 
     if args.test_notification {
         send_test_notification()?;

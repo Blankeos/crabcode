@@ -5,7 +5,12 @@ use std::fs;
 use std::path::Path;
 
 const BUNDLED_THEMES: &[(&str, &str)] = &[
-    ("crabcode-orange", include_str!("theme.json")),
+    (
+        "crabcode-orange",
+        include_str!("themes/crabcode-orange.json"),
+    ),
+    ("groknight", include_str!("themes/groknight.json")),
+    ("grokday", include_str!("themes/grokday.json")),
     ("aura", include_str!("generated_themes/aura.json")),
     ("ayu", include_str!("generated_themes/ayu.json")),
     ("carbonfox", include_str!("generated_themes/carbonfox.json")),
@@ -136,12 +141,28 @@ pub fn contrast_text(background: ratatui::style::Color) -> ratatui::style::Color
 
 pub fn agent_color(agent: &str, colors: &ThemeColors) -> ratatui::style::Color {
     match agent.to_ascii_lowercase().as_str() {
-        // Match OpenCode primary agent colors:
-        // - Build: secondary
-        // - Plan: accent
+        // Match OpenCode visible-agent palette rotation for builtins:
+        // secondary / accent / success / warning / primary / error / info
         "build" => colors.secondary,
         "plan" => colors.accent,
-        _ => colors.primary,
+        "general" => colors.success,
+        "explore" => colors.warning,
+        "executor" => colors.info,
+        other => {
+            let palette = [
+                colors.secondary,
+                colors.accent,
+                colors.success,
+                colors.warning,
+                colors.primary,
+                colors.error,
+                colors.info,
+            ];
+            let hash = other.bytes().fold(0usize, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(b as usize)
+            });
+            palette[hash % palette.len()]
+        }
     }
 }
 
@@ -328,8 +349,11 @@ impl Theme {
     }
 
     pub fn load_builtin_default() -> Self {
-        Self::load_from_str(include_str!("theme.json"), "crabcode-orange")
-            .expect("embedded default theme must be valid")
+        Self::load_from_str(
+            include_str!("themes/crabcode-orange.json"),
+            "crabcode-orange",
+        )
+        .expect("embedded default theme must be valid")
     }
 
     pub fn bundled_themes() -> Vec<Self> {
@@ -685,5 +709,33 @@ mod tests {
         let themes = Theme::bundled_themes();
         assert!(themes.iter().any(|theme| theme.id == "crabcode-orange"));
         assert!(themes.iter().any(|theme| theme.id == "ayu"));
+    }
+
+    #[test]
+    fn bundled_themes_include_grok_mono() {
+        let themes = Theme::bundled_themes();
+        for id in ["groknight", "grokday"] {
+            let theme = themes
+                .iter()
+                .find(|theme| theme.id == id)
+                .unwrap_or_else(|| panic!("{id} theme should be bundled"));
+            for light in [true, false] {
+                let colors = theme.get_colors(light);
+                assert_ne!(colors.background, ratatui::style::Color::Reset, "{id} bg");
+                assert_ne!(colors.primary, ratatui::style::Color::Reset, "{id} primary");
+                assert_ne!(colors.text, ratatui::style::Color::Reset, "{id} text");
+                // Chrome is monochrome — primary must not be TokyoNight/GrokDay blue.
+                assert_ne!(
+                    colors.primary,
+                    ratatui::style::Color::Rgb(0x7a, 0xa2, 0xf7),
+                    "{id} primary should not be TokyoNight blue"
+                );
+                assert_ne!(
+                    colors.primary,
+                    ratatui::style::Color::Rgb(0x2f, 0x64, 0xd2),
+                    "{id} primary should not be GrokDay blue"
+                );
+            }
+        }
     }
 }

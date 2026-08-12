@@ -7,6 +7,11 @@ import {
   CommandItem,
   CommandList,
 } from "cmdk-solid"
+import {
+  MessageMarkerRail,
+  isRailMessage,
+  messageDomIdsFromThreadItems,
+} from "./message-marker-rail"
 import { useIsMobileViewport } from "./mobile-utils"
 import { IconBrainGlyph, IconClockCounterClockwise, IconF7ChevronDownSquare, IconGitDiff } from "../../assets/icons"
 import { FadedEdgeEffect } from "../../components/remote/faded-edge-effect"
@@ -25,7 +30,7 @@ import { QuestionRequestPanel, PermissionRequestPanel } from "./request-panels"
 import { SubagentSessionFooter } from "./subagent-footer"
 import { ImagePreviewDialog, ThreadItemView } from "./thread-view"
 import { ThreadTabsBar } from "./thread-tabs"
-import { GitDiffFile } from "./git-diff-viewer"
+import { GitDiffBatch, GitDiffFile } from "./git-diff-viewer"
 import { isActiveServer } from "./server-utils"
 import { relativeTime } from "./shared-utils"
 
@@ -245,6 +250,8 @@ function RemoteSidebar(props: { sidebar: SidebarController }) {
           activeProjectPath={sidebar.activeProjectPath}
           token={sidebar.token}
           currentSessionId={sidebar.currentSessionId}
+          scrollToSessionId={sidebar.scrollToSessionId}
+          onScrollToSessionHandled={sidebar.onScrollToSessionHandled}
           onToggleProject={sidebar.onToggleProject}
           onNewSession={sidebar.onNewSession}
           onSwitchSession={sidebar.onSwitchSession}
@@ -480,11 +487,7 @@ function GitStatusView(props: {
                 </div>
               }
             >
-              <div class="grid min-w-0 gap-2">
-                <For each={status().diff_files}>
-                  {(file) => <GitDiffFile file={file} compact wrap={props.wrapLines()} />}
-                </For>
-              </div>
+              <GitDiffBatch files={status().diff_files} compact wrap={props.wrapLines()} />
             </Show>
           </Show>
         </section>
@@ -910,13 +913,31 @@ function ServerPopover(props: { servers: ServerPanelController }) {
 
 function ThreadViewport(props: { thread: ThreadController }) {
   const thread = props.thread
+  const [scrollEl, setScrollEl] = createSignal<HTMLDivElement | null>(null)
+  // Ids from threadItems so they match rendered message objects (assistant
+  // turns with tools are split into new objects and break WeakMap-by-visibleMessages).
+  const messageDomIds = createMemo(() => messageDomIdsFromThreadItems(thread.threadItems()))
+
+  const showMarkerRail = createMemo(
+    () =>
+      !thread.isEmptyChat() &&
+      !thread.shellLoading() &&
+      !thread.sessionSwitching() &&
+      !thread.isSubagentView()
+  )
 
   return (
     <div class="relative min-h-0 flex-1">
       <div
-        ref={thread.setScrollRef}
+        ref={(el) => {
+          setScrollEl(el)
+          thread.setScrollRef(el)
+        }}
         class={cx(
-          "remote-thread-scroll h-full min-h-0 overflow-y-auto overflow-x-hidden px-4 pt-5 overscroll-contain",
+          // Equal left/right gutter so the rail lane doesn't shift content off-center.
+          "remote-thread-scroll h-full min-h-0 overflow-y-auto overflow-x-hidden pt-5 overscroll-contain",
+          "px-4",
+          showMarkerRail() && "md:px-10",
           thread.isEmptyChat()
             ? "overflow-hidden pb-[clamp(8rem,22vh,12rem)] max-[900px]:pb-4"
             : thread.isSubagentView()
@@ -928,37 +949,65 @@ function ThreadViewport(props: { thread: ThreadController }) {
           ref={thread.setContentRef}
           class={cx(
             "mx-auto w-[min(100%,64rem)] min-w-0 max-w-full",
-            (thread.isEmptyChat() || thread.shellLoading()) && "grid h-full"
+            (thread.isEmptyChat() || thread.shellLoading() || thread.sessionSwitching()) && "grid h-full"
           )}
         >
-          <Show when={!thread.shellLoading()} fallback={<div class="min-h-0" aria-busy="true" aria-label="Loading" />}>
-            <Show
-              when={thread.visibleMessages().length > 0}
-              fallback={
-                <EmptyThread
-                  projectName={thread.projectName()}
-                  mascotFrame={thread.mascotFrame()}
-                  recentSessions={thread.recentSessions}
-                  onSwitchSession={thread.onSwitchSession}
-                />
-              }
-            >
-              <Index each={thread.threadItems()}>
-                {(item) => (
-                  <ThreadItemView
-                    item={item}
-                    status={thread.status}
-                    streaming={thread.streaming}
-                    token={thread.token}
-                    onPreviewImage={thread.onPreviewImage}
-                    onOpenSubagentSession={thread.tabs.onOpenSubagentSession}
-                  />
-                )}
-              </Index>
+          <Show
+            when={!thread.shellLoading() && !thread.sessionSwitching()}
+            fallback={<div class="min-h-0" aria-busy="true" aria-label="Loading" />}
+          >
+            {/* String key so 0 (initial load) still mounts; remounts on switch to re-run entry animation. */}
+            <Show when={String(thread.chatRevealKey())} keyed>
+              {(_key) => (
+                <div
+                  class={cx(
+                    "w-full min-w-0",
+                    thread.chatRevealKey() > 0 && "animate-flyDownFade"
+                  )}
+                >
+                  <Show
+                    when={thread.visibleMessages().length > 0}
+                    fallback={
+                      <EmptyThread
+                        projectName={thread.projectName()}
+                        mascotFrame={thread.mascotFrame()}
+                        recentSessions={thread.recentSessions}
+                        onSwitchSession={thread.onSwitchSession}
+                      />
+                    }
+                  >
+                    <Index each={thread.threadItems()}>
+                      {(item) => (
+                        <ThreadItemView
+                          item={item}
+                          status={thread.status}
+                          streaming={thread.streaming}
+                          token={thread.token}
+                          messageDomId={() => {
+                            const current = item()
+                            if (current.type !== "message" || !isRailMessage(current.message)) return undefined
+                            return messageDomIds().get(current.message)
+                          }}
+                          onPreviewImage={thread.onPreviewImage}
+                          onOpenSubagentSession={thread.tabs.onOpenSubagentSession}
+                        />
+                      )}
+                    </Index>
+                  </Show>
+                </div>
+              )}
             </Show>
           </Show>
         </div>
       </div>
+      <MessageMarkerRail
+        threadItems={thread.threadItems}
+        scrollEl={scrollEl}
+        hidden={() => !showMarkerRail()}
+        // Match composer-dock footprint so the stack centers above the input.
+        bottomInset={() => "13rem"}
+        setNavigationLock={thread.setNavigationLock}
+      />
       <FadedEdgeEffect direction="top" hidden={thread.isAtTop()} size="3rem" color="#171717" />
       <FadedEdgeEffect direction="bottom" hidden={thread.isAtBottom()} size="7rem" color="#171717" />
     </div>

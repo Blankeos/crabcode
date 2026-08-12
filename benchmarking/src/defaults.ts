@@ -9,4 +9,5 @@ export const DEFAULT_INPUT_USD_PER_MTOK = 1.25
 export const DEFAULT_OUTPUT_USD_PER_MTOK = 10
 export const DEFAULT_BENCHMARK_DIR = join(REPO_ROOT, '.benchmarks')
 export const DEFAULT_REPORT_DIR = join(REPO_ROOT, 'benchmark-reports')
-export const DEFAULT_AGENTS: AgentName[] = ['crabcode', 'opencode', 'codex']
+/** All known harnesses. Default runs include every agent (binary must be installed). */
+export const DEFAULT_AGENTS: AgentName[] = ['crabcode', 'opencode', 'codex', 'grok-build']

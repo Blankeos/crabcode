@@ -1,8 +1,5 @@
 target/
 /dist/
-src/themes/
-!src/theme.json
-!src/theme.json
 app.log
 aisdk_debug.log
 sounds/complete.wav

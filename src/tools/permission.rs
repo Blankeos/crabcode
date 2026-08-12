@@ -22,6 +22,19 @@ pub enum PermissionAction {
     Unknown,
 }
 
+fn external_directory_pattern_matches(candidate: &str, grant: &str) -> bool {
+    if grant == "*" {
+        return true;
+    }
+
+    let Some(grant_root) = grant.strip_suffix("/*") else {
+        return wildcard_match(candidate, grant);
+    };
+    let candidate_root = candidate.strip_suffix("/*").unwrap_or(candidate);
+
+    Path::new(candidate_root).starts_with(Path::new(grant_root))
+}
+
 fn is_safe_workspace_read_like_action(action: PermissionAction) -> bool {
     matches!(
         action,
@@ -111,7 +124,10 @@ impl PermissionGrant {
         other.patterns.iter().any(|candidate| {
             self.patterns
                 .iter()
-                .any(|grant| wildcard_match(candidate, grant))
+                .any(|grant| match self.permission.as_str() {
+                    "external_directory" => external_directory_pattern_matches(candidate, grant),
+                    _ => wildcard_match(candidate, grant),
+                })
         })
     }
 }
@@ -1288,6 +1304,49 @@ mod tests {
 
         let second = perms.preflight("build", "read", &params, Some(&tx)).await;
         assert!(second.is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn allow_always_external_directory_covers_nonexistent_descendants() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workdir = temp.path().join("workspace");
+        let external = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&workdir).expect("workspace");
+        std::fs::create_dir_all(&external).expect("external");
+
+        let perms = ToolPermissions::new(&workdir);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let dir_params = serde_json::json!({ "file_path": external.to_string_lossy() });
+
+        let pending = tokio::spawn({
+            let perms = perms.clone();
+            let params = dir_params.clone();
+            let tx = tx.clone();
+            async move { perms.preflight("build", "read", &params, Some(&tx)).await }
+        });
+
+        let prompt = match rx.recv().await {
+            Some(ChunkMessage::PermissionRequest(prompt)) => prompt,
+            _ => panic!("Expected permission prompt"),
+        };
+        let _ = prompt.response_tx.send(PermissionResponse::AllowAlways);
+        assert!(pending
+            .await
+            .expect("preflight task should complete")
+            .is_ok());
+
+        let nested_missing = external.join("somewhat-else").join("business.md");
+        let result = perms
+            .preflight(
+                "build",
+                "read",
+                &serde_json::json!({ "file_path": nested_missing }),
+                Some(&tx),
+            )
+            .await;
+
+        assert!(result.is_ok());
         assert!(rx.try_recv().is_err());
     }
 

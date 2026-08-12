@@ -8,10 +8,16 @@ export const AGENT_LABELS: Record<AgentName, string> = {
   crabcode: '🦀 crabcode',
   opencode: '🔲 opencode',
   codex: '⚛️ codex',
+  'grok-build': '⬛ grok-build',
 }
 
 export function displayAgent(agent: AgentName) {
   return AGENT_LABELS[agent] ?? agent
+}
+
+/** Env override key: `BENCH_GROK_BUILD_CMD` for agent `grok-build`. */
+export function agentEnvPrefix(agent: AgentName) {
+  return `BENCH_${agent.replace(/-/g, '_').toUpperCase()}`
 }
 
 export function commandFor(agent: AgentName, prompt: string, model: string) {
@@ -19,8 +25,9 @@ export function commandFor(agent: AgentName, prompt: string, model: string) {
     crabcode: defaultCrabcodeCommand(),
     opencode: 'opencode run --dangerously-skip-permissions -m {model} {prompt}',
     codex: 'codex exec --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m {model} {prompt}',
+    'grok-build': defaultGrokBuildCommand(),
   }
-  const envName = `BENCH_${agent.toUpperCase()}_CMD`
+  const envName = `${agentEnvPrefix(agent)}_CMD`
   const template = process.env[envName] || defaults[agent]
   const agentModel = modelForAgent(agent, model)
   return template
@@ -48,9 +55,20 @@ export function resolveTaskPrompt(task: BenchmarkTask, siteUrl?: string) {
   return task.prompt.replaceAll('{siteUrl}', siteUrl ?? '')
 }
 
+/**
+ * Normalize model id for each harness CLI.
+ * - codex: strip `openai/` prefix
+ * - grok-build: strip a single `provider/` prefix when present (grok CLI takes bare ids);
+ *   OpenAI-only ids will fail on grok — use a shared multi-provider model or omit grok for that run
+ */
 export function modelForAgent(agent: AgentName, modelRef: string) {
   if (agent === 'codex') {
     return modelRef.replace(/^openai\//, '')
+  }
+  if (agent === 'grok-build') {
+    // `openai/gpt-5.5` → `gpt-5.5` (still may be unsupported); `grok-4.5` stays
+    const stripped = modelRef.replace(/^[^/]+\//, '')
+    return stripped || modelRef
   }
 
   return modelRef
@@ -79,6 +97,30 @@ function defaultCrabcodeCommand() {
     return `${shellQuote(binary)} ${args}`
   }
   return `cargo run --quiet --manifest-path ${shellQuote(join(REPO_ROOT, 'Cargo.toml'))} -- ${args}`
+}
+
+/**
+ * Grok Build headless: `--single` / `-p` runs one prompt and exits; `--always-approve`
+ * auto-approves tools (bench workspace is disposable).
+ * Override binary: BENCH_GROK_BUILD_BIN=/path/to/grok
+ * Override full template: BENCH_GROK_BUILD_CMD='grok … -m {model} -p {prompt}'
+ */
+function defaultGrokBuildCommand() {
+  const args = `--always-approve -m {model} -p {prompt}`
+  const configuredBinary = process.env.BENCH_GROK_BUILD_BIN?.trim()
+  if (configuredBinary) {
+    return `${shellQuote(configuredBinary)} ${args}`
+  }
+  const installedBinary = findExecutableOnPath('grok')
+  if (installedBinary) {
+    return `${shellQuote(installedBinary)} ${args}`
+  }
+  // Fallback name if PATH has grok-build instead of grok
+  const alt = findExecutableOnPath('grok-build')
+  if (alt) {
+    return `${shellQuote(alt)} ${args}`
+  }
+  return `grok ${args}`
 }
 
 function findExecutableOnPath(name: string) {

@@ -27,10 +27,8 @@ pub fn discover_themes(
     let mut layers: Vec<Vec<PathBuf>> = Vec::new();
 
     let mut built_in = Vec::new();
-    if PathBuf::from("src/theme.json").is_file() {
-        built_in.push(PathBuf::from("src/theme.json"));
-    }
     built_in.extend(list_json_files(Path::new("src/generated_themes")));
+    built_in.extend(list_json_files(Path::new("src/themes")));
     layers.push(built_in);
 
     layers.push(list_json_files(
@@ -497,6 +495,7 @@ pub struct CustomModelConfig {
     pub max_tokens: Option<u32>,
     pub attachment: Option<bool>,
     pub reasoning: Option<bool>,
+    pub reasoning_options: Option<Vec<crate::model::reasoning::ReasoningOption>>,
     pub temperature: Option<bool>,
     pub tool_call: Option<bool>,
     pub modalities: Option<CustomModelModalities>,
@@ -2138,6 +2137,11 @@ fn parse_custom_providers(
                                 output: parse_string_array(modalities.get("output")),
                             });
 
+                    let reasoning_options = model_obj
+                        .get("reasoning_options")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok());
+
                     let launch = model_obj
                         .get("_launch")
                         .and_then(Value::as_bool)
@@ -2151,6 +2155,7 @@ fn parse_custom_providers(
                             max_tokens,
                             attachment: model_obj.get("attachment").and_then(Value::as_bool),
                             reasoning: model_obj.get("reasoning").and_then(Value::as_bool),
+                            reasoning_options,
                             temperature: model_obj.get("temperature").and_then(Value::as_bool),
                             tool_call: model_obj.get("tool_call").and_then(Value::as_bool),
                             modalities,
@@ -3192,6 +3197,9 @@ mod tests {
                                 "name": "Vision Model",
                                 "attachment": true,
                                 "reasoning": true,
+                                "reasoning_options": [
+                                    { "type": "effort", "values": ["low", "max"] }
+                                ],
                                 "temperature": true,
                                 "tool_call": true,
                                 "limit": {
@@ -3233,6 +3241,13 @@ mod tests {
         assert_eq!(model.max_tokens, Some(8192));
         assert_eq!(model.attachment, Some(true));
         assert_eq!(model.reasoning, Some(true));
+        assert_eq!(
+            model.reasoning_options,
+            Some(vec![crate::model::reasoning::ReasoningOption {
+                kind: "effort".to_string(),
+                values: vec!["low".to_string(), "max".to_string()],
+            }])
+        );
         assert_eq!(model.temperature, Some(true));
         assert_eq!(model.tool_call, Some(true));
         let modalities = model.modalities.as_ref().expect("model modalities");

@@ -210,6 +210,7 @@ pub fn render_home(
         &provider_name,
         reasoning_effort.as_deref(),
         colors,
+        true,
     );
 
     let help_text = vec![

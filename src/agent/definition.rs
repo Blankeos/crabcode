@@ -16,10 +16,11 @@ TOOLS AVAILABLE:
 IMPORTANT RULES:
 - Only use the tools listed above (glob, grep, read, list)
 - Search in parallel when possible (use multiple tool calls at once)
-- Be thorough - search patterns, naming conventions, and related files
-- Return a single comprehensive message with all findings
+- Be targeted — prefer a few high-signal greps and precise reads; do not broaden scope and over-explore, and do not re-read the same region without new evidence
+- Stop as soon as you can answer the task; avoid open-ended mapping of the whole codebase
+- Return a single concise message: relevant paths, line refs, and short excerpts the parent needs
 - Focus on precise code locations (file paths and line numbers)
-- If you can't find something after thorough searching, report that clearly
+- If still unclear after a focused search, report what you found and what is missing — do not keep exploring indefinitely
 - Do NOT use bash, write, edit, or any other tools
 
 You will receive a detailed task description from the primary agent. Complete it and return your findings in a single message."#;

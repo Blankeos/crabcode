@@ -55,6 +55,39 @@ Events are `complete`, `subagentComplete`, `error`, `permission`, and `question`
 
 `complete`, `subagentComplete`, and `error` default to `soundEnabled: true` and use their own bundled sounds when `soundFile` is unset. `subagentComplete` runs whenever a subagent finishes. When omitted, it inherits the `complete` event's enable, terminal, and desktop settings, but not its custom `soundFile`; the dedicated bundled subagent completion sound is used instead. Configure `subagentComplete` separately to use a custom sound or notification behavior. `permission` and `question` default to silent unless you enable them and provide a file.
 
+## Sound Playback
+
+Crabcode plays event sounds through the OS player when available:
+
+| Platform | Players |
+| -------- | ------- |
+| macOS    | `afplay` |
+| Linux    | `paplay` (Pulse/PipeWire), then `aplay` (ALSA) |
+
+Playback is skipped when no usable audio backend is detected (for example a headless server with `aplay` installed but no sound device). Player stdout and stderr are discarded so ALSA or Pulse warnings do not pollute the TUI.
+
+### Disable sound
+
+Per event:
+
+```jsonc title="crabcode.jsonc"
+{
+  "notifications": {
+    "complete": { "soundEnabled": false },
+    "subagentComplete": { "soundEnabled": false },
+    "error": { "soundEnabled": false },
+  },
+}
+```
+
+Process-wide kill switch (overrides detection; still respects per-event `soundEnabled`):
+
+```bash
+export CRABCODE_SOUND=0
+```
+
+Accepted values: `0` / `false` / `no` / `off` to force off; `1` / `true` / `yes` / `on` to force on when a player binary is on `PATH`.
+
 ## Terminal Notifications
 
 The `terminal` property is useful for agent orchestrator apps (i.e. [Zed](https://zed.dev), [Superconductor](https://super.engineering), [T3 Code](https://t3.codes)) that listen to terminal notifications. In Zed, BEL marks the terminal as notified, which lets Zed render the accent dot on the terminal tab or terminal thread entry.

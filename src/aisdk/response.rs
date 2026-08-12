@@ -15,13 +15,23 @@ const PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT: usize = 1;
 const PROVIDER_STEP_MAX_RETRIES: usize = 10;
 
 /// Keep the newest N tool outputs intact for the model; older ones are pruned.
-/// Matches Grok Build / OpenCode mid-session tool-result retention behavior.
 const KEEP_RECENT_TOOL_OUTPUTS: usize = 6;
+/// Tool outputs older than this many user turns are hard-cleared (turn-age gate).
+const KEEP_RECENT_USER_TURNS: usize = 2;
 /// Soft-trim threshold for older-but-still-retained tool outputs (chars).
 const TOOL_OUTPUT_SOFT_TRIM_CHARS: usize = 4_000;
 const TOOL_OUTPUT_SOFT_TRIM_HEAD: usize = 1_500;
 const TOOL_OUTPUT_SOFT_TRIM_TAIL: usize = 1_500;
 const PRUNED_TOOL_OUTPUT_PLACEHOLDER: &str = "[Old tool result content cleared]";
+
+/// Image compact hysteresis:
+/// - Gate eviction only when total image payload exceeds the **trigger**
+/// - Once firing, reclaim down to the lower **target** so the next few turns
+///   stay under the ceiling (avoids re-busting the KV prefix every step)
+const IMAGE_COMPACT_TRIGGER_BYTES: usize = 6 * 1024 * 1024;
+const IMAGE_COMPACT_RECLAIM_TARGET_BYTES: usize = 3 * 1024 * 1024;
+const _: () = assert!(IMAGE_COMPACT_RECLAIM_TARGET_BYTES < IMAGE_COMPACT_TRIGGER_BYTES);
+const IMAGE_COMPACT_PLACEHOLDER: &str = "[An earlier image was removed to keep the request within its size limit and is no longer visible. Do not describe or reason about its contents from memory; ask the user to re-share it if you need to see it again.]";
 
 pub struct StreamTextResponse {
     pub stream: LanguageModelStream,
@@ -139,8 +149,15 @@ pub async fn stream_with_tools<P: Provider>(
             let pruned = prune_stale_tool_outputs_in_place(&mut current_messages);
             if pruned > 0 {
                 let _ = tx_loop.send(ChunkType::Metadata(format!(
-                    "tool_outputs_pruned count={} keep_recent={}",
-                    pruned, KEEP_RECENT_TOOL_OUTPUTS
+                    "tool_outputs_pruned count={} keep_recent={} keep_user_turns={}",
+                    pruned, KEEP_RECENT_TOOL_OUTPUTS, KEEP_RECENT_USER_TURNS
+                )));
+            }
+            let images_evicted = compact_images_to_budget_in_place(&mut current_messages);
+            if images_evicted > 0 {
+                let _ = tx_loop.send(ChunkType::Metadata(format!(
+                    "images_compacted evicted={} trigger_bytes={} reclaim_target_bytes={}",
+                    images_evicted, IMAGE_COMPACT_TRIGGER_BYTES, IMAGE_COMPACT_RECLAIM_TARGET_BYTES
                 )));
             }
             let _ = tx_loop.send(ChunkType::Metadata(format!(
@@ -778,10 +795,11 @@ fn rollback_provider_attempt(
 /// provider request. Durable UI/history copies are left intact — this only
 /// mutates the request-facing message list.
 ///
-/// Strategy (Grok Build / OpenCode inspired):
+/// Strategy:
 /// - Keep the newest [`KEEP_RECENT_TOOL_OUTPUTS`] results full-size
 /// - Soft-trim large older results to head+tail
-/// - Hard-clear anything older than 2× the keep window to a placeholder
+/// - Hard-clear anything older than 2× the keep window **or** older than
+///   [`KEEP_RECENT_USER_TURNS`] user turns
 /// - Drop attached images on pruned outputs (base64 is extremely expensive)
 fn prune_stale_tool_outputs_in_place(messages: &mut [Message]) -> usize {
     let tool_output_indices: Vec<usize> = messages
@@ -794,6 +812,24 @@ fn prune_stale_tool_outputs_in_place(messages: &mut [Message]) -> usize {
         return 0;
     }
 
+    // Turn age: count User messages from the end. Tools in older turns are
+    // cheaper to drop even if they still fall inside the rank keep window.
+    let mut turn_from_end_by_index = vec![0usize; messages.len()];
+    {
+        let mut turn_from_end = 0usize;
+        let mut seen_user = false;
+        for i in (0..messages.len()).rev() {
+            if matches!(&messages[i], Message::User(_)) {
+                if seen_user {
+                    turn_from_end += 1;
+                } else {
+                    seen_user = true;
+                }
+            }
+            turn_from_end_by_index[i] = turn_from_end;
+        }
+    }
+
     let keep_from = tool_output_indices
         .len()
         .saturating_sub(KEEP_RECENT_TOOL_OUTPUTS);
@@ -803,9 +839,16 @@ fn prune_stale_tool_outputs_in_place(messages: &mut [Message]) -> usize {
     let mut pruned = 0usize;
 
     for (rank, &idx) in tool_output_indices.iter().enumerate() {
-        if rank >= keep_from {
+        let turn_age = turn_from_end_by_index[idx];
+        let in_rank_keep = rank >= keep_from;
+        let in_turn_keep = turn_age < KEEP_RECENT_USER_TURNS;
+        // Keep full only when recent by tool-count *and* by user-turn.
+        if in_rank_keep && in_turn_keep {
             continue;
         }
+
+        let hard_by_rank = rank < hard_clear_before;
+        let hard_by_turn = !in_turn_keep;
 
         let Message::ToolOutput(output) = &mut messages[idx] else {
             continue;
@@ -813,7 +856,7 @@ fn prune_stale_tool_outputs_in_place(messages: &mut [Message]) -> usize {
 
         let had_images = !output.images.is_empty();
         let original_len = output.output.len();
-        if rank < hard_clear_before {
+        if hard_by_rank || hard_by_turn {
             if original_len > PRUNED_TOOL_OUTPUT_PLACEHOLDER.len() || had_images {
                 output.output = PRUNED_TOOL_OUTPUT_PLACEHOLDER.to_string();
                 output.images.clear();
@@ -831,6 +874,88 @@ fn prune_stale_tool_outputs_in_place(messages: &mut [Message]) -> usize {
     }
 
     pruned
+}
+
+/// Evict oldest inline images with hysteresis:
+/// fire only above [`IMAGE_COMPACT_TRIGGER_BYTES`], reclaim to
+/// [`IMAGE_COMPACT_RECLAIM_TARGET_BYTES`].
+/// Returns how many images were replaced with a text placeholder.
+fn compact_images_to_budget_in_place(messages: &mut [Message]) -> usize {
+    let mut total = total_image_bytes(messages);
+    // Below trigger: leave every image in place so the KV prefix stays byte-stable.
+    if total <= IMAGE_COMPACT_TRIGGER_BYTES {
+        return 0;
+    }
+
+    let mut evicted = 0usize;
+    // Collect (message_index, is_user, image_index, bytes) oldest-first.
+    let mut slots: Vec<(usize, bool, usize, usize)> = Vec::new();
+    for (msg_idx, message) in messages.iter().enumerate() {
+        match message {
+            Message::User(user) => {
+                for (img_idx, image) in user.images.iter().enumerate() {
+                    slots.push((msg_idx, true, img_idx, image.data_url.len()));
+                }
+            }
+            Message::ToolOutput(output) => {
+                for (img_idx, image) in output.images.iter().enumerate() {
+                    slots.push((msg_idx, false, img_idx, image.data_url.len()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Evict from oldest message first (already in conversation order).
+    // Within a message, drop higher image indices first so removals don't shift lower ones.
+    slots.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+
+    for (msg_idx, is_user, img_idx, bytes) in slots {
+        // Reclaim past the trigger down to the low-water mark (hysteresis).
+        if total <= IMAGE_COMPACT_RECLAIM_TARGET_BYTES {
+            break;
+        }
+        let removed = match &mut messages[msg_idx] {
+            Message::User(user) if is_user && img_idx < user.images.len() => {
+                user.images.remove(img_idx);
+                if user.content.trim().is_empty() {
+                    user.content = IMAGE_COMPACT_PLACEHOLDER.to_string();
+                } else if !user.content.contains(IMAGE_COMPACT_PLACEHOLDER) {
+                    user.content.push_str("\n\n");
+                    user.content.push_str(IMAGE_COMPACT_PLACEHOLDER);
+                }
+                true
+            }
+            Message::ToolOutput(output) if !is_user && img_idx < output.images.len() => {
+                output.images.remove(img_idx);
+                if !output.output.contains(IMAGE_COMPACT_PLACEHOLDER) {
+                    if !output.output.is_empty() {
+                        output.output.push_str("\n\n");
+                    }
+                    output.output.push_str(IMAGE_COMPACT_PLACEHOLDER);
+                }
+                true
+            }
+            _ => false,
+        };
+        if removed {
+            total = total.saturating_sub(bytes);
+            evicted += 1;
+        }
+    }
+
+    evicted
+}
+
+fn total_image_bytes(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .map(|message| match message {
+            Message::User(user) => user.images.iter().map(|img| img.data_url.len()).sum(),
+            Message::ToolOutput(output) => output.images.iter().map(|img| img.data_url.len()).sum(),
+            _ => 0usize,
+        })
+        .sum()
 }
 
 fn soft_trim_tool_output(text: &str) -> String {
@@ -1406,9 +1531,10 @@ fn tool_call_key(item: &serde_json::Value, array_index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        prune_stale_tool_outputs_in_place, soft_trim_tool_output, stream_with_tools,
-        ToolCallAccumulator, KEEP_RECENT_TOOL_OUTPUTS, PRUNED_TOOL_OUTPUT_PLACEHOLDER,
-        TOOL_OUTPUT_SOFT_TRIM_CHARS,
+        compact_images_to_budget_in_place, prune_stale_tool_outputs_in_place,
+        soft_trim_tool_output, stream_with_tools, total_image_bytes, ToolCallAccumulator,
+        IMAGE_COMPACT_PLACEHOLDER, IMAGE_COMPACT_RECLAIM_TARGET_BYTES, IMAGE_COMPACT_TRIGGER_BYTES,
+        KEEP_RECENT_TOOL_OUTPUTS, PRUNED_TOOL_OUTPUT_PLACEHOLDER, TOOL_OUTPUT_SOFT_TRIM_CHARS,
     };
     use crate::chunk::{ChunkType, FinishReason, MessagePhase};
     use crate::message::Message;
@@ -1470,6 +1596,125 @@ mod tests {
         assert_eq!(outputs[0], PRUNED_TOOL_OUTPUT_PLACEHOLDER);
         let last = outputs.last().expect("output");
         assert_eq!(last.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 200);
+    }
+
+    #[test]
+    fn prune_stale_tool_outputs_hard_clears_by_user_turn_age() {
+        // Few tools overall (would stay inside rank keep window) but spanning
+        // many user turns — turn-age gate should still hard-clear the oldest.
+        let mut messages = vec![
+            Message::user("u0"),
+            Message::tool_output(
+                "c0",
+                "bash",
+                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
+                false,
+            ),
+            Message::user("u1"),
+            Message::tool_output(
+                "c1",
+                "bash",
+                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
+                false,
+            ),
+            Message::user("u2"),
+            Message::tool_output(
+                "c2",
+                "bash",
+                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
+                false,
+            ),
+            Message::user("u3"),
+            Message::tool_output(
+                "c3",
+                "bash",
+                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
+                false,
+            ),
+        ];
+
+        let pruned = prune_stale_tool_outputs_in_place(&mut messages);
+        assert!(pruned > 0);
+
+        let first_tool = messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolOutput(o) if o.call_id == "c0" => Some(o.output.as_str()),
+                _ => None,
+            })
+            .expect("c0");
+        assert_eq!(first_tool, PRUNED_TOOL_OUTPUT_PLACEHOLDER);
+
+        let last_tool = messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolOutput(o) if o.call_id == "c3" => Some(o.output.as_str()),
+                _ => None,
+            })
+            .expect("c3");
+        assert_eq!(last_tool.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 50);
+    }
+
+    #[test]
+    fn compact_images_evicts_oldest_when_over_trigger_and_reclaims_to_target() {
+        use crate::message::ImageContent;
+
+        // Two oversized images: each ~4 MiB → total ~8 MiB > 6 MiB trigger.
+        // Hysteresis reclaims to 3 MiB → must drop both (4 MiB still over target).
+        let big = "x".repeat(4 * 1024 * 1024);
+        let mut messages = vec![
+            Message::user_with_images(
+                "first",
+                vec![ImageContent {
+                    data_url: format!("data:image/png;base64,{big}"),
+                    media_type: "image/png".to_string(),
+                }],
+            ),
+            Message::user_with_images(
+                "second",
+                vec![ImageContent {
+                    data_url: format!("data:image/png;base64,{big}"),
+                    media_type: "image/png".to_string(),
+                }],
+            ),
+        ];
+
+        let before = total_image_bytes(&messages);
+        assert!(before > IMAGE_COMPACT_TRIGGER_BYTES);
+
+        let evicted = compact_images_to_budget_in_place(&mut messages);
+        assert!(evicted >= 1);
+        assert!(total_image_bytes(&messages) <= IMAGE_COMPACT_RECLAIM_TARGET_BYTES);
+
+        // Oldest message should lose its image and gain a placeholder note.
+        match &messages[0] {
+            Message::User(user) => {
+                assert!(user.images.is_empty());
+                assert!(user.content.contains(IMAGE_COMPACT_PLACEHOLDER));
+            }
+            _ => panic!("expected user"),
+        }
+    }
+
+    #[test]
+    fn compact_images_is_noop_below_trigger() {
+        use crate::message::ImageContent;
+
+        // ~2 MiB total — under 6 MiB trigger → leave alone (prefix-stable).
+        let med = "x".repeat(2 * 1024 * 1024);
+        let mut messages = vec![Message::user_with_images(
+            "one",
+            vec![ImageContent {
+                data_url: format!("data:image/png;base64,{med}"),
+                media_type: "image/png".to_string(),
+            }],
+        )];
+        assert!(total_image_bytes(&messages) <= IMAGE_COMPACT_TRIGGER_BYTES);
+        assert_eq!(compact_images_to_budget_in_place(&mut messages), 0);
+        match &messages[0] {
+            Message::User(user) => assert_eq!(user.images.len(), 1),
+            _ => panic!("expected user"),
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -1801,7 +2046,7 @@ mod tests {
             let chunks = match request {
                 0 | 1 => vec![
                     Ok(ChunkType::ToolCall(
-                        r#"[{"index":0,"id":"call_repeat","type":"function","function":{"name":"task","arguments":"{\"description\":\"Write haiku\",\"prompt\":\"Write a haiku\",\"subagent_type\":\"general\"}"}}]"#
+                        r#"[{"index":0,"id":"call_repeat","type":"function","function":{"name":"task","arguments":"{\"description\":\"Write haiku\",\"prompt\":\"Write a haiku\",\"agent_type\":\"general\"}"}}]"#
                             .to_string(),
                     )),
                     Ok(ChunkType::End {
@@ -2410,13 +2655,13 @@ mod tests {
         let tool_executions = executions.clone();
         let task_tool = Tool::builder()
             .name("task")
-            .description("launch subagent")
+            .description("launch nested agent")
             .input_schema(Schema::from(true))
             .execute(ToolExecute::new(move |_input| {
                 let executions = tool_executions.clone();
                 async move {
                     executions.fetch_add(1, Ordering::SeqCst);
-                    Ok("subagent result".to_string())
+                    Ok("nested agent result".to_string())
                 }
             }))
             .build()

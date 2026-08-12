@@ -632,6 +632,9 @@ impl Discovery {
                 if let Some(reasoning) = custom_model.reasoning {
                     model.reasoning = reasoning;
                 }
+                if let Some(reasoning_options) = &custom_model.reasoning_options {
+                    model.reasoning_options.clone_from(reasoning_options);
+                }
                 if let Some(temperature) = custom_model.temperature {
                     model.temperature = temperature;
                 }
@@ -965,6 +968,7 @@ mod tests {
                         max_tokens: None,
                         attachment: Some(true),
                         reasoning: None,
+                        reasoning_options: None,
                         temperature: None,
                         tool_call: None,
                         modalities: None,
@@ -1061,6 +1065,10 @@ mod tests {
                         max_tokens: None,
                         attachment: None,
                         reasoning: None,
+                        reasoning_options: Some(vec![crate::model::reasoning::ReasoningOption {
+                            kind: "effort".to_string(),
+                            values: vec!["low".to_string(), "max".to_string()],
+                        }]),
                         temperature: None,
                         tool_call: None,
                         modalities: None,
@@ -1081,6 +1089,13 @@ mod tests {
         assert_eq!(model.name, "Configured Model");
         assert!(model.attachment);
         assert!(model.reasoning);
+        assert_eq!(
+            model.reasoning_options,
+            vec![crate::model::reasoning::ReasoningOption {
+                kind: "effort".to_string(),
+                values: vec!["low".to_string(), "max".to_string()],
+            }]
+        );
         assert!(model.tool_call);
         assert!(model.structured_output);
         assert!(model.temperature);
@@ -1117,6 +1132,10 @@ mod tests {
                         max_tokens: Some(8192),
                         attachment: None,
                         reasoning: Some(true),
+                        reasoning_options: Some(vec![crate::model::reasoning::ReasoningOption {
+                            kind: "effort".to_string(),
+                            values: vec!["none".to_string(), "high".to_string()],
+                        }]),
                         temperature: Some(true),
                         tool_call: Some(true),
                         modalities: Some(CustomModelModalities {
@@ -1138,6 +1157,13 @@ mod tests {
             .expect("model");
         assert!(model.attachment);
         assert!(model.reasoning);
+        assert_eq!(
+            model.reasoning_options,
+            vec![crate::model::reasoning::ReasoningOption {
+                kind: "effort".to_string(),
+                values: vec!["none".to_string(), "high".to_string()],
+            }]
+        );
         assert!(model.temperature);
         assert!(model.tool_call);
         assert_eq!(
@@ -1165,6 +1191,7 @@ mod tests {
                         max_tokens: None,
                         attachment: Some(true),
                         reasoning: None,
+                        reasoning_options: None,
                         temperature: None,
                         tool_call: None,
                         modalities: None,

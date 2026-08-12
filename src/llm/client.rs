@@ -446,6 +446,8 @@ pub async fn stream_llm_with_cancellation(
         request_config.supports_image_input,
         show_vlm_agent_hint,
     );
+    // Stamp Build affinity *after* message conversion so turn_idx matches wire content.
+    stamp_build_main_turn_affinity(&mut request_config, &session_id, &aisdk_messages);
 
     let mut aisdk_tools = convert_to_aisdk_tools(
         &tool_registry,
@@ -544,18 +546,21 @@ pub async fn stream_llm_with_cancellation(
 
     let mut follow_up_messages = response.messages().await;
     follow_up_messages.push(AisdkMessage::assistant(MAX_STEPS_REACHED_PROMPT));
-    let summary_message_count = follow_up_messages.len();
+    // Parent-cached aux: same conversation prefix + sticky session key, fresh req id.
+    // Tools are empty (text-only summary) so tool-schema cache may miss; system+history still hit.
+    let mut summary_config = request_config.clone();
+    stamp_build_parent_cached_aux(&mut summary_config, &session_id, &follow_up_messages);
     let summary_log_context = StreamLogContext::new(
         "max_steps_summary",
-        &request_config,
-        summary_message_count,
+        &summary_config,
+        follow_up_messages.len(),
         0,
         None,
     );
-    log_stream_request(summary_log_context, &request_config);
+    log_stream_request(summary_log_context, &summary_config);
 
     let mut summary_response = stream_provider_request(
-        &request_config,
+        &summary_config,
         follow_up_messages,
         Vec::new(),
         None,
@@ -654,16 +659,38 @@ pub async fn summarize_for_compaction(
     model: String,
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     prompt: String,
+    cancel_token: CancellationToken,
 ) -> Result<String, DynError> {
+    if cancel_token.is_cancelled() {
+        return Err(anyhow::anyhow!("Compaction cancelled by user").into());
+    }
+
     let (warning_sender, _warning_receiver) = tokio::sync::mpsc::unbounded_channel();
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &warning_sender).await?;
     let messages = vec![AisdkMessage::user(prompt)];
-    let mut response =
-        stream_provider_request(&request_config, messages, Vec::new(), None, None).await?;
+    let mut response = stream_provider_request(
+        &request_config,
+        messages,
+        Vec::new(),
+        None,
+        Some(cancel_token.clone()),
+    )
+    .await?;
 
     let mut summary = String::new();
-    while let Some(chunk) = response.stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(anyhow::anyhow!("Compaction cancelled by user").into());
+            }
+            chunk = response.stream.next() => chunk,
+        };
+
+        let Some(chunk) = chunk else {
+            break;
+        };
+
         match chunk {
             ChunkType::Text(text) => summary.push_str(&text),
             ChunkType::Failed(err) => {
@@ -689,6 +716,10 @@ pub async fn summarize_for_compaction(
                 }
             }
         }
+    }
+
+    if cancel_token.is_cancelled() {
+        return Err(anyhow::anyhow!("Compaction cancelled by user").into());
     }
 
     let summary = summary.trim().to_string();
@@ -1212,6 +1243,60 @@ fn send_warning(sender: &crate::llm::ChunkSender, warning: impl Into<String>) {
     let _ = sender.send(crate::llm::ChunkMessage::Warning(warning.into()));
 }
 
+/// Stamp sticky Build affinity for a main agent turn (session == conv).
+fn stamp_build_main_turn_affinity(
+    request_config: &mut ProviderRequestConfig,
+    session_id: &str,
+    messages: &[AisdkMessage],
+) {
+    if !super::xai_build::is_build_transport(&request_config.openai_options.additional_headers) {
+        return;
+    }
+    let turn_idx = super::xai_build::user_turn_idx_from_aisdk_messages(messages);
+    let affinity = super::xai_build::SessionAffinity::main_turn(session_id, turn_idx);
+    super::xai_build::inject_session_affinity_headers(
+        &mut request_config.openai_options.additional_headers,
+        &affinity,
+    );
+    crate::emit_log!(
+        "[prompt-cache] xai-build affinity kind=main session_id={} conv_id={} req_id={} turn_idx={} agent_id={}",
+        affinity.session_id,
+        affinity.conv_id,
+        affinity.req_id,
+        turn_idx,
+        affinity.agent_id.as_deref().unwrap_or("-")
+    );
+}
+
+/// Stamp parent-cached affinity for continuation aux (e.g. max-steps text summary).
+///
+/// Keeps `prompt_cache_key` / session / conv on the parent so the wire prefix can
+/// reuse the main turn's cached KV; assigns a fresh `req_id` for telemetry.
+fn stamp_build_parent_cached_aux(
+    request_config: &mut ProviderRequestConfig,
+    parent_session_id: &str,
+    messages: &[AisdkMessage],
+) {
+    request_config.openai_options.prompt_cache_key = Some(parent_session_id.to_string());
+    if !super::xai_build::is_build_transport(&request_config.openai_options.additional_headers) {
+        return;
+    }
+    let turn_idx = super::xai_build::user_turn_idx_from_aisdk_messages(messages);
+    let affinity =
+        super::xai_build::SessionAffinity::parent_cached_aux(parent_session_id, turn_idx);
+    super::xai_build::inject_session_affinity_headers(
+        &mut request_config.openai_options.additional_headers,
+        &affinity,
+    );
+    crate::emit_log!(
+        "[prompt-cache] xai-build affinity kind=parent_aux session_id={} conv_id={} req_id={} turn_idx={}",
+        affinity.session_id,
+        affinity.conv_id,
+        affinity.req_id,
+        turn_idx
+    );
+}
+
 async fn stream_provider_request(
     config: &ProviderRequestConfig,
     messages: Vec<AisdkMessage>,
@@ -1690,17 +1775,24 @@ fn convert_messages_for_model(
     show_vlm_agent_hint: bool,
 ) -> Vec<AisdkMessage> {
     let mut aisdk_messages = Vec::new();
+    // Soft compaction keeps full UI history; only the active post-boundary
+    // slice is sent to the model (OpenCode-style filterCompacted).
+    let context_messages = crate::session::compaction::filter_messages_for_context(messages);
 
-    for msg in messages {
+    for msg in &context_messages {
         if crate::session::compaction::is_compaction_marker(msg) {
             continue;
         }
 
         match msg.role {
             crate::session::types::MessageRole::System => {
-                aisdk_messages.push(AisdkMessage::system(
-                    crate::utils::sanitize::strip_legacy_image_descriptions(&msg.content),
-                ));
+                // Skip empty system rows — they pad the sticky prefix and bust cache
+                // (Grok Build: "resumed sessions no longer pad the sticky prompt with empty rows").
+                let content = crate::utils::sanitize::strip_legacy_image_descriptions(&msg.content);
+                if content.trim().is_empty() {
+                    continue;
+                }
+                aisdk_messages.push(AisdkMessage::system(content));
             }
             crate::session::types::MessageRole::User => {
                 let content = crate::utils::sanitize::strip_legacy_image_descriptions(&msg.content);
@@ -1742,6 +1834,11 @@ fn convert_messages_for_model(
                         }
                     })
                     .collect::<Vec<_>>();
+
+                // Empty user rows without images also pad the sticky prefix.
+                if content.trim().is_empty() && images.is_empty() {
+                    continue;
+                }
 
                 if images.is_empty() {
                     aisdk_messages.push(AisdkMessage::user(content));
@@ -3060,6 +3157,44 @@ mod tests {
             AisdkMessage::User(message) => assert_eq!(message.content, "tail"),
             other => panic!("expected user message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn soft_compaction_history_is_hidden_from_model_request() {
+        let stats = crate::session::types::CompactionStats {
+            before_tokens: 12_000,
+            after_tokens: 360,
+            before_messages: 8,
+            after_messages: 2,
+        };
+        let summary = crate::session::types::Message::user(format!(
+            "{}\nhandoff",
+            crate::session::compaction::SUMMARY_PREFIX
+        ));
+        let marker = crate::session::compaction::compaction_marker(stats);
+        let history = vec![
+            crate::session::types::Message::user("old user"),
+            crate::session::types::Message::assistant("old assistant"),
+            summary,
+            marker,
+            crate::session::types::Message::user("tail"),
+        ];
+
+        let messages = convert_messages(&history);
+        let rendered = messages
+            .iter()
+            .map(|message| match message {
+                AisdkMessage::User(m) => m.content.clone(),
+                AisdkMessage::Assistant(m) => m.content.clone(),
+                AisdkMessage::System(m) => m.content.clone(),
+                AisdkMessage::ToolCall(_) | AisdkMessage::ToolOutput(_) => String::new(),
+            })
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|c| c.contains("handoff")));
+        assert!(rendered.iter().any(|c| c == "tail"));
+        assert!(!rendered.iter().any(|c| c == "old user"));
+        assert!(!rendered.iter().any(|c| c == "old assistant"));
     }
 }
 fn content_with_vlm_agent_hint(content: &str, image_paths: &[String]) -> String {

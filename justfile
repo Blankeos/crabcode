@@ -10,7 +10,7 @@ remote-client-build:
 remote-host-dev bind="127.0.0.1:8421":
     cargo r -- serve --bind "{{ bind }}"
 
-# Phone on same LAN: http://<this-machine-ip>:4271 (API proxied to {{ api }} on the host)
+[doc('Phone on same LAN: http://<this-machine-ip>:4271 (API proxied to {{ api }} on the host)')]
 remote-client-dev api="http://127.0.0.1:8421":
     cd remote-client && CRABCODE_REMOTE_API_ORIGIN="{{ api }}" bun run dev
 
@@ -18,8 +18,8 @@ dist-build *args:
     just remote-client-build
     dist build {{ args }}
 
-preview:
-    ./target/release/crabcode
+preview *args:
+    ./target/release/crabcode {{ args }}
 
 dpreview *args:
     ./target/debug/crabcode {{ args }}
@@ -27,6 +27,24 @@ dpreview *args:
 gen-themes *args:
     bun run scripts/gen-themes.ts {{ args }}
 
+[doc("""
+  Agent self-eval benchmarks (crabcode / opencode / codex / grok-build).
+
+  Pass-through args to scripts/bench-agents.ts. Reports → benchmark-reports/
+
+  just bench-agents
+  just bench-agents --model openai/gpt-5.5
+  just bench-agents --tasks bugfix-js,add-rust-test --model openai/gpt-5.5
+  just bench-agents --agents crabcode,grok-build
+  just bench-agents --agents crabcode,grok-build --tasks bugfix-js --model grok-4.5
+  BENCH_CRABCODE_REASONING=high just bench-agents --model openai/gpt-5.5
+  just bench-agents --list-tasks
+  just bench-agents --estimate
+  just bench-agents --help
+
+  Crabcode reasoning: BENCH_CRABCODE_REASONING (default medium).
+  OpenAI model ids may fail on grok-build — use an xAI model or drop it from --agents.
+""")]
 bench-agents *args:
     bun run scripts/bench-agents.ts {{ args }}
 
@@ -39,8 +57,6 @@ log:
 sync_readme:
     cp README.md npm/README.md
 
-# Release: bump versions, create release commit, and create a git tag.
-
-# Usage: just tag [patch|minor|major]
+[doc('Release: bump versions, commit, and tag (just tag [patch|minor|major])')]
 tag bump="":
     sh scripts/tag_and_release.sh {{ bump }}

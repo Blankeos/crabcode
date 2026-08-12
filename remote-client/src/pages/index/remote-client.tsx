@@ -66,6 +66,7 @@ export default function RemoteClient() {
   const [permissionBusy, setPermissionBusy] = createSignal(false)
   const [questionBusy, setQuestionBusy] = createSignal(false)
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
+  const [sidebarScrollSessionId, setSidebarScrollSessionId] = createSignal<string | null>(null)
   const [projectOpenKeys, setProjectOpenKeys] = useLocalStorage<string[]>({
     key: OPEN_PROJECTS_KEY,
     defaultValue: [],
@@ -103,6 +104,7 @@ export default function RemoteClient() {
   const [gitLoadedPath, setGitLoadedPath] = createSignal("")
   const [gitSelectedPath, setGitSelectedPath] = createSignal<string | null>(null)
   const [gitViewMode, setGitViewMode] = createSignal<"file" | "all">("all")
+  let gitRequestRevision = 0
   const [agentOpen, setAgentOpen] = createSignal(false)
   const [reasoningOpen, setReasoningOpen] = createSignal(false)
   const [modelOpen, setModelOpen] = createSignal(false)
@@ -152,6 +154,9 @@ export default function RemoteClient() {
   let commandCloseTimer: number | undefined
   let parentScrollRestore: { rootId: string; top: number } | null = null
   let skipNextThreadScrollToBottom = false
+  let switchRevision = 0
+  const [pendingSwitchId, setPendingSwitchId] = createSignal<string | null>(null)
+  const [chatRevealKey, setChatRevealKey] = createSignal(0)
   const [threadSwitching, setThreadSwitching] = createSignal(false)
 
   const openCommandPalette = () => {
@@ -234,7 +239,9 @@ export default function RemoteClient() {
 
   createEffect(() => {
     projectPath()
+    gitRequestRevision += 1
     setGitOpen(false)
+    setGitLoading(false)
     setGitStatus(null)
     setGitLoadedPath("")
     setGitError("")
@@ -266,9 +273,13 @@ export default function RemoteClient() {
   })
 
   const applyRemoteState = (next: RemoteState) => {
+    // While a switch is in flight, ignore snapshots for any other session.
+    const pending = pendingSwitchId()
+    if (pending && next.current_session_id !== pending) {
+      return
+    }
     setState(next)
     setOptimisticMessages([])
-
   }
 
   const loadStateSnapshot = async () => {
@@ -475,7 +486,10 @@ export default function RemoteClient() {
     (state()?.sessions ?? []).find((session) => session.id === currentSessionId())
   )
   const threadItems = createMemo(() => buildThreadItems(visibleMessages(), projectPath()))
-  const isEmptyChat = createMemo(() => threadItems().length === 0 && !state()?.is_streaming)
+  const isEmptyChat = createMemo(
+    () => threadItems().length === 0 && !state()?.is_streaming && !pendingSwitchId()
+  )
+  const sessionSwitching = createMemo(() => pendingSwitchId() !== null)
 
   createEffect(() => {
     currentSessionId()
@@ -550,19 +564,70 @@ export default function RemoteClient() {
     await selectWorkspace(projectPathInput())
   }
 
-  const switchSession = async (id: string, options?: { focusComposer?: boolean }) => {
+  const switchSession = async (
+    id: string,
+    options?: { focusComposer?: boolean; scrollSidebar?: boolean }
+  ) => {
     closeCommandPalette()
+    if (!id.trim()) return
+
+    const alreadyCurrent =
+      state()?.current_session_id === id && pendingSwitchId() === null
+    if (alreadyCurrent) {
+      if (options?.scrollSidebar) setSidebarScrollSessionId(id)
+      setSidebarOpen(false)
+      if (options?.focusComposer !== false && !state()?.thread_tabs?.is_child_session) {
+        promptRef?.focus()
+      }
+      return
+    }
+
+    const revision = ++switchRevision
+    setPendingSwitchId(id)
+
+    // Optimistic: highlight target + clear main panel immediately.
+    setState((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        current_session_id: id,
+        messages: [],
+        is_streaming: false,
+        queued_messages: [],
+        pending_permission: null,
+        pending_question: null,
+        thread_tabs: null,
+      }
+    })
+    setOptimisticMessages([])
+    setOptimisticQueuedMessages([])
+
+    if (options?.scrollSidebar) setSidebarScrollSessionId(id)
+    setSidebarOpen(false)
+    if (options?.focusComposer !== false) {
+      promptRef?.focus()
+    }
+
     try {
       const next = await api().switchSession(id)
+      if (revision !== switchRevision) return
       applyRemoteState(next)
+      setPendingSwitchId(null)
+      setChatRevealKey((key) => key + 1)
       const cwd = next.status.cwd?.trim()
       if (cwd) ensureProjectExpanded(cwd)
-      setSidebarOpen(false)
       if (options?.focusComposer !== false && !next.thread_tabs?.is_child_session) {
         promptRef?.focus()
       }
     } catch (error) {
+      if (revision !== switchRevision) return
+      setPendingSwitchId(null)
       showErrorToast(error, "Could not switch chat.")
+      try {
+        await loadStateSnapshot()
+      } catch {
+        // Keep the optimistic empty panel if resync also fails.
+      }
     }
   }
 
@@ -1329,18 +1394,21 @@ export default function RemoteClient() {
     if (!gitSummary()?.is_repo || !cwd || gitLoading()) return
     if (!force && gitStatus() && gitLoadedPath() === cwd) return
 
+    const requestRevision = ++gitRequestRevision
     setGitLoading(true)
     setGitError("")
     try {
       const next = await api().gitStatus()
-      if (projectPath() !== cwd) return
+      if (requestRevision !== gitRequestRevision || projectPath() !== cwd) return
       setGitStatus(next)
       setGitLoadedPath(cwd)
     } catch (error) {
-      if (projectPath() !== cwd) return
+      if (requestRevision !== gitRequestRevision || projectPath() !== cwd) return
       setGitError(errorToastMessage(error, "Could not load git changes."))
     } finally {
-      setGitLoading(false)
+      if (requestRevision === gitRequestRevision && projectPath() === cwd) {
+        setGitLoading(false)
+      }
     }
   }
 
@@ -1614,6 +1682,8 @@ export default function RemoteClient() {
       activeProjectPath: projectPath,
       token,
       currentSessionId: () => state()?.current_session_id,
+      scrollToSessionId: sidebarScrollSessionId,
+      onScrollToSessionHandled: () => setSidebarScrollSessionId(null),
       onToggleProject: toggleProject,
       allProjectsExpanded,
       onToggleAllProjects: toggleAllProjects,
@@ -1659,8 +1729,11 @@ export default function RemoteClient() {
       setContentRef: (element) => setThreadContentEl(element),
       isAtTop: threadScroll.isAtTop,
       isAtBottom: threadScroll.isAtBottom,
+      setNavigationLock: threadScroll.setNavigationLock,
       isEmptyChat,
       shellLoading: () => !pairRequired() && state() === null,
+      sessionSwitching,
+      chatRevealKey,
       streaming: () => Boolean(state()?.is_streaming),
       visibleMessages,
       threadItems,
@@ -1783,7 +1856,7 @@ export default function RemoteClient() {
       onNewSession: startNewSession,
       projectResults: projectCommandResults,
       sessionResults: commandResults,
-      onSwitchSession: switchSession,
+      onSwitchSession: (id: string) => switchSession(id, { scrollSidebar: true }),
     },
     servers: serversController,
     imagePreview,
