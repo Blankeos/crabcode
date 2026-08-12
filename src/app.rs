@@ -3071,7 +3071,11 @@ impl App {
     }
 
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
-        if self.overlay_focus == OverlayFocus::None && self.base_focus == BaseFocus::Chat {
+        if matches!(
+            self.overlay_focus,
+            OverlayFocus::None | OverlayFocus::FindBar
+        ) && self.base_focus == BaseFocus::Chat
+        {
             let chat_area = self.current_chat_area();
             if chat_area.contains(Position::new(mouse.column, mouse.row))
                 && self
@@ -11334,6 +11338,24 @@ mod tests {
             .as_ref()
             .map(|dialog| dialog.items.iter().map(|item| item.label.clone()).collect())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn coalesced_mouse_scroll_reaches_chat_while_find_bar_is_focused() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::FindBar;
+        app.chat_state.chat.viewport_height = 10;
+        app.chat_state.chat.content_height = 100;
+        let chat_area = app.current_chat_area();
+
+        app.handle_coalesced_mouse_scroll(
+            mouse(MouseEventKind::ScrollDown, chat_area.x, chat_area.y),
+            1,
+        );
+
+        assert!(app.chat_state.chat.scroll_offset > 0);
     }
 
     #[test]
