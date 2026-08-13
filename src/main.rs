@@ -15,6 +15,7 @@ mod mcp;
 mod model;
 mod notify;
 mod persistence;
+mod plugin;
 mod prompt;
 mod remote;
 mod remote_mcp;
@@ -861,6 +862,32 @@ async fn main() -> Result<()> {
     }
 
     let mut app = App::new_with_model_override(args.model.as_deref())?;
+    let plugins_enabled = std::env::var("CRABCODE_ENABLE_OPENCODE_PLUGINS")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let mut plugin_host = None;
+    if plugins_enabled && !app.plugin_specs.is_empty() {
+        let cache_dir = crate::persistence::get_data_dir().join("cache");
+        match crate::plugin::PluginHost::start(&cache_dir, &app.project_root).await {
+            Ok(mut host) => match host.load_plugins(&app.plugin_specs).await {
+                Ok(result) => {
+                    crate::startup_diag!("Plugins: {}", result);
+                    plugin_host = Some(host);
+                }
+                Err(error) => {
+                    crate::startup_diag!("Plugin warning: failed to load plugins: {}", error);
+                    let _ = host.shutdown().await;
+                }
+            },
+            Err(error) => {
+                crate::startup_diag!("Plugin warning: failed to start Bun sidecar: {}", error);
+            }
+        }
+    } else if !app.plugin_specs.is_empty() {
+        crate::startup_diag!(
+            "Plugins: {} discovered but disabled; set CRABCODE_ENABLE_OPENCODE_PLUGINS=1 to enable the experimental host",
+            app.plugin_specs.len()
+        );
+    }
     // Keep herdr authority until this guard drops (normal exit or panic).
     let _herdr = crate::herdr::Session::start();
 
@@ -930,6 +957,12 @@ async fn main() -> Result<()> {
 
     restore_terminal_modes(terminal.backend_mut(), keyboard_enhancement)?;
     terminal.show_cursor()?;
+
+    if let Some(host) = plugin_host {
+        if let Err(error) = host.shutdown().await {
+            eprintln!("Plugin warning: failed to stop sidecar: {error}");
+        }
+    }
 
     if let Some(request) = remote_launch_request {
         if let Err(err) = result {

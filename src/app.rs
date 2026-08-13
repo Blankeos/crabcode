@@ -893,6 +893,8 @@ pub struct App {
     terminal_focused: bool,
     pub tool_permissions: crate::tools::ToolPermissions,
     pub skills_dirs: Vec<std::path::PathBuf>,
+    pub plugin_specs: Vec<crate::config::configuration::PluginSpec>,
+    pub project_root: std::path::PathBuf,
     pub is_streaming: bool,
     pending_session_title: Option<String>,
     session_view_states: std::collections::HashMap<String, ClientSessionState>,
@@ -1011,6 +1013,8 @@ impl App {
         };
 
         let loaded_config = crate::config::ConfigLoader::load()?;
+        let plugin_specs = loaded_config.merged_config.plugins.clone();
+        let project_root = loaded_config.project_root.clone();
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
         input.set_image_open_config(loaded_config.merged_config.images.clone());
@@ -1240,6 +1244,8 @@ impl App {
             terminal_focused: true,
             tool_permissions,
             skills_dirs: loaded_config.inventory.opencode_skills_dirs,
+            plugin_specs,
+            project_root,
             // Note: skills_dirs is legacy; skill loading is now handled by src/skill/mod.rs
             is_streaming: false,
             pending_session_title: None,
@@ -11304,6 +11310,8 @@ mod tests {
             terminal_focused: true,
             tool_permissions: crate::tools::ToolPermissions::new(".".to_string()),
             skills_dirs: Vec::new(),
+            plugin_specs: Vec::new(),
+            project_root: std::path::PathBuf::from("."),
             is_streaming: false,
             pending_session_title: None,
             session_view_states: std::collections::HashMap::new(),
