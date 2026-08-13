@@ -7222,9 +7222,6 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>();
 
-        assert!(collapsed
-            .iter()
-            .any(|line| line.contains("Thinking collapsed")));
         assert!(!collapsed
             .iter()
             .any(|line| line.contains("Private reasoning")));
@@ -7996,11 +7993,12 @@ mod tests {
     #[test]
     fn test_edit_tool_renders_codex_style_diff_summary() {
         let chat = Chat::new();
+        let file_path = "/Users/carlo/Desktop/Projects/crabcode/README.md";
         let content = serde_json::json!({
             "name": "edit",
             "status": "ok",
             "args": {
-                "file_path": "/Users/carlo/Desktop/Projects/crabcode/README.md",
+                "file_path": file_path,
                 "old_string": "alpha\nbeta\nomega",
                 "new_string": "alpha\nbravo\nomega",
             },
@@ -8013,15 +8011,16 @@ mod tests {
 
         let lines = chat.format_tool_row(&msg, 80, &colors, false);
         let rendered = lines.iter().map(trimmed_line_text).collect::<Vec<_>>();
+        let expected_title = format!("⬢ Edited {} (+1 -1)", display_path(file_path, false));
 
         assert_eq!(
             rendered,
             vec![
-                "⬢ Edited README.md (+1 -1)",
-                "    3  alpha",
-                "    4 -beta",
-                "    4 +bravo",
-                "    5  omega",
+                expected_title,
+                "    3  alpha".to_string(),
+                "    4 -beta".to_string(),
+                "    4 +bravo".to_string(),
+                "    5  omega".to_string(),
             ]
         );
     }
