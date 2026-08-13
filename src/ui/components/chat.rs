@@ -319,8 +319,6 @@ pub struct Chat {
     pending_click_anchor: Option<(usize, usize)>,
     /// Index of the message highlighted by timeline navigation (None = no highlight)
     pub highlighted_message_index: Option<usize>,
-    /// Index of the message whose viewport copy should be faded (sticky message).
-    pub faded_message_index: Option<usize>,
     /// Deferred scroll-to-message index resolved during next render after positions are known.
     pending_scroll_to_message: Option<usize>,
     /// Match ranges for the active rendered-line chat find query.
@@ -1718,7 +1716,6 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
-            faded_message_index: None,
             pending_scroll_to_message: None,
             search_matches: Vec::new(),
             search_active_match: None,
@@ -1790,7 +1787,6 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
-            faded_message_index: None,
             pending_scroll_to_message: None,
             search_matches: Vec::new(),
             search_active_match: None,
@@ -3844,6 +3840,10 @@ impl Chat {
             *line = sanitize_styled_line(line);
         }
 
+        // Keep content_height in sync so callers (e.g. sticky overlay) can
+        // resolve last-message end lines without waiting for Chat::render.
+        self.content_height = self.cached_lines.len();
+
         self.cached_revision = self.render_revision;
         self.cached_width = max_width;
         self.cached_colors_hash = colors_hash;
@@ -4030,32 +4030,6 @@ impl Chat {
             visible_start,
             colors,
         );
-
-        // Fade the sticky message's viewport copy so it becomes invisible while
-        // still occupying its rows (no text, no background).
-        if let Some(faded_idx) = self.faded_message_index {
-            if let Some(msg_start) = self.message_line_positions.get(faded_idx).copied() {
-                let msg_end = self
-                    .message_line_positions
-                    .iter()
-                    .skip(faded_idx + 1)
-                    .next()
-                    .copied()
-                    .unwrap_or(content_height);
-                let fade_start = msg_start.max(visible_start);
-                let fade_end = msg_end.min(visible_end);
-                if fade_start < fade_end {
-                    let invisible =
-                        Line::from(vec![Span::styled(" ".repeat(max_width), Style::default())]);
-                    for line_idx in fade_start..fade_end {
-                        let local_idx = line_idx - visible_start;
-                        if let Some(line) = content_lines.get_mut(local_idx) {
-                            *line = invisible.clone();
-                        }
-                    }
-                }
-            }
-        }
 
         let render_area = Rect {
             x: content_area.x,

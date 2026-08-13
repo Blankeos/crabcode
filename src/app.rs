@@ -4957,7 +4957,6 @@ impl App {
                             // Clear sticky state so the scrolled-to message re-enters
                             // the viewport cleanly without residual sticky chrome.
                             self.chat_state.sticky_message_index = None;
-                            self.chat_state.chat.faded_message_index = None;
                             self.chat_state.sticky_click_target = None;
                             self.pending_chat_message_click = None;
                             return;
@@ -6219,6 +6218,11 @@ impl App {
                 }
                 if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
                     self.chat_state.compact_mode = !self.chat_state.compact_mode;
+                    if let Some(dao) = &self.prefs_dao {
+                        if let Err(error) = dao.set_compact_mode(self.chat_state.compact_mode) {
+                            eprintln!("Failed to persist compact mode preference: {error}");
+                        }
+                    }
                     push_toast(Toast::new(
                         if self.chat_state.compact_mode {
                             "Compact mode enabled"

@@ -211,6 +211,14 @@ pub fn render_chat(
         // Fixed layout first so chat_area is independent of sticky overlay height.
         let (header_area, chat_area) = compact_transcript_layout(above_status_chunks[1]);
 
+        // Match Chat::render content width (area.width - 2 scrollbar gutter).
+        // Refresh layout cache before sticky math so show/hide uses this frame's
+        // positions, not the previous frame's (stale after resize / new messages).
+        let content_max_width = (chat_area.width.saturating_sub(2) as usize).max(1);
+        chat_state
+            .chat
+            .ensure_render_cache(content_max_width, &model, colors);
+
         let scroll_offset = chat_state.chat.scroll_offset;
         // One start line per transcript message / rendered block (groups share a start).
         let rendered_message_starts = &chat_state.chat.message_line_positions;
@@ -260,11 +268,6 @@ pub fn render_chat(
             // else keep memory for hysteresis while in dead/transition zones
         }
 
-        // Only fade a message that is fully above the viewport. If it's still
-        // partially visible we never set display_sticky, so this stays None and
-        // sticky/viewport never intersect.
-        chat_state.chat.faded_message_index = display_sticky;
-
         let sticky_height: u16 = if let Some(idx) = display_sticky {
             let msg_start = rendered_message_starts.get(idx).copied().unwrap_or(0);
             let msg_end = msg_end_line(idx);
@@ -273,10 +276,9 @@ pub fn render_chat(
             0
         };
 
-        // Render compact header with session title. No background fill; the
-        // title sits on the middle row in accent + bold. Top/bottom rows are
-        // truly empty (no bg).
-        if let Some(title) = session_title {
+        // Compact header: title on middle row (accent + bold). Skip empty titles
+        // but keep the fixed 3-row slot so layout does not jump.
+        if let Some(title) = session_title.filter(|t| !t.is_empty()) {
             let header_inner = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(
@@ -288,7 +290,6 @@ pub fn render_chat(
                     .as_ref(),
                 )
                 .split(header_area);
-            // Title line (accent + bold, no background)
             f.render_widget(
                 Paragraph::new(title).style(
                     Style::default()
@@ -310,7 +311,6 @@ pub fn render_chat(
     } else {
         // Leaving compact mode: clear sticky state so re-enabling starts clean.
         chat_state.sticky_message_index = None;
-        chat_state.chat.faded_message_index = None;
         chat_state.sticky_click_target = None;
         chat_state.last_chat_area = Some(above_status_chunks[1]);
         (above_status_chunks[1], None)
@@ -324,7 +324,15 @@ pub fn render_chat(
     if let Some((sticky_rect, idx)) = sticky_overlay {
         chat_state.sticky_click_target = Some((sticky_rect, idx));
 
-        let max_width = sticky_rect.width as usize;
+        // Content panel matches Chat content area (full width minus scrollbar gutter).
+        let content_width = sticky_rect.width.saturating_sub(2);
+        let content_rect = Rect {
+            x: sticky_rect.x,
+            y: sticky_rect.y,
+            width: content_width,
+            height: sticky_rect.height,
+        };
+        let max_width = content_width as usize;
         let sticky_height = sticky_rect.height;
         let sticky_msg = chat_state.chat.messages.get(idx);
 
@@ -372,8 +380,8 @@ pub fn render_chat(
         let mut sticky_lines: Vec<Line> = Vec::with_capacity(sticky_height as usize);
         sticky_lines.push(padding_line());
 
-        // Content rows: mirror real user-message rendering (image
-        // placeholders styled, text wrapped), limited to content_rows.
+        // Content rows: same wrap width as the live user bubble so sticky text
+        // matches the faded-out original (image placeholders, agent mentions).
         let content_lines = chat_state
             .chat
             .format_user_message_content_lines(idx, max_width, colors);
@@ -402,9 +410,10 @@ pub fn render_chat(
         // Paragraph patches styles onto existing cells and only rewrites
         // grapheme-covered cells. Clear first so bold/fg/bg from the
         // underlying transcript cannot leak into the sticky rectangle.
+        // Paint only the content strip so the scrollbar gutter stays free.
         paint_sticky_overlay(
             f.buffer_mut(),
-            sticky_rect,
+            content_rect,
             sticky_lines,
             colors.background_element,
         );
@@ -2036,6 +2045,10 @@ mod tests {
             .chat
             .add_assistant_message("assistant reply\n".repeat(40));
         chat_state.chat.add_user_message("later user");
+        // Pin to top after adds (add_* sets scroll_offset = MAX while autoscroll is on).
+        chat_state.chat.autoscroll_enabled = false;
+        chat_state.chat.scroll_offset = 0;
+        chat_state.chat.scroll_up(0); // marks user_scrolled_up so pin-to-bottom stays off
 
         let mut input = Input::new();
         let mut find_bar = FindBar::new();
@@ -2066,6 +2079,7 @@ mod tests {
                     None,
                     &[],
                     &mut find_bar,
+                    true,
                     Some("Session"),
                 );
             })
@@ -2090,6 +2104,7 @@ mod tests {
             user_message_body_end(end)
         };
         chat_state.chat.scroll_offset = first_user_body_end;
+        chat_state.chat.scroll_up(0);
 
         terminal
             .draw(|f| {
@@ -2113,6 +2128,7 @@ mod tests {
                     None,
                     &[],
                     &mut find_bar,
+                    true,
                     Some("Session"),
                 );
             })
@@ -2138,7 +2154,6 @@ mod tests {
         assert_eq!(sticky_rect.y, area_with.y);
         assert_eq!(sticky_rect.width, area_with.width);
         assert!(sticky_rect.height >= 3 && sticky_rect.height <= 5);
-        assert_eq!(chat_state.chat.faded_message_index, Some(sticky_idx));
     }
 
     #[test]
@@ -2153,9 +2168,12 @@ mod tests {
             sticky_click_target: None,
             last_chat_area: None,
         };
+        chat_state.chat.autoscroll_enabled = false;
         chat_state
             .chat
             .add_user_message("only message still in view");
+        chat_state.chat.scroll_offset = 0;
+        chat_state.chat.scroll_up(0);
 
         let mut input = Input::new();
         let mut find_bar = FindBar::new();
@@ -2185,6 +2203,7 @@ mod tests {
                     None,
                     &[],
                     &mut find_bar,
+                    true,
                     Some("Session"),
                 );
             })
@@ -2197,7 +2216,6 @@ mod tests {
         assert_eq!(chat_area.y, 3, "chat starts immediately under the header");
         assert!(chat_area.height > 0);
         assert!(chat_state.sticky_click_target.is_none());
-        assert!(chat_state.chat.faded_message_index.is_none());
         // Overlay helpers agree: no sticky height → no overlay rect.
         assert!(sticky_overlay_rect(chat_area, 0).is_none());
     }
