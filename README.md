@@ -36,6 +36,15 @@ cargo install crabcode             # or cargo (build from source)
 curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | sh # or linux/macos (via curl)
 ```
 
+### Upgrade
+
+Detects how you installed (brew / npm / bun / cargo / install.sh) and upgrades in place:
+
+```sh
+crabcode upgrade          # latest
+crabcode upgrade 0.0.12   # specific version
+```
+
 ## Quick Start
 
 1. Run crabcode:

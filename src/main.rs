@@ -674,9 +674,9 @@ enum Command {
     /// List remembered remote hosts
     Hosts,
 
-    /// Upgrade crabcode to the latest or a specific version
+    /// Upgrade crabcode to the latest (or a specific) version
     Upgrade {
-        /// Version to install, for example 0.1.0. Defaults to latest.
+        /// Target version (e.g. `0.0.12`) or `latest`
         target: Option<String>,
     },
 }
@@ -816,7 +816,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some(Command::Upgrade { target }) => {
-            return crate::upgrade::upgrade(target.as_deref()).await;
+            return crate::upgrade::upgrade(target.as_deref());
         }
         None => {}
     }
