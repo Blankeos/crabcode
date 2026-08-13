@@ -2102,6 +2102,9 @@ impl App {
     fn set_session_retry_status(&mut self, session_id: &str, status: Option<StreamingRetryStatus>) {
         self.ensure_session_view_state(session_id);
         if let Some(state) = self.session_view_states.get_mut(session_id) {
+            if state.retry_status == status {
+                return;
+            }
             state.retry_status = status;
         }
     }
@@ -13005,6 +13008,9 @@ mod tests {
             .chat
             .add_message(crate::session::types::Message::incomplete(""));
         app.chat_state.chat.begin_streaming_turn();
+        app.chat_state
+            .chat
+            .prepare_streaming_token_counter("test-model");
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         sender
@@ -13129,14 +13135,23 @@ mod tests {
         app.overlay_focus = OverlayFocus::SessionsDialog;
         app.sessions_dialog_state.dialog.show();
         app.refresh_sessions_dialog();
-        app.sessions_dialog_live_dirty = false;
-        let probe_before = app.last_sessions_dialog_metadata_probe;
 
         app.base_focus = BaseFocus::Chat;
         app.chat_state
             .chat
             .add_message(crate::session::types::Message::incomplete(""));
         app.chat_state.chat.begin_streaming_turn();
+        // Warm tiktoken before probing so load cost is not charged to the
+        // sessions-dialog probe interval during process_streaming_chunks.
+        app.chat_state
+            .chat
+            .prepare_streaming_token_counter("test-model");
+
+        // Reset probe after any setup cost (e.g. tiktoken warm-up) so the
+        // assertion only covers process_streaming_chunks itself.
+        app.sessions_dialog_live_dirty = false;
+        app.last_sessions_dialog_metadata_probe = std::time::Instant::now();
+        let probe_before = app.last_sessions_dialog_metadata_probe;
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         sender

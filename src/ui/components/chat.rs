@@ -2507,9 +2507,17 @@ impl Chat {
         }
 
         // Seed the text-only counter for this step.
+        // Reuse the turn counter when present so the first text chunk after a
+        // tool call does not re-load tiktoken (can take hundreds of ms).
         if self.generation_token_counter.is_none() {
-            let model = self.streaming_model.as_deref().unwrap_or("");
-            self.generation_token_counter = Some(StreamingTokenCounter::new(model));
+            if let Some(turn_counter) = self.streaming_token_counter.clone() {
+                let mut sample_counter = turn_counter;
+                sample_counter.reset();
+                self.generation_token_counter = Some(sample_counter);
+            } else {
+                let model = self.streaming_model.as_deref().unwrap_or("");
+                self.generation_token_counter = Some(StreamingTokenCounter::new(model));
+            }
         }
 
         self.active_generation = Some(GenerationSample {
@@ -2839,13 +2847,24 @@ impl Chat {
         }
 
         if refreshed {
-            let dirty_from = self
-                .pending_streaming_render_dirty_from
-                .take()
-                .unwrap_or(last_idx);
-            self.pending_streaming_content_dirty = false;
-            self.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
-            self.invalidate_cache_from(dirty_from);
+            let dirty_from = self.pending_streaming_render_dirty_from.unwrap_or(last_idx);
+            // Markdown may re-render on a shorter cadence than tool-heavy layout.
+            // Only bump render_revision / drop line caches when the adaptive
+            // layout interval has elapsed.
+            let layout_due = layout_min_interval.is_zero()
+                || self
+                    .last_streaming_cache_refresh_at
+                    .map_or(true, |last| last.elapsed() >= layout_min_interval);
+            if layout_due {
+                self.pending_streaming_render_dirty_from = None;
+                self.pending_streaming_content_dirty = false;
+                self.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
+                self.invalidate_cache_from(dirty_from);
+            } else {
+                // Keep content marked dirty so a later frame flushes layout.
+                self.pending_streaming_content_dirty = true;
+                self.pending_streaming_render_dirty_from = Some(dirty_from);
+            }
         }
 
         self.flush_non_content_streaming_render_pending();
@@ -7499,9 +7518,13 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>();
 
-        assert!(collapsed
-            .iter()
-            .any(|line| line.contains("Thinking collapsed")));
+        // Collapsed reasoning shows the duration/status label only (not "Thinking collapsed").
+        assert!(
+            collapsed
+                .iter()
+                .any(|line| { line.contains("Thought for") || line.contains("Thinking") }),
+            "expected collapsed thinking label, got: {collapsed:?}"
+        );
         assert!(!collapsed
             .iter()
             .any(|line| line.contains("Private reasoning")));
@@ -7606,6 +7629,8 @@ mod tests {
 
         chat.update_streaming_renderer(100, &colors);
         let first_line_count = chat.build_all_lines(100, "model", &colors).len();
+        // Freeze layout clock so deferred append cannot race wall-clock expiry.
+        chat.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
         let first_revision = chat.render_revision;
         let cached_prefix_len = chat
             .ordered_tool_prefix_cache
@@ -7614,7 +7639,11 @@ mod tests {
             .map(|cache| cache.lines.len())
             .expect("tool prefix cache");
         assert!(cached_prefix_len > 0);
+
         chat.append_to_last_assistant(" continues");
+        // Re-freeze immediately before the deferred update so wall-clock from
+        // tool-prefix warm-up cannot open the layout interval.
+        chat.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
         chat.update_streaming_renderer(100, &colors);
 
         assert_eq!(chat.render_revision, first_revision);
@@ -9592,7 +9621,8 @@ codex exec --skip-git-repo-check \
 
         assert!(metadata.contains("1.0s"));
         assert!(metadata.contains("ttft 0.2s"));
-        assert!(metadata.contains("50t/s"));
+        // OpenCode inter-token: (40 - 1) / 0.8s = 48.75 → rounds to 49t/s
+        assert!(metadata.contains("49t/s"));
     }
 
     #[test]
