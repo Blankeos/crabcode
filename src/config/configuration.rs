@@ -1129,7 +1129,6 @@ fn opencode_ignored_keys() -> BTreeSet<&'static str> {
         "share",
         "tui",
         "server",
-        "plugin",
         "tool",
         "custom tools",
         "custom_tools",
@@ -2747,7 +2746,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_plugin_key_survives_filtering_and_is_implemented() {
+    fn opencode_plugin_key_is_parsed_and_not_reported_unimplemented() {
         let filtered = filter_top_level(
             json!({
                 "plugin": ["./plugin.mjs"],
@@ -2756,7 +2755,11 @@ mod tests {
             SourceKind::OpenCode,
         );
 
-        assert_eq!(filtered, json!({ "plugin": ["./plugin.mjs"] }));
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(&filtered, &mut diagnostics);
+
+        assert_eq!(config.plugins.len(), 1);
+        assert_eq!(config.plugins[0].source, "./plugin.mjs");
         assert!(collect_unimplemented_keys(&filtered).is_empty());
     }
 
@@ -2790,9 +2793,10 @@ mod tests {
         let mut diagnostics = ConfigDiagnostics::default();
         discover_opencode_inventory(xdg.path(), project.path(), &mut inventory, &mut diagnostics);
 
-        assert_eq!(inventory.plugin_files.len(), 2);
-        assert!(inventory.plugin_files[0].ends_with("a.js"));
-        assert!(inventory.plugin_files[1].ends_with("z.mjs"));
+        let mut expected = vec![plural.join("a.js"), singular.join("z.mjs")];
+        expected.sort();
+
+        assert_eq!(inventory.plugin_files, expected);
     }
 
     #[test]
