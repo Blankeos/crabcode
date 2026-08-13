@@ -1013,6 +1013,15 @@ impl App {
         let loaded_config = crate::config::ConfigLoader::load()?;
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
+        // Warm MCP connections in the background so the first chat never waits.
+        if !mcp_config.is_empty() {
+            let warm_cfg = mcp_config.clone();
+            let warm_cwd =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let _ = tokio::spawn(async move {
+                let _ = crate::mcp::McpManager::ensure(warm_cfg, warm_cwd);
+            });
+        }
         input.set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
@@ -1234,7 +1243,7 @@ impl App {
             notifications: loaded_config.merged_config.notifications,
             images: loaded_config.merged_config.images,
             websearch: loaded_config.merged_config.websearch,
-            mcp: mcp_config,
+            mcp: mcp_config.clone(),
             config_raw_merged: loaded_config.raw_merged,
             custom_instructions,
             terminal_focused: true,
