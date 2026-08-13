@@ -1498,38 +1498,7 @@ impl App {
     }
 
     fn completion_notification_stats(&self) -> Option<String> {
-        let message = self.chat_state.chat.messages.iter().rev().find(|msg| {
-            msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
-        })?;
-
-        if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
-            let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
-            let ttft_ms = t1.saturating_sub(t0);
-            let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
-            let total_ms = ttft_ms.saturating_add(decode_ms);
-
-            let total_sec = total_ms as f64 / 1000.0;
-            let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
-                (output_tokens as f64) / (decode_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-
-            return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
-        }
-
-        if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
-            let duration_sec = duration_ms as f64 / 1000.0;
-            let tokens_per_sec = if duration_ms > 0 {
-                (token_count as f64) / (duration_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-
-            return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
-        }
-
-        None
+        Self::completion_notification_stats_for_chat(&self.chat_state.chat)
     }
 
     fn completion_notification_stats_for_chat(chat: &Chat) -> Option<String> {
@@ -1537,31 +1506,47 @@ impl App {
             msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
         })?;
 
+        let format_tps = |precomputed: Option<f64>, tokens: usize, decode_ms: u64| -> Option<f64> {
+            if let Some(tps) = precomputed {
+                if tps.is_finite() && tps > 0.0 {
+                    return Some(tps);
+                }
+            }
+            // OpenCode inter-token: (n - 1) / duration; need >1 token.
+            if decode_ms == 0 || tokens < 2 {
+                return None;
+            }
+            let tps = ((tokens - 1) as f64) / (decode_ms as f64 / 1000.0);
+            if tps.is_finite() && tps > 0.0 {
+                Some(tps)
+            } else {
+                None
+            }
+        };
+
         if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
             let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
             let ttft_ms = t1.saturating_sub(t0);
             let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
             let total_ms = ttft_ms.saturating_add(decode_ms);
-
             let total_sec = total_ms as f64 / 1000.0;
-            let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
-                (output_tokens as f64) / (decode_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
 
-            return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
+            if let Some(tokens_per_sec) =
+                format_tps(message.tokens_per_sec, output_tokens, decode_ms)
+            {
+                return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
+            }
+            return Some(format!("{:.1}s", total_sec));
         }
 
         if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
             let duration_sec = duration_ms as f64 / 1000.0;
-            let tokens_per_sec = if duration_ms > 0 {
-                (token_count as f64) / (duration_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-
-            return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
+            if let Some(tokens_per_sec) =
+                format_tps(message.tokens_per_sec, token_count, duration_ms)
+            {
+                return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
+            }
+            return Some(format!("{:.1}s", duration_sec));
         }
 
         None
@@ -8940,6 +8925,11 @@ impl App {
             crate::llm::ChunkMessage::Metrics { .. } => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.set_session_retry_status(session_id, None);
+                // Close the generation sample as a tool-calls finish (excluded from
+                // TPS) and pause timing for the duration of tool execution.
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.end_generation_for_tool_calls();
+                }
                 self.add_tool_calls_to_session(session_id, tool_calls);
                 true
             }

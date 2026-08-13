@@ -2523,6 +2523,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -2545,6 +2546,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -2576,6 +2578,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -2621,6 +2624,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -2784,6 +2788,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -2817,6 +2822,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -2845,6 +2851,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -3040,6 +3047,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -3079,6 +3087,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -3104,6 +3113,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
@@ -3294,6 +3304,7 @@ mod tests {
                     "provider",
                     None,
                     &colors,
+                    false,
                 );
             })
             .unwrap();
