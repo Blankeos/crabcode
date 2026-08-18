@@ -2,6 +2,7 @@
   "$schema": "https://opencode.ai/desktop-theme.json",
   "name": "Grok Day",
   "id": "grokday",
+  "appearance": "light",
   "light": {
     "seeds": {
       "neutral": "#eeeeee",

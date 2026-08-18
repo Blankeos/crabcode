@@ -75,8 +75,8 @@
       "light": "base600Weak"
     },
     "background": {
-      "dark": "black",
-      "light": "paper"
+      "dark": "#100F0F",
+      "light": "#FFFCF0"
     },
     "backgroundPanel": {
       "dark": "base950",
@@ -238,5 +238,6 @@
       "dark": "base300",
       "light": "base600"
     }
-  }
+  },
+  "appearance": "dark"
 }

@@ -51,7 +51,7 @@
       "light": "vesperMuted"
     },
     "background": {
-      "dark": "vesperBg",
+      "dark": "#101010",
       "light": "#FFF"
     },
     "backgroundPanel": {
@@ -214,5 +214,6 @@
       "dark": "vesperFg",
       "light": "vesperBg"
     }
-  }
+  },
+  "appearance": "dark"
 }

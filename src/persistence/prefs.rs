@@ -7,6 +7,7 @@ use super::{ensure_data_dir, get_data_dir};
 
 const MODEL_PREFS_KEY: &str = "model_preferences";
 const ACTIVE_THEME_KEY: &str = "active_theme";
+const THEME_TRANSPARENT_KEY: &str = "theme_transparent";
 const TERMINAL_TITLE_ITEMS_KEY: &str = "terminal_title_items";
 const COMPACT_MODE_KEY: &str = "compact_mode";
 
@@ -214,6 +215,22 @@ impl PrefsDAO {
 
     pub fn set_compact_mode(&self, enabled: bool) -> Result<()> {
         self.set_pref(COMPACT_MODE_KEY, &enabled.to_string())
+    }
+
+    /// Whether the main UI background should be transparent (terminal shows through).
+    /// Default: false (solid theme background).
+    pub fn get_theme_transparent(&self) -> Result<bool> {
+        Ok(self
+            .get_pref(THEME_TRANSPARENT_KEY)?
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false))
+    }
+
+    pub fn set_theme_transparent(&self, transparent: bool) -> Result<()> {
+        self.set_pref(
+            THEME_TRANSPARENT_KEY,
+            if transparent { "true" } else { "false" },
+        )
     }
 
     pub fn get_terminal_title_items(

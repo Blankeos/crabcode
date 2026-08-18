@@ -66,8 +66,8 @@
       "light": "lightGrayWeak"
     },
     "background": {
-      "dark": "sumiInk0",
-      "light": "lightBg"
+      "dark": "#1F1F28",
+      "light": "#F2E9DE"
     },
     "backgroundPanel": {
       "dark": "sumiInk1",
@@ -229,5 +229,6 @@
       "dark": "fujiWhite",
       "light": "lightText"
     }
-  }
+  },
+  "appearance": "dark"
 }

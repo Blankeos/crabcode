@@ -469,8 +469,10 @@ pub fn render_chat(
     }
 
     if is_subagent_view {
-        let blank = Block::default();
-        f.render_widget(blank, above_status_chunks[6]);
+        f.render_widget(
+            Block::default().style(Style::default().bg(colors.background)),
+            above_status_chunks[6],
+        );
 
         let status_bar = StatusBar::new(version, cwd, branch, agent, model);
         status_bar.render(f, main_chunks[1], colors);
@@ -551,8 +553,10 @@ pub fn render_chat(
     let help = Paragraph::new(help_line).alignment(Alignment::Right);
     f.render_widget(help, status_chunks[3]);
 
-    let blank = Block::default();
-    f.render_widget(blank, above_status_chunks[6]);
+    f.render_widget(
+        Block::default().style(Style::default().bg(colors.background)),
+        above_status_chunks[6],
+    );
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
     status_bar.render(f, main_chunks[1], colors);

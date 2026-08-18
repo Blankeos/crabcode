@@ -84,8 +84,8 @@
       "light": "neutral500Weak"
     },
     "background": {
-      "light": "neutral-000",
-      "dark": "neutral-950"
+      "light": "#ffffff",
+      "dark": "#171721"
     },
     "backgroundPanel": {
       "light": "neutral-050",
@@ -247,5 +247,6 @@
       "light": "neutral-700",
       "dark": "neutral-200"
     }
-  }
+  },
+  "appearance": "dark"
 }

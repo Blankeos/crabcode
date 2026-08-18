@@ -29,7 +29,10 @@
       "dark": "darkFgMutedWeak",
       "light": "darkFgMutedWeak"
     },
-    "background": "darkBg",
+    "background": {
+      "dark": "#0f0f0f",
+      "light": "#0f0f0f"
+    },
     "backgroundPanel": "darkBgPanel",
     "backgroundElement": "darkBgPanel",
     "border": "darkBorder",
@@ -70,5 +73,6 @@
     "syntaxType": "purple",
     "syntaxOperator": "pink",
     "syntaxPunctuation": "darkFg"
-  }
+  },
+  "appearance": "dark"
 }

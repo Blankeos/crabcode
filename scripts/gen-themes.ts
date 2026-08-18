@@ -160,6 +160,98 @@ function injectTextWeak(themeJson: Record<string, unknown>) {
   themeJson.theme = theme
 }
 
+/**
+ * Solid backgrounds by default. Upstream themes sometimes set `background` to
+ * "transparent" or semi-transparent `#rrggbbaa`; replace / strip so the TUI
+ * paints a real opaque bg. Users can still enable transparency at runtime via
+ * /themes (ctrl+t).
+ */
+function solidifyBackground(themeJson: Record<string, unknown>) {
+  if (!themeJson.theme || !themeJson.defs) return
+
+  const theme = themeJson.theme as Record<string, unknown>
+  const defs = themeJson.defs as Record<string, string>
+  const bg = theme.background
+  if (bg === undefined) return
+
+  const isTransparent = (v: unknown) =>
+    typeof v === 'string' && v.trim().toLowerCase() === 'transparent'
+
+  const stripAlpha = (hex: string): string => {
+    const h = hex.trim()
+    if (/^#[0-9a-fA-F]{8}$/.test(h)) return h.slice(0, 7)
+    if (/^#[0-9a-fA-F]{4}$/.test(h)) return `#${h[1]}${h[1]}${h[2]}${h[2]}${h[3]}${h[3]}`
+    return h
+  }
+
+  const solidForMode = (mode: ThemeMode): string => {
+    const panel = getModeValue(theme.backgroundPanel, mode)
+    const menu = getModeValue(theme.backgroundMenu, mode)
+    const element = getModeValue(theme.backgroundElement, mode)
+    for (const ref of [panel, menu, element]) {
+      if (!ref || isTransparent(ref)) continue
+      const hex = resolveToHex(defs, theme, ref)
+      if (hex.startsWith('#')) return stripAlpha(hex)
+    }
+    return mode === 'dark' ? '#0d0d0d' : '#fafafa'
+  }
+
+  const solidifyValue = (v: unknown, mode: ThemeMode): string => {
+    if (typeof v !== 'string' || isTransparent(v)) return solidForMode(mode)
+    if (v.startsWith('#')) return stripAlpha(v)
+    // def ref — resolve, strip alpha, keep as hex so we don't mutate shared defs
+    const hex = resolveToHex(defs, theme, v)
+    if (hex.startsWith('#')) return stripAlpha(hex)
+    return solidForMode(mode)
+  }
+
+  if (typeof bg === 'string') {
+    theme.background = {
+      dark: solidifyValue(bg, 'dark'),
+      light: solidifyValue(bg, 'light'),
+    }
+    return
+  }
+
+  if (bg && typeof bg === 'object') {
+    const dual = bg as Record<string, unknown>
+    for (const mode of ['dark', 'light'] as const) {
+      if (dual[mode] !== undefined) {
+        dual[mode] = solidifyValue(dual[mode], mode)
+      } else {
+        dual[mode] = solidForMode(mode)
+      }
+    }
+    theme.background = dual
+  }
+}
+
+/**
+ * Tag each theme as "dark" or "light" based on its primary (dark-mode) background
+ * luminance. Searchable in /themes.
+ */
+function injectAppearance(themeJson: Record<string, unknown>) {
+  if (typeof themeJson.appearance === 'string') return
+  if (!themeJson.theme || !themeJson.defs) {
+    themeJson.appearance = 'dark'
+    return
+  }
+
+  const theme = themeJson.theme as Record<string, unknown>
+  const defs = themeJson.defs as Record<string, string>
+  const bgRef =
+    getModeValue(theme.background, 'dark') ??
+    getModeValue(theme.backgroundPanel, 'dark') ??
+    getModeValue(theme.backgroundMenu, 'dark')
+  if (!bgRef || bgRef.toLowerCase() === 'transparent') {
+    themeJson.appearance = 'dark'
+    return
+  }
+  const hex = resolveToHex(defs, theme, bgRef)
+  const lum = luminance(hex)
+  themeJson.appearance = lum !== undefined && lum > 0.5 ? 'light' : 'dark'
+}
+
 async function fetchThemes() {
   const response = await fetch(GITHUB_API_URL)
   if (!response.ok) {
@@ -190,6 +282,8 @@ async function fetchThemes() {
     try {
       const themeJson = JSON.parse(themeContent) as Record<string, unknown>
       injectTextWeak(themeJson)
+      solidifyBackground(themeJson)
+      injectAppearance(themeJson)
       writeFileSync(themePath, JSON.stringify(themeJson, null, 2) + '\n')
     } catch {
       writeFileSync(themePath, themeContent)

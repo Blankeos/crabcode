@@ -80,8 +80,8 @@
       "light": "lightStep11Weak"
     },
     "background": {
-      "dark": "darkStep1",
-      "light": "lightStep1"
+      "dark": "#2d353b",
+      "light": "#fdf6e3"
     },
     "backgroundPanel": {
       "dark": "darkStep2",
@@ -243,5 +243,6 @@
       "dark": "darkStep12",
       "light": "lightStep12"
     }
-  }
+  },
+  "appearance": "dark"
 }

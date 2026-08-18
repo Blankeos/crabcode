@@ -62,7 +62,7 @@
       "light": "6f6f6fWeak"
     },
     "background": {
-      "dark": "bg",
+      "dark": "#3f3f3f",
       "light": "#ffffef"
     },
     "backgroundPanel": {
@@ -225,5 +225,6 @@
       "dark": "fg",
       "light": "#3f3f3f"
     }
-  }
+  },
+  "appearance": "dark"
 }

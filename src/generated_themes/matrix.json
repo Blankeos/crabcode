@@ -66,8 +66,8 @@
       "light": "lightGrayWeak"
     },
     "background": {
-      "dark": "matrixInk0",
-      "light": "lightBg"
+      "dark": "#0a0e0a",
+      "light": "#eef3ea"
     },
     "backgroundPanel": {
       "dark": "matrixInk1",
@@ -229,5 +229,6 @@
       "dark": "rainGreenHi",
       "light": "lightText"
     }
-  }
+  },
+  "appearance": "dark"
 }

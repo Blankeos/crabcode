@@ -170,10 +170,36 @@ pub fn agent_mode_color(agent_mode: Option<&str>, colors: &ThemeColors) -> ratat
     agent_color(agent_mode.unwrap_or("Plan"), colors)
 }
 
+/// Whether a theme is designed for light or dark terminal windows.
+/// Searchable in /themes via description ("light" / "dark").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeAppearance {
+    Dark,
+    Light,
+}
+
+impl ThemeAppearance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThemeAppearance::Dark => "dark",
+            ThemeAppearance::Light => "light",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "dark" => Some(ThemeAppearance::Dark),
+            "light" => Some(ThemeAppearance::Light),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub name: String,
     pub id: String,
+    pub appearance: ThemeAppearance,
     data: ThemeData,
 }
 
@@ -376,21 +402,44 @@ impl Theme {
             .and_then(|x| x.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| id.clone());
+        let declared_appearance = v
+            .get("appearance")
+            .and_then(|x| x.as_str())
+            .and_then(ThemeAppearance::parse);
 
         if v.get("light").is_some() && v.get("dark").is_some() {
             let desktop: DesktopTheme = serde_json::from_value(v)?;
+            let appearance = declared_appearance.unwrap_or_else(|| {
+                appearance_from_color(parse_hex(&desktop.dark.overrides.background_base))
+            });
             return Ok(Self {
                 name: desktop.name.clone(),
                 id: desktop.id.clone(),
+                appearance,
                 data: ThemeData::Desktop(desktop),
             });
         }
 
         if v.get("defs").is_some() && v.get("theme").is_some() {
             let tui: TuiTheme = serde_json::from_value(v)?;
+            let appearance = declared_appearance.unwrap_or_else(|| {
+                let bg = resolve_tui_color(&tui, "background", true);
+                let bg = if bg == ratatui::style::Color::Reset {
+                    let panel = resolve_tui_color(&tui, "backgroundPanel", true);
+                    if panel == ratatui::style::Color::Reset {
+                        resolve_tui_color(&tui, "backgroundMenu", true)
+                    } else {
+                        panel
+                    }
+                } else {
+                    bg
+                };
+                appearance_from_color(bg)
+            });
             return Ok(Self {
                 name,
                 id,
+                appearance,
                 data: ThemeData::Tui(tui),
             });
         }
@@ -398,8 +447,14 @@ impl Theme {
         Err(format!("Unsupported theme schema for {}", derived_id).into())
     }
 
+    /// Resolve theme colors. When `transparent` is true, main `background`
+    /// becomes `Color::Reset` so the terminal shows through.
     pub fn get_colors(&self, dark: bool) -> ThemeColors {
-        match &self.data {
+        self.get_colors_with(dark, false)
+    }
+
+    pub fn get_colors_with(&self, dark: bool, transparent: bool) -> ThemeColors {
+        let mut colors = match &self.data {
             ThemeData::Desktop(theme) => {
                 let mode = if dark { &theme.dark } else { &theme.light };
 
@@ -555,13 +610,26 @@ impl Theme {
                         v
                     }
                 };
-                let background = resolve("background");
-                let dialog_background = {
-                    let v = resolve("backgroundPanel");
-                    if v == ratatui::style::Color::Reset {
-                        background
+                // Prefer solid backgrounds: if theme declares transparent, fall back to panel.
+                let mut background = resolve("background");
+                let panel = resolve("backgroundPanel");
+                let menu = resolve("backgroundMenu");
+                if background == ratatui::style::Color::Reset {
+                    background = if panel != ratatui::style::Color::Reset {
+                        panel
+                    } else if menu != ratatui::style::Color::Reset {
+                        menu
+                    } else if dark {
+                        ratatui::style::Color::Rgb(0x0d, 0x0d, 0x0d)
                     } else {
-                        v
+                        ratatui::style::Color::Rgb(0xfa, 0xfa, 0xfa)
+                    };
+                }
+                let dialog_background = {
+                    if panel != ratatui::style::Color::Reset {
+                        panel
+                    } else {
+                        background
                     }
                 };
                 let background_element = resolve_or("backgroundElement", dialog_background);
@@ -638,7 +706,28 @@ impl Theme {
                     diff_gutter,
                 }
             }
+        };
+
+        if transparent {
+            colors.background = ratatui::style::Color::Reset;
         }
+
+        colors
+    }
+}
+
+fn appearance_from_color(color: ratatui::style::Color) -> ThemeAppearance {
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => {
+            let lum = 0.2126 * (r as f32) + 0.7152 * (g as f32) + 0.0722 * (b as f32);
+            if lum > 140.0 {
+                ThemeAppearance::Light
+            } else {
+                ThemeAppearance::Dark
+            }
+        }
+        // Reset / unknown → treat as dark (most terminals default dark).
+        _ => ThemeAppearance::Dark,
     }
 }
 
@@ -712,6 +801,49 @@ mod tests {
     }
 
     #[test]
+    fn bundled_themes_have_appearance() {
+        let themes = Theme::bundled_themes();
+        for theme in &themes {
+            // Every theme must classify as light or dark.
+            assert!(
+                matches!(
+                    theme.appearance,
+                    super::ThemeAppearance::Dark | super::ThemeAppearance::Light
+                ),
+                "{} missing appearance",
+                theme.id
+            );
+        }
+        let grokday = themes.iter().find(|t| t.id == "grokday").unwrap();
+        assert_eq!(grokday.appearance, super::ThemeAppearance::Light);
+        let groknight = themes.iter().find(|t| t.id == "groknight").unwrap();
+        assert_eq!(groknight.appearance, super::ThemeAppearance::Dark);
+    }
+
+    #[test]
+    fn transparent_override_resets_background_only() {
+        let theme = Theme::load_builtin_default();
+        let solid = theme.get_colors_with(true, false);
+        let clear = theme.get_colors_with(true, true);
+        assert_ne!(solid.background, ratatui::style::Color::Reset);
+        assert_eq!(clear.background, ratatui::style::Color::Reset);
+        assert_eq!(clear.dialog_background, solid.dialog_background);
+        assert_eq!(clear.primary, solid.primary);
+    }
+
+    #[test]
+    fn lucent_theme_defaults_to_solid_background() {
+        let themes = Theme::bundled_themes();
+        let lucent = themes.iter().find(|t| t.id == "lucent-orng").unwrap();
+        let colors = lucent.get_colors(true);
+        assert_ne!(
+            colors.background,
+            ratatui::style::Color::Reset,
+            "lucent-orng should paint a solid bg by default"
+        );
+    }
+
+    #[test]
     fn bundled_themes_include_grok_mono() {
         let themes = Theme::bundled_themes();
         for id in ["groknight", "grokday"] {
@@ -719,8 +851,8 @@ mod tests {
                 .iter()
                 .find(|theme| theme.id == id)
                 .unwrap_or_else(|| panic!("{id} theme should be bundled"));
-            for light in [true, false] {
-                let colors = theme.get_colors(light);
+            for dark in [true, false] {
+                let colors = theme.get_colors(dark);
                 assert_ne!(colors.background, ratatui::style::Color::Reset, "{id} bg");
                 assert_ne!(colors.primary, ratatui::style::Color::Reset, "{id} primary");
                 assert_ne!(colors.text, ratatui::style::Color::Reset, "{id} text");
