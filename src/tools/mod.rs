@@ -25,7 +25,7 @@ pub use context::ToolContext;
 pub use edit::EditTool;
 pub use init::{
     initialize_tool_registry, initialize_tool_registry_with_dynamic,
-    initialize_tool_registry_with_dynamic_config, scope_tool_registry_for_agent,
+    initialize_tool_registry_with_dynamic_config, refresh_mcp_tools, scope_tool_registry_for_agent,
 };
 pub use patch::ApplyPatchTool;
 pub use permission::{

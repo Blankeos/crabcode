@@ -167,7 +167,9 @@ impl SessionsDialogState {
             }
         }
         let items = std::mem::take(&mut self.dialog.items);
+        let scroll_offset = self.dialog.scroll_offset;
         self.dialog.update_items_in_place(items);
+        self.dialog.scroll_offset = scroll_offset;
     }
 
     pub fn set_workspace_group_ids(&mut self, group_ids: HashMap<String, i64>) {
@@ -850,6 +852,78 @@ mod tests {
 
         assert_eq!(action, SessionsDialogAction::Handled);
         assert!(state.dialog.scroll_offset > 0);
+    }
+
+    #[test]
+    fn mouse_move_after_wheel_scroll_updates_selection_without_resetting_viewport() {
+        let items = (0..20)
+            .map(|idx| session_item(&format!("session-{idx}"), &format!("Session {idx}")))
+            .collect();
+        let mut state = init_sessions_dialog("Sessions", items);
+        state.dialog.show();
+        state.dialog.visible_row_count = 5;
+        state.dialog.dialog_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 30,
+        };
+
+        handle_sessions_dialog_mouse_event(&mut state, scroll_down(4, 8));
+        let scroll_offset = state.dialog.scroll_offset;
+        let action = handle_sessions_dialog_mouse_event(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 4,
+                row: 8,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+
+        assert_eq!(action, SessionsDialogAction::NotHandled);
+        assert_ne!(state.dialog.selected_index, 0);
+        assert_eq!(state.dialog.scroll_offset, scroll_offset);
+    }
+
+    #[test]
+    fn streaming_marker_update_preserves_viewport_after_hover() {
+        let items = (0..20)
+            .map(|idx| DialogItem {
+                id: format!("session-{idx}"),
+                name: format!("Session {idx}"),
+                group: "Today".to_string(),
+                description: String::new(),
+                tip: None,
+                provider_id: format!("Session {idx}"),
+                active: false,
+            })
+            .collect();
+        let mut state = init_sessions_dialog("Sessions", items);
+        state.dialog.show();
+        state.dialog.visible_row_count = 5;
+        state.dialog.dialog_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 30,
+        };
+
+        handle_sessions_dialog_mouse_event(&mut state, scroll_down(4, 8));
+        handle_sessions_dialog_mouse_event(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 4,
+                row: 8,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        let scroll_offset = state.dialog.scroll_offset;
+
+        state.apply_streaming_row_markers(&["session-0".to_string()], 1);
+
+        assert_eq!(state.dialog.scroll_offset, scroll_offset);
     }
 
     #[test]

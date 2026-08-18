@@ -1017,6 +1017,15 @@ impl App {
         let project_root = loaded_config.project_root.clone();
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
+        // Warm MCP connections in the background so the first chat never waits.
+        if !mcp_config.is_empty() {
+            let warm_cfg = mcp_config.clone();
+            let warm_cwd =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let _ = tokio::spawn(async move {
+                let _ = crate::mcp::McpManager::ensure(warm_cfg, warm_cwd);
+            });
+        }
         input.set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
@@ -1238,7 +1247,7 @@ impl App {
             notifications: loaded_config.merged_config.notifications,
             images: loaded_config.merged_config.images,
             websearch: loaded_config.merged_config.websearch,
-            mcp: mcp_config,
+            mcp: mcp_config.clone(),
             config_raw_merged: loaded_config.raw_merged,
             custom_instructions,
             terminal_focused: true,
@@ -1495,38 +1504,7 @@ impl App {
     }
 
     fn completion_notification_stats(&self) -> Option<String> {
-        let message = self.chat_state.chat.messages.iter().rev().find(|msg| {
-            msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
-        })?;
-
-        if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
-            let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
-            let ttft_ms = t1.saturating_sub(t0);
-            let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
-            let total_ms = ttft_ms.saturating_add(decode_ms);
-
-            let total_sec = total_ms as f64 / 1000.0;
-            let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
-                (output_tokens as f64) / (decode_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-
-            return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
-        }
-
-        if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
-            let duration_sec = duration_ms as f64 / 1000.0;
-            let tokens_per_sec = if duration_ms > 0 {
-                (token_count as f64) / (duration_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-
-            return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
-        }
-
-        None
+        Self::completion_notification_stats_for_chat(&self.chat_state.chat)
     }
 
     fn completion_notification_stats_for_chat(chat: &Chat) -> Option<String> {
@@ -1534,31 +1512,47 @@ impl App {
             msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
         })?;
 
+        let format_tps = |precomputed: Option<f64>, tokens: usize, decode_ms: u64| -> Option<f64> {
+            if let Some(tps) = precomputed {
+                if tps.is_finite() && tps > 0.0 {
+                    return Some(tps);
+                }
+            }
+            // OpenCode inter-token: (n - 1) / duration; need >1 token.
+            if decode_ms == 0 || tokens < 2 {
+                return None;
+            }
+            let tps = ((tokens - 1) as f64) / (decode_ms as f64 / 1000.0);
+            if tps.is_finite() && tps > 0.0 {
+                Some(tps)
+            } else {
+                None
+            }
+        };
+
         if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
             let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
             let ttft_ms = t1.saturating_sub(t0);
             let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
             let total_ms = ttft_ms.saturating_add(decode_ms);
-
             let total_sec = total_ms as f64 / 1000.0;
-            let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
-                (output_tokens as f64) / (decode_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
 
-            return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
+            if let Some(tokens_per_sec) =
+                format_tps(message.tokens_per_sec, output_tokens, decode_ms)
+            {
+                return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
+            }
+            return Some(format!("{:.1}s", total_sec));
         }
 
         if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
             let duration_sec = duration_ms as f64 / 1000.0;
-            let tokens_per_sec = if duration_ms > 0 {
-                (token_count as f64) / (duration_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-
-            return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
+            if let Some(tokens_per_sec) =
+                format_tps(message.tokens_per_sec, token_count, duration_ms)
+            {
+                return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
+            }
+            return Some(format!("{:.1}s", duration_sec));
         }
 
         None
@@ -2114,6 +2108,9 @@ impl App {
     fn set_session_retry_status(&mut self, session_id: &str, status: Option<StreamingRetryStatus>) {
         self.ensure_session_view_state(session_id);
         if let Some(state) = self.session_view_states.get_mut(session_id) {
+            if state.retry_status == status {
+                return;
+            }
             state.retry_status = status;
         }
     }
@@ -3077,7 +3074,11 @@ impl App {
     }
 
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
-        if self.overlay_focus == OverlayFocus::None && self.base_focus == BaseFocus::Chat {
+        if matches!(
+            self.overlay_focus,
+            OverlayFocus::None | OverlayFocus::FindBar
+        ) && self.base_focus == BaseFocus::Chat
+        {
             let chat_area = self.current_chat_area();
             if chat_area.contains(Position::new(mouse.column, mouse.row))
                 && self
@@ -8933,6 +8934,11 @@ impl App {
             crate::llm::ChunkMessage::Metrics { .. } => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.set_session_retry_status(session_id, None);
+                // Close the generation sample as a tool-calls finish (excluded from
+                // TPS) and pause timing for the duration of tool execution.
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.end_generation_for_tool_calls();
+                }
                 self.add_tool_calls_to_session(session_id, tool_calls);
                 true
             }
@@ -11345,6 +11351,24 @@ mod tests {
     }
 
     #[test]
+    fn coalesced_mouse_scroll_reaches_chat_while_find_bar_is_focused() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::FindBar;
+        app.chat_state.chat.viewport_height = 10;
+        app.chat_state.chat.content_height = 100;
+        let chat_area = app.current_chat_area();
+
+        app.handle_coalesced_mouse_scroll(
+            mouse(MouseEventKind::ScrollDown, chat_area.x, chat_area.y),
+            1,
+        );
+
+        assert!(app.chat_state.chat.scroll_offset > 0);
+    }
+
+    #[test]
     fn reasoning_effort_overrides_are_instance_local() {
         let mut first = test_app();
         let second = test_app();
@@ -12992,6 +13016,9 @@ mod tests {
             .chat
             .add_message(crate::session::types::Message::incomplete(""));
         app.chat_state.chat.begin_streaming_turn();
+        app.chat_state
+            .chat
+            .prepare_streaming_token_counter("test-model");
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         sender
@@ -13116,14 +13143,23 @@ mod tests {
         app.overlay_focus = OverlayFocus::SessionsDialog;
         app.sessions_dialog_state.dialog.show();
         app.refresh_sessions_dialog();
-        app.sessions_dialog_live_dirty = false;
-        let probe_before = app.last_sessions_dialog_metadata_probe;
 
         app.base_focus = BaseFocus::Chat;
         app.chat_state
             .chat
             .add_message(crate::session::types::Message::incomplete(""));
         app.chat_state.chat.begin_streaming_turn();
+        // Warm tiktoken before probing so load cost is not charged to the
+        // sessions-dialog probe interval during process_streaming_chunks.
+        app.chat_state
+            .chat
+            .prepare_streaming_token_counter("test-model");
+
+        // Reset probe after any setup cost (e.g. tiktoken warm-up) so the
+        // assertion only covers process_streaming_chunks itself.
+        app.sessions_dialog_live_dirty = false;
+        app.last_sessions_dialog_metadata_probe = std::time::Instant::now();
+        let probe_before = app.last_sessions_dialog_metadata_probe;
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         sender

@@ -174,6 +174,9 @@ pub struct Message {
     pub t1_ms: Option<u64>,
     pub tn_ms: Option<u64>,
     pub output_tokens: Option<usize>,
+    /// Precomputed tokens/s (OpenCode inter-token aggregate). Prefer over
+    /// recomputing `output_tokens / duration_ms`.
+    pub tokens_per_sec: Option<f64>,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub local_image_paths: Vec<String>,
@@ -205,6 +208,7 @@ impl Message {
             t1_ms: None,
             tn_ms: None,
             output_tokens: None,
+            tokens_per_sec: None,
             model: None,
             provider: None,
             local_image_paths: Vec::new(),
@@ -252,6 +256,7 @@ impl Message {
             t1_ms: None,
             tn_ms: None,
             output_tokens: None,
+            tokens_per_sec: None,
             model: None,
             provider: None,
             local_image_paths: Vec::new(),

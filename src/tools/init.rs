@@ -55,16 +55,43 @@ async fn register_mcp_tools(
     if mcp_config.is_empty() || !mcp_config.values().any(|server| server.enabled()) {
         return;
     }
-    let manager = crate::mcp::McpManager::connect(mcp_config, workspace).await;
+    // Shared pool + background connect — never blocks chat on process spawn.
+    let manager = crate::mcp::McpManager::ensure(mcp_config, workspace);
+    sync_mcp_tools_from_manager(registry, manager).await;
+}
+
+/// Register any MCP tools that are already connected (no wait). Safe to call
+/// repeatedly — skips tools already present in the registry.
+pub async fn sync_mcp_tools_from_manager(
+    registry: &ToolRegistry,
+    manager: std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpManager>>,
+) {
     let tools = manager.lock().await.tools();
     for spec in tools {
+        if registry.get(&spec.tool_id).await.is_some() {
+            continue;
+        }
         registry
-            .register(Arc::new(crate::mcp::McpToolHandler::new(
+            .register(std::sync::Arc::new(crate::mcp::McpToolHandler::new(
                 manager.clone(),
                 spec,
             )))
             .await;
     }
+}
+
+/// Best-effort: pick up MCP tools that finished connecting after the registry
+/// was first built. Never blocks on connect.
+pub async fn refresh_mcp_tools(
+    registry: &ToolRegistry,
+    mcp_config: &crate::config::configuration::McpConfig,
+    workspace: impl Into<std::path::PathBuf>,
+) {
+    if mcp_config.is_empty() || !mcp_config.values().any(|server| server.enabled()) {
+        return;
+    }
+    let manager = crate::mcp::McpManager::ensure(mcp_config.clone(), workspace);
+    sync_mcp_tools_from_manager(registry, manager).await;
 }
 
 pub async fn register_dynamic_tools(
