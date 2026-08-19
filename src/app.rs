@@ -3067,6 +3067,50 @@ impl App {
         self.chat_area_for_size(self.last_frame_size)
     }
 
+    /// Forward chat mouse events while a permission/question dialog is open.
+    /// Clicks on dialog controls are handled by the dialog; everything else
+    /// (scroll + text selection) reaches the chat behind it.
+    fn forward_chat_mouse_through_dialog(&mut self, mouse: MouseEvent) {
+        if self.base_focus != BaseFocus::Chat {
+            return;
+        }
+
+        let is_scroll = matches!(
+            mouse.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        );
+        let is_selection = matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        );
+        if !is_scroll && !is_selection {
+            return;
+        }
+
+        let chat_area = self.current_chat_area();
+        let was_dragging = self.chat_state.chat.selection.is_dragging;
+        if !self.chat_state.chat.handle_mouse_event(mouse, chat_area) {
+            return;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.selection_action_bar = None;
+        }
+
+        // Same as the normal chat path: show actions as soon as a drag creates a
+        // selection, because mouse-up may never arrive if released outside the terminal.
+        if was_dragging
+            && self.chat_state.chat.selection.is_dragging
+            && matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+        {
+            self.show_selection_action_bar_for(SelectionActionTarget::Chat);
+        } else if was_dragging && !self.chat_state.chat.selection.is_dragging {
+            self.show_selection_action_bar_for(SelectionActionTarget::Chat);
+        }
+    }
+
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
         if matches!(
             self.overlay_focus,
@@ -4476,8 +4520,14 @@ impl App {
             return;
         }
 
-        // If text is selected and user clicks on an overlay, clear selection instead
+        // If text is selected and user clicks on an overlay, clear selection instead.
+        // Permission/question dialogs intentionally forward outside clicks to chat so
+        // text can still be highlighted (same idea as scroll-through).
         if self.overlay_focus != OverlayFocus::None
+            && !matches!(
+                self.overlay_focus,
+                OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+            )
             && (self.chat_state.chat.has_selection() || self.input.has_selection())
             && self.selection_action_bar.is_none()
             && matches!(
@@ -4572,52 +4622,9 @@ impl App {
             if let PermissionDialogAction::Respond(response) = action {
                 self.remote_respond_permission(response);
             }
-            if !handled
-                && matches!(
-                    mouse.kind,
-                    ratatui::crossterm::event::MouseEventKind::ScrollDown
-                        | ratatui::crossterm::event::MouseEventKind::ScrollUp
-                )
-                && self.base_focus == BaseFocus::Chat
-            {
-                let size = self.last_frame_size;
-                let main_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(size);
-                let input_height = self.input.get_height_for_width(size.width);
-                let input_height = if self.is_subagent_session_active() {
-                    SUBAGENT_FOOTER_HEIGHT
-                } else {
-                    input_height
-                };
-                let help_height = if self.is_subagent_session_active() {
-                    0
-                } else {
-                    1
-                };
-                let above_status_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(help_height),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(main_chunks[0]);
-                let chat_area = above_status_chunks[1];
-                let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
+            if !handled {
+                // Allow chat scroll + text selection outside the permission dialog.
+                self.forward_chat_mouse_through_dialog(mouse);
             }
         } else if self.overlay_focus == OverlayFocus::QuestionDialog {
             let action = handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse);
@@ -4638,52 +4645,9 @@ impl App {
                 }
                 QuestionDialogAction::Handled | QuestionDialogAction::NotHandled => {}
             }
-            if !handled
-                && matches!(
-                    mouse.kind,
-                    ratatui::crossterm::event::MouseEventKind::ScrollDown
-                        | ratatui::crossterm::event::MouseEventKind::ScrollUp
-                )
-                && self.base_focus == BaseFocus::Chat
-            {
-                let size = self.last_frame_size;
-                let main_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(size);
-                let input_height = self.input.get_height_for_width(size.width);
-                let input_height = if self.is_subagent_session_active() {
-                    SUBAGENT_FOOTER_HEIGHT
-                } else {
-                    input_height
-                };
-                let help_height = if self.is_subagent_session_active() {
-                    0
-                } else {
-                    1
-                };
-                let above_status_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(help_height),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(main_chunks[0]);
-                let chat_area = above_status_chunks[1];
-                let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
+            if !handled {
+                // Allow chat scroll + text selection outside the question dialog.
+                self.forward_chat_mouse_through_dialog(mouse);
             }
         } else if self.overlay_focus == OverlayFocus::RemoteDialog {
             let action = handle_remote_dialog_mouse_event(&mut self.remote_dialog_state, mouse);
@@ -11968,6 +11932,75 @@ mod tests {
         assert_eq!(
             app.selection_action_bar.map(|state| state.target),
             Some(SelectionActionTarget::Input)
+        );
+    }
+
+    #[test]
+    fn permission_dialog_forwards_chat_text_selection() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant(
+                "alpha beta gamma",
+            ));
+        app.chat_state.chat.content_height = 25;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+        let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
+        app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_id: "list".to_string(),
+            action: PermissionAction::List,
+            permission: "external_directory".to_string(),
+            patterns: vec!["/tmp/*".to_string()],
+            target: Some("/tmp".to_string()),
+            command: None,
+            workdir: None,
+            reason: "approval required".to_string(),
+            response_tx: permission_tx,
+        });
+        app.overlay_focus = OverlayFocus::PermissionDialog;
+
+        // Outside dialog controls: start + drag selection on chat text.
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), 8, 1));
+
+        assert!(
+            app.chat_state.chat.has_selection() || app.chat_state.chat.selection.is_dragging,
+            "chat text should be selectable while permission dialog is open"
+        );
+    }
+
+    #[test]
+    fn question_dialog_forwards_chat_text_selection() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant(
+                "alpha beta gamma",
+            ));
+        app.chat_state.chat.content_height = 25;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+        let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
+        app.question_dialog_state.enqueue(
+            json!([{
+                "question": "Continue?",
+                "options": [{ "label": "Yes" }, { "label": "No" }]
+            }]),
+            question_tx,
+        );
+        app.overlay_focus = OverlayFocus::QuestionDialog;
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), 8, 1));
+
+        assert!(
+            app.chat_state.chat.has_selection() || app.chat_state.chat.selection.is_dragging,
+            "chat text should be selectable while question dialog is open"
         );
     }
 
