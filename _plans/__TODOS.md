@@ -477,3 +477,4 @@ I think this is how the TUI works already anyway right?
 - [x] I wanna be able to type `/compact|` (imagine "|" is my cursor) and press `ctrl-t` or `ctrl-x m`.. Right now doing those kinda make me stay in the focus of the autosuggestions popover, so I think it's an event handling thing, but it's such an often thing that happens that I wanna make a special case for it.
 
 - [x] I wanna make it scrollable even when doing ctrl-f find, with my mouse
+- [ ] "providers" config, does it work

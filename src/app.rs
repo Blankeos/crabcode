@@ -1160,7 +1160,18 @@ impl App {
             .unwrap_or_else(theme::Theme::load_builtin_default);
         let colors = theme_for_colors.get_colors(true);
 
-        let chat_state = init_chat(chat, &agent, &colors);
+        let configured_compact_mode = loaded_config.merged_config.tui_compact_mode;
+        let persisted_compact_mode = if configured_compact_mode.is_none() {
+            prefs_dao
+                .as_ref()
+                .and_then(|dao| dao.get_compact_mode().ok().flatten())
+        } else {
+            None
+        };
+        let compact_mode = configured_compact_mode
+            .or(persisted_compact_mode)
+            .unwrap_or(true);
+        let chat_state = init_chat(chat, &agent, &colors, compact_mode);
         let session_rename_dialog_state = init_session_rename_dialog(colors);
         let runtime = crate::config::ConfigRuntime::from_merged(
             &loaded_config.merged_config,
@@ -3064,10 +3075,13 @@ impl App {
     }
 
     fn current_chat_area(&self) -> Rect {
-        self.chat_area_for_size(self.last_frame_size)
+        // Prefer the last-rendered chat content rect (excludes compact chrome).
+        self.chat_state
+            .last_chat_area
+            .unwrap_or_else(|| self.chat_area_for_size(self.last_frame_size))
     }
 
-    /// Forward chat mouse events while a permission/question dialog is open.
+/// Forward chat mouse events while a permission/question dialog is open.
     /// Clicks on dialog controls are handled by the dialog; everything else
     /// (scroll + text selection) reaches the chat behind it.
     fn forward_chat_mouse_through_dialog(&mut self, mouse: MouseEvent) {
@@ -3111,13 +3125,32 @@ impl App {
         }
     }
 
+    /// Region where a mouse wheel scrolls the chat. In compact mode this
+    /// extends above the chat content to include the 3-row header (and the
+    /// sticky overlay which sits inside the transcript top), so scrolling
+    /// works even when the pointer is over that chrome.
+    fn chat_scroll_region(&self) -> Rect {
+        let chat_area = self.current_chat_area();
+        if !self.chat_state.compact_mode {
+            return chat_area;
+        }
+        // Sticky is an overlay inside chat_area; only the header sits above it.
+        let top = chat_area.y.saturating_sub(3); // header rows
+        Rect {
+            x: chat_area.x,
+            y: top,
+            width: chat_area.width,
+            height: chat_area.bottom().saturating_sub(top),
+        }
+    }
+
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
         if matches!(
             self.overlay_focus,
             OverlayFocus::None | OverlayFocus::FindBar
         ) && self.base_focus == BaseFocus::Chat
         {
-            let chat_area = self.current_chat_area();
+            let chat_area = self.chat_scroll_region();
             if chat_area.contains(Position::new(mouse.column, mouse.row))
                 && self
                     .chat_state
@@ -4914,6 +4947,23 @@ impl App {
             if self.base_focus == BaseFocus::Chat {
                 let chat_area = self.current_chat_area();
 
+                // Compact-mode sticky user message: click to scroll to that message.
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    && mouse.modifiers.is_empty()
+                {
+                    if let Some((sticky_rect, msg_idx)) = self.chat_state.sticky_click_target {
+                        if sticky_rect.contains(Position::new(mouse.column, mouse.row)) {
+                            self.chat_state.chat.scroll_to_message_index(msg_idx);
+                            // Clear sticky state so the scrolled-to message re-enters
+                            // the viewport cleanly without residual sticky chrome.
+                            self.chat_state.sticky_message_index = None;
+                            self.chat_state.sticky_click_target = None;
+                            self.pending_chat_message_click = None;
+                            return;
+                        }
+                    }
+                }
+
                 match mouse.kind {
                     MouseEventKind::Moved
                         if !self.chat_state.chat.has_selection()
@@ -6166,6 +6216,24 @@ impl App {
                     }
                     return;
                 }
+                if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
+                    self.chat_state.compact_mode = !self.chat_state.compact_mode;
+                    if let Some(dao) = &self.prefs_dao {
+                        if let Err(error) = dao.set_compact_mode(self.chat_state.compact_mode) {
+                            eprintln!("Failed to persist compact mode preference: {error}");
+                        }
+                    }
+                    push_toast(Toast::new(
+                        if self.chat_state.compact_mode {
+                            "Compact mode enabled"
+                        } else {
+                            "Compact mode disabled"
+                        },
+                        ToastLevel::Info,
+                        Some(std::time::Duration::from_secs(2)),
+                    ));
+                    return;
+                }
                 if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat
                 {
                     self.handle_fork_command(&parsed.args);
@@ -6393,6 +6461,24 @@ impl App {
             } else {
                 self.compact_current_session().await;
             }
+            return;
+        }
+        if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
+            self.chat_state.compact_mode = !self.chat_state.compact_mode;
+            if let Some(dao) = &self.prefs_dao {
+                if let Err(error) = dao.set_compact_mode(self.chat_state.compact_mode) {
+                    eprintln!("Failed to persist compact mode preference: {error}");
+                }
+            }
+            push_toast(Toast::new(
+                if self.chat_state.compact_mode {
+                    "Compact mode enabled"
+                } else {
+                    "Compact mode disabled"
+                },
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
             return;
         }
         if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat {
@@ -8253,28 +8339,50 @@ impl App {
                     {
                         Ok(()) => {
                             let is_active = self.is_active_session(&session_id);
-                            // Marker is appended last — pin to bottom so the
-                            // "Context compacted" line is visible without jump.
-                            let mut chat = self.chat_with_messages(messages.clone());
-                            chat.scroll_to_bottom_on_next_render();
-                            if let Some(marker_idx) = messages
+                            // Marker is last in soft layout — pin to bottom so the
+                            // "Context compacted" line is visible without mid-history jump.
+                            // Prefer replace_messages on the live chat: rebuilding via
+                            // chat_with_messages zeros content_height and can desync
+                            // sticky/live scroll state until the next session load.
+                            let marker_idx = messages
                                 .iter()
-                                .rposition(|m| crate::session::compaction::is_compaction_marker(m))
-                            {
-                                chat.set_highlighted_message(Some(marker_idx));
-                            } else {
-                                chat.clear_highlighted_message();
-                            }
-
+                                .rposition(|m| crate::session::compaction::is_compaction_marker(m));
                             if is_active {
-                                self.chat_state.chat = chat.clone();
+                                self.chat_state.chat.replace_messages(messages.clone());
+                                self.chat_state.chat.scroll_to_bottom_on_next_render();
+                                if let Some(marker_idx) = marker_idx {
+                                    self.chat_state
+                                        .chat
+                                        .set_highlighted_message(Some(marker_idx));
+                                } else {
+                                    self.chat_state.chat.clear_highlighted_message();
+                                }
                             }
 
-                            // Always keep view-state in sync so reopen/switch
-                            // shows the same compacted history + marker.
                             self.ensure_session_view_state(&session_id);
+                            // Build parked chat before mutably borrowing session_view_states
+                            // (chat_with_messages needs &self).
+                            let parked_chat = if !is_active {
+                                let mut view_chat = self.chat_with_messages(messages);
+                                view_chat.scroll_to_bottom_on_next_render();
+                                if let Some(marker_idx) = marker_idx {
+                                    view_chat.set_highlighted_message(Some(marker_idx));
+                                } else {
+                                    view_chat.clear_highlighted_message();
+                                }
+                                Some(view_chat)
+                            } else {
+                                None
+                            };
                             if let Some(state) = self.session_view_states.get_mut(&session_id) {
-                                state.chat = chat;
+                                // Keep the active session's live chat out of
+                                // session_view_states (same invariant as
+                                // load_session_view_state / switch_to_session).
+                                // Never park an empty new_chat() here — that would
+                                // wipe the marker on the next session restore.
+                                if let Some(view_chat) = parked_chat {
+                                    state.chat = view_chat;
+                                }
                                 state.tool_calls = ToolCallViewState::default();
                                 state.unread_completed = !is_active;
                             }
@@ -10616,6 +10724,9 @@ impl App {
                     &queued_messages,
                     &mut self.find_bar,
                     self.overlay_focus == OverlayFocus::None,
+                    self.session_manager
+                        .get_current_session()
+                        .map(|s| s.title.as_str()),
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -11204,7 +11315,7 @@ mod tests {
             command_registry: registry,
             session_manager: SessionManager::new(),
             home_state: init_home(),
-            chat_state: init_chat(Chat::new(), "Build", &colors),
+            chat_state: init_chat(Chat::new(), "Build", &colors, true),
             suggestions_popup_state: init_suggestions_popup(Popup::new()),
             agents_dialog_state: init_agents_dialog("Select agent", vec![]),
             models_dialog_state: init_models_dialog("Models", vec![]),

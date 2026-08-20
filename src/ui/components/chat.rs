@@ -1716,6 +1716,7 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
+            pending_scroll_to_message: None,
             search_matches: Vec::new(),
             search_active_match: None,
             search_query: String::new(),
@@ -1735,7 +1736,6 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
-            pending_scroll_to_message: None,
         }
     }
 
@@ -1787,6 +1787,7 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
+            pending_scroll_to_message: None,
             search_matches: Vec::new(),
             search_active_match: None,
             search_query: String::new(),
@@ -1806,7 +1807,6 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
-            pending_scroll_to_message: None,
         }
     }
 
@@ -2984,6 +2984,37 @@ impl Chat {
             .saturating_add(self.scroll_bottom_padding)
     }
 
+    /// Re-paint the vertical scrollbar over `area` (rightmost column).
+    /// Used by overlays (e.g. compact sticky) that would otherwise cover the thumb.
+    pub fn render_scrollbar_over(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        track_color: Color,
+        thumb_color: Color,
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+        render_scrollbar(
+            f,
+            ScrollMetrics::new(
+                self.scroll_content_height(),
+                self.viewport_height,
+                self.scroll_offset,
+            ),
+            scrollbar_area,
+            track_color,
+            thumb_color,
+        );
+    }
+
     pub fn set_search_query(
         &mut self,
         query: &str,
@@ -3072,6 +3103,10 @@ impl Chat {
     /// immediately after bulk-replacing the message list (e.g. compaction).
     pub fn scroll_to_message_on_next_render(&mut self, idx: usize) {
         self.pending_scroll_to_message = Some(idx);
+        // Prevent pin-to-bottom / autoscroll from overriding the marker jump
+        // on the next frame (replace_messages re-enables autoscroll).
+        self.autoscroll_enabled = false;
+        self.user_scrolled_up = true;
     }
 
     pub fn set_highlighted_message(&mut self, idx: Option<usize>) {
@@ -3805,6 +3840,10 @@ impl Chat {
             *line = sanitize_styled_line(line);
         }
 
+        // Keep content_height in sync so callers (e.g. sticky overlay) can
+        // resolve last-message end lines without waiting for Chat::render.
+        self.content_height = self.cached_lines.len();
+
         self.cached_revision = self.render_revision;
         self.cached_width = max_width;
         self.cached_colors_hash = colors_hash;
@@ -3916,6 +3955,8 @@ impl Chat {
 
         // Resolve any deferred scroll-to-message request (e.g. after compaction).
         // Keep the pending request if positions are not ready yet (viewport=0).
+        // Must win over pin-to-bottom when applied.
+        let mut forced_message_scroll = false;
         if let Some(target_idx) = self.pending_scroll_to_message {
             if viewport > 0 {
                 if let Some(&line) = positions.get(target_idx) {
@@ -3934,7 +3975,9 @@ impl Chat {
                     // Stick-to-bottom only runs when user_scrolled_up is false;
                     // keep this true so the offset is not immediately overwritten.
                     self.user_scrolled_up = true;
+                    self.autoscroll_enabled = false;
                     self.pending_scroll_to_message = None;
+                    forced_message_scroll = true;
                 }
             }
         }
@@ -3942,8 +3985,9 @@ impl Chat {
         let max_offset = content_height
             .saturating_add(self.scroll_bottom_padding)
             .saturating_sub(viewport);
-        let was_pinned_to_bottom = self.scroll_offset == usize::MAX
-            || (self.scroll_offset >= self.max_scroll_offset() && !self.user_scrolled_up);
+        let was_pinned_to_bottom = !forced_message_scroll
+            && (self.scroll_offset == usize::MAX
+                || (self.scroll_offset >= self.max_scroll_offset() && !self.user_scrolled_up));
         let clamped_scroll = if was_pinned_to_bottom {
             max_offset
         } else {
@@ -5137,6 +5181,61 @@ impl Chat {
         );
         let locations = infer_editor_locations_for_lines(message, &lines);
         (lines, locations)
+    }
+
+    /// Format a user message's content into wrapped, styled lines, mirroring
+    /// `format_message`'s user branch exactly (image-placeholder colors,
+    /// `@agent` mention colors, wrap width, horizontal padding). Returns
+    /// content lines only — no border/padding rows. Used by the compact-mode
+    /// sticky message so it renders like a real user message.
+    pub fn format_user_message_content_lines(
+        &self,
+        idx: usize,
+        max_width: usize,
+        colors: &ThemeColors,
+    ) -> Vec<Line<'static>> {
+        let Some(message) = self.messages.get(idx) else {
+            return Vec::new();
+        };
+        if message.role != MessageRole::User {
+            return Vec::new();
+        }
+
+        let max_width = max_width.max(1);
+        let bg = colors.background_element;
+        let text_style = Style::default().fg(colors.text).bg(bg);
+        let image_style = |placeholder: &str| {
+            let is_hovered = self.hovered_image.as_ref().is_some_and(|target| {
+                target.message_index == idx && target.placeholder == placeholder
+            });
+            if is_hovered {
+                Style::default().fg(colors.markdown_image_text).bg(bg)
+            } else {
+                Style::default().fg(colors.markdown_image).bg(bg)
+            }
+        };
+
+        let horizontal_padding = 2usize;
+        let right_padding = 2usize;
+        let wrap_width = max_width
+            .saturating_sub(1 + horizontal_padding + right_padding)
+            .max(1);
+
+        message
+            .content
+            .split('\n')
+            .flat_map(|content_line| {
+                let content_line = content_line.strip_suffix('\r').unwrap_or(content_line);
+                let styled_content = Line::from(style_agent_mentions_in_line(
+                    content_line,
+                    &self.agent_mention_names,
+                    colors,
+                    text_style,
+                    &image_style,
+                ));
+                wrap_styled_line(&styled_content, WrapOptions::new(wrap_width))
+            })
+            .collect::<Vec<_>>()
     }
 
     fn format_tool_row<'a>(

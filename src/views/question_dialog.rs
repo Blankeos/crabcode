@@ -252,6 +252,8 @@ pub struct QuestionDialogState {
     queue: VecDeque<QuestionDialogRequest>,
     tab_hitboxes: Vec<QuestionTabHitbox>,
     mouse_hitboxes: Vec<QuestionMouseHitbox>,
+    /// Vertical scroll for the question body when options wrap past the panel.
+    body_scroll_y: u16,
     /// Last rendered panel height (for chat bottom scroll padding).
     last_panel_height: u16,
 }
@@ -281,6 +283,7 @@ impl QuestionDialogState {
             queue: VecDeque::new(),
             tab_hitboxes: Vec::new(),
             mouse_hitboxes: Vec::new(),
+            body_scroll_y: 0,
             last_panel_height: 0,
         }
     }
@@ -295,6 +298,7 @@ impl QuestionDialogState {
             self.current = Some(request);
             self.tab_hitboxes.clear();
             self.mouse_hitboxes.clear();
+            self.body_scroll_y = 0;
         } else {
             self.queue.push_back(request);
         }
@@ -353,6 +357,8 @@ impl QuestionDialogState {
         }
         self.current = self.queue.pop_front();
         self.tab_hitboxes.clear();
+        self.mouse_hitboxes.clear();
+        self.body_scroll_y = 0;
     }
 
     pub fn respond_current(&mut self, response: Value) {
@@ -361,6 +367,8 @@ impl QuestionDialogState {
         }
         self.current = self.queue.pop_front();
         self.tab_hitboxes.clear();
+        self.mouse_hitboxes.clear();
+        self.body_scroll_y = 0;
     }
 
     pub fn cancel_current(&mut self) {
@@ -370,6 +378,8 @@ impl QuestionDialogState {
         }
         self.current = self.queue.pop_front();
         self.tab_hitboxes.clear();
+        self.mouse_hitboxes.clear();
+        self.body_scroll_y = 0;
     }
 
     pub fn clear_with_empty(&mut self) {
@@ -383,6 +393,8 @@ impl QuestionDialogState {
             let _ = request.response_tx.send(response);
         }
         self.tab_hitboxes.clear();
+        self.mouse_hitboxes.clear();
+        self.body_scroll_y = 0;
     }
 
     pub fn insert_text(&mut self, text: &str) {
@@ -1091,6 +1103,7 @@ fn question_body_hitboxes(
     request: &QuestionDialogRequest,
     body_lines: &[Line<'_>],
     body_area: Rect,
+    body_scroll_y: u16,
 ) -> Vec<QuestionMouseHitbox> {
     let Some(question) = request.current_question() else {
         return Vec::new();
@@ -1101,11 +1114,22 @@ fn question_body_hitboxes(
 
     let option_start = 3 + usize::from(question.multiple);
     let mut y = body_area.y;
+    let mut consumed = 0u16;
     let mut hitboxes = Vec::new();
     for (line_index, line) in body_lines.iter().enumerate() {
         let height = line_wrapped_height(line, body_area.width).max(1);
+        let line_start = consumed;
+        let line_end = consumed.saturating_add(height);
+        consumed = line_end;
+
+        if line_end <= body_scroll_y {
+            continue;
+        }
+
+        let hidden = body_scroll_y.saturating_sub(line_start);
+        let visible_in_line = height.saturating_sub(hidden);
         if line_index >= option_start && line_index < option_start + option_row_count(question) {
-            let visible_height = height.min(body_area.bottom().saturating_sub(y));
+            let visible_height = visible_in_line.min(body_area.bottom().saturating_sub(y));
             if visible_height > 0 {
                 hitboxes.push(QuestionMouseHitbox {
                     area: Rect::new(body_area.x, y, body_area.width, visible_height),
@@ -1113,12 +1137,73 @@ fn question_body_hitboxes(
                 });
             }
         }
-        y = y.saturating_add(height);
+        y = y.saturating_add(visible_in_line);
         if y >= body_area.bottom() {
             break;
         }
     }
     hitboxes
+}
+
+/// Keep the selected/custom row visible when wrapped body height exceeds the panel.
+fn ensure_body_scroll_visible(
+    body_lines: &[Line<'_>],
+    body_width: u16,
+    body_height: u16,
+    focus_line_index: usize,
+    scroll_y: &mut u16,
+) {
+    if body_height == 0 || body_lines.is_empty() {
+        *scroll_y = 0;
+        return;
+    }
+
+    let mut offsets = Vec::with_capacity(body_lines.len() + 1);
+    offsets.push(0u16);
+    let mut total = 0u16;
+    for line in body_lines {
+        total = total.saturating_add(line_wrapped_height(line, body_width).max(1));
+        offsets.push(total);
+    }
+
+    let max_scroll = total.saturating_sub(body_height);
+    if *scroll_y > max_scroll {
+        *scroll_y = max_scroll;
+    }
+
+    let focus = focus_line_index.min(body_lines.len().saturating_sub(1));
+    let focus_start = offsets[focus];
+    let focus_end = offsets[focus + 1];
+    if focus_start < *scroll_y {
+        *scroll_y = focus_start;
+    } else if focus_end > (*scroll_y).saturating_add(body_height) {
+        *scroll_y = focus_end.saturating_sub(body_height);
+    }
+    if *scroll_y > max_scroll {
+        *scroll_y = max_scroll;
+    }
+}
+
+fn focused_body_line_index(request: &QuestionDialogRequest, body_lines: &[Line<'_>]) -> usize {
+    let Some(question) = request.current_question() else {
+        return 0;
+    };
+    if question.options.is_empty() {
+        // Free-text body: question text is the interactive content.
+        return 1.min(body_lines.len().saturating_sub(1));
+    }
+
+    let option_start = 3 + usize::from(question.multiple);
+    if request.current_is_custom_row() {
+        return body_lines.len().saturating_sub(1);
+    }
+
+    let cursor = request
+        .current_answer()
+        .map(|answer| answer.cursor)
+        .unwrap_or(0)
+        .min(question.options.len().saturating_sub(1));
+    (option_start + cursor).min(body_lines.len().saturating_sub(1))
 }
 
 fn push_tab_hitbox(
@@ -1280,6 +1365,7 @@ pub fn render_question_dialog(
         let Some(request) = state.active() else {
             state.tab_hitboxes.clear();
             state.mouse_hitboxes.clear();
+            state.body_scroll_y = 0;
             state.last_panel_height = 0;
             return;
         };
@@ -1362,13 +1448,80 @@ pub fn render_question_dialog(
         .constraints([Constraint::Min(0), Constraint::Length(cancel_chunk_width)])
         .split(chunks[0]);
 
+    // Keep the custom answer row pinned to the bottom of the body so wrapping
+    // options cannot clip "( ) Type your own answer" off-screen on resize.
+    let pin_custom = state
+        .active()
+        .and_then(|r| r.current_question())
+        .map(|q| !q.options.is_empty() && q.custom)
+        .unwrap_or(false);
+    let focus_line = {
+        let Some(request) = state.active() else {
+            return;
+        };
+        // When the custom row is sticky, keep scroll focused on option rows only.
+        if pin_custom && request.current_is_custom_row() {
+            usize::MAX
+        } else {
+            focused_body_line_index(request, &body_lines)
+        }
+    };
+    let (scrollable_lines, sticky_custom) = split_sticky_custom_row(pin_custom, body_lines);
+    let sticky_height = sticky_custom
+        .as_ref()
+        .map(|line| line_wrapped_height(line, chunks[1].width).max(1))
+        .unwrap_or(0);
+    let scroll_area = if sticky_height > 0 && chunks[1].height > sticky_height {
+        Rect::new(
+            chunks[1].x,
+            chunks[1].y,
+            chunks[1].width,
+            chunks[1].height.saturating_sub(sticky_height),
+        )
+    } else if sticky_height > 0 {
+        // Extremely short panel: prefer showing the custom row.
+        Rect::new(chunks[1].x, chunks[1].y, chunks[1].width, 0)
+    } else {
+        chunks[1]
+    };
+    let sticky_area = if sticky_height > 0 {
+        Rect::new(
+            chunks[1].x,
+            chunks[1].y.saturating_add(scroll_area.height),
+            chunks[1].width,
+            sticky_height.min(chunks[1].height.saturating_sub(scroll_area.height)),
+        )
+    } else {
+        Rect::default()
+    };
+
+    ensure_body_scroll_visible(
+        &scrollable_lines,
+        scroll_area.width,
+        scroll_area.height,
+        focus_line.min(scrollable_lines.len().saturating_sub(1)),
+        &mut state.body_scroll_y,
+    );
+    let body_scroll_y = state.body_scroll_y;
+
     let (tab_scroll_x, tab_hitboxes, mouse_hitboxes) = {
         let Some(request) = state.active() else {
             return;
         };
         let tab_scroll_x = active_tab_scroll(request, header_chunks[0].width);
         let tab_hitboxes = question_tab_hitboxes(request, header_chunks[0], tab_scroll_x);
-        let mut mouse_hitboxes = question_body_hitboxes(request, &body_lines, chunks[1]);
+        let mut mouse_hitboxes =
+            question_body_hitboxes(request, &scrollable_lines, scroll_area, body_scroll_y);
+        if sticky_custom.is_some() {
+            if let Some(question) = request.current_question() {
+                if !question.options.is_empty() && sticky_area.height > 0 {
+                    mouse_hitboxes.push(QuestionMouseHitbox {
+                        area: sticky_area,
+                        target: QuestionMouseTarget::Option(question.options.len()),
+                    });
+                }
+            }
+        }
         mouse_hitboxes.push(QuestionMouseHitbox {
             area: header_chunks[1],
             target: QuestionMouseTarget::Cancel,
@@ -1395,16 +1548,48 @@ pub fn render_question_dialog(
         header_chunks[1],
     );
 
-    f.render_widget(
-        Paragraph::new(body_lines)
-            .style(Style::default().bg(colors.dialog_background))
-            .wrap(Wrap { trim: true }),
-        chunks[1],
-    );
+    if scroll_area.height > 0 {
+        f.render_widget(
+            Paragraph::new(scrollable_lines)
+                .style(Style::default().bg(colors.dialog_background))
+                .wrap(Wrap { trim: true })
+                .scroll((body_scroll_y, 0)),
+            scroll_area,
+        );
+    }
+    if let Some(custom_line) = sticky_custom {
+        if sticky_area.height > 0 {
+            f.render_widget(
+                Paragraph::new(vec![custom_line])
+                    .style(Style::default().bg(colors.dialog_background))
+                    .wrap(Wrap { trim: true }),
+                sticky_area,
+            );
+        }
+    }
 
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Left), chunks[3]);
     state.tab_hitboxes = tab_hitboxes;
     state.mouse_hitboxes = mouse_hitboxes;
+}
+
+fn split_sticky_custom_row(
+    pin_custom: bool,
+    mut body_lines: Vec<Line<'static>>,
+) -> (Vec<Line<'static>>, Option<Line<'static>>) {
+    if !pin_custom || body_lines.len() < 2 {
+        return (body_lines, None);
+    }
+    // question_body_lines ends with the custom answer row (optionally after a blank).
+    let custom = body_lines.pop();
+    if body_lines
+        .last()
+        .map(|line| line.spans.is_empty())
+        .unwrap_or(false)
+    {
+        body_lines.pop();
+    }
+    (body_lines, custom)
 }
 
 fn parse_questions(value: Value) -> Vec<QuestionItem> {
@@ -3045,6 +3230,59 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("Type your own answer"));
+    }
+
+    #[test]
+    fn sticky_custom_row_stays_visible_when_body_overflows_on_short_terminal() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "When designing a long-running Rust TUI application like crabcode that needs to coordinate streaming LLM responses, tool execution, SQLite preference persistence, and reactive Ratatui rendering on a single event loop, which architectural tradeoff do you consider most important for the next major refactor?",
+                "header": "Architecture",
+                "options": [
+                    {
+                        "label": "Single-threaded actor bus",
+                        "description": "Keep one event loop and ordered channels; prioritize determinism and simpler reasoning about UI state."
+                    },
+                    {
+                        "label": "Hybrid workers + main UI",
+                        "description": "Move blocking/network work off the UI thread while keeping Ratatui rendering on the main thread."
+                    },
+                    {
+                        "label": "Headless core + thin TUI",
+                        "description": "Extract a reusable session engine so CLI/headless and TUI share one state machine."
+                    }
+                ]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        // Narrow + short: wrapped options exceed body height and previously clipped
+        // the custom answer row off the bottom.
+        let backend = TestBackend::new(72, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("Type your own answer"),
+            "custom row should stay pinned visible on overflow:\n{rendered}"
+        );
     }
 
     #[test]
