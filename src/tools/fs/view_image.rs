@@ -21,7 +21,7 @@ impl ToolHandler for ViewImageTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "view_image".to_string(),
-            description: "View a local image from the filesystem. Use this when the user asks what a local image file looks like, or when visual inspection of a local image is needed."
+            description: "View a local image from the filesystem. Use only for on-disk image paths that are not already attached in the current user message (those are already visible to vision models). Do not call this for pasted/attached images."
                 .to_string(),
             parameters: vec![
                 ParameterSchema {
@@ -115,6 +115,15 @@ mod tests {
     fn test_context() -> ToolContext {
         let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
         ToolContext::new("session", "message", "build", abort_rx)
+    }
+
+    #[test]
+    fn view_image_description_steers_away_from_already_attached_images() {
+        let definition = ViewImageTool::new().definition();
+        assert!(definition.description.contains("not already attached"));
+        assert!(definition
+            .description
+            .contains("Do not call this for pasted/attached images"));
     }
 
     #[tokio::test]
