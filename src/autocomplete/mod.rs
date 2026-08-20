@@ -1,5 +1,6 @@
 pub mod command;
 pub mod file;
+pub mod mru;
 
 pub use command::{CommandAuto, Suggestion, SuggestionKind};
 pub use file::FileAuto;

@@ -6365,6 +6365,9 @@ impl App {
     }
 
     async fn process_command_input(&mut self, mut parsed: crate::command::parser::ParsedCommand) {
+        if let Some(autocomplete) = self.input.autocomplete.as_ref() {
+            autocomplete.command_auto.touch_mru(&parsed.name);
+        }
         if self.command_registry.is_custom_command(&parsed.name) {
             parsed.prefs_data = self
                 .prefs_dao
@@ -10029,11 +10032,21 @@ impl App {
         is_chat: bool,
     ) -> Vec<crate::autocomplete::Suggestion> {
         match trigger {
-            "slash" => crate::autocomplete::CommandAuto::new(&self.command_registry)
-                .get_suggestions(query, is_chat)
-                .into_iter()
-                .filter(|suggestion| !is_remote_browser_unsupported_command(&suggestion.name))
-                .collect(),
+            "slash" => {
+                let suggestions = self
+                    .input
+                    .autocomplete
+                    .as_ref()
+                    .map(|ac| ac.command_auto.get_suggestions(query, is_chat))
+                    .unwrap_or_else(|| {
+                        crate::autocomplete::CommandAuto::new(&self.command_registry)
+                            .get_suggestions(query, is_chat)
+                    });
+                suggestions
+                    .into_iter()
+                    .filter(|suggestion| !is_remote_browser_unsupported_command(&suggestion.name))
+                    .collect()
+            }
             "mention" => {
                 let query_lower = query.to_ascii_lowercase();
                 let mut suggestions = self
