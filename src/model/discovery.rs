@@ -1387,10 +1387,10 @@ mod tests {
 
         let mut models = HashMap::new();
         models.insert(
-            "big-pickle".to_string(),
+            "stable-model".to_string(),
             serde_json::from_value(serde_json::json!({
-                "id": "big-pickle",
-                "name": "Big Pickle",
+                "id": "stable-model",
+                "name": "Stable Model",
                 "release_date": "2025-10-17",
                 "last_updated": "2025-10-17",
                 "attachment": false,
@@ -1422,13 +1422,13 @@ mod tests {
 
         let mut providers = HashMap::new();
         providers.insert(
-            "opencode".to_string(),
+            "fixture-provider".to_string(),
             Provider {
-                id: "opencode".to_string(),
-                name: "OpenCode Zen".to_string(),
-                api: "https://opencode.ai/zen/v1".to_string(),
+                id: "fixture-provider".to_string(),
+                name: "Fixture Provider".to_string(),
+                api: "https://example.invalid/v1".to_string(),
                 doc: String::new(),
-                env: vec!["OPENCODE_API_KEY".to_string()],
+                env: Vec::new(),
                 npm: "@ai-sdk/openai-compatible".to_string(),
                 header: vec![],
                 models,
@@ -1444,7 +1444,10 @@ mod tests {
             .map(|model| model.id)
             .collect();
 
-        assert!(model_ids.contains(&"big-pickle".to_string()));
+        assert!(
+            model_ids.contains(&"stable-model".to_string()),
+            "expected stable model in {model_ids:?}"
+        );
         assert!(!model_ids.contains(&"kimi-k2.5-free".to_string()));
 
         let _ = fs::remove_file(cache_path);

@@ -449,6 +449,7 @@ I think this is how the TUI works already anyway right?
 
 - [ ] opencode v2-like
   - [ ] apis for `crabcode session list` or something. So agents can just use the cli instead of checking the .db on its own.
+  - [ ] Create sessions for you, and read sessions, etc.
   - [ ] toolsearch and codemode built-in https://x.com/thdxr/status/2085865399195779308 saves a lot of tokens
 
 - [x] Massively improve compaction, shouldnt remove the history for future reading, I think that's what's happening right now... Idk how others work but they dont really get rid of history in the db.. probabyl just make a summary and disable the other previous messages before compaction (that is my assumption)
@@ -471,6 +472,8 @@ I think this is how the TUI works already anyway right?
 - [x] Light mode themes + grok build theme (people like the monochrome aesthetic)
   - [ ] Add the background now, no more transparent background - but 'transparency' is activateable
 
-- [ ] Thought time with Thought for 0.2s, and Thinking...
+- [x] Thought time with Thought for 0.2s, and Thinking...
 
 - [x] I wanna be able to type `/compact|` (imagine "|" is my cursor) and press `ctrl-t` or `ctrl-x m`.. Right now doing those kinda make me stay in the focus of the autosuggestions popover, so I think it's an event handling thing, but it's such an often thing that happens that I wanna make a special case for it.
+
+- [x] I wanna make it scrollable even when doing ctrl-f find, with my mouse

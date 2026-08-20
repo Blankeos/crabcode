@@ -200,6 +200,7 @@ impl TryFrom<Message> for SessionMessage {
             output_tokens: msg
                 .output_tokens
                 .and_then(|v| if v > 0 { Some(v as usize) } else { None }),
+            tokens_per_sec: None,
             model: msg.model.clone(),
             provider: msg.provider.clone(),
             local_image_paths,

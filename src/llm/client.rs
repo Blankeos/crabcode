@@ -390,9 +390,13 @@ pub async fn stream_llm_with_cancellation(
     request_config.openai_options.prompt_cache_key = Some(session_id.clone());
 
     let tool_registry = match tool_registry {
-        Some(tool_registry) => tool_registry,
+        Some(tool_registry) => {
+            // Pick up MCP tools that finished connecting after the registry was built.
+            crate::tools::refresh_mcp_tools(&tool_registry, &mcp_config, &workspace).await;
+            tool_registry
+        }
         None => {
-            crate::tools::initialize_tool_registry_with_dynamic_config(
+            let registry = crate::tools::initialize_tool_registry_with_dynamic_config(
                 Some(sender.clone()),
                 tool_permissions.clone(),
                 agent_registry.clone(),
@@ -402,7 +406,9 @@ pub async fn stream_llm_with_cancellation(
                 &mcp_config,
                 &workspace,
             )
-            .await
+            .await;
+            crate::tools::refresh_mcp_tools(&registry, &mcp_config, &workspace).await;
+            registry
         }
     };
     // Set LLM session config for subagent use
