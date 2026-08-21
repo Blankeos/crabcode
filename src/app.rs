@@ -191,7 +191,7 @@ impl From<crate::aisdk::retry::RetryStatus> for StreamingRetryStatus {
     }
 }
 
-fn titlecase_agent_name(name: &str) -> String {
+pub(crate) fn titlecase_agent_name(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
         return "Build".to_string();
@@ -955,10 +955,13 @@ impl App {
     }
 
     pub fn new() -> Result<Self> {
-        Self::new_with_model_override(None)
+        Self::new_with_model_override(None, None)
     }
 
-    pub fn new_with_model_override(model_override: Option<&str>) -> Result<Self> {
+    pub fn new_with_model_override(
+        model_override: Option<&str>,
+        cli_agent: Option<&str>,
+    ) -> Result<Self> {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
@@ -1071,6 +1074,16 @@ impl App {
             if !default_agent.trim().is_empty() {
                 agent = default_agent;
             }
+        }
+        if let Some(name) = cli_agent.map(str::trim).filter(|name| !name.is_empty()) {
+            if agent_registry.primary_agent(name).is_none() {
+                anyhow::bail!(
+                    "Unknown agent '{}'. Available: {}",
+                    name,
+                    agent_registry.visible_primary_agent_names().join(", ")
+                );
+            }
+            agent = titlecase_agent_name(name);
         }
 
         let (resolved_sounds, notification_warnings) =

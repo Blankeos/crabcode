@@ -292,12 +292,36 @@ fn format_post_close_message(
     msg
 }
 
+fn resolve_startup_agent(
+    registry: &crate::agent::definition::AgentRegistry,
+    default_agent: Option<&str>,
+    cli_agent: Option<&str>,
+) -> Result<String> {
+    if let Some(name) = cli_agent.map(str::trim).filter(|name| !name.is_empty()) {
+        if registry.primary_agent(name).is_none() {
+            anyhow::bail!(
+                "Unknown agent '{}'. Available: {}",
+                name,
+                registry.visible_primary_agent_names().join(", ")
+            );
+        }
+        return Ok(crate::app::titlecase_agent_name(name));
+    }
+
+    Ok(default_agent
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(crate::app::titlecase_agent_name)
+        .unwrap_or_else(|| "Build".to_string()))
+}
+
 async fn run_print_mode(
     prompt: &str,
     model_override: Option<&str>,
     reasoning_override: Option<crate::model::reasoning::ReasoningEffort>,
     no_session_persistence: bool,
     dangerously_skip_permissions: bool,
+    cli_agent: Option<&str>,
 ) -> Result<()> {
     use crate::llm::client::stream_llm_with_cancellation;
     use crate::session::types::Message;
@@ -330,11 +354,11 @@ async fn run_print_mode(
         }
     };
 
-    let agent_mode = loaded_config
-        .merged_config
-        .default_agent
-        .clone()
-        .unwrap_or_else(|| "Build".to_string());
+    let agent_mode = resolve_startup_agent(
+        &loaded_config.merged_config.agent_registry,
+        loaded_config.merged_config.default_agent.as_deref(),
+        cli_agent,
+    )?;
 
     let saved_reasoning = prefs_dao
         .as_ref()
@@ -409,6 +433,7 @@ async fn run_print_mode(
     )
     .with_tool_registry(prompt_registry.clone())
     .with_agent_registry(agent_registry.clone())
+    .with_active_agent(agent_mode.clone())
     .with_custom_instructions(custom_instructions)
     .with_print_mode(true);
     let system_prompt = composer.compose().await;
@@ -617,6 +642,10 @@ struct Args {
     /// Model to use for this invocation, formatted as provider/model
     #[arg(short = 'm', long = "model")]
     model: Option<String>,
+
+    /// Agent to start with (e.g. build, plan). Overrides config `default_agent`.
+    #[arg(long = "agent", value_name = "NAME")]
+    agent: Option<String>,
 
     /// Reasoning effort to use for this invocation: none, minimal, low, medium, high, xhigh, or max
     #[arg(long = "reasoning-effort", value_parser = parse_reasoning_effort_arg)]
@@ -856,11 +885,12 @@ async fn main() -> Result<()> {
             args.reasoning_effort,
             args.no_session_persistence,
             args.dangerously_skip_permissions,
+            args.agent.as_deref(),
         )
         .await;
     }
 
-    let mut app = App::new_with_model_override(args.model.as_deref())?;
+    let mut app = App::new_with_model_override(args.model.as_deref(), args.agent.as_deref())?;
     // Keep herdr authority until this guard drops (normal exit or panic).
     let _herdr = crate::herdr::Session::start();
 
@@ -999,6 +1029,27 @@ mod tests {
             args.reasoning_effort,
             Some(crate::model::reasoning::ReasoningEffort::Medium)
         );
+    }
+
+    #[test]
+    fn parses_agent_override() {
+        let args = Args::try_parse_from(["crabcode", "-p", "hi", "--agent", "plan"]).unwrap();
+
+        assert_eq!(args.agent.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn resolve_startup_agent_prefers_cli_over_default() {
+        let registry = crate::agent::definition::AgentRegistry::default();
+        let agent = resolve_startup_agent(&registry, Some("Build"), Some("plan")).unwrap();
+        assert_eq!(agent, "Plan");
+    }
+
+    #[test]
+    fn resolve_startup_agent_rejects_unknown() {
+        let registry = crate::agent::definition::AgentRegistry::default();
+        let err = resolve_startup_agent(&registry, None, Some("not-a-real-agent")).unwrap_err();
+        assert!(err.to_string().contains("Unknown agent"));
     }
 
     #[test]
