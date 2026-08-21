@@ -3081,7 +3081,7 @@ impl App {
             .unwrap_or_else(|| self.chat_area_for_size(self.last_frame_size))
     }
 
-/// Forward chat mouse events while a permission/question dialog is open.
+    /// Forward chat mouse events while a permission/question dialog is open.
     /// Clicks on dialog controls are handled by the dialog; everything else
     /// (scroll + text selection) reaches the chat behind it.
     fn forward_chat_mouse_through_dialog(&mut self, mouse: MouseEvent) {
