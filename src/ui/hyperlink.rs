@@ -1,7 +1,7 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, text::Line};
 use std::path::PathBuf;
 use std::sync::LazyLock;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use url::Url;
 
 static LOCATION_SUFFIX_RE: LazyLock<regex::Regex> =
@@ -26,6 +26,14 @@ pub struct HyperlinkRange {
     pub end_col: usize,
     pub text: String,
     pub target: HyperlinkTarget,
+}
+
+/// A hyperlink span mapped onto one wrapped display line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HyperlinkLineRange {
+    pub line_idx: usize,
+    pub start_col: usize,
+    pub end_col: usize,
 }
 
 /// Mark URL-like and local-path-like text in rendered buffer cells.
@@ -54,6 +62,26 @@ pub fn mark_hyperlink_range(buf: &mut Buffer, area: Rect, line_idx: usize, range
     mark_range(buf, area, y, range);
 }
 
+pub fn mark_hyperlink_line_range(
+    buf: &mut Buffer,
+    area: Rect,
+    line_idx: usize,
+    start_col: usize,
+    end_col: usize,
+) {
+    mark_hyperlink_range(
+        buf,
+        area,
+        line_idx,
+        &HyperlinkRange {
+            start_col,
+            end_col,
+            text: String::new(),
+            target: HyperlinkTarget::Url(String::new()),
+        },
+    );
+}
+
 pub fn hyperlink_at_line_col(line: &Line<'_>, col: usize) -> Option<HyperlinkTarget> {
     hyperlink_range_at_line_col(line, col).map(|range| range.target)
 }
@@ -63,6 +91,161 @@ pub fn hyperlink_range_at_line_col(line: &Line<'_>, col: usize) -> Option<Hyperl
     detect_hyperlinks(&text)
         .into_iter()
         .find(|range| col >= range.start_col && col < range.end_col)
+}
+
+/// Resolve a hyperlink at `(line_idx, col)` while reconstructing paths/URLs that
+/// were hard-wrapped across adjacent lines.
+///
+/// Terminal wrapping can split `/Users/.../file.md` mid-token. Per-line detection
+/// then sees incomplete fragments that are not valid targets. This joins the wrap
+/// group, detects on the reconstructed text, and maps the match back onto the
+/// clicked line for underlining.
+pub fn hyperlink_range_at_wrapped_lines(
+    lines: &[Line<'_>],
+    line_idx: usize,
+    col: usize,
+    wrap_width: usize,
+) -> Option<HyperlinkRange> {
+    if wrap_width == 0 || line_idx >= lines.len() {
+        return hyperlink_range_at_line_col(lines.get(line_idx)?, col);
+    }
+
+    let (group_start, joined, line_spans) = stitch_wrap_group(lines, line_idx, wrap_width);
+    let local = line_spans.get(line_idx - group_start)?;
+    let prefix_cols = UnicodeWidthStr::width(&joined[..local.start]);
+    let line_text = line_to_string(&lines[line_idx]);
+    let stripped = local.stripped_prefix_cols;
+    if col < stripped {
+        return None;
+    }
+    let content_col = col - stripped;
+    let content_start = byte_index_at_display_col(&line_text, stripped);
+    let line_content_width = UnicodeWidthStr::width(&line_text[content_start..]);
+    if content_col >= line_content_width {
+        return None;
+    }
+    let joined_col = prefix_cols + content_col;
+
+    let Some(full_range) = detect_hyperlinks(&joined)
+        .into_iter()
+        .find(|range| joined_col >= range.start_col && joined_col < range.end_col)
+    else {
+        return hyperlink_range_at_line_col(&lines[line_idx], col);
+    };
+
+    let link_start = byte_index_at_display_col(&joined, full_range.start_col);
+    let link_end = byte_index_at_display_col(&joined, full_range.end_col);
+    let overlap_start = link_start.max(local.start);
+    let overlap_end = link_end.min(local.end);
+    if overlap_start >= overlap_end {
+        return Some(full_range);
+    }
+
+    let start_col = stripped + UnicodeWidthStr::width(&joined[local.start..overlap_start]);
+    let end_col = stripped + UnicodeWidthStr::width(&joined[local.start..overlap_end]);
+
+    Some(HyperlinkRange {
+        start_col,
+        end_col,
+        text: full_range.text,
+        target: full_range.target,
+    })
+}
+
+pub fn hyperlink_at_wrapped_lines(
+    lines: &[Line<'_>],
+    line_idx: usize,
+    col: usize,
+    wrap_width: usize,
+) -> Option<HyperlinkTarget> {
+    hyperlink_range_at_wrapped_lines(lines, line_idx, col, wrap_width).map(|range| range.target)
+}
+
+/// Like [`hyperlink_range_at_wrapped_lines`], but returns underline ranges for
+/// every wrap segment that participates in the matched link.
+pub fn hyperlink_segments_at_wrapped_lines(
+    lines: &[Line<'_>],
+    line_idx: usize,
+    col: usize,
+    wrap_width: usize,
+) -> Option<(HyperlinkRange, Vec<HyperlinkLineRange>)> {
+    if wrap_width == 0 || line_idx >= lines.len() {
+        let range = hyperlink_range_at_line_col(lines.get(line_idx)?, col)?;
+        let segments = vec![HyperlinkLineRange {
+            line_idx,
+            start_col: range.start_col,
+            end_col: range.end_col,
+        }];
+        return Some((range, segments));
+    }
+
+    let (group_start, joined, line_spans) = stitch_wrap_group(lines, line_idx, wrap_width);
+    let local = line_spans.get(line_idx - group_start)?;
+    let prefix_cols = UnicodeWidthStr::width(&joined[..local.start]);
+    let line_text = line_to_string(&lines[line_idx]);
+    let stripped = local.stripped_prefix_cols;
+    if col < stripped {
+        return None;
+    }
+    let content_col = col - stripped;
+    let content_start = byte_index_at_display_col(&line_text, stripped);
+    let line_content_width = UnicodeWidthStr::width(&line_text[content_start..]);
+    if content_col >= line_content_width {
+        return None;
+    }
+    let joined_col = prefix_cols + content_col;
+
+    let Some(full_range) = detect_hyperlinks(&joined)
+        .into_iter()
+        .find(|range| joined_col >= range.start_col && joined_col < range.end_col)
+    else {
+        let range = hyperlink_range_at_line_col(&lines[line_idx], col)?;
+        let segments = vec![HyperlinkLineRange {
+            line_idx,
+            start_col: range.start_col,
+            end_col: range.end_col,
+        }];
+        return Some((range, segments));
+    };
+
+    let link_start = byte_index_at_display_col(&joined, full_range.start_col);
+    let link_end = byte_index_at_display_col(&joined, full_range.end_col);
+
+    let mut segments = Vec::new();
+    for (offset, span) in line_spans.iter().enumerate() {
+        let overlap_start = link_start.max(span.start);
+        let overlap_end = link_end.min(span.end);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+        let start_col =
+            span.stripped_prefix_cols + UnicodeWidthStr::width(&joined[span.start..overlap_start]);
+        let end_col =
+            span.stripped_prefix_cols + UnicodeWidthStr::width(&joined[span.start..overlap_end]);
+        if start_col < end_col {
+            segments.push(HyperlinkLineRange {
+                line_idx: group_start + offset,
+                start_col,
+                end_col,
+            });
+        }
+    }
+
+    let clicked = segments
+        .iter()
+        .find(|seg| seg.line_idx == line_idx)
+        .cloned()
+        .or_else(|| segments.first().cloned())?;
+
+    Some((
+        HyperlinkRange {
+            start_col: clicked.start_col,
+            end_col: clicked.end_col,
+            text: full_range.text,
+            target: full_range.target,
+        },
+        segments,
+    ))
 }
 
 fn mark_range(buf: &mut Buffer, area: Rect, y: u16, range: &HyperlinkRange) {
@@ -83,6 +266,108 @@ fn mark_range(buf: &mut Buffer, area: Rect, y: u16, range: &HyperlinkRange) {
 
         cell.modifier.insert(Modifier::UNDERLINED);
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WrapLineSpan {
+    start: usize,
+    end: usize,
+    /// Display columns stripped from the start of this line when joining
+    /// (leading indent on continuation wrap segments).
+    stripped_prefix_cols: usize,
+}
+
+fn stitch_wrap_group(
+    lines: &[Line<'_>],
+    line_idx: usize,
+    wrap_width: usize,
+) -> (usize, String, Vec<WrapLineSpan>) {
+    let group_start = find_wrap_group_start(lines, line_idx, wrap_width);
+    let group_end = find_wrap_group_end(lines, line_idx, wrap_width);
+
+    let mut joined = String::new();
+    let mut spans = Vec::with_capacity(group_end - group_start);
+    for idx in group_start..group_end {
+        let text = line_to_string(&lines[idx]);
+        let is_continuation = idx > group_start;
+        let (content, stripped_prefix_cols) = if is_continuation {
+            strip_leading_indent_for_join(&text)
+        } else {
+            (text.as_str(), 0)
+        };
+        let start = joined.len();
+        joined.push_str(content);
+        spans.push(WrapLineSpan {
+            start,
+            end: joined.len(),
+            stripped_prefix_cols,
+        });
+    }
+    (group_start, joined, spans)
+}
+
+fn find_wrap_group_start(lines: &[Line<'_>], line_idx: usize, wrap_width: usize) -> usize {
+    let mut start = line_idx;
+    while start > 0 && should_join_wrapped_lines(&lines[start - 1], &lines[start], wrap_width) {
+        start -= 1;
+    }
+    start
+}
+
+fn find_wrap_group_end(lines: &[Line<'_>], line_idx: usize, wrap_width: usize) -> usize {
+    let mut end = line_idx + 1;
+    while end < lines.len() && should_join_wrapped_lines(&lines[end - 1], &lines[end], wrap_width) {
+        end += 1;
+    }
+    end
+}
+
+fn should_join_wrapped_lines(prev: &Line<'_>, next: &Line<'_>, wrap_width: usize) -> bool {
+    let prev_text = line_to_string(prev);
+    if line_fills_wrap_width(&prev_text, wrap_width) {
+        return true;
+    }
+
+    // Soft wraps after `/` leave the previous line under width.
+    let prev_trim = prev_text.trim_end();
+    if !prev_trim.ends_with('/') {
+        return false;
+    }
+
+    let next_text = line_to_string(next);
+    let (next_content, _) = strip_leading_indent_for_join(&next_text);
+    next_content
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '~'))
+}
+
+fn line_fills_wrap_width(text: &str, wrap_width: usize) -> bool {
+    UnicodeWidthStr::width(text) >= wrap_width
+}
+
+fn strip_leading_indent_for_join(text: &str) -> (&str, usize) {
+    let trimmed = text.trim_start_matches(' ');
+    let stripped = &text[..text.len() - trimmed.len()];
+    (trimmed, UnicodeWidthStr::width(stripped))
+}
+
+fn byte_index_at_display_col(text: &str, col: usize) -> usize {
+    if col == 0 {
+        return 0;
+    }
+    let mut width = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > col {
+            return idx;
+        }
+        width += ch_width;
+        if width == col {
+            return idx + ch.len_utf8();
+        }
+    }
+    text.len()
 }
 
 fn detect_hyperlinks(text: &str) -> Vec<HyperlinkRange> {
@@ -546,5 +831,102 @@ mod tests {
             }
             HyperlinkTarget::Url(url) => panic!("expected file target, got {url}"),
         }
+    }
+
+    #[test]
+    fn resolves_file_link_split_across_wrapped_lines() {
+        let path = "/Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md";
+        let prefix = "⬢ Added ";
+        let full = format!("{prefix}{path}");
+
+        // Simulate hard wrap by splitting mid-path (no whitespace break).
+        let first = "⬢ Added /Users/carlo/work/some-project/PR";
+        let second = "_REVIEW_20260821_112404.md";
+        assert_eq!(format!("{first}{second}"), full);
+
+        let width = UnicodeWidthStr::width(first);
+        assert!(width > 0);
+
+        let lines = vec![Line::from(first), Line::from(second)];
+
+        // Click on first half.
+        let target = hyperlink_at_wrapped_lines(&lines, 0, prefix.len() + 2, width).unwrap();
+        match target {
+            HyperlinkTarget::File(file) => {
+                assert_eq!(file.path, std::path::Path::new(path));
+            }
+            HyperlinkTarget::Url(url) => panic!("expected file, got {url}"),
+        }
+
+        // Click on second half.
+        let target = hyperlink_at_wrapped_lines(&lines, 1, 2, width).unwrap();
+        match target {
+            HyperlinkTarget::File(file) => {
+                assert_eq!(file.path, std::path::Path::new(path));
+            }
+            HyperlinkTarget::Url(url) => panic!("expected file, got {url}"),
+        }
+
+        // Underline range on the second line should cover the fragment.
+        let range = hyperlink_range_at_wrapped_lines(&lines, 1, 2, width).unwrap();
+        assert_eq!(range.text, path);
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_col, UnicodeWidthStr::width(second));
+    }
+
+    #[test]
+    fn returns_underline_segments_for_all_wrap_parts() {
+        let path = "/Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md";
+        let first = "⬢ Added /Users/carlo/work/some-project/PR";
+        let second = "_REVIEW_20260821_112404.md";
+        let width = UnicodeWidthStr::width(first);
+        let lines = vec![Line::from(first), Line::from(second)];
+
+        let (range, segments) = hyperlink_segments_at_wrapped_lines(&lines, 1, 2, width).unwrap();
+        assert_eq!(range.text, path);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].line_idx, 0);
+        assert_eq!(segments[0].start_col, UnicodeWidthStr::width("⬢ Added "));
+        assert_eq!(segments[0].end_col, UnicodeWidthStr::width(first));
+        assert_eq!(segments[1].line_idx, 1);
+        assert_eq!(segments[1].start_col, 0);
+        assert_eq!(segments[1].end_col, UnicodeWidthStr::width(second));
+    }
+
+    #[test]
+    fn stitches_soft_wrap_after_path_separator() {
+        let path = "/Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md";
+        let first = "⬢ Added /Users/carlo/work/some-project/";
+        let second = "PR_REVIEW_20260821_112404.md";
+        assert_eq!(format!("{first}{second}"), format!("⬢ Added {path}"));
+
+        let lines = vec![Line::from(first), Line::from(second)];
+        let width = 80; // previous line does not fill width
+
+        let target = hyperlink_at_wrapped_lines(&lines, 1, 0, width).unwrap();
+        match target {
+            HyperlinkTarget::File(file) => {
+                assert_eq!(file.path, std::path::Path::new(path));
+            }
+            HyperlinkTarget::Url(url) => panic!("expected file, got {url}"),
+        }
+    }
+
+    #[test]
+    fn does_not_stitch_unrelated_adjacent_lines() {
+        let lines = vec![
+            Line::from("short line"),
+            Line::from("/Users/carlo/work/file.md"),
+        ];
+        // First line does not fill wrap width, so no stitch.
+        let target = hyperlink_at_wrapped_lines(&lines, 1, 1, 80).unwrap();
+        match target {
+            HyperlinkTarget::File(file) => {
+                assert_eq!(file.path, std::path::Path::new("/Users/carlo/work/file.md"));
+            }
+            HyperlinkTarget::Url(url) => panic!("expected file, got {url}"),
+        }
+
+        assert!(hyperlink_at_wrapped_lines(&lines, 0, 0, 80).is_none());
     }
 }

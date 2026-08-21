@@ -365,6 +365,8 @@ pub struct ChatImageTarget {
 pub struct ChatHyperlinkHover {
     content_line: usize,
     range: crate::ui::hyperlink::HyperlinkRange,
+    /// Underline ranges for every wrap segment of the hovered link.
+    segments: Vec<crate::ui::hyperlink::HyperlinkLineRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3220,8 +3222,12 @@ impl Chat {
         let content_line = (event.row.saturating_sub(content_area.y) as usize)
             .saturating_add(self.resolved_scroll_offset());
         let content_col = event.column.saturating_sub(content_area.x) as usize;
-        let line = self.cached_lines.get(content_line)?;
-        let range = crate::ui::hyperlink::hyperlink_range_at_line_col(line, content_col)?;
+        let range = crate::ui::hyperlink::hyperlink_range_at_wrapped_lines(
+            &self.cached_lines,
+            content_line,
+            content_col,
+            self.cached_width,
+        )?;
 
         self.resolve_hyperlink_target(content_line, &range)
             .or_else(|| Some(range.target))
@@ -3244,8 +3250,12 @@ impl Chat {
         let content_line = (event.row.saturating_sub(content_area.y) as usize)
             .saturating_add(self.resolved_scroll_offset());
         let content_col = event.column.saturating_sub(content_area.x) as usize;
-        let line = self.cached_lines.get(content_line)?;
-        let range = crate::ui::hyperlink::hyperlink_range_at_line_col(line, content_col)?;
+        let (range, segments) = crate::ui::hyperlink::hyperlink_segments_at_wrapped_lines(
+            &self.cached_lines,
+            content_line,
+            content_col,
+            self.cached_width,
+        )?;
 
         let clickable = self
             .resolve_hyperlink_target(content_line, &range)
@@ -3255,6 +3265,7 @@ impl Chat {
         clickable.then_some(ChatHyperlinkHover {
             content_line,
             range,
+            segments,
         })
     }
 
@@ -4128,13 +4139,17 @@ impl Chat {
 
         f.render_widget(paragraph, render_area);
         if let Some(hovered) = &self.hovered_hyperlink {
-            if hovered.content_line >= visible_start && hovered.content_line < visible_end {
-                crate::ui::hyperlink::mark_hyperlink_range(
-                    f.buffer_mut(),
-                    render_area,
-                    hovered.content_line - visible_start,
-                    &hovered.range,
-                );
+            let buf = f.buffer_mut();
+            for segment in &hovered.segments {
+                if segment.line_idx >= visible_start && segment.line_idx < visible_end {
+                    crate::ui::hyperlink::mark_hyperlink_line_range(
+                        buf,
+                        render_area,
+                        segment.line_idx - visible_start,
+                        segment.start_col,
+                        segment.end_col,
+                    );
+                }
             }
         }
 
@@ -9099,6 +9114,67 @@ mod tests {
                 panic!("expected file target, got {url}");
             }
         }
+    }
+
+    #[test]
+    fn test_wrapped_hyperlink_underline_covers_all_segments() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = test_colors();
+        let path = "/Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md";
+        let mut chat = Chat::with_messages(vec![Message::assistant(format!("Added {path}"))]);
+        // Narrow enough that the absolute path must wrap.
+        let area = Rect::new(0, 0, 36, 12);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+
+        let (line_idx, col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find('/').map(|col| (line_idx, col as u16))
+            })
+            .expect("path position");
+        let hover = chat
+            .hyperlink_hover_at_position(
+                mouse(
+                    MouseEventKind::Moved,
+                    col,
+                    line_idx as u16,
+                    KeyModifiers::empty(),
+                ),
+                area,
+            )
+            .expect("hyperlink hover");
+        assert!(
+            hover.segments.len() > 1,
+            "expected wrapped path hover segments, got {:?}",
+            hover.segments
+        );
+        chat.set_hovered_hyperlink(Some(hover.clone()));
+
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let underlined = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].modifier.contains(Modifier::UNDERLINED))
+            .count();
+
+        let expected: usize = hover
+            .segments
+            .iter()
+            .map(|seg| seg.end_col.saturating_sub(seg.start_col))
+            .sum();
+        assert_eq!(underlined, expected);
+        assert!(underlined >= path.len());
     }
 
     #[test]
