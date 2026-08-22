@@ -2997,14 +2997,14 @@ impl Chat {
         self.update_scrollbar();
     }
 
-    fn max_scroll_offset(&self) -> usize {
+    pub fn max_scroll_offset(&self) -> usize {
         self.content_height
             .saturating_add(self.scroll_bottom_padding)
             .saturating_sub(self.viewport_height)
     }
 
     /// Concrete scroll offset, resolving the stick-to-bottom MAX sentinel.
-    fn resolved_scroll_offset(&self) -> usize {
+    pub fn resolved_scroll_offset(&self) -> usize {
         let max_offset = self.max_scroll_offset();
         if self.scroll_offset == usize::MAX {
             max_offset

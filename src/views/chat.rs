@@ -219,7 +219,10 @@ pub fn render_chat(
             .chat
             .ensure_render_cache(content_max_width, &model, colors);
 
-        let scroll_offset = chat_state.chat.scroll_offset;
+        // Resolve stick-to-bottom MAX so sticky math uses a real line offset.
+        // Raw `scroll_offset == usize::MAX` would make every body_end <= S and
+        // incorrectly pin the latest still-visible user message.
+        let scroll_offset = chat_state.chat.resolved_scroll_offset();
         // One start line per transcript message / rendered block (groups share a start).
         let rendered_message_starts = &chat_state.chat.message_line_positions;
         let content_height = chat_state.chat.content_height;
@@ -2025,6 +2028,30 @@ mod tests {
     }
 
     #[test]
+    fn sticky_at_bottom_keeps_previous_user_while_latest_still_visible() {
+        // U0 body_end=3, U1 start=100 body_end=103.
+        // Near the bottom (S=90) U1 is still on screen below the top → sticky stays U0.
+        // Callers must pass resolved_scroll_offset(); raw stick-to-bottom MAX would
+        // make every body_end <= S and incorrectly pin the latest user.
+        let msgs = synthetic_user_messages(&[(0, 0, 4), (5, 100, 4)]);
+        assert_eq!(
+            natural_sticky_index(&msgs, 90),
+            Some(0),
+            "previous user sticky while latest remains visible"
+        );
+        assert_eq!(
+            natural_sticky_index(&msgs, 103),
+            Some(5),
+            "latest becomes sticky only after its body fully leaves the top"
+        );
+        assert_eq!(
+            natural_sticky_index(&msgs, usize::MAX),
+            Some(5),
+            "MAX sentinel traps sticky on the latest user — never pass unresolved offset"
+        );
+    }
+
+    #[test]
     fn compact_render_keeps_chat_area_stable_when_sticky_appears() {
         use ratatui::{backend::TestBackend, Terminal};
 
@@ -2041,9 +2068,11 @@ mod tests {
         // first user fully above the viewport while remaining well clear of the
         // next user sticky-coverage boundary.
         chat_state.chat.add_user_message("sticky candidate");
+        // Tall enough that first_user body_end is reachable within max_scroll
+        // after chrome (header/input) shrinks the chat viewport on an 80x40 term.
         chat_state
             .chat
-            .add_assistant_message("assistant reply\n".repeat(40));
+            .add_assistant_message("assistant reply\n".repeat(120));
         chat_state.chat.add_user_message("later user");
         // Pin to top after adds (add_* sets scroll_offset = MAX while autoscroll is on).
         chat_state.chat.autoscroll_enabled = false;
@@ -2094,7 +2123,8 @@ mod tests {
 
         // Scroll so the first user message is fully above the viewport, but the
         // later user has not entered the sticky-covered top region yet.
-        // Use the first user's body_end as the scroll target.
+        // Use the first user's body_end as the scroll target. Must be within
+        // max_scroll_offset — sticky math uses resolved_scroll_offset().
         let first_user_body_end = {
             let starts = &chat_state.chat.message_line_positions;
             let end = starts
@@ -2103,6 +2133,11 @@ mod tests {
                 .unwrap_or(chat_state.chat.content_height);
             user_message_body_end(end)
         };
+        let max_scroll = chat_state.chat.max_scroll_offset();
+        assert!(
+            first_user_body_end <= max_scroll,
+            "fixture must allow scrolling past first user body (body_end={first_user_body_end}, max_scroll={max_scroll})"
+        );
         chat_state.chat.scroll_offset = first_user_body_end;
         chat_state.chat.scroll_up(0);
 
