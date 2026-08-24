@@ -26,8 +26,8 @@ impl BashTool {
 }
 
 #[cfg(unix)]
-fn kill_process_group(child: &tokio::process::Child) {
-    if let Some(pid) = child.id() {
+fn kill_process_group(pid: Option<u32>) {
+    if let Some(pid) = pid {
         unsafe {
             let _ = libc::killpg(pid as i32, libc::SIGKILL);
         }
@@ -36,9 +36,12 @@ fn kill_process_group(child: &tokio::process::Child) {
 
 #[cfg(unix)]
 async fn terminate_child(child: &mut tokio::process::Child) {
-    kill_process_group(child);
+    kill_process_group(child.id());
     let _ = child.kill().await;
 }
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: Option<u32>) {}
 
 #[cfg(not(unix))]
 async fn terminate_child(child: &mut tokio::process::Child) {
@@ -152,6 +155,7 @@ impl ToolHandler for BashTool {
         let mut child = cmd
             .spawn()
             .map_err(|e| ToolError::Execution(format!("Failed to spawn process: {}", e)))?;
+        let process_group_id = child.id();
 
         let stdout = child.stdout.take().expect("stdout should be piped");
         let stderr = child.stderr.take().expect("stderr should be piped");
@@ -169,6 +173,7 @@ impl ToolHandler for BashTool {
         let result = timeout(timeout_duration, async {
             let mut stdout_done = false;
             let mut stderr_done = false;
+            let mut exit_status = None;
             let mut stdout_chunk = vec![0u8; READ_CHUNK_SIZE];
             let mut stderr_chunk = vec![0u8; READ_CHUNK_SIZE];
 
@@ -179,9 +184,16 @@ impl ToolHandler for BashTool {
                 }
 
                 if stdout_done && stderr_done {
-                    return match child.wait().await {
-                        Ok(exit_status) => Ok(exit_status),
-                        Err(e) => Err(ToolError::Execution(format!("Process error: {}", e))),
+                    return if let Some(exit_status) = exit_status {
+                        Ok(exit_status)
+                    } else {
+                        match child.wait().await {
+                            Ok(exit_status) => {
+                                kill_process_group(process_group_id);
+                                Ok(exit_status)
+                            }
+                            Err(e) => Err(ToolError::Execution(format!("Process error: {}", e))),
+                        }
                     };
                 }
 
@@ -200,11 +212,17 @@ impl ToolHandler for BashTool {
                             Err(e) => return Err(ToolError::Execution(format!("Error reading stderr: {}", e))),
                         }
                     }
-                    status = child.wait(), if stdout_done && stderr_done => {
-                        return match status {
-                            Ok(exit_status) => Ok(exit_status),
-                            Err(e) => Err(ToolError::Execution(format!("Process error: {}", e))),
-                        };
+                    status = child.wait(), if exit_status.is_none() => {
+                        match status {
+                            Ok(status) => {
+                                exit_status = Some(status);
+                                // A shell can exit successfully while background descendants
+                                // keep running and retain the output pipes. Kill the process group
+                                // so those descendants cannot leak beyond this tool invocation.
+                                kill_process_group(process_group_id);
+                            }
+                            Err(e) => return Err(ToolError::Execution(format!("Process error: {}", e))),
+                        }
                     }
                     _ = tokio::time::sleep(Duration::from_millis(25)) => {}
                 }
@@ -303,5 +321,47 @@ mod tests {
         .expect("bash command should execute");
 
         assert!(result.output.contains("eof"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_command_kills_background_processes() {
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        let pid_file = temp_dir.path().join("background.pid");
+        let command = format!(
+            "sleep 30 & echo $! > {}",
+            pid_file.to_string_lossy().replace(' ', "\\ ")
+        );
+        let ctx =
+            ToolContext::from_cancel_token("session", "message", "Build", CancellationToken::new());
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            BashTool::new().execute(
+                serde_json::json!({
+                    "command": command,
+                    "timeout": 2
+                }),
+                &ctx,
+            ),
+        )
+        .await
+        .expect("bash tool should not wait for background process pipes")
+        .expect("foreground command should succeed");
+
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .expect("background pid should be written")
+            .trim()
+            .parse()
+            .expect("background pid should be numeric");
+        let mut still_running = true;
+        for _ in 0..20 {
+            still_running = unsafe { libc::kill(pid, 0) == 0 };
+            if !still_running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!still_running, "background process {pid} was not killed");
     }
 }
