@@ -390,9 +390,13 @@ pub async fn stream_llm_with_cancellation(
     request_config.openai_options.prompt_cache_key = Some(session_id.clone());
 
     let tool_registry = match tool_registry {
-        Some(tool_registry) => tool_registry,
+        Some(tool_registry) => {
+            // Pick up MCP tools that finished connecting after the registry was built.
+            crate::tools::refresh_mcp_tools(&tool_registry, &mcp_config, &workspace).await;
+            tool_registry
+        }
         None => {
-            crate::tools::initialize_tool_registry_with_dynamic_config(
+            let registry = crate::tools::initialize_tool_registry_with_dynamic_config(
                 Some(sender.clone()),
                 tool_permissions.clone(),
                 agent_registry.clone(),
@@ -402,7 +406,9 @@ pub async fn stream_llm_with_cancellation(
                 &mcp_config,
                 &workspace,
             )
-            .await
+            .await;
+            crate::tools::refresh_mcp_tools(&registry, &mcp_config, &workspace).await;
+            registry
         }
     };
     // Set LLM session config for subagent use
@@ -1834,7 +1840,10 @@ fn convert_messages_for_model(
                 if images.is_empty() {
                     aisdk_messages.push(AisdkMessage::user(content));
                 } else {
-                    aisdk_messages.push(AisdkMessage::user_with_images(content, images));
+                    aisdk_messages.push(AisdkMessage::user_with_images(
+                        content_with_vision_attached_image_hint(&content),
+                        images,
+                    ));
                 }
             }
             crate::session::types::MessageRole::Assistant => {
@@ -2075,6 +2084,15 @@ fn content_with_unsupported_image_note(content: &str, image_count: usize) -> Str
         note
     } else {
         format!("{content}\n\n{note}")
+    }
+}
+
+fn content_with_vision_attached_image_hint(content: &str) -> String {
+    const HINT: &str = "Attached image(s) in this message are already visible. Do not call view_image for them; use view_image only for other filesystem image paths.";
+    if content.trim().is_empty() {
+        HINT.to_string()
+    } else {
+        format!("{content}\n\n{HINT}")
     }
 }
 
@@ -2853,6 +2871,38 @@ mod tests {
                 assert!(message
                     .content
                     .contains("this model does not support image input"));
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vision_model_with_attached_images_gets_do_not_view_image_hint() {
+        use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+        use std::io::Cursor;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("example.png");
+        let image = RgbaImage::from_pixel(2, 1, Rgba([255, 0, 0, 255]));
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut encoded, ImageFormat::Png)
+            .expect("encode png");
+        std::fs::write(&path, encoded.into_inner()).expect("write png");
+
+        let mut user_message = crate::session::types::Message::user("what is in this?");
+        user_message.local_image_paths = vec![path.to_string_lossy().to_string()];
+
+        let messages = convert_messages_for_model(&[user_message], true, false);
+
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            AisdkMessage::User(message) => {
+                assert_eq!(message.images.len(), 1);
+                assert!(message.content.contains("what is in this?"));
+                assert!(message
+                    .content
+                    .contains("already visible. Do not call view_image for them"));
             }
             other => panic!("expected user message, got {other:?}"),
         }

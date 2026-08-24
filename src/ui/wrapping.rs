@@ -269,6 +269,10 @@ fn wrap_single_line_ranges(
             used_width += ch_width;
             if ch.is_whitespace() && byte_idx > start {
                 last_break = Some((byte_idx, next));
+            } else if ch == '/' && byte_idx > start {
+                // Prefer breaking after path separators so wrapped file links
+                // keep more complete path segments on each line.
+                last_break = Some((next, next));
             }
         }
 
@@ -575,6 +579,24 @@ mod tests {
             .spans
             .iter()
             .all(|span| span.content.chars().all(|ch| !ch.is_control())));
+    }
+
+    #[test]
+    fn prefers_break_after_path_separator() {
+        let path = "/Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md";
+        let line = Line::from(format!("⬢ Added {path}"));
+        let wrapped = wrap_styled_line(&line, 40);
+        assert!(wrapped.len() > 1);
+
+        let texts: Vec<String> = wrapped.iter().map(line_text).collect();
+        assert_eq!(texts.concat(), format!("⬢ Added {path}"));
+
+        for (i, text) in texts.iter().enumerate().take(texts.len().saturating_sub(1)) {
+            assert!(
+                text.ends_with('/'),
+                "wrap segment {i} should end at path separator: {text:?}"
+            );
+        }
     }
 
     #[test]

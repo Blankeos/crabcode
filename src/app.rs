@@ -191,7 +191,7 @@ impl From<crate::aisdk::retry::RetryStatus> for StreamingRetryStatus {
     }
 }
 
-fn titlecase_agent_name(name: &str) -> String {
+pub(crate) fn titlecase_agent_name(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
         return "Build".to_string();
@@ -955,10 +955,13 @@ impl App {
     }
 
     pub fn new() -> Result<Self> {
-        Self::new_with_model_override(None)
+        Self::new_with_model_override(None, None)
     }
 
-    pub fn new_with_model_override(model_override: Option<&str>) -> Result<Self> {
+    pub fn new_with_model_override(
+        model_override: Option<&str>,
+        cli_agent: Option<&str>,
+    ) -> Result<Self> {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
@@ -1013,6 +1016,15 @@ impl App {
         let loaded_config = crate::config::ConfigLoader::load()?;
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
+        // Warm MCP connections in the background so the first chat never waits.
+        if !mcp_config.is_empty() {
+            let warm_cfg = mcp_config.clone();
+            let warm_cwd =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let _ = tokio::spawn(async move {
+                let _ = crate::mcp::McpManager::ensure(warm_cfg, warm_cwd);
+            });
+        }
         input.set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
@@ -1062,6 +1074,16 @@ impl App {
             if !default_agent.trim().is_empty() {
                 agent = default_agent;
             }
+        }
+        if let Some(name) = cli_agent.map(str::trim).filter(|name| !name.is_empty()) {
+            if agent_registry.primary_agent(name).is_none() {
+                anyhow::bail!(
+                    "Unknown agent '{}'. Available: {}",
+                    name,
+                    agent_registry.visible_primary_agent_names().join(", ")
+                );
+            }
+            agent = titlecase_agent_name(name);
         }
 
         let (resolved_sounds, notification_warnings) =
@@ -1151,7 +1173,18 @@ impl App {
             .unwrap_or_else(theme::Theme::load_builtin_default);
         let colors = theme_for_colors.get_colors(true);
 
-        let chat_state = init_chat(chat, &agent, &colors);
+        let configured_compact_mode = loaded_config.merged_config.tui_compact_mode;
+        let persisted_compact_mode = if configured_compact_mode.is_none() {
+            prefs_dao
+                .as_ref()
+                .and_then(|dao| dao.get_compact_mode().ok().flatten())
+        } else {
+            None
+        };
+        let compact_mode = configured_compact_mode
+            .or(persisted_compact_mode)
+            .unwrap_or(true);
+        let chat_state = init_chat(chat, &agent, &colors, compact_mode);
         let session_rename_dialog_state = init_session_rename_dialog(colors);
         let runtime = crate::config::ConfigRuntime::from_merged(
             &loaded_config.merged_config,
@@ -1234,7 +1267,7 @@ impl App {
             notifications: loaded_config.merged_config.notifications,
             images: loaded_config.merged_config.images,
             websearch: loaded_config.merged_config.websearch,
-            mcp: mcp_config,
+            mcp: mcp_config.clone(),
             config_raw_merged: loaded_config.raw_merged,
             custom_instructions,
             terminal_focused: true,
@@ -1489,38 +1522,7 @@ impl App {
     }
 
     fn completion_notification_stats(&self) -> Option<String> {
-        let message = self.chat_state.chat.messages.iter().rev().find(|msg| {
-            msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
-        })?;
-
-        if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
-            let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
-            let ttft_ms = t1.saturating_sub(t0);
-            let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
-            let total_ms = ttft_ms.saturating_add(decode_ms);
-
-            let total_sec = total_ms as f64 / 1000.0;
-            let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
-                (output_tokens as f64) / (decode_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-
-            return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
-        }
-
-        if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
-            let duration_sec = duration_ms as f64 / 1000.0;
-            let tokens_per_sec = if duration_ms > 0 {
-                (token_count as f64) / (duration_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-
-            return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
-        }
-
-        None
+        Self::completion_notification_stats_for_chat(&self.chat_state.chat)
     }
 
     fn completion_notification_stats_for_chat(chat: &Chat) -> Option<String> {
@@ -1528,31 +1530,47 @@ impl App {
             msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
         })?;
 
+        let format_tps = |precomputed: Option<f64>, tokens: usize, decode_ms: u64| -> Option<f64> {
+            if let Some(tps) = precomputed {
+                if tps.is_finite() && tps > 0.0 {
+                    return Some(tps);
+                }
+            }
+            // OpenCode inter-token: (n - 1) / duration; need >1 token.
+            if decode_ms == 0 || tokens < 2 {
+                return None;
+            }
+            let tps = ((tokens - 1) as f64) / (decode_ms as f64 / 1000.0);
+            if tps.is_finite() && tps > 0.0 {
+                Some(tps)
+            } else {
+                None
+            }
+        };
+
         if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
             let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
             let ttft_ms = t1.saturating_sub(t0);
             let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
             let total_ms = ttft_ms.saturating_add(decode_ms);
-
             let total_sec = total_ms as f64 / 1000.0;
-            let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
-                (output_tokens as f64) / (decode_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
 
-            return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
+            if let Some(tokens_per_sec) =
+                format_tps(message.tokens_per_sec, output_tokens, decode_ms)
+            {
+                return Some(format!("{:.1}s | {:.0}t/s", total_sec, tokens_per_sec));
+            }
+            return Some(format!("{:.1}s", total_sec));
         }
 
         if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
             let duration_sec = duration_ms as f64 / 1000.0;
-            let tokens_per_sec = if duration_ms > 0 {
-                (token_count as f64) / (duration_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
-
-            return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
+            if let Some(tokens_per_sec) =
+                format_tps(message.tokens_per_sec, token_count, duration_ms)
+            {
+                return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
+            }
+            return Some(format!("{:.1}s", duration_sec));
         }
 
         None
@@ -2108,6 +2126,9 @@ impl App {
     fn set_session_retry_status(&mut self, session_id: &str, status: Option<StreamingRetryStatus>) {
         self.ensure_session_view_state(session_id);
         if let Some(state) = self.session_view_states.get_mut(session_id) {
+            if state.retry_status == status {
+                return;
+            }
             state.retry_status = status;
         }
     }
@@ -3067,12 +3088,82 @@ impl App {
     }
 
     fn current_chat_area(&self) -> Rect {
-        self.chat_area_for_size(self.last_frame_size)
+        // Prefer the last-rendered chat content rect (excludes compact chrome).
+        self.chat_state
+            .last_chat_area
+            .unwrap_or_else(|| self.chat_area_for_size(self.last_frame_size))
+    }
+
+    /// Forward chat mouse events while a permission/question dialog is open.
+    /// Clicks on dialog controls are handled by the dialog; everything else
+    /// (scroll + text selection) reaches the chat behind it.
+    fn forward_chat_mouse_through_dialog(&mut self, mouse: MouseEvent) {
+        if self.base_focus != BaseFocus::Chat {
+            return;
+        }
+
+        let is_scroll = matches!(
+            mouse.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        );
+        let is_selection = matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        );
+        if !is_scroll && !is_selection {
+            return;
+        }
+
+        let chat_area = self.current_chat_area();
+        let was_dragging = self.chat_state.chat.selection.is_dragging;
+        if !self.chat_state.chat.handle_mouse_event(mouse, chat_area) {
+            return;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.selection_action_bar = None;
+        }
+
+        // Same as the normal chat path: show actions as soon as a drag creates a
+        // selection, because mouse-up may never arrive if released outside the terminal.
+        if was_dragging
+            && self.chat_state.chat.selection.is_dragging
+            && matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+        {
+            self.show_selection_action_bar_for(SelectionActionTarget::Chat);
+        } else if was_dragging && !self.chat_state.chat.selection.is_dragging {
+            self.show_selection_action_bar_for(SelectionActionTarget::Chat);
+        }
+    }
+
+    /// Region where a mouse wheel scrolls the chat. In compact mode this
+    /// extends above the chat content to include the 3-row header (and the
+    /// sticky overlay which sits inside the transcript top), so scrolling
+    /// works even when the pointer is over that chrome.
+    fn chat_scroll_region(&self) -> Rect {
+        let chat_area = self.current_chat_area();
+        if !self.chat_state.compact_mode {
+            return chat_area;
+        }
+        // Sticky is an overlay inside chat_area; only the header sits above it.
+        let top = chat_area.y.saturating_sub(3); // header rows
+        Rect {
+            x: chat_area.x,
+            y: top,
+            width: chat_area.width,
+            height: chat_area.bottom().saturating_sub(top),
+        }
     }
 
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
-        if self.overlay_focus == OverlayFocus::None && self.base_focus == BaseFocus::Chat {
-            let chat_area = self.current_chat_area();
+        if matches!(
+            self.overlay_focus,
+            OverlayFocus::None | OverlayFocus::FindBar
+        ) && self.base_focus == BaseFocus::Chat
+        {
+            let chat_area = self.chat_scroll_region();
             if chat_area.contains(Position::new(mouse.column, mouse.row))
                 && self
                     .chat_state
@@ -4475,8 +4566,14 @@ impl App {
             return;
         }
 
-        // If text is selected and user clicks on an overlay, clear selection instead
+        // If text is selected and user clicks on an overlay, clear selection instead.
+        // Permission/question dialogs intentionally forward outside clicks to chat so
+        // text can still be highlighted (same idea as scroll-through).
         if self.overlay_focus != OverlayFocus::None
+            && !matches!(
+                self.overlay_focus,
+                OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+            )
             && (self.chat_state.chat.has_selection() || self.input.has_selection())
             && self.selection_action_bar.is_none()
             && matches!(
@@ -4571,52 +4668,9 @@ impl App {
             if let PermissionDialogAction::Respond(response) = action {
                 self.remote_respond_permission(response);
             }
-            if !handled
-                && matches!(
-                    mouse.kind,
-                    ratatui::crossterm::event::MouseEventKind::ScrollDown
-                        | ratatui::crossterm::event::MouseEventKind::ScrollUp
-                )
-                && self.base_focus == BaseFocus::Chat
-            {
-                let size = self.last_frame_size;
-                let main_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(size);
-                let input_height = self.input.get_height_for_width(size.width);
-                let input_height = if self.is_subagent_session_active() {
-                    SUBAGENT_FOOTER_HEIGHT
-                } else {
-                    input_height
-                };
-                let help_height = if self.is_subagent_session_active() {
-                    0
-                } else {
-                    1
-                };
-                let above_status_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(help_height),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(main_chunks[0]);
-                let chat_area = above_status_chunks[1];
-                let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
+            if !handled {
+                // Allow chat scroll + text selection outside the permission dialog.
+                self.forward_chat_mouse_through_dialog(mouse);
             }
         } else if self.overlay_focus == OverlayFocus::QuestionDialog {
             let action = handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse);
@@ -4637,52 +4691,9 @@ impl App {
                 }
                 QuestionDialogAction::Handled | QuestionDialogAction::NotHandled => {}
             }
-            if !handled
-                && matches!(
-                    mouse.kind,
-                    ratatui::crossterm::event::MouseEventKind::ScrollDown
-                        | ratatui::crossterm::event::MouseEventKind::ScrollUp
-                )
-                && self.base_focus == BaseFocus::Chat
-            {
-                let size = self.last_frame_size;
-                let main_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(size);
-                let input_height = self.input.get_height_for_width(size.width);
-                let input_height = if self.is_subagent_session_active() {
-                    SUBAGENT_FOOTER_HEIGHT
-                } else {
-                    input_height
-                };
-                let help_height = if self.is_subagent_session_active() {
-                    0
-                } else {
-                    1
-                };
-                let above_status_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(help_height),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(main_chunks[0]);
-                let chat_area = above_status_chunks[1];
-                let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
+            if !handled {
+                // Allow chat scroll + text selection outside the question dialog.
+                self.forward_chat_mouse_through_dialog(mouse);
             }
         } else if self.overlay_focus == OverlayFocus::RemoteDialog {
             let action = handle_remote_dialog_mouse_event(&mut self.remote_dialog_state, mouse);
@@ -4948,6 +4959,23 @@ impl App {
             // Handle mouse events for chat scrolling/selection when in chat mode
             if self.base_focus == BaseFocus::Chat {
                 let chat_area = self.current_chat_area();
+
+                // Compact-mode sticky user message: click to scroll to that message.
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    && mouse.modifiers.is_empty()
+                {
+                    if let Some((sticky_rect, msg_idx)) = self.chat_state.sticky_click_target {
+                        if sticky_rect.contains(Position::new(mouse.column, mouse.row)) {
+                            self.chat_state.chat.scroll_to_message_index(msg_idx);
+                            // Clear sticky state so the scrolled-to message re-enters
+                            // the viewport cleanly without residual sticky chrome.
+                            self.chat_state.sticky_message_index = None;
+                            self.chat_state.sticky_click_target = None;
+                            self.pending_chat_message_click = None;
+                            return;
+                        }
+                    }
+                }
 
                 match mouse.kind {
                     MouseEventKind::Moved
@@ -6201,6 +6229,24 @@ impl App {
                     }
                     return;
                 }
+                if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
+                    self.chat_state.compact_mode = !self.chat_state.compact_mode;
+                    if let Some(dao) = &self.prefs_dao {
+                        if let Err(error) = dao.set_compact_mode(self.chat_state.compact_mode) {
+                            eprintln!("Failed to persist compact mode preference: {error}");
+                        }
+                    }
+                    push_toast(Toast::new(
+                        if self.chat_state.compact_mode {
+                            "Compact mode enabled"
+                        } else {
+                            "Compact mode disabled"
+                        },
+                        ToastLevel::Info,
+                        Some(std::time::Duration::from_secs(2)),
+                    ));
+                    return;
+                }
                 if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat
                 {
                     self.handle_fork_command(&parsed.args);
@@ -6428,6 +6474,24 @@ impl App {
             } else {
                 self.compact_current_session().await;
             }
+            return;
+        }
+        if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
+            self.chat_state.compact_mode = !self.chat_state.compact_mode;
+            if let Some(dao) = &self.prefs_dao {
+                if let Err(error) = dao.set_compact_mode(self.chat_state.compact_mode) {
+                    eprintln!("Failed to persist compact mode preference: {error}");
+                }
+            }
+            push_toast(Toast::new(
+                if self.chat_state.compact_mode {
+                    "Compact mode enabled"
+                } else {
+                    "Compact mode disabled"
+                },
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
             return;
         }
         if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat {
@@ -8288,28 +8352,50 @@ impl App {
                     {
                         Ok(()) => {
                             let is_active = self.is_active_session(&session_id);
-                            // Marker is appended last — pin to bottom so the
-                            // "Context compacted" line is visible without jump.
-                            let mut chat = self.chat_with_messages(messages.clone());
-                            chat.scroll_to_bottom_on_next_render();
-                            if let Some(marker_idx) = messages
+                            // Marker is last in soft layout — pin to bottom so the
+                            // "Context compacted" line is visible without mid-history jump.
+                            // Prefer replace_messages on the live chat: rebuilding via
+                            // chat_with_messages zeros content_height and can desync
+                            // sticky/live scroll state until the next session load.
+                            let marker_idx = messages
                                 .iter()
-                                .rposition(|m| crate::session::compaction::is_compaction_marker(m))
-                            {
-                                chat.set_highlighted_message(Some(marker_idx));
-                            } else {
-                                chat.clear_highlighted_message();
-                            }
-
+                                .rposition(|m| crate::session::compaction::is_compaction_marker(m));
                             if is_active {
-                                self.chat_state.chat = chat.clone();
+                                self.chat_state.chat.replace_messages(messages.clone());
+                                self.chat_state.chat.scroll_to_bottom_on_next_render();
+                                if let Some(marker_idx) = marker_idx {
+                                    self.chat_state
+                                        .chat
+                                        .set_highlighted_message(Some(marker_idx));
+                                } else {
+                                    self.chat_state.chat.clear_highlighted_message();
+                                }
                             }
 
-                            // Always keep view-state in sync so reopen/switch
-                            // shows the same compacted history + marker.
                             self.ensure_session_view_state(&session_id);
+                            // Build parked chat before mutably borrowing session_view_states
+                            // (chat_with_messages needs &self).
+                            let parked_chat = if !is_active {
+                                let mut view_chat = self.chat_with_messages(messages);
+                                view_chat.scroll_to_bottom_on_next_render();
+                                if let Some(marker_idx) = marker_idx {
+                                    view_chat.set_highlighted_message(Some(marker_idx));
+                                } else {
+                                    view_chat.clear_highlighted_message();
+                                }
+                                Some(view_chat)
+                            } else {
+                                None
+                            };
                             if let Some(state) = self.session_view_states.get_mut(&session_id) {
-                                state.chat = chat;
+                                // Keep the active session's live chat out of
+                                // session_view_states (same invariant as
+                                // load_session_view_state / switch_to_session).
+                                // Never park an empty new_chat() here — that would
+                                // wipe the marker on the next session restore.
+                                if let Some(view_chat) = parked_chat {
+                                    state.chat = view_chat;
+                                }
                                 state.tool_calls = ToolCallViewState::default();
                                 state.unread_completed = !is_active;
                             }
@@ -8927,6 +9013,11 @@ impl App {
             crate::llm::ChunkMessage::Metrics { .. } => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.set_session_retry_status(session_id, None);
+                // Close the generation sample as a tool-calls finish (excluded from
+                // TPS) and pause timing for the duration of tool execution.
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.end_generation_for_tool_calls();
+                }
                 self.add_tool_calls_to_session(session_id, tool_calls);
                 true
             }
@@ -10646,6 +10737,9 @@ impl App {
                     &queued_messages,
                     &mut self.find_bar,
                     self.overlay_focus == OverlayFocus::None,
+                    self.session_manager
+                        .get_current_session()
+                        .map(|s| s.title.as_str()),
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -11234,7 +11328,7 @@ mod tests {
             command_registry: registry,
             session_manager: SessionManager::new(),
             home_state: init_home(),
-            chat_state: init_chat(Chat::new(), "Build", &colors),
+            chat_state: init_chat(Chat::new(), "Build", &colors, true),
             suggestions_popup_state: init_suggestions_popup(Popup::new()),
             agents_dialog_state: init_agents_dialog("Select agent", vec![]),
             models_dialog_state: init_models_dialog("Models", vec![]),
@@ -11334,6 +11428,24 @@ mod tests {
             .as_ref()
             .map(|dialog| dialog.items.iter().map(|item| item.label.clone()).collect())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn coalesced_mouse_scroll_reaches_chat_while_find_bar_is_focused() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::FindBar;
+        app.chat_state.chat.viewport_height = 10;
+        app.chat_state.chat.content_height = 100;
+        let chat_area = app.current_chat_area();
+
+        app.handle_coalesced_mouse_scroll(
+            mouse(MouseEventKind::ScrollDown, chat_area.x, chat_area.y),
+            1,
+        );
+
+        assert!(app.chat_state.chat.scroll_offset > 0);
     }
 
     #[test]
@@ -11944,6 +12056,75 @@ mod tests {
         assert_eq!(
             app.selection_action_bar.map(|state| state.target),
             Some(SelectionActionTarget::Input)
+        );
+    }
+
+    #[test]
+    fn permission_dialog_forwards_chat_text_selection() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant(
+                "alpha beta gamma",
+            ));
+        app.chat_state.chat.content_height = 25;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+        let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
+        app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_id: "list".to_string(),
+            action: PermissionAction::List,
+            permission: "external_directory".to_string(),
+            patterns: vec!["/tmp/*".to_string()],
+            target: Some("/tmp".to_string()),
+            command: None,
+            workdir: None,
+            reason: "approval required".to_string(),
+            response_tx: permission_tx,
+        });
+        app.overlay_focus = OverlayFocus::PermissionDialog;
+
+        // Outside dialog controls: start + drag selection on chat text.
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), 8, 1));
+
+        assert!(
+            app.chat_state.chat.has_selection() || app.chat_state.chat.selection.is_dragging,
+            "chat text should be selectable while permission dialog is open"
+        );
+    }
+
+    #[test]
+    fn question_dialog_forwards_chat_text_selection() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant(
+                "alpha beta gamma",
+            ));
+        app.chat_state.chat.content_height = 25;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+        let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
+        app.question_dialog_state.enqueue(
+            json!([{
+                "question": "Continue?",
+                "options": [{ "label": "Yes" }, { "label": "No" }]
+            }]),
+            question_tx,
+        );
+        app.overlay_focus = OverlayFocus::QuestionDialog;
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), 8, 1));
+
+        assert!(
+            app.chat_state.chat.has_selection() || app.chat_state.chat.selection.is_dragging,
+            "chat text should be selectable while question dialog is open"
         );
     }
 
@@ -12984,6 +13165,9 @@ mod tests {
             .chat
             .add_message(crate::session::types::Message::incomplete(""));
         app.chat_state.chat.begin_streaming_turn();
+        app.chat_state
+            .chat
+            .prepare_streaming_token_counter("test-model");
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         sender
@@ -13108,14 +13292,23 @@ mod tests {
         app.overlay_focus = OverlayFocus::SessionsDialog;
         app.sessions_dialog_state.dialog.show();
         app.refresh_sessions_dialog();
-        app.sessions_dialog_live_dirty = false;
-        let probe_before = app.last_sessions_dialog_metadata_probe;
 
         app.base_focus = BaseFocus::Chat;
         app.chat_state
             .chat
             .add_message(crate::session::types::Message::incomplete(""));
         app.chat_state.chat.begin_streaming_turn();
+        // Warm tiktoken before probing so load cost is not charged to the
+        // sessions-dialog probe interval during process_streaming_chunks.
+        app.chat_state
+            .chat
+            .prepare_streaming_token_counter("test-model");
+
+        // Reset probe after any setup cost (e.g. tiktoken warm-up) so the
+        // assertion only covers process_streaming_chunks itself.
+        app.sessions_dialog_live_dirty = false;
+        app.last_sessions_dialog_metadata_probe = std::time::Instant::now();
+        let probe_before = app.last_sessions_dialog_metadata_probe;
 
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         sender

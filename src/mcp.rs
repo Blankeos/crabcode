@@ -1,4 +1,4 @@
-use crate::config::{McpConfig, McpServerConfig};
+use crate::config::configuration::{McpConfig, McpServerConfig};
 use crate::tools::{
     ParameterSchema, ParameterType, Tool, ToolContext, ToolError, ToolHandler, ToolResult,
 };
@@ -17,6 +17,11 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
+
+/// Process-wide MCP managers keyed by workspace. Connections warm in the
+/// background so chat never blocks on process spawn / tool listing.
+static MCP_POOL: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Arc<Mutex<McpManager>>>>> =
+    std::sync::OnceLock::new();
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct McpServerView {
@@ -50,6 +55,7 @@ struct McpServerState {
 #[derive(Debug, Clone)]
 enum McpStatus {
     Disabled,
+    Connecting,
     Connected,
     Failed(String),
     NeedsAuth,
@@ -59,6 +65,7 @@ impl McpStatus {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
+            Self::Connecting => "connecting",
             Self::Connected => "connected",
             Self::Failed(_) => "failed",
             Self::NeedsAuth => "needs_auth",
@@ -67,31 +74,63 @@ impl McpStatus {
 }
 
 impl McpManager {
-    pub async fn connect(config: McpConfig, workspace: impl Into<PathBuf>) -> Arc<Mutex<Self>> {
+    /// Get or create the shared manager for `workspace` and kick off background
+    /// connects. Returns immediately — never waits on MCP servers.
+    pub fn ensure(config: McpConfig, workspace: impl Into<PathBuf>) -> Arc<Mutex<Self>> {
         let workspace = workspace.into();
+        let key = workspace.to_string_lossy().to_string();
+        let pool = MCP_POOL.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let mut guard = pool.lock().unwrap_or_else(|e| e.into_inner());
+
+        if let Some(existing) = guard.get(&key).cloned() {
+            drop(guard);
+            let bg = existing.clone();
+            let _ = tokio::spawn(async move {
+                // Mutate config under a short lock, then warm without holding it.
+                {
+                    let mut m = bg.lock().await;
+                    m.apply_config(config);
+                }
+                warm_connections(bg).await;
+            });
+            return existing;
+        }
+
         let mut manager = Self {
             workspace,
             servers: BTreeMap::new(),
         };
-
         for (name, server_config) in config {
-            let mut state = McpServerState {
-                status: if server_config.enabled() {
-                    McpStatus::Failed("not connected".to_string())
-                } else {
-                    McpStatus::Disabled
+            manager.servers.insert(
+                name,
+                McpServerState {
+                    status: if server_config.enabled() {
+                        McpStatus::Connecting
+                    } else {
+                        McpStatus::Disabled
+                    },
+                    config: server_config,
+                    client: None,
+                    tools: Vec::new(),
                 },
-                config: server_config,
-                client: None,
-                tools: Vec::new(),
-            };
-            if state.config.enabled() {
-                manager.connect_one(&name, &mut state).await;
-            }
-            manager.servers.insert(name, state);
+            );
         }
+        let manager = Arc::new(Mutex::new(manager));
+        guard.insert(key, manager.clone());
+        drop(guard);
 
-        Arc::new(Mutex::new(manager))
+        let bg = manager.clone();
+        let _ = tokio::spawn(async move {
+            warm_connections(bg).await;
+        });
+        manager
+    }
+
+    /// Fully connect (tests / callers that need tools ready). Parallel.
+    pub async fn connect(config: McpConfig, workspace: impl Into<PathBuf>) -> Arc<Mutex<Self>> {
+        let manager = Self::ensure(config, workspace);
+        warm_connections(manager.clone()).await;
+        manager
     }
 
     pub fn views(&self) -> Vec<McpServerView> {
@@ -113,110 +152,65 @@ impl McpManager {
             .collect()
     }
 
+    /// Apply config changes under a short lock. Does not open connections —
+    /// call `warm_connections` afterwards without holding the mutex.
+    fn apply_config(&mut self, config: McpConfig) {
+        for (name, server_config) in config {
+            match self.servers.get_mut(&name) {
+                Some(state) => {
+                    let was_enabled = state.config.enabled();
+                    let now_enabled = server_config.enabled();
+                    state.config = server_config;
+                    if was_enabled && !now_enabled {
+                        state.client = None;
+                        state.tools.clear();
+                        state.status = McpStatus::Disabled;
+                    } else if !was_enabled && now_enabled {
+                        state.status = McpStatus::Connecting;
+                        state.client = None;
+                        state.tools.clear();
+                    } else if now_enabled && state.client.is_none() {
+                        if !matches!(state.status, McpStatus::Connecting) {
+                            state.status = McpStatus::Connecting;
+                        }
+                    }
+                }
+                None => {
+                    let enabled = server_config.enabled();
+                    self.servers.insert(
+                        name,
+                        McpServerState {
+                            status: if enabled {
+                                McpStatus::Connecting
+                            } else {
+                                McpStatus::Disabled
+                            },
+                            config: server_config,
+                            client: None,
+                            tools: Vec::new(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     pub async fn set_enabled(&mut self, name: &str, enabled: bool) -> anyhow::Result<()> {
         let Some(mut state) = self.servers.remove(name) else {
             anyhow::bail!("mcp server not found");
         };
         state.config.set_enabled(enabled);
-        if enabled {
-            self.connect_one(name, &mut state).await;
-        } else {
+        if !enabled {
+            state.client = None;
             state.tools.clear();
             state.status = McpStatus::Disabled;
-            if let Some(mut client) = state.client.take() {
-                let _ = client.close_with_timeout(Duration::from_millis(500)).await;
-            }
+        } else {
+            state.status = McpStatus::Connecting;
+            let result = open_and_list_tools(&self.workspace, name, &state.config).await;
+            apply_connect_result(&mut state, result);
         }
         self.servers.insert(name.to_string(), state);
         Ok(())
-    }
-
-    async fn connect_one(&self, name: &str, state: &mut McpServerState) {
-        let timeout = state_timeout(&state.config);
-        match self.open_client(&state.config).await {
-            Ok(client) => match tokio::time::timeout(timeout, client.list_all_tools()).await {
-                Ok(Ok(tools)) => {
-                    state.tools = tools
-                        .into_iter()
-                        .map(|tool| McpToolSpec {
-                            server: name.to_string(),
-                            tool_id: tool_name(name, &tool.name),
-                            name: tool.name.to_string(),
-                            description: tool
-                                .description
-                                .map(|d| d.to_string())
-                                .unwrap_or_default(),
-                            input_schema: Value::Object(tool.input_schema.as_ref().clone()),
-                        })
-                        .collect();
-                    state.client = Some(client);
-                    state.status = McpStatus::Connected;
-                }
-                Ok(Err(err)) => {
-                    state.status = McpStatus::Failed(err.to_string());
-                }
-                Err(_) => {
-                    state.status = McpStatus::Failed(format!(
-                        "timed out after {} ms while listing tools",
-                        timeout.as_millis()
-                    ));
-                }
-            },
-            Err(err) => {
-                let msg = err.to_string();
-                state.status = if msg.to_ascii_lowercase().contains("auth")
-                    || msg.to_ascii_lowercase().contains("401")
-                    || msg.to_ascii_lowercase().contains("unauthorized")
-                {
-                    McpStatus::NeedsAuth
-                } else {
-                    McpStatus::Failed(msg)
-                };
-            }
-        }
-    }
-
-    async fn open_client(
-        &self,
-        config: &McpServerConfig,
-    ) -> anyhow::Result<RunningService<RoleClient, ()>> {
-        match config {
-            McpServerConfig::Local(local) => {
-                let command = local.command.first().cloned().unwrap_or_default();
-                let args = local.command.iter().skip(1).cloned().collect::<Vec<_>>();
-                let cwd = local
-                    .cwd
-                    .as_deref()
-                    .map(|cwd| resolve_path(&self.workspace, cwd))
-                    .unwrap_or_else(|| self.workspace.clone());
-                let env = local.environment.clone();
-                let (transport, _) = TokioChildProcess::builder(
-                    tokio::process::Command::new(command).configure(move |cmd| {
-                        cmd.args(args);
-                        cmd.current_dir(cwd);
-                        cmd.envs(env);
-                    }),
-                )
-                .stderr(Stdio::null())
-                .spawn()?;
-                Ok(().serve(transport).await?)
-            }
-            McpServerConfig::Remote(remote) => {
-                let mut headers = HashMap::new();
-                for (key, value) in &remote.headers {
-                    let name = HeaderName::from_bytes(key.as_bytes())?;
-                    let value = HeaderValue::from_str(value)?;
-                    headers.insert(name, value);
-                }
-                let transport = StreamableHttpClientTransport::from_config(
-                    rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
-                        remote.url.clone(),
-                    )
-                    .custom_headers(headers),
-                );
-                Ok(().serve(transport).await?)
-            }
-        }
     }
 
     async fn call_tool(
@@ -264,6 +258,158 @@ impl McpManager {
             format!("MCP: {server_name}.{tool_name}"),
             output,
         ))
+    }
+}
+
+type ConnectOutcome = Result<(RunningService<RoleClient, ()>, Vec<McpToolSpec>), McpStatus>;
+
+/// Warm connections without holding the manager lock during I/O.
+async fn warm_connections(manager: Arc<Mutex<McpManager>>) {
+    let (workspace, jobs) = {
+        let mut m = manager.lock().await;
+        let jobs: Vec<(String, McpServerConfig)> = m
+            .servers
+            .iter_mut()
+            .filter(|(_, state)| {
+                state.config.enabled()
+                    && state.client.is_none()
+                    && !matches!(state.status, McpStatus::Disabled)
+            })
+            .map(|(name, state)| {
+                state.status = McpStatus::Connecting;
+                (name.clone(), state.config.clone())
+            })
+            .collect();
+        (m.workspace.clone(), jobs)
+    };
+
+    if jobs.is_empty() {
+        return;
+    }
+
+    let results = futures::future::join_all(jobs.into_iter().map(|(name, config)| {
+        let workspace = workspace.clone();
+        async move {
+            let result = open_and_list_tools(&workspace, &name, &config).await;
+            (name, result)
+        }
+    }))
+    .await;
+
+    let mut m = manager.lock().await;
+    for (name, result) in results {
+        if let Some(state) = m.servers.get_mut(&name) {
+            if !state.config.enabled() {
+                state.client = None;
+                state.tools.clear();
+                state.status = McpStatus::Disabled;
+                continue;
+            }
+            apply_connect_result(state, result);
+        }
+    }
+}
+
+fn apply_connect_result(state: &mut McpServerState, result: ConnectOutcome) {
+    match result {
+        Ok((client, tools)) => {
+            state.tools = tools;
+            state.client = Some(client);
+            state.status = McpStatus::Connected;
+        }
+        Err(status) => {
+            state.client = None;
+            state.tools.clear();
+            state.status = status;
+        }
+    }
+}
+
+async fn open_and_list_tools(
+    workspace: &Path,
+    name: &str,
+    config: &McpServerConfig,
+) -> ConnectOutcome {
+    let timeout = state_timeout(config);
+    let client = match open_client(workspace, config).await {
+        Ok(client) => client,
+        Err(err) => {
+            let msg = err.to_string();
+            return Err(
+                if msg.to_ascii_lowercase().contains("auth")
+                    || msg.to_ascii_lowercase().contains("401")
+                    || msg.to_ascii_lowercase().contains("unauthorized")
+                {
+                    McpStatus::NeedsAuth
+                } else {
+                    McpStatus::Failed(msg)
+                },
+            );
+        }
+    };
+
+    match tokio::time::timeout(timeout, client.list_all_tools()).await {
+        Ok(Ok(tools)) => {
+            let tools = tools
+                .into_iter()
+                .map(|tool| McpToolSpec {
+                    server: name.to_string(),
+                    tool_id: tool_name(name, &tool.name),
+                    name: tool.name.to_string(),
+                    description: tool.description.map(|d| d.to_string()).unwrap_or_default(),
+                    input_schema: Value::Object(tool.input_schema.as_ref().clone()),
+                })
+                .collect();
+            Ok((client, tools))
+        }
+        Ok(Err(err)) => Err(McpStatus::Failed(err.to_string())),
+        Err(_) => Err(McpStatus::Failed(format!(
+            "timed out after {} ms while listing tools",
+            timeout.as_millis()
+        ))),
+    }
+}
+
+async fn open_client(
+    workspace: &Path,
+    config: &McpServerConfig,
+) -> anyhow::Result<RunningService<RoleClient, ()>> {
+    match config {
+        McpServerConfig::Local(local) => {
+            let command = local.command.first().cloned().unwrap_or_default();
+            let args = local.command.iter().skip(1).cloned().collect::<Vec<_>>();
+            let cwd = local
+                .cwd
+                .as_deref()
+                .map(|cwd| resolve_path(workspace, cwd))
+                .unwrap_or_else(|| workspace.to_path_buf());
+            let env = local.environment.clone();
+            let (transport, _) = TokioChildProcess::builder(
+                tokio::process::Command::new(command).configure(move |cmd| {
+                    cmd.args(args);
+                    cmd.current_dir(cwd);
+                    cmd.envs(env);
+                }),
+            )
+            .stderr(Stdio::null())
+            .spawn()?;
+            Ok(().serve(transport).await?)
+        }
+        McpServerConfig::Remote(remote) => {
+            let mut headers = HashMap::new();
+            for (key, value) in &remote.headers {
+                let name = HeaderName::from_bytes(key.as_bytes())?;
+                let value = HeaderValue::from_str(value)?;
+                headers.insert(name, value);
+            }
+            let transport = StreamableHttpClientTransport::from_config(
+                rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+                    remote.url.clone(),
+                )
+                .custom_headers(headers),
+            );
+            Ok(().serve(transport).await?)
+        }
     }
 }
 

@@ -457,6 +457,7 @@ pub enum ProviderTimeout {
 #[derive(Debug, Clone, Default)]
 pub struct MergedConfig {
     pub theme: Option<String>,
+    pub tui_compact_mode: Option<bool>,
     pub model: Option<String>,
     pub small_model: Option<String>,
     pub default_agent: Option<String>,
@@ -1060,6 +1061,7 @@ fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     out.insert("notifications");
     out.insert("images");
     out.insert("websearch");
+    out.insert("tui");
     out
 }
 
@@ -1313,6 +1315,12 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
             out.theme = Some(theme.trim().to_string());
         }
     }
+
+    out.tui_compact_mode = obj
+        .get("tui")
+        .and_then(Value::as_object)
+        .and_then(|tui| tui.get("compactMode").or_else(|| tui.get("compact_mode")))
+        .and_then(Value::as_bool);
 
     if let Some(Value::String(model)) = obj.get("model") {
         if !model.trim().is_empty() {
@@ -2589,6 +2597,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "notifications",
         "images",
         "websearch",
+        "tui",
         "instructions",
         "tools",
         "watcher",
@@ -2669,6 +2678,24 @@ mod tests {
             config.small_model.as_deref(),
             Some("anthropic/claude-haiku")
         );
+    }
+
+    #[test]
+    fn parses_tui_compact_mode_aliases() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({ "tui": { "compactMode": false } }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.tui_compact_mode, Some(false));
+
+        let config = parse_merged_config(
+            &json!({ "tui": { "compact_mode": true } }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.tui_compact_mode, Some(true));
     }
 
     #[test]

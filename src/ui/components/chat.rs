@@ -264,7 +264,15 @@ pub struct Chat {
     streaming_pause_started_at: Option<std::time::Instant>,
     streaming_paused_duration: std::time::Duration,
     streaming_decode_paused_duration: std::time::Duration,
+    /// Completed generation samples for OpenCode-style TPS aggregation.
+    generation_samples: Vec<GenerationSample>,
+    /// Active generation sample (opened on first text token of a step).
+    active_generation: Option<GenerationSample>,
+    /// Text-only token counter for the active generation sample.
+    generation_token_counter: Option<StreamingTokenCounter>,
     streaming_token_counter: Option<StreamingTokenCounter>,
+    /// Model id used to build token counters for this turn.
+    streaming_model: Option<String>,
     /// Whether to autoscroll to bottom when new content arrives
     /// Only autoscrolls if user is already near the bottom
     pub autoscroll_enabled: bool,
@@ -357,6 +365,8 @@ pub struct ChatImageTarget {
 pub struct ChatHyperlinkHover {
     content_line: usize,
     range: crate::ui::hyperlink::HyperlinkRange,
+    /// Underline ranges for every wrap segment of the hovered link.
+    segments: Vec<crate::ui::hyperlink::HyperlinkLineRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,6 +387,78 @@ struct RenderedDiffLocationState {
 
 // Minimum elapsed time before showing tokens/s (250ms)
 const MIN_TOKENS_PER_SECOND_ELAPSED_MS: u128 = 250;
+/// OpenCode-style floor: need more than one token for inter-token rate.
+const MIN_TPS_SAMPLE_TOKENS: usize = 2;
+
+/// One LLM generation step's timing for TPS (OpenCode tps-tally model).
+///
+/// - `started` = first *text* token of the step (not reasoning, not request start)
+/// - `generated` = step end (stream finish or tool-call boundary)
+/// - Tool-call finishes are excluded from TPS; only normal completions count
+/// - Rate uses `(tokens - 1) / duration` (inter-token / TPOT style)
+#[derive(Debug, Clone)]
+struct GenerationSample {
+    started: std::time::Instant,
+    started_ms: u64,
+    generated: Option<std::time::Instant>,
+    generated_ms: Option<u64>,
+    /// Visible assistant *text* tokens in this step (reasoning excluded).
+    tokens: usize,
+    /// Pause time while this sample was open (permission/question overlays).
+    paused_duration: std::time::Duration,
+    /// True when the step ended because the model requested tools.
+    tool_calls_finish: bool,
+}
+
+impl GenerationSample {
+    fn generation_duration_ms(&self) -> Option<u64> {
+        let generated = self.generated?;
+        let raw_ms = generated
+            .saturating_duration_since(self.started)
+            .as_millis() as u64;
+        let paused_ms = self.paused_duration.as_millis() as u64;
+        Some(raw_ms.saturating_sub(paused_ms))
+    }
+
+    /// OpenCode eligibility: not tool-calls finish, tokens > 1, duration > 0.
+    fn tps_contribution(&self) -> Option<(usize, u64)> {
+        if self.tool_calls_finish {
+            return None;
+        }
+        if self.tokens < MIN_TPS_SAMPLE_TOKENS {
+            return None;
+        }
+        let duration_ms = self.generation_duration_ms()?;
+        if duration_ms == 0 {
+            return None;
+        }
+        // Inter-token units: (n - 1) tokens after the first.
+        Some((self.tokens - 1, duration_ms))
+    }
+}
+
+/// Prefer precomputed OpenCode TPS; fall back to inter-token formula.
+fn message_tokens_per_sec(
+    precomputed: Option<f64>,
+    output_tokens: usize,
+    decode_ms: u64,
+) -> Option<f64> {
+    if let Some(tps) = precomputed {
+        if tps.is_finite() && tps > 0.0 {
+            return Some(tps);
+        }
+    }
+    if decode_ms == 0 || output_tokens < MIN_TPS_SAMPLE_TOKENS {
+        return None;
+    }
+    let tps = ((output_tokens - 1) as f64) / (decode_ms as f64 / 1000.0);
+    if tps.is_finite() && tps > 0.0 {
+        Some(tps)
+    } else {
+        None
+    }
+}
+
 const MIN_MOUSE_WHEEL_LINES: usize = 1;
 const MAX_MOUSE_WHEEL_LINES: usize = 3;
 const MOUSE_WHEEL_VIEWPORT_FRACTION: usize = 8;
@@ -1609,7 +1691,11 @@ impl Chat {
             streaming_pause_started_at: None,
             streaming_paused_duration: std::time::Duration::default(),
             streaming_decode_paused_duration: std::time::Duration::default(),
+            generation_samples: Vec::new(),
+            active_generation: None,
+            generation_token_counter: None,
             streaming_token_counter: None,
+            streaming_model: None,
             autoscroll_enabled: true,
             user_scrolled_up: false,
             cached_tokens_per_sec: None,
@@ -1632,6 +1718,7 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
+            pending_scroll_to_message: None,
             search_matches: Vec::new(),
             search_active_match: None,
             search_query: String::new(),
@@ -1651,7 +1738,6 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
-            pending_scroll_to_message: None,
         }
     }
 
@@ -1676,7 +1762,11 @@ impl Chat {
             streaming_pause_started_at: None,
             streaming_paused_duration: std::time::Duration::default(),
             streaming_decode_paused_duration: std::time::Duration::default(),
+            generation_samples: Vec::new(),
+            active_generation: None,
+            generation_token_counter: None,
             streaming_token_counter: None,
+            streaming_model: None,
             autoscroll_enabled: true,
             user_scrolled_up: false,
             cached_tokens_per_sec: None,
@@ -1699,6 +1789,7 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
+            pending_scroll_to_message: None,
             search_matches: Vec::new(),
             search_active_match: None,
             search_query: String::new(),
@@ -1718,7 +1809,6 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
-            pending_scroll_to_message: None,
         }
     }
 
@@ -1845,6 +1935,9 @@ impl Chat {
 
     pub fn append_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
         let chunk_str = chunk.as_ref();
+        if chunk_str.is_empty() {
+            return;
+        }
         let appended_idx;
 
         // Append only if the last message is the current streaming assistant segment.
@@ -1871,10 +1964,9 @@ impl Chat {
             self.streaming_start_time = Some(now);
             self.streaming_t0_ms = Some(now_epoch_ms());
         }
-        if self.streaming_first_token_time.is_none() {
-            self.streaming_first_token_time = Some(now);
-            self.streaming_t1_ms = Some(now_epoch_ms());
-        }
+
+        // First *text* token opens a generation sample (OpenCode: time.started).
+        self.ensure_active_generation();
         self.update_streaming_token_count(chunk_str);
         if self.should_autoscroll() {
             self.scroll_offset = usize::MAX;
@@ -1884,6 +1976,9 @@ impl Chat {
 
     pub fn append_reasoning_to_last_assistant(&mut self, chunk: impl AsRef<str>) {
         let chunk_str = chunk.as_ref();
+        if chunk_str.is_empty() {
+            return;
+        }
         let appended_idx;
 
         if self
@@ -1913,11 +2008,10 @@ impl Chat {
             self.streaming_start_time = Some(now);
             self.streaming_t0_ms = Some(now_epoch_ms());
         }
-        if self.streaming_first_token_time.is_none() {
-            self.streaming_first_token_time = Some(now);
-            self.streaming_t1_ms = Some(now_epoch_ms());
-        }
-        self.update_streaming_token_count(chunk_str);
+        // Reasoning does NOT open a generation sample and does NOT set TTFT
+        // (OpenCode only counts text-start / text-delta for TPS).
+        // Still track turn-level token count for display totals.
+        self.update_streaming_token_count_turn_only(chunk_str);
         if self.should_autoscroll() {
             self.scroll_offset = usize::MAX;
             self.user_scrolled_up = false;
@@ -1959,7 +2053,8 @@ impl Chat {
 
     pub fn clear(&mut self) {
         self.messages.clear();
-        self.scroll_offset = 0;
+        self.scroll_offset = usize::MAX;
+        self.user_scrolled_up = false;
         self.scrollbar_state = ScrollbarState::default();
         self.is_dragging_scrollbar = false;
         self.scrollbar_drag_offset = None;
@@ -1974,7 +2069,11 @@ impl Chat {
         self.streaming_pause_started_at = None;
         self.streaming_paused_duration = std::time::Duration::default();
         self.streaming_decode_paused_duration = std::time::Duration::default();
+        self.generation_samples.clear();
+        self.active_generation = None;
+        self.generation_token_counter = None;
         self.streaming_token_counter = None;
+        self.streaming_model = None;
         self.selection.reset();
         self.pending_click_anchor = None;
         self.hovered_image = None;
@@ -2170,6 +2269,9 @@ impl Chat {
         self.streaming_pause_started_at = None;
         self.streaming_paused_duration = std::time::Duration::default();
         self.streaming_decode_paused_duration = std::time::Duration::default();
+        self.generation_samples.clear();
+        self.active_generation = None;
+        self.generation_token_counter = None;
         self.cached_tokens_per_sec = None;
         self.last_tps_calculated = None;
 
@@ -2190,6 +2292,8 @@ impl Chat {
         let now = std::time::Instant::now();
         self.streaming_end_time = Some(now);
         self.streaming_tn_ms = Some(now_epoch_ms());
+        // Close the active generation sample as a normal (non-tool) finish.
+        self.close_active_generation(false);
     }
 
     pub fn get_streaming_tokens_per_sec(&self) -> Option<f64> {
@@ -2200,6 +2304,7 @@ impl Chat {
         self.streaming_token_count
     }
 
+    /// Pause TPS timing (permission overlays, tool execution, questions).
     pub fn pause_streaming_tps_timer(&mut self) {
         if self.streaming_start_time.is_none() {
             return;
@@ -2210,10 +2315,21 @@ impl Chat {
         }
     }
 
+    /// Close the active generation sample as a tool-calls finish (OpenCode:
+    /// tool-call steps are excluded from TPS). Tool-execution wall time is
+    /// also paused via [`pause_streaming_tps_timer`].
+    pub fn end_generation_for_tool_calls(&mut self) {
+        self.close_active_generation(true);
+        self.pause_streaming_tps_timer();
+        self.cached_tokens_per_sec = None;
+        self.last_tps_calculated = None;
+    }
+
     pub fn resume_streaming_tps_timer(&mut self) {
         if let Some(started) = self.streaming_pause_started_at.take() {
             let ended = std::time::Instant::now();
-            self.streaming_paused_duration += ended.duration_since(started);
+            let pause = ended.duration_since(started);
+            self.streaming_paused_duration += pause;
             if let Some(first_token_time) = self.streaming_first_token_time {
                 if ended > first_token_time {
                     let decode_pause_started = if started > first_token_time {
@@ -2224,6 +2340,10 @@ impl Chat {
                     self.streaming_decode_paused_duration +=
                         ended.duration_since(decode_pause_started);
                 }
+            }
+            // Attribute overlay pauses to the active generation sample.
+            if let Some(sample) = self.active_generation.as_mut() {
+                sample.paused_duration += pause;
             }
             self.last_tps_calculated = None;
         }
@@ -2268,28 +2388,186 @@ impl Chat {
         self.streaming_start_time.is_some() && self.streaming_assistant_idx().is_some()
     }
 
+    /// OpenCode-style aggregate: sum eligible `(tokens - 1)` and durations
+    /// across generation samples (tool-call finishes excluded).
+    fn aggregate_generation_tps(
+        samples: &[GenerationSample],
+        active: Option<&GenerationSample>,
+    ) -> Option<f64> {
+        let mut total_units: u64 = 0;
+        let mut total_duration_ms: u64 = 0;
+
+        for sample in samples {
+            if let Some((units, duration_ms)) = sample.tps_contribution() {
+                total_units = total_units.saturating_add(units as u64);
+                total_duration_ms = total_duration_ms.saturating_add(duration_ms);
+            }
+        }
+
+        if let Some(sample) = active {
+            // Live sample: use current instant as provisional `generated`.
+            let mut provisional = sample.clone();
+            provisional.generated = Some(std::time::Instant::now());
+            provisional.generated_ms = Some(now_epoch_ms());
+            if let Some((units, duration_ms)) = provisional.tps_contribution() {
+                total_units = total_units.saturating_add(units as u64);
+                total_duration_ms = total_duration_ms.saturating_add(duration_ms);
+            }
+        }
+
+        if total_units == 0 || total_duration_ms == 0 {
+            return None;
+        }
+        if total_duration_ms < MIN_TOKENS_PER_SECOND_ELAPSED_MS as u64 {
+            return None;
+        }
+
+        let tps = (total_units as f64) / (total_duration_ms as f64 / 1000.0);
+        if tps.is_finite() && tps > 0.0 {
+            Some(tps)
+        } else {
+            None
+        }
+    }
+
+    /// Sum of generation (decode) durations across samples.
+    /// Includes tool-call-ending steps (that was still LLM generation time) but
+    /// never includes tool *execution* wall time (samples end before tools run).
+    fn aggregate_generation_duration_ms(
+        samples: &[GenerationSample],
+        active: Option<&GenerationSample>,
+    ) -> u64 {
+        let mut total: u64 = 0;
+        for sample in samples {
+            if let Some(duration_ms) = sample.generation_duration_ms() {
+                total = total.saturating_add(duration_ms);
+            }
+        }
+        if let Some(sample) = active {
+            let mut provisional = sample.clone();
+            provisional.generated = Some(std::time::Instant::now());
+            // Attribute in-progress pause to the provisional sample when present.
+            if let Some(duration_ms) = provisional.generation_duration_ms() {
+                total = total.saturating_add(duration_ms);
+            }
+        }
+        total
+    }
+
+    fn close_active_generation(&mut self, tool_calls_finish: bool) {
+        // Flush any pending overlay pause into the sample before closing.
+        if self.streaming_pause_started_at.is_some() && self.active_generation.is_some() {
+            // Don't clear the pause flag — tool execution may still be paused —
+            // but attribute elapsed pause so far into the sample.
+            if let (Some(started), Some(sample)) = (
+                self.streaming_pause_started_at,
+                self.active_generation.as_mut(),
+            ) {
+                sample.paused_duration += started.elapsed();
+                // Reset pause start so we don't double-count on resume.
+                self.streaming_pause_started_at = Some(std::time::Instant::now());
+            }
+        }
+
+        if let Some(mut sample) = self.active_generation.take() {
+            let now = std::time::Instant::now();
+            sample.generated = Some(now);
+            sample.generated_ms = Some(now_epoch_ms());
+            sample.tool_calls_finish = tool_calls_finish;
+            // Prefer the dedicated text-only counter for sample token count.
+            if let Some(counter) = self.generation_token_counter.as_ref() {
+                sample.tokens = counter.total_tokens();
+            }
+            self.generation_samples.push(sample);
+        }
+        self.generation_token_counter = None;
+    }
+
+    /// Open a new generation sample on the first *text* token of a step.
+    fn ensure_active_generation(&mut self) {
+        if self.active_generation.is_some() {
+            return;
+        }
+        // Ending an overlay pause before starting a new step keeps tool time out.
+        if self.streaming_pause_started_at.is_some() {
+            self.resume_streaming_tps_timer();
+        }
+
+        let now = std::time::Instant::now();
+        let started_ms = now_epoch_ms();
+
+        // First text token of the whole turn → TTFT (t1).
+        if self.streaming_first_token_time.is_none() {
+            self.streaming_first_token_time = Some(now);
+            self.streaming_t1_ms = Some(started_ms);
+            if let Some(msg) = self
+                .messages
+                .last_mut()
+                .filter(|m| m.role == MessageRole::Assistant && !m.is_complete)
+            {
+                msg.t1_ms = Some(started_ms);
+            }
+        }
+
+        // Seed the text-only counter for this step.
+        // Reuse the turn counter when present so the first text chunk after a
+        // tool call does not re-load tiktoken (can take hundreds of ms).
+        if self.generation_token_counter.is_none() {
+            if let Some(turn_counter) = self.streaming_token_counter.clone() {
+                let mut sample_counter = turn_counter;
+                sample_counter.reset();
+                self.generation_token_counter = Some(sample_counter);
+            } else {
+                let model = self.streaming_model.as_deref().unwrap_or("");
+                self.generation_token_counter = Some(StreamingTokenCounter::new(model));
+            }
+        }
+
+        self.active_generation = Some(GenerationSample {
+            started: now,
+            started_ms,
+            generated: None,
+            generated_ms: None,
+            tokens: 0,
+            paused_duration: std::time::Duration::default(),
+            tool_calls_finish: false,
+        });
+    }
+
     pub fn finalize_streaming_metrics(&mut self) {
         let finalized_at = std::time::Instant::now();
+
+        // Close any still-open generation as a normal finish.
+        if self.active_generation.is_some() {
+            self.close_active_generation(false);
+        }
+
         let token_count = self.streaming_token_count;
 
         let t0_ms = self.streaming_t0_ms;
         let t1_ms = self.streaming_t1_ms;
-        let tn_ms = self.streaming_tn_ms.or_else(|| {
-            // Fallback: if caller didn't mark end, compute an end timestamp now.
-            Some(now_epoch_ms())
-        });
+        let tn_ms = self.streaming_tn_ms.or_else(|| Some(now_epoch_ms()));
 
-        let paused_ms = self.total_decode_paused_duration().as_millis();
-
-        let decode_duration_ms = if let (Some(t1), Some(tn)) =
-            (self.streaming_first_token_time, self.streaming_end_time)
-        {
-            tn.duration_since(t1).as_millis().saturating_sub(paused_ms) as u64
-        } else if let Some(t1) = self.streaming_first_token_time {
-            t1.elapsed().as_millis().saturating_sub(paused_ms) as u64
+        // Prefer OpenCode sample-based decode duration; fall back to wall decode.
+        let sample_duration_ms =
+            Self::aggregate_generation_duration_ms(&self.generation_samples, None);
+        let decode_duration_ms = if sample_duration_ms > 0 {
+            sample_duration_ms
         } else {
-            0
+            let paused_ms = self.total_decode_paused_duration().as_millis();
+            if let (Some(t1), Some(tn)) = (self.streaming_first_token_time, self.streaming_end_time)
+            {
+                tn.duration_since(t1).as_millis().saturating_sub(paused_ms) as u64
+            } else if let Some(t1) = self.streaming_first_token_time {
+                t1.elapsed().as_millis().saturating_sub(paused_ms) as u64
+            } else {
+                0
+            }
         };
+
+        // Final TPS from completed samples only.
+        let final_tps = Self::aggregate_generation_tps(&self.generation_samples, None);
+        self.cached_tokens_per_sec = final_tps;
 
         if let Some(idx) = self
             .messages
@@ -2300,6 +2578,7 @@ impl Chat {
                 msg.output_tokens = Some(token_count);
                 msg.token_count = Some(token_count);
                 msg.duration_ms = Some(decode_duration_ms);
+                msg.tokens_per_sec = final_tps;
                 msg.finish_reasoning_timer(finalized_at);
                 msg.t0_ms = t0_ms;
                 msg.t1_ms = t1_ms;
@@ -2318,6 +2597,9 @@ impl Chat {
         self.streaming_pause_started_at = None;
         self.streaming_paused_duration = std::time::Duration::default();
         self.streaming_decode_paused_duration = std::time::Duration::default();
+        self.generation_samples.clear();
+        self.active_generation = None;
+        self.generation_token_counter = None;
         self.streaming_renderer = None;
         self.streaming_message_idx = None;
         self.streaming_renderer_content_len = 0;
@@ -2325,6 +2607,7 @@ impl Chat {
         self.streaming_reasoning_message_idx = None;
         self.streaming_reasoning_renderer_content_len = 0;
         self.streaming_token_counter = None;
+        self.streaming_model = None;
         self.invalidate_cache();
     }
 
@@ -2379,16 +2662,33 @@ impl Chat {
     }
 
     pub fn prepare_streaming_token_counter(&mut self, model: &str) {
+        self.streaming_model = Some(model.to_string());
         self.streaming_token_counter = Some(StreamingTokenCounter::new(model));
     }
 
-    fn update_streaming_token_count(&mut self, chunk: &str) {
+    /// Count tokens for turn totals only (reasoning). Does not open a generation
+    /// sample or feed the text-only per-step TPS counter.
+    fn update_streaming_token_count_turn_only(&mut self, chunk: &str) {
         if let Some(counter) = self.streaming_token_counter.as_mut() {
             self.streaming_token_count = counter.add_text(chunk);
         } else {
             self.streaming_token_count = self
                 .streaming_token_count
                 .saturating_add(estimate_tokens(chunk));
+        }
+    }
+
+    /// Count tokens for both turn totals and the active generation sample (text).
+    fn update_streaming_token_count(&mut self, chunk: &str) {
+        self.update_streaming_token_count_turn_only(chunk);
+
+        if let Some(counter) = self.generation_token_counter.as_mut() {
+            let tokens = counter.add_text(chunk);
+            if let Some(sample) = self.active_generation.as_mut() {
+                sample.tokens = tokens;
+            }
+        } else if let Some(sample) = self.active_generation.as_mut() {
+            sample.tokens = sample.tokens.saturating_add(estimate_tokens(chunk));
         }
 
         self.update_streaming_tokens_per_sec();
@@ -2405,28 +2705,16 @@ impl Chat {
         }
         self.last_tps_calculated = Some(now);
 
-        let result = if let Some(first_token_time) = self.streaming_first_token_time {
-            let paused_ms = self.total_decode_paused_duration().as_millis();
-            let elapsed_ms = first_token_time
-                .elapsed()
-                .as_millis()
-                .saturating_sub(paused_ms);
-            if elapsed_ms >= MIN_TOKENS_PER_SECOND_ELAPSED_MS && self.streaming_token_count > 0 {
-                let tokens_per_sec =
-                    (self.streaming_token_count as f64) / (elapsed_ms as f64 / 1000.0);
-                if tokens_per_sec.is_finite() {
-                    Some(tokens_per_sec)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        self.cached_tokens_per_sec = result;
+        // Live aggregate: completed samples + provisional active sample.
+        // Attribute in-progress pause time to the active sample for accuracy.
+        let mut active = self.active_generation.clone();
+        if let (Some(sample), Some(pause_started)) =
+            (active.as_mut(), self.streaming_pause_started_at)
+        {
+            sample.paused_duration += pause_started.elapsed();
+        }
+        self.cached_tokens_per_sec =
+            Self::aggregate_generation_tps(&self.generation_samples, active.as_ref());
     }
 
     /// Update the streaming markdown renderer for the current streaming message
@@ -2562,13 +2850,24 @@ impl Chat {
         }
 
         if refreshed {
-            let dirty_from = self
-                .pending_streaming_render_dirty_from
-                .take()
-                .unwrap_or(last_idx);
-            self.pending_streaming_content_dirty = false;
-            self.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
-            self.invalidate_cache_from(dirty_from);
+            let dirty_from = self.pending_streaming_render_dirty_from.unwrap_or(last_idx);
+            // Markdown may re-render on a shorter cadence than tool-heavy layout.
+            // Only bump render_revision / drop line caches when the adaptive
+            // layout interval has elapsed.
+            let layout_due = layout_min_interval.is_zero()
+                || self
+                    .last_streaming_cache_refresh_at
+                    .map_or(true, |last| last.elapsed() >= layout_min_interval);
+            if layout_due {
+                self.pending_streaming_render_dirty_from = None;
+                self.pending_streaming_content_dirty = false;
+                self.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
+                self.invalidate_cache_from(dirty_from);
+            } else {
+                // Keep content marked dirty so a later frame flushes layout.
+                self.pending_streaming_content_dirty = true;
+                self.pending_streaming_render_dirty_from = Some(dirty_from);
+            }
         }
 
         self.flush_non_content_streaming_render_pending();
@@ -2614,9 +2913,18 @@ impl Chat {
 
     pub fn scroll_down(&mut self, amount: usize) {
         let max_offset = self.max_scroll_offset();
-        self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
-        // Check if we're now at the bottom
-        self.user_scrolled_up = self.scroll_offset < max_offset;
+        let next = self
+            .resolved_scroll_offset()
+            .saturating_add(amount)
+            .min(max_offset);
+        if next >= max_offset {
+            // Stick-to-bottom: keep MAX so later content growth stays pinned.
+            self.scroll_offset = usize::MAX;
+            self.user_scrolled_up = false;
+        } else {
+            self.scroll_offset = next;
+            self.user_scrolled_up = true;
+        }
         self.update_scrollbar();
     }
 
@@ -2644,13 +2952,22 @@ impl Chat {
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        // Resolve MAX to the current bottom; leave other concrete offsets alone
+        // so callers/tests can set scroll_offset before content_height is known.
+        let current = if self.scroll_offset == usize::MAX {
+            self.max_scroll_offset()
+        } else {
+            self.scroll_offset
+        };
+        self.scroll_offset = current.saturating_sub(amount);
         self.user_scrolled_up = true;
         self.update_scrollbar();
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.max_scroll_offset();
+        // Prefer the MAX sentinel so stick-to-bottom survives content growth
+        // between frames (streaming / ensure_render_cache before render).
+        self.scroll_offset = usize::MAX;
         self.user_scrolled_up = false;
         self.update_scrollbar();
     }
@@ -2667,25 +2984,69 @@ impl Chat {
             return;
         }
         self.scroll_bottom_padding = padding;
-        let max_offset = self.max_scroll_offset();
-        if self.scroll_offset > max_offset {
-            self.scroll_offset = max_offset;
-        }
         if !self.user_scrolled_up {
-            self.scroll_offset = max_offset;
+            // Stick-to-bottom uses the MAX sentinel so padding / content-height
+            // changes cannot materialize a stale concrete offset (or 0).
+            self.scroll_offset = usize::MAX;
+        } else if self.scroll_offset != usize::MAX {
+            let max_offset = self.max_scroll_offset();
+            if self.scroll_offset > max_offset {
+                self.scroll_offset = max_offset;
+            }
         }
         self.update_scrollbar();
     }
 
-    fn max_scroll_offset(&self) -> usize {
+    pub fn max_scroll_offset(&self) -> usize {
         self.content_height
             .saturating_add(self.scroll_bottom_padding)
             .saturating_sub(self.viewport_height)
     }
 
+    /// Concrete scroll offset, resolving the stick-to-bottom MAX sentinel.
+    pub fn resolved_scroll_offset(&self) -> usize {
+        let max_offset = self.max_scroll_offset();
+        if self.scroll_offset == usize::MAX {
+            max_offset
+        } else {
+            self.scroll_offset.min(max_offset)
+        }
+    }
+
     fn scroll_content_height(&self) -> usize {
         self.content_height
             .saturating_add(self.scroll_bottom_padding)
+    }
+
+    /// Re-paint the vertical scrollbar over `area` (rightmost column).
+    /// Used by overlays (e.g. compact sticky) that would otherwise cover the thumb.
+    pub fn render_scrollbar_over(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        track_color: Color,
+        thumb_color: Color,
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+        render_scrollbar(
+            f,
+            ScrollMetrics::new(
+                self.scroll_content_height(),
+                self.viewport_height,
+                self.resolved_scroll_offset(),
+            ),
+            scrollbar_area,
+            track_color,
+            thumb_color,
+        );
     }
 
     pub fn set_search_query(
@@ -2776,6 +3137,10 @@ impl Chat {
     /// immediately after bulk-replacing the message list (e.g. compaction).
     pub fn scroll_to_message_on_next_render(&mut self, idx: usize) {
         self.pending_scroll_to_message = Some(idx);
+        // Prevent pin-to-bottom / autoscroll from overriding the marker jump
+        // on the next frame (replace_messages re-enables autoscroll).
+        self.autoscroll_enabled = false;
+        self.user_scrolled_up = true;
     }
 
     pub fn set_highlighted_message(&mut self, idx: Option<usize>) {
@@ -2817,8 +3182,8 @@ impl Chat {
             return None;
         }
 
-        let content_line =
-            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_line = (event.row.saturating_sub(content_area.y) as usize)
+            .saturating_add(self.resolved_scroll_offset());
         let content_col = event.column.saturating_sub(content_area.x) as usize;
         let message_index =
             self.message_index_at_content_line(content_line, self.content_height)?;
@@ -2854,11 +3219,15 @@ impl Chat {
             return None;
         }
 
-        let content_line =
-            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_line = (event.row.saturating_sub(content_area.y) as usize)
+            .saturating_add(self.resolved_scroll_offset());
         let content_col = event.column.saturating_sub(content_area.x) as usize;
-        let line = self.cached_lines.get(content_line)?;
-        let range = crate::ui::hyperlink::hyperlink_range_at_line_col(line, content_col)?;
+        let range = crate::ui::hyperlink::hyperlink_range_at_wrapped_lines(
+            &self.cached_lines,
+            content_line,
+            content_col,
+            self.cached_width,
+        )?;
 
         self.resolve_hyperlink_target(content_line, &range)
             .or_else(|| Some(range.target))
@@ -2878,11 +3247,15 @@ impl Chat {
             return None;
         }
 
-        let content_line =
-            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_line = (event.row.saturating_sub(content_area.y) as usize)
+            .saturating_add(self.resolved_scroll_offset());
         let content_col = event.column.saturating_sub(content_area.x) as usize;
-        let line = self.cached_lines.get(content_line)?;
-        let range = crate::ui::hyperlink::hyperlink_range_at_line_col(line, content_col)?;
+        let (range, segments) = crate::ui::hyperlink::hyperlink_segments_at_wrapped_lines(
+            &self.cached_lines,
+            content_line,
+            content_col,
+            self.cached_width,
+        )?;
 
         let clickable = self
             .resolve_hyperlink_target(content_line, &range)
@@ -2892,6 +3265,7 @@ impl Chat {
         clickable.then_some(ChatHyperlinkHover {
             content_line,
             range,
+            segments,
         })
     }
 
@@ -2990,8 +3364,8 @@ impl Chat {
             return None;
         }
 
-        let content_line =
-            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_line = (event.row.saturating_sub(content_area.y) as usize)
+            .saturating_add(self.resolved_scroll_offset());
         let content_height = self.content_height.max(
             self.message_line_positions
                 .iter()
@@ -3088,7 +3462,9 @@ impl Chat {
     fn update_scrollbar(&mut self) {
         let max_offset = self.max_scroll_offset();
         let content_length = max_offset.saturating_add(1).max(1);
-        let position = self.scroll_offset.min(content_length.saturating_sub(1));
+        let position = self
+            .resolved_scroll_offset()
+            .min(content_length.saturating_sub(1));
         self.scrollbar_state = self.scrollbar_state.content_length(content_length);
         self.scrollbar_state = self.scrollbar_state.position(position);
     }
@@ -3106,21 +3482,21 @@ impl Chat {
             return false;
         }
 
-        let before = self.scroll_offset;
+        let before = self.resolved_scroll_offset();
         match edge_scroll.direction {
             EdgeScrollDirection::Up => self.scroll_up(1),
             EdgeScrollDirection::Down => self.scroll_down(1),
         }
 
-        if self.scroll_offset == before {
+        if self.resolved_scroll_offset() == before {
             self.selection_edge_scroll = None;
             return false;
         }
 
         let line = match edge_scroll.direction {
-            EdgeScrollDirection::Up => self.scroll_offset,
+            EdgeScrollDirection::Up => self.resolved_scroll_offset(),
             EdgeScrollDirection::Down => self
-                .scroll_offset
+                .resolved_scroll_offset()
                 .saturating_add(self.viewport_height.saturating_sub(1))
                 .min(self.content_height.saturating_sub(1)),
         };
@@ -3180,8 +3556,8 @@ impl Chat {
 
     fn drag_selection_to_position(&mut self, content_area: Rect, event: MouseEvent) {
         let content_line = (Self::clamped_content_row(content_area, event.row) as usize
-            + self.scroll_offset)
-            .min(self.content_height.saturating_sub(1));
+            + self.resolved_scroll_offset())
+        .min(self.content_height.saturating_sub(1));
         let content_col = Self::clamped_content_column(content_area, event.column);
         self.selection.extend(content_line, content_col);
     }
@@ -3327,7 +3703,7 @@ impl Chat {
                     let metrics = ScrollMetrics::new(
                         self.scroll_content_height(),
                         self.viewport_height,
-                        self.scroll_offset,
+                        self.resolved_scroll_offset(),
                     );
                     if let Some(grab_offset) =
                         scrollbar_grab_offset(metrics, scrollbar_area, event.row)
@@ -3341,7 +3717,7 @@ impl Chat {
                     }
                 } else if is_in_content {
                     let content_line = (event.row.saturating_sub(rendered_content_area.y) as usize)
-                        .saturating_add(self.scroll_offset);
+                        .saturating_add(self.resolved_scroll_offset());
                     let content_col = event.column.saturating_sub(rendered_content_area.x) as usize;
                     self.pending_click_anchor = self.selection.anchor;
 
@@ -3391,7 +3767,7 @@ impl Chat {
                     {
                         let content_line = (event.row.saturating_sub(rendered_content_area.y)
                             as usize)
-                            .saturating_add(self.scroll_offset);
+                            .saturating_add(self.resolved_scroll_offset());
                         let content_col =
                             event.column.saturating_sub(rendered_content_area.x) as usize;
                         if let Some(anchor) = self.pending_click_anchor {
@@ -3435,16 +3811,25 @@ impl Chat {
 
         let max_offset = self.max_scroll_offset();
         let content_height = self.scroll_content_height();
-        let metrics = ScrollMetrics::new(content_height, self.viewport_height, self.scroll_offset);
+        let metrics = ScrollMetrics::new(
+            content_height,
+            self.viewport_height,
+            self.resolved_scroll_offset(),
+        );
         let grab_offset = self
             .scrollbar_drag_offset
             .or_else(|| scrollbar_grab_offset(metrics, scrollbar_area, row))
             .unwrap_or(0);
         let new_offset =
             scrollbar_offset_from_row_with_grab(metrics, scrollbar_area, row, grab_offset);
-        self.scroll_offset = new_offset.min(max_offset);
-        // Track if user scrolled away from bottom
-        self.user_scrolled_up = self.scroll_offset < max_offset;
+        let next = new_offset.min(max_offset);
+        if next >= max_offset {
+            self.scroll_offset = usize::MAX;
+            self.user_scrolled_up = false;
+        } else {
+            self.scroll_offset = next;
+            self.user_scrolled_up = true;
+        }
         self.update_scrollbar();
     }
 
@@ -3508,6 +3893,10 @@ impl Chat {
         for line in &mut self.cached_lines {
             *line = sanitize_styled_line(line);
         }
+
+        // Keep content_height in sync so callers (e.g. sticky overlay) can
+        // resolve last-message end lines without waiting for Chat::render.
+        self.content_height = self.cached_lines.len();
 
         self.cached_revision = self.render_revision;
         self.cached_width = max_width;
@@ -3582,9 +3971,10 @@ impl Chat {
 
         let viewport = self.viewport_height.max(1);
         let line = search_match.line;
-        if line < self.scroll_offset {
+        let current = self.resolved_scroll_offset();
+        if line < current {
             self.scroll_offset = line;
-        } else if line >= self.scroll_offset.saturating_add(viewport) {
+        } else if line >= current.saturating_add(viewport) {
             self.scroll_offset = line.saturating_sub(viewport.saturating_sub(1));
         }
         self.user_scrolled_up = true;
@@ -3610,6 +4000,12 @@ impl Chat {
 
         let max_width = content_area.width as usize;
 
+        // Stick-to-bottom is owned by `!user_scrolled_up` + the MAX sentinel.
+        // Do not compare a concrete offset to max_scroll_offset() here: compact
+        // mode may call ensure_render_cache (and grow content_height) before
+        // render, which would make a previous bottom offset look scrolled-up.
+        let mut was_pinned_to_bottom = !self.user_scrolled_up;
+
         self.ensure_render_cache(max_width, model, colors);
         self.ensure_search_matches(max_width, colors);
 
@@ -3620,6 +4016,7 @@ impl Chat {
 
         // Resolve any deferred scroll-to-message request (e.g. after compaction).
         // Keep the pending request if positions are not ready yet (viewport=0).
+        // Must win over pin-to-bottom when applied.
         if let Some(target_idx) = self.pending_scroll_to_message {
             if viewport > 0 {
                 if let Some(&line) = positions.get(target_idx) {
@@ -3638,7 +4035,9 @@ impl Chat {
                     // Stick-to-bottom only runs when user_scrolled_up is false;
                     // keep this true so the offset is not immediately overwritten.
                     self.user_scrolled_up = true;
+                    self.autoscroll_enabled = false;
                     self.pending_scroll_to_message = None;
+                    was_pinned_to_bottom = false;
                 }
             }
         }
@@ -3646,12 +4045,10 @@ impl Chat {
         let max_offset = content_height
             .saturating_add(self.scroll_bottom_padding)
             .saturating_sub(viewport);
-        let was_pinned_to_bottom = self.scroll_offset == usize::MAX
-            || (self.scroll_offset >= self.max_scroll_offset() && !self.user_scrolled_up);
         let clamped_scroll = if was_pinned_to_bottom {
             max_offset
         } else {
-            self.scroll_offset.min(max_offset)
+            self.resolved_scroll_offset().min(max_offset)
         };
         let visible_start = clamped_scroll.min(content_height);
         let visible_end = content_height.min(clamped_scroll.saturating_add(viewport));
@@ -3742,18 +4139,29 @@ impl Chat {
 
         f.render_widget(paragraph, render_area);
         if let Some(hovered) = &self.hovered_hyperlink {
-            if hovered.content_line >= visible_start && hovered.content_line < visible_end {
-                crate::ui::hyperlink::mark_hyperlink_range(
-                    f.buffer_mut(),
-                    render_area,
-                    hovered.content_line - visible_start,
-                    &hovered.range,
-                );
+            let buf = f.buffer_mut();
+            for segment in &hovered.segments {
+                if segment.line_idx >= visible_start && segment.line_idx < visible_end {
+                    crate::ui::hyperlink::mark_hyperlink_line_range(
+                        buf,
+                        render_area,
+                        segment.line_idx - visible_start,
+                        segment.start_col,
+                        segment.end_col,
+                    );
+                }
             }
         }
 
         self.content_height = content_height;
-        self.scroll_offset = clamped_scroll;
+        // Keep the MAX sentinel while pinned so a later ensure_render_cache
+        // (e.g. compact sticky before the next render) cannot make a concrete
+        // bottom offset look "scrolled up" after content grows mid-stream.
+        self.scroll_offset = if was_pinned_to_bottom {
+            usize::MAX
+        } else {
+            clamped_scroll
+        };
         self.update_scrollbar();
 
         let scrollbar_area = Rect {
@@ -4841,6 +5249,61 @@ impl Chat {
         );
         let locations = infer_editor_locations_for_lines(message, &lines);
         (lines, locations)
+    }
+
+    /// Format a user message's content into wrapped, styled lines, mirroring
+    /// `format_message`'s user branch exactly (image-placeholder colors,
+    /// `@agent` mention colors, wrap width, horizontal padding). Returns
+    /// content lines only — no border/padding rows. Used by the compact-mode
+    /// sticky message so it renders like a real user message.
+    pub fn format_user_message_content_lines(
+        &self,
+        idx: usize,
+        max_width: usize,
+        colors: &ThemeColors,
+    ) -> Vec<Line<'static>> {
+        let Some(message) = self.messages.get(idx) else {
+            return Vec::new();
+        };
+        if message.role != MessageRole::User {
+            return Vec::new();
+        }
+
+        let max_width = max_width.max(1);
+        let bg = colors.background_element;
+        let text_style = Style::default().fg(colors.text).bg(bg);
+        let image_style = |placeholder: &str| {
+            let is_hovered = self.hovered_image.as_ref().is_some_and(|target| {
+                target.message_index == idx && target.placeholder == placeholder
+            });
+            if is_hovered {
+                Style::default().fg(colors.markdown_image_text).bg(bg)
+            } else {
+                Style::default().fg(colors.markdown_image).bg(bg)
+            }
+        };
+
+        let horizontal_padding = 2usize;
+        let right_padding = 2usize;
+        let wrap_width = max_width
+            .saturating_sub(1 + horizontal_padding + right_padding)
+            .max(1);
+
+        message
+            .content
+            .split('\n')
+            .flat_map(|content_line| {
+                let content_line = content_line.strip_suffix('\r').unwrap_or(content_line);
+                let styled_content = Line::from(style_agent_mentions_in_line(
+                    content_line,
+                    &self.agent_mention_names,
+                    colors,
+                    text_style,
+                    &image_style,
+                ));
+                wrap_styled_line(&styled_content, WrapOptions::new(wrap_width))
+            })
+            .collect::<Vec<_>>()
     }
 
     fn format_tool_row<'a>(
@@ -6011,6 +6474,8 @@ impl Chat {
         ));
 
         // Timing + throughput metrics are shown only once the stream is done.
+        // TPS uses OpenCode inter-token rate: (tokens - 1) / generation_duration,
+        // preferring the precomputed sample aggregate on the message.
         if include_metrics {
             if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
                 let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
@@ -6031,15 +6496,14 @@ impl Chat {
                     Style::default().fg(colors.text_weak),
                 ));
 
-                let tokens_per_sec = if decode_ms > 0 && output_tokens > 0 {
-                    (output_tokens as f64) / (decode_ms as f64 / 1000.0)
-                } else {
-                    0.0
-                };
-                spans.push(Span::styled(
-                    format!(" • {:.0}t/s", tokens_per_sec),
-                    Style::default().fg(colors.text_weak),
-                ));
+                if let Some(tokens_per_sec) =
+                    message_tokens_per_sec(message.tokens_per_sec, output_tokens, decode_ms)
+                {
+                    spans.push(Span::styled(
+                        format!(" • {:.0}t/s", tokens_per_sec),
+                        Style::default().fg(colors.text_weak),
+                    ));
+                }
             } else if let (Some(token_count), Some(duration_ms)) =
                 (message.token_count, message.duration_ms)
             {
@@ -6049,15 +6513,14 @@ impl Chat {
                     format!(" • {:.1}s", duration_sec),
                     Style::default().fg(colors.text_weak),
                 ));
-                let tokens_per_sec = if duration_ms > 0 {
-                    (token_count as f64) / (duration_ms as f64 / 1000.0)
-                } else {
-                    0.0
-                };
-                spans.push(Span::styled(
-                    format!(" • {:.0}t/s", tokens_per_sec),
-                    Style::default().fg(colors.text_weak),
-                ));
+                if let Some(tokens_per_sec) =
+                    message_tokens_per_sec(message.tokens_per_sec, token_count, duration_ms)
+                {
+                    spans.push(Span::styled(
+                        format!(" • {:.0}t/s", tokens_per_sec),
+                        Style::default().fg(colors.text_weak),
+                    ));
+                }
             }
         }
 
@@ -7222,9 +7685,13 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>();
 
-        assert!(collapsed
-            .iter()
-            .any(|line| line.contains("Thinking collapsed")));
+        // Collapsed reasoning shows the duration/status label only (not "Thinking collapsed").
+        assert!(
+            collapsed
+                .iter()
+                .any(|line| { line.contains("Thought for") || line.contains("Thinking") }),
+            "expected collapsed thinking label, got: {collapsed:?}"
+        );
         assert!(!collapsed
             .iter()
             .any(|line| line.contains("Private reasoning")));
@@ -7329,6 +7796,8 @@ mod tests {
 
         chat.update_streaming_renderer(100, &colors);
         let first_line_count = chat.build_all_lines(100, "model", &colors).len();
+        // Freeze layout clock so deferred append cannot race wall-clock expiry.
+        chat.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
         let first_revision = chat.render_revision;
         let cached_prefix_len = chat
             .ordered_tool_prefix_cache
@@ -7337,7 +7806,11 @@ mod tests {
             .map(|cache| cache.lines.len())
             .expect("tool prefix cache");
         assert!(cached_prefix_len > 0);
+
         chat.append_to_last_assistant(" continues");
+        // Re-freeze immediately before the deferred update so wall-clock from
+        // tool-prefix warm-up cannot open the layout interval.
+        chat.last_streaming_cache_refresh_at = Some(std::time::Instant::now());
         chat.update_streaming_renderer(100, &colors);
 
         assert_eq!(chat.render_revision, first_revision);
@@ -8644,6 +9117,67 @@ mod tests {
     }
 
     #[test]
+    fn test_wrapped_hyperlink_underline_covers_all_segments() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = test_colors();
+        let path = "/Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md";
+        let mut chat = Chat::with_messages(vec![Message::assistant(format!("Added {path}"))]);
+        // Narrow enough that the absolute path must wrap.
+        let area = Rect::new(0, 0, 36, 12);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+
+        let (line_idx, col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find('/').map(|col| (line_idx, col as u16))
+            })
+            .expect("path position");
+        let hover = chat
+            .hyperlink_hover_at_position(
+                mouse(
+                    MouseEventKind::Moved,
+                    col,
+                    line_idx as u16,
+                    KeyModifiers::empty(),
+                ),
+                area,
+            )
+            .expect("hyperlink hover");
+        assert!(
+            hover.segments.len() > 1,
+            "expected wrapped path hover segments, got {:?}",
+            hover.segments
+        );
+        chat.set_hovered_hyperlink(Some(hover.clone()));
+
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let underlined = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].modifier.contains(Modifier::UNDERLINED))
+            .count();
+
+        let expected: usize = hover
+            .segments
+            .iter()
+            .map(|seg| seg.end_col.saturating_sub(seg.start_col))
+            .sum();
+        assert_eq!(underlined, expected);
+        assert!(underlined >= path.len());
+    }
+
+    #[test]
     fn test_hyperlink_underline_only_renders_on_hover() {
         use ratatui::{backend::TestBackend, Terminal};
 
@@ -9315,7 +9849,8 @@ codex exec --skip-git-repo-check \
 
         assert!(metadata.contains("1.0s"));
         assert!(metadata.contains("ttft 0.2s"));
-        assert!(metadata.contains("50t/s"));
+        // OpenCode inter-token: (40 - 1) / 0.8s = 48.75 → rounds to 49t/s
+        assert!(metadata.contains("49t/s"));
     }
 
     #[test]
@@ -9392,39 +9927,6 @@ codex exec --skip-git-repo-check \
     }
 
     #[test]
-    fn test_streaming_pause_excluded_from_decode_duration() {
-        use std::time::Duration;
-
-        let mut chat = Chat::new();
-        chat.add_assistant_message("");
-        if let Some(last) = chat.messages.last_mut() {
-            last.is_complete = false;
-        }
-
-        chat.begin_streaming_turn();
-        chat.append_to_last_assistant("hello");
-
-        std::thread::sleep(Duration::from_millis(40));
-        chat.pause_streaming_tps_timer();
-        std::thread::sleep(Duration::from_millis(320));
-        chat.resume_streaming_tps_timer();
-        std::thread::sleep(Duration::from_millis(40));
-
-        chat.mark_streaming_end();
-        chat.finalize_streaming_metrics();
-
-        let duration_ms = chat
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == MessageRole::Assistant)
-            .and_then(|m| m.duration_ms)
-            .unwrap_or(0);
-
-        assert!(duration_ms < 250, "duration was {}ms", duration_ms);
-    }
-
-    #[test]
     fn test_metadata_tps_uses_pause_adjusted_decode_duration() {
         let mut chat = Chat::new();
         chat.add_assistant_message("hello");
@@ -9435,6 +9937,7 @@ codex exec --skip-git-repo-check \
             message.tn_ms = Some(12_000);
             message.output_tokens = Some(100);
             message.token_count = Some(100);
+            // 1s decode, OpenCode inter-token: (100 - 1) / 1s = 99 t/s
             message.duration_ms = Some(1_000);
         }
 
@@ -9443,14 +9946,245 @@ codex exec --skip-git-repo-check \
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
 
         assert!(
-            rendered.contains("100t/s"),
-            "metadata did not use adjusted decode duration:\n{}",
+            rendered.contains("99t/s"),
+            "metadata should use inter-token TPS (n-1)/duration:\n{}",
             rendered
         );
         assert!(
             rendered.contains("2.0s"),
             "total duration should be ttft + adjusted decode duration:\n{}",
             rendered
+        );
+    }
+
+    #[test]
+    fn test_metadata_tps_prefers_precomputed_sample_aggregate() {
+        let mut chat = Chat::new();
+        chat.add_assistant_message("hello");
+        if let Some(message) = chat.messages.last_mut() {
+            message.is_complete = true;
+            message.t0_ms = Some(1_000);
+            message.t1_ms = Some(2_000);
+            message.tn_ms = Some(3_000);
+            message.output_tokens = Some(50);
+            message.token_count = Some(50);
+            message.duration_ms = Some(1_000);
+            // Precomputed OpenCode multi-step aggregate should win over naive math.
+            message.tokens_per_sec = Some(42.0);
+        }
+
+        let colors = test_colors();
+        let lines = chat.build_all_lines(100, "model", &colors);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(
+            rendered.contains("42t/s"),
+            "metadata should prefer precomputed tokens_per_sec:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_tool_call_finish_excluded_from_tps() {
+        use std::time::{Duration, Instant};
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+        let turn_start = Instant::now();
+        chat.append_to_last_assistant("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        std::thread::sleep(Duration::from_millis(250));
+        chat.end_generation_for_tool_calls();
+        let tool_start = Instant::now();
+        std::thread::sleep(Duration::from_millis(400)); // tool execution wall time
+        let tool_elapsed_ms = tool_start.elapsed().as_millis() as u64;
+        chat.append_to_last_assistant("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        std::thread::sleep(Duration::from_millis(250));
+        chat.mark_streaming_end();
+        let wall_ms = turn_start.elapsed().as_millis() as u64;
+
+        assert_eq!(
+            chat.generation_samples.len(),
+            2,
+            "expected tool-finish sample + normal-finish sample"
+        );
+        assert!(
+            chat.generation_samples[0].tool_calls_finish,
+            "first sample should be tool-calls finish"
+        );
+        assert!(
+            !chat.generation_samples[1].tool_calls_finish,
+            "second sample should be normal finish"
+        );
+
+        // Tool-call finish must not contribute TPS units.
+        assert!(
+            chat.generation_samples[0].tps_contribution().is_none(),
+            "tool-calls finish sample must be excluded from TPS"
+        );
+        // Normal finish with enough tokens should contribute.
+        assert!(
+            chat.generation_samples[1].tps_contribution().is_some(),
+            "normal finish sample should contribute to TPS"
+        );
+
+        let sample_sum = chat
+            .generation_samples
+            .iter()
+            .filter_map(|s| s.generation_duration_ms())
+            .sum::<u64>();
+
+        chat.finalize_streaming_metrics();
+
+        let msg = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("assistant message");
+
+        assert!(
+            msg.tokens_per_sec.is_some(),
+            "expected TPS from post-tool generation step"
+        );
+        assert_eq!(
+            msg.duration_ms.unwrap_or(0),
+            sample_sum,
+            "duration_ms should equal sum of generation samples"
+        );
+        // Sample sum must exclude tool-execution wall time (400ms+).
+        assert!(
+            sample_sum + tool_elapsed_ms <= wall_ms + 50,
+            "sample_sum ({sample_sum}) + tool ({tool_elapsed_ms}) should be ~wall ({wall_ms})"
+        );
+        assert!(
+            sample_sum + 200 < wall_ms,
+            "sample_sum ({sample_sum}) should be well below wall ({wall_ms}) by tool time"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_does_not_open_generation_or_set_ttft() {
+        use std::time::Duration;
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+        chat.append_reasoning_to_last_assistant("thinking hard about stuff...");
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(
+            chat.streaming_first_token_time.is_none(),
+            "reasoning must not set TTFT"
+        );
+        assert!(
+            chat.active_generation.is_none(),
+            "reasoning must not open a generation sample"
+        );
+
+        chat.append_to_last_assistant("answer");
+        assert!(
+            chat.streaming_first_token_time.is_some(),
+            "first text token should set TTFT"
+        );
+        assert!(
+            chat.active_generation.is_some(),
+            "first text token should open a generation sample"
+        );
+    }
+
+    #[test]
+    fn test_short_sample_rejected_from_tps() {
+        use std::time::Duration;
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+        // Single short chunk → likely 1 estimated token → rejected (need >1).
+        chat.append_to_last_assistant("x");
+        std::thread::sleep(Duration::from_millis(300));
+        chat.mark_streaming_end();
+        chat.finalize_streaming_metrics();
+
+        let msg = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("assistant message");
+
+        // With only ~1 token the sample is ineligible (OpenCode: tokens > 1).
+        if msg.output_tokens.unwrap_or(0) < 2 {
+            assert!(
+                msg.tokens_per_sec.is_none(),
+                "single-token sample must not produce TPS"
+            );
+        }
+    }
+
+    #[test]
+    fn test_streaming_pause_excluded_from_decode_duration() {
+        use std::time::{Duration, Instant};
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+        let wall_start = Instant::now();
+        chat.append_to_last_assistant("hello");
+
+        std::thread::sleep(Duration::from_millis(40));
+        chat.pause_streaming_tps_timer();
+        let pause_start = Instant::now();
+        std::thread::sleep(Duration::from_millis(320));
+        let pause_ms = pause_start.elapsed().as_millis() as u64;
+        chat.resume_streaming_tps_timer();
+        std::thread::sleep(Duration::from_millis(40));
+
+        chat.mark_streaming_end();
+        assert_eq!(chat.generation_samples.len(), 1);
+        let sample = &chat.generation_samples[0];
+        let sample_paused_ms = sample.paused_duration.as_millis() as u64;
+        let sample_duration_ms = sample.generation_duration_ms().unwrap_or(0);
+        assert!(
+            sample_paused_ms + 50 >= pause_ms,
+            "sample should attribute overlay pause (sample={sample_paused_ms}ms, actual={pause_ms}ms)"
+        );
+
+        chat.finalize_streaming_metrics();
+        let wall_ms = wall_start.elapsed().as_millis() as u64;
+
+        let duration_ms = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .and_then(|m| m.duration_ms)
+            .unwrap_or(0);
+
+        assert_eq!(duration_ms, sample_duration_ms);
+        // Decode duration must exclude the long overlay pause.
+        assert!(
+            duration_ms + pause_ms <= wall_ms + 50,
+            "duration ({duration_ms}) + pause ({pause_ms}) should be ~wall ({wall_ms})"
+        );
+        assert!(
+            duration_ms + 200 < wall_ms,
+            "duration ({duration_ms}) should be well below wall ({wall_ms}) by pause time"
         );
     }
 
@@ -9493,7 +10227,7 @@ codex exec --skip-git-repo-check \
 
     #[test]
     fn test_pre_token_pause_does_not_reduce_decode_duration() {
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         let mut chat = Chat::new();
         chat.add_assistant_message("");
@@ -9505,9 +10239,24 @@ codex exec --skip-git-repo-check \
         chat.pause_streaming_tps_timer();
         std::thread::sleep(Duration::from_millis(120));
         chat.resume_streaming_tps_timer();
+
+        let gen_start = Instant::now();
         chat.append_to_last_assistant("hello");
         std::thread::sleep(Duration::from_millis(80));
         chat.mark_streaming_end();
+        let gen_wall_ms = gen_start.elapsed().as_millis() as u64;
+
+        assert_eq!(chat.generation_samples.len(), 1);
+        let sample = &chat.generation_samples[0];
+        // Generation sample opens on first text token — pre-token pause is not
+        // part of the sample window, so paused_duration should be ~0.
+        assert!(
+            sample.paused_duration.as_millis() < 30,
+            "pre-token pause leaked into sample: {}ms",
+            sample.paused_duration.as_millis()
+        );
+        let sample_duration_ms = sample.generation_duration_ms().unwrap_or(0);
+
         chat.finalize_streaming_metrics();
 
         let duration_ms = chat
@@ -9518,15 +10267,15 @@ codex exec --skip-git-repo-check \
             .and_then(|m| m.duration_ms)
             .unwrap_or(0);
 
+        assert_eq!(duration_ms, sample_duration_ms);
+        // Duration should track post-token generation wall, not the 120ms pre-token pause.
         assert!(
-            duration_ms >= 40,
-            "pre-token pause should not be subtracted from decode duration: {}ms",
-            duration_ms
+            duration_ms + 50 >= gen_wall_ms.saturating_sub(30),
+            "decode duration too short ({duration_ms}ms vs gen wall {gen_wall_ms}ms)"
         );
         assert!(
-            duration_ms < 180,
-            "decode duration unexpectedly included pre-token pause: {}ms",
-            duration_ms
+            duration_ms <= gen_wall_ms + 50,
+            "decode duration ({duration_ms}ms) exceeded post-token wall ({gen_wall_ms}ms)"
         );
     }
 
@@ -9539,7 +10288,8 @@ codex exec --skip-git-repo-check \
 
         chat.clear();
         assert!(chat.messages.is_empty());
-        assert_eq!(chat.scroll_offset, 0);
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
     }
 
     #[test]
@@ -9829,7 +10579,9 @@ codex exec --skip-git-repo-check \
         chat.viewport_height = 20;
         chat.scroll_offset = 10;
         chat.scroll_to_bottom();
-        assert_eq!(chat.scroll_offset, 80);
+        // MAX sentinel survives content growth between frames (streaming).
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
     }
 
     #[test]
@@ -9857,7 +10609,8 @@ codex exec --skip-git-repo-check \
             ),
             area,
         ));
-        assert_eq!(chat.scroll_offset, 90);
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
         assert!(chat.is_dragging_scrollbar);
 
         assert!(chat.handle_mouse_event(
@@ -9931,6 +10684,49 @@ codex exec --skip-git-repo-check \
         chat.add_user_message("test");
         // Should autoscroll (scroll_offset set to MAX)
         assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+    }
+
+    #[test]
+    fn test_stick_to_bottom_survives_content_height_growth() {
+        let mut chat = Chat::new();
+        chat.viewport_height = 20;
+        chat.content_height = 100;
+        chat.scroll_to_bottom();
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+
+        // Simulate streaming growth + compact ensure_render_cache before render.
+        chat.content_height = 250;
+        assert_eq!(chat.resolved_scroll_offset(), chat.max_scroll_offset());
+        assert!(!chat.user_scrolled_up);
+
+        // Padding change must not drop the pin to a concrete/zero offset.
+        chat.set_scroll_bottom_padding(8);
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+        assert_eq!(chat.resolved_scroll_offset(), chat.max_scroll_offset());
+    }
+
+    #[test]
+    fn test_stick_to_bottom_survives_zero_content_height() {
+        let mut chat = Chat::new();
+        chat.viewport_height = 20;
+        chat.content_height = 100;
+        chat.scroll_to_bottom();
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+
+        // Simulate a transient zero extent (stale/unbuilt cache). Pin must
+        // remain via the MAX sentinel, not materialize to offset 0.
+        chat.content_height = 0;
+        chat.set_scroll_bottom_padding(4);
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+        assert_eq!(chat.resolved_scroll_offset(), 0);
+
+        chat.content_height = 200;
+        assert_eq!(chat.resolved_scroll_offset(), 184);
         assert!(!chat.user_scrolled_up);
     }
 

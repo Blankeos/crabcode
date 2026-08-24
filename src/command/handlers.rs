@@ -620,6 +620,22 @@ pub fn handle_compact<'a>(
     })
 }
 
+pub fn handle_compact_mode<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error("Usage: /compact-mode".to_string());
+        }
+
+        // The app intercepts /compact-mode to toggle the chat_state.compact_mode flag.
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_fork<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
@@ -974,6 +990,14 @@ pub fn register_all_commands(registry: &mut Registry) {
         name: "compact".to_string(),
         description: "Summarize this session to reduce context".to_string(),
         handler: handle_compact,
+        hidden_tokens: vec![],
+        chat_only: true,
+    });
+
+    registry.register(Command {
+        name: "compact-mode".to_string(),
+        description: "Toggle compact mode (sticky header + latest user message)".to_string(),
+        handler: handle_compact_mode,
         hidden_tokens: vec![],
         chat_only: true,
     });

@@ -8,6 +8,7 @@ use super::{ensure_data_dir, get_data_dir};
 const MODEL_PREFS_KEY: &str = "model_preferences";
 const ACTIVE_THEME_KEY: &str = "active_theme";
 const TERMINAL_TITLE_ITEMS_KEY: &str = "terminal_title_items";
+const COMPACT_MODE_KEY: &str = "compact_mode";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRef {
@@ -204,6 +205,17 @@ impl PrefsDAO {
         self.set_pref(ACTIVE_THEME_KEY, theme_id.trim())
     }
 
+    pub fn get_compact_mode(&self) -> Result<Option<bool>> {
+        match self.get_pref(COMPACT_MODE_KEY)? {
+            Some(value) => Ok(serde_json::from_str(&value).ok()),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_compact_mode(&self, enabled: bool) -> Result<()> {
+        self.set_pref(COMPACT_MODE_KEY, &enabled.to_string())
+    }
+
     pub fn get_terminal_title_items(
         &self,
     ) -> Result<Option<Vec<crate::terminal_title::TerminalTitleItem>>> {
@@ -374,5 +386,18 @@ mod tests {
             dao.get_active_theme().unwrap(),
             Some("tokyonight".to_string())
         );
+    }
+
+    #[test]
+    fn test_compact_mode_round_trip() {
+        let dao = setup_test_dao();
+
+        assert_eq!(dao.get_compact_mode().unwrap(), None);
+
+        dao.set_compact_mode(false).unwrap();
+        assert_eq!(dao.get_compact_mode().unwrap(), Some(false));
+
+        dao.set_compact_mode(true).unwrap();
+        assert_eq!(dao.get_compact_mode().unwrap(), Some(true));
     }
 }

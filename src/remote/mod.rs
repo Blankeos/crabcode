@@ -691,6 +691,7 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
     )?);
     let app = Arc::new(TokioMutex::new(App::new_with_model_override(
         options.model_override.as_deref(),
+        None,
     )?));
 
     {
@@ -4000,7 +4001,7 @@ mod tests {
 
     #[test]
     fn remote_status_exposes_visible_primary_agents() {
-        let mut app = App::new_with_model_override(None).unwrap();
+        let mut app = App::new_with_model_override(None, None).unwrap();
         let mut warnings = Vec::new();
         let defs = crate::agent::definition::parse_agent_definitions_from_config(
             Some(&serde_json::json!({
