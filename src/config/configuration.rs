@@ -306,6 +306,7 @@ impl Default for ImagesConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebsearchProvider {
     ExaHostedMcp,
+    FirecrawlHostedMcp,
     Exa,
     Tavily,
     Perplexity,
@@ -319,6 +320,7 @@ impl WebsearchProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ExaHostedMcp => "exa-hosted-mcp",
+            Self::FirecrawlHostedMcp => "firecrawl-hosted-mcp",
             Self::Exa => "exa",
             Self::Tavily => "tavily",
             Self::Perplexity => "perplexity",
@@ -1676,7 +1678,7 @@ fn parse_websearch(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -
                     match parse_websearch_provider(raw) {
                         Some(provider) => websearch.provider = provider,
                         _ => diagnostics.warnings.push(format!(
-                            "websearch.provider must be one of: exa-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro; got {}",
+                            "websearch.provider must be one of: exa-hosted-mcp, firecrawl-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro; got {}",
                             raw
                         )),
                     }
@@ -1735,6 +1737,7 @@ fn parse_websearch_provider(raw: &str) -> Option<WebsearchProvider> {
     let normalized = raw.trim().to_ascii_lowercase().replace('_', "-");
     match normalized.as_str() {
         "exa-hosted-mcp" => Some(WebsearchProvider::ExaHostedMcp),
+        "firecrawl-hosted-mcp" => Some(WebsearchProvider::FirecrawlHostedMcp),
         "exa" => Some(WebsearchProvider::Exa),
         "tavily" => Some(WebsearchProvider::Tavily),
         "perplexity" => Some(WebsearchProvider::Perplexity),
@@ -2904,6 +2907,10 @@ mod tests {
         assert_eq!(
             parse_websearch_provider("exa-hosted-mcp"),
             Some(WebsearchProvider::ExaHostedMcp)
+        );
+        assert_eq!(
+            parse_websearch_provider("firecrawl-hosted-mcp"),
+            Some(WebsearchProvider::FirecrawlHostedMcp)
         );
         assert_eq!(
             parse_websearch_provider("exa"),
