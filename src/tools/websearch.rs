@@ -283,9 +283,15 @@ impl WebsearchAdapter for ExaHostedMcpAdapter<'_> {
             .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS));
 
         let body = send_text(request, self.provider_name()).await?;
-        parse_mcp_response(&body).ok_or_else(|| {
+        let text = parse_mcp_response(&body).ok_or_else(|| {
             ToolError::Execution("websearch provider returned no text content".to_string())
-        })
+        })?;
+        Ok(format_results(
+            self.provider_name(),
+            &input.query,
+            parse_exa_mcp_text(&text),
+            None,
+        ))
     }
 }
 
@@ -705,6 +711,94 @@ fn parse_exa_results(value: &Value) -> Vec<SearchItem> {
         .collect()
 }
 
+/// Parse Exa hosted MCP `web_search_exa` text blocks shaped like:
+/// `Title: …\nURL: …\nPublished: …\nAuthor: …\nHighlights:\n…`
+fn parse_exa_mcp_text(text: &str) -> Vec<SearchItem> {
+    let mut results = Vec::new();
+    let mut title: Option<String> = None;
+    let mut url: Option<String> = None;
+    let mut date: Option<String> = None;
+    let mut highlights = String::new();
+    let mut in_highlights = false;
+
+    let flush = |results: &mut Vec<SearchItem>,
+                 title: &mut Option<String>,
+                 url: &mut Option<String>,
+                 date: &mut Option<String>,
+                 highlights: &mut String| {
+        if let (Some(title), Some(url)) = (title.take(), url.take()) {
+            let snippet = {
+                let cleaned = clean_snippet(highlights);
+                (!cleaned.is_empty()).then_some(cleaned)
+            };
+            let date = date.take().and_then(|value| {
+                let trimmed = value.trim();
+                (trimmed != "N/A" && !trimmed.is_empty()).then(|| trimmed.to_string())
+            });
+            results.push(SearchItem {
+                title,
+                url,
+                snippet,
+                date,
+            });
+        } else {
+            title.take();
+            url.take();
+            date.take();
+        }
+        highlights.clear();
+    };
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Title: ") {
+            if title.is_some() || url.is_some() {
+                flush(
+                    &mut results,
+                    &mut title,
+                    &mut url,
+                    &mut date,
+                    &mut highlights,
+                );
+            }
+            title = Some(rest.trim().to_string());
+            in_highlights = false;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("URL: ") {
+            url = Some(rest.trim().to_string());
+            in_highlights = false;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Published: ") {
+            date = Some(rest.trim().to_string());
+            in_highlights = false;
+            continue;
+        }
+        if line.starts_with("Author: ") {
+            in_highlights = false;
+            continue;
+        }
+        if line.trim() == "Highlights:" {
+            in_highlights = true;
+            continue;
+        }
+        if in_highlights {
+            if !highlights.is_empty() {
+                highlights.push(' ');
+            }
+            highlights.push_str(line.trim());
+        }
+    }
+    flush(
+        &mut results,
+        &mut title,
+        &mut url,
+        &mut date,
+        &mut highlights,
+    );
+    results
+}
+
 fn parse_firecrawl_results(value: &Value) -> Vec<SearchItem> {
     let items = value
         .pointer("/data/web")
@@ -1008,6 +1102,44 @@ mod tests {
                 snippet: Some("A useful highlight".to_string()),
                 date: Some("2026-01-01".to_string()),
             }]
+        );
+    }
+
+    #[test]
+    fn parses_exa_mcp_text_blocks() {
+        let text = "\
+Title: axum - Rust
+URL: https://docs.rs/axum/latest/axum/
+Published: N/A
+Author: N/A
+Highlights:
+axum is an HTTP routing library
+that focuses on ergonomics.
+Title: Second Result
+URL: https://example.com/second
+Published: 2026-01-02
+Author: Someone
+Highlights:
+Useful second snippet
+";
+        assert_eq!(
+            parse_exa_mcp_text(text),
+            vec![
+                SearchItem {
+                    title: "axum - Rust".to_string(),
+                    url: "https://docs.rs/axum/latest/axum/".to_string(),
+                    snippet: Some(
+                        "axum is an HTTP routing library that focuses on ergonomics.".to_string()
+                    ),
+                    date: None,
+                },
+                SearchItem {
+                    title: "Second Result".to_string(),
+                    url: "https://example.com/second".to_string(),
+                    snippet: Some("Useful second snippet".to_string()),
+                    date: Some("2026-01-02".to_string()),
+                },
+            ]
         );
     }
 
