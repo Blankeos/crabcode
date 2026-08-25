@@ -6013,7 +6013,7 @@ impl App {
         self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         let _ = self.session_manager.set_session_status(
             session_id,
-            crate::session::types::SessionStatus::Waiting,
+            crate::session::types::SessionStatus::Streaming,
             None,
         );
         push_toast(Toast::new(
