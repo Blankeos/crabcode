@@ -2,10 +2,69 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.10] - 2026-08-06
+## [0.0.11] - 2026-08-25
 
 ### Bug Fixes
 
+- Stop home-screen animation loop after 3s of inactivity (#31) by @Blankeos in [#31](https://github.com/Blankeos/crabcode/pull/31)
+- Compacting should be streaming not waiting by @Blankeos
+- Up tls 1.2 for exa mcp to tls 1.3 by @Blankeos
+- Resolve stick-to-bottom MAX before sticky user math by @Blankeos
+- Detect and underline hyperlinks that wrap across multiple lines by @Blankeos
+- Use MAX sentinel for stick-to-bottom scroll to survive content growth by @Blankeos
+- Steer vision models away from calling view_image on already-attached images by @Blankeos
+- Best shape, render compact sticky message as overlay over transcript by @Blankeos
+- More fix attempts by @Blankeos
+- @agent mention colors in sticky message by @Blankeos
+- Align sticky user message rendering with full message formatting by @Blankeos
+- Scroll region includes headers/stickymessage header by @Blankeos
+- Pin custom answer row and add vertical scroll for overflowing question options by @Blankeos
+- Allow chat interaction during permission/question dialogs by @Blankeos
+- Margin bottom of headings in streamdown by @Blankeos
+- Switch completion TPS calculation to OpenCode-style generation samples + live still (#26) by @Blankeos in [#26](https://github.com/Blankeos/crabcode/pull/26)
+- Warm MCP connections in background with shared manager pool by @Blankeos
+- Preserve state on mouse move after wheel scroll by @Blankeos
+- Clean up background process groups by @yan-ad
+- Inherit external directory permissions recursively (#22) by @yan-ad in [#22](https://github.com/Blankeos/crabcode/pull/22)
+- Clamp popup overlay to available space above anchor by @Blankeos
+- Silence unavailable audio backends (#21) by @yan-ad in [#21](https://github.com/Blankeos/crabcode/pull/21)
+- Deepseek v4 flash has max for crof, but not in models.dev by @Blankeos
+- Allow ctrl-t and ctrl-x while slash suggestions are open by @Blankeos
+- Improve manual compacting and marker visibility by @Blankeos
+- Token-budget tail selection and live marker scroll by @Blankeos
+- Steer @explore agent to be less 'thorough' by @Blankeos
+
+### Features
+
+- Added a command for the compact-mode toggle by @Blankeos
+- Rank slash commands by most-recently-used (#29) by @Blankeos in [#29](https://github.com/Blankeos/crabcode/pull/29)
+- Parse Exa hosted MCP text blocks into formatted results by @Blankeos
+- Added working firecrawl mcp no auth by @Blankeos
+- Add `--agent` flag to override active agent at startup feat(cli): add `--agent` flag to override active agent at startup by @Blankeos
+- Add compact-mode with sticky header and sticky user messages (#20) by @Blankeos in [#20](https://github.com/Blankeos/crabcode/pull/20)
+- Persist compact mode and simplify sticky overlay rendering by @Blankeos
+- Add configurable, persisted compact-mode preference by @Blankeos
+- Make icon smaller by @Blankeos
+- Add compact-mode with sticky header and sticky user messages by @Blankeos
+- Better upgrade (i think it works) by @Blankeos
+- Allow chat mouse-wheel scrolling while find bar is focused by @Blankeos
+- Track and display assistant thought duration by @Blankeos
+- Support custom model reasoning options by @Blankeos
+- Prevent sending /compact when already compacting by @Blankeos
+- Add bundled Grok mono themes and reorganize theme assets by @Blankeos
+- Share and apply `@agent` mention styling in chat history by @Blankeos
+- Support JSONC model catalog overrides + crof vision overrids by @Blankeos
+
+### Refactor
+
+- Decouple in-tree SDK from host logging and prep for extraction by @Blankeos
+
+## [0.0.10] - 2026-08-08
+
+### Bug Fixes
+
+- Keep thread panel in sync during session switches by @Blankeos
+- Don't auto-submit autocomplete command suggestions by @Blankeos
 - Treat `@ai-sdk/gateway` as OpenAI-compatible provider by @Blankeos
 - Group adjacent tool calls and outputs in API payload by @Blankeos
 - Bad merge left uplicate enabled_providers/disabled_providers by @Blankeos
@@ -15,8 +74,19 @@ All notable changes to this project will be documented in this file.
 - For kimi-k3 & possibly anthropic models, require explicit non-final stop to request phase-less follow-up by @Blankeos
 - Vercel ai gateway endpoint by @Blankeos
 
+### Chores
+
+- Move vendored AI SDK in-tree and gate releases on published binaries (republishing 0.0.10 after) by @Blankeos
+- Simplify chat hint typography and revise TODO grouping by @Blankeos
+- Include grok-build in self-evals and better just bench-agents entrypoint by @Blankeos
+- Added harness llm judge for constant evals by @Blankeos
+
 ### Features
 
+- Add xAI Build affinity and smarter prompt-cache compaction (#18) by @Blankeos in [#18](https://github.com/Blankeos/crabcode/pull/18)
+- Add message marker rail and stable scroll navigation by @Blankeos
+- Add soft compaction with queued/cancellable /compact flow by @Blankeos
+- Highlight configured agent mentions in chat input by @Blankeos
 - Report session activity to herdr agent panel (#17) by @Blankeos in [#17](https://github.com/Blankeos/crabcode/pull/17)
 - Add prompt-caching diagnostics for provider streams + docs by @Blankeos
 - Add Anthropic prompt caching for gateway and direct requests by @Blankeos
