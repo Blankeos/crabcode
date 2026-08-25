@@ -1270,11 +1270,11 @@ async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
-    // Adaptive poll duration: fast when animations run (home page / streaming),
-    // slow otherwise to avoid wasting CPU on unnecessary re-renders.
+    // Adaptive poll: fast for home blink / streaming, park nearly forever when idle.
+    // A short "idle" poll still burns needless redraws/sec; block until input instead.
     const FAST_POLL: Duration = Duration::from_millis(16); // ~60fps for interactive animations
     const STREAMING_POLL: Duration = Duration::from_millis(40); // 25fps, matches wave spinner
-    const SLOW_POLL: Duration = Duration::from_millis(250); // ~4fps idle
+    const IDLE_POLL: Duration = Duration::from_secs(30); // wake only on input / timeout
 
     let mut needs_redraw = true;
     let mut last_complete_frame: Option<Buffer> = None;
@@ -1290,7 +1290,7 @@ async fn run_event_loop(
         } else if animation_needed {
             FAST_POLL
         } else {
-            SLOW_POLL
+            IDLE_POLL
         };
 
         let elapsed_before_poll = loop_start.elapsed();

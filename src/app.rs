@@ -905,6 +905,8 @@ pub struct App {
     last_sessions_dialog_metadata_probe: std::time::Instant,
     last_frame_size: ratatui::layout::Rect,
     last_animation_update: std::time::Instant,
+    /// Last keyboard/mouse/paste (or Home entry). Home blink runs only briefly after this.
+    last_user_activity: std::time::Instant,
     last_session_spinner_update: std::time::Instant,
     cached_git_branch: Option<String>,
     cached_git_branch_path: String,
@@ -1298,6 +1300,7 @@ impl App {
             last_sessions_dialog_metadata_probe: now,
             last_frame_size: ratatui::layout::Rect::default(),
             last_animation_update: now,
+            last_user_activity: now,
             last_session_spinner_update: now,
             cached_git_branch: None,
             cached_git_branch_path: String::new(),
@@ -2009,6 +2012,7 @@ impl App {
         self.chat_state.chat.clear();
         self.input.clear();
         self.base_focus = BaseFocus::Home;
+        self.note_user_activity();
         self.sync_active_streaming_flag();
         self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         self.refresh_sessions_dialog();
@@ -2025,6 +2029,7 @@ impl App {
         self.chat_state.chat.clear();
         self.input.clear();
         self.base_focus = BaseFocus::Home;
+        self.note_user_activity();
         self.sync_active_streaming_flag();
         self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         self.refresh_sessions_dialog();
@@ -3213,6 +3218,7 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        self.note_user_activity();
 
         if self.overlay_focus == OverlayFocus::FindBar && !self.can_open_find_bar() {
             self.close_find_bar_focus();
@@ -4580,6 +4586,9 @@ impl App {
     }
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if !matches!(mouse.kind, MouseEventKind::Moved) {
+            self.note_user_activity();
+        }
         if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
             crate::emit_log!(
                 "Handle mouse: kind={:?} modifiers={:?} col={} row={} base={:?} overlay={:?}",
@@ -5225,6 +5234,7 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: String) {
+        self.note_user_activity();
         const MAX_PASTE_SIZE: usize = 20 * 1024 * 1024;
 
         if text.len() > MAX_PASTE_SIZE {
@@ -6325,6 +6335,7 @@ impl App {
                         if parsed.name == "new" || parsed.name == "home" {
                             self.chat_state.chat.clear();
                             self.base_focus = BaseFocus::Home;
+                            self.note_user_activity();
                             self.pending_session_title = None;
                             self.session_manager.clear_current_session();
                         } else if self.base_focus == BaseFocus::Home
@@ -6560,6 +6571,7 @@ impl App {
                 if parsed.name == "new" || parsed.name == "home" {
                     self.chat_state.chat.clear();
                     self.base_focus = BaseFocus::Home;
+                    self.note_user_activity();
                     self.pending_session_title = None;
                     self.session_manager.clear_current_session();
                 } else if self.base_focus == BaseFocus::Home && parsed.name != "refreshmodels" {
@@ -8808,8 +8820,17 @@ impl App {
         }
     }
 
+    /// How long the Home cursor blink keeps the ~60fps loop alive after activity.
+    const HOME_ANIM_IDLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+    pub fn note_user_activity(&mut self) {
+        self.last_user_activity = std::time::Instant::now();
+    }
+
     pub fn is_animation_running(&self) -> bool {
-        self.base_focus == BaseFocus::Home
+        let home_animating = self.base_focus == BaseFocus::Home
+            && self.last_user_activity.elapsed() < Self::HOME_ANIM_IDLE;
+        home_animating
             || self.has_active_selection_edge_scroll()
             || self.is_streaming
             || self.chat_state.chat.has_active_tool_messages()
@@ -10289,6 +10310,7 @@ impl App {
 
         if self.session_manager.get_current_session_id().is_none() {
             self.base_focus = BaseFocus::Home;
+            self.note_user_activity();
             self.overlay_focus = OverlayFocus::None;
             self.pending_session_title = None;
             self.input.clear();
@@ -11474,6 +11496,7 @@ mod tests {
             last_sessions_dialog_metadata_probe: std::time::Instant::now(),
             last_frame_size: ratatui::layout::Rect::default(),
             last_animation_update: std::time::Instant::now(),
+            last_user_activity: std::time::Instant::now(),
             last_session_spinner_update: std::time::Instant::now(),
             cached_git_branch: None,
             cached_git_branch_path: ".".to_string(),
@@ -12719,6 +12742,20 @@ mod tests {
 
         assert!(app.is_animation_running());
         assert!(!app.is_streaming_animation_only());
+    }
+
+    #[test]
+    fn home_animation_freezes_after_idle() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Home;
+        app.note_user_activity();
+        assert!(app.is_animation_running());
+
+        app.last_user_activity = std::time::Instant::now() - std::time::Duration::from_secs(4);
+        assert!(
+            !app.is_animation_running(),
+            "Home alone must not pin the 60fps loop after idle"
+        );
     }
 
     #[test]
