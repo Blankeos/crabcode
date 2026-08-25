@@ -105,7 +105,7 @@ impl fmt::Display for ReasoningEffort {
 }
 
 impl FromStr for ReasoningEffort {
-    type Err = ();
+    type Err = &'static str;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match normalize_effort_token(value).as_str() {
@@ -116,7 +116,9 @@ impl FromStr for ReasoningEffort {
             "high" => Ok(Self::High),
             "xhigh" => Ok(Self::XHigh),
             "max" => Ok(Self::Max),
-            _ => Err(()),
+            _ => Err(
+                "reasoning effort must be one of none, minimal, low, medium, high, xhigh, or max",
+            ),
         }
     }
 }

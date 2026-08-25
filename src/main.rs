@@ -68,8 +68,6 @@ pub mod log {
 use crate::toast::{Toast, ToastManager};
 use anyhow::{Context, Result};
 use app::App;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, shells};
 use ratatui::crossterm::{
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -85,6 +83,7 @@ use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::sync::Mutex;
 use std::time::Duration;
+use usage::{Cli, Subcommands};
 
 const POST_CLOSE_LOGO: &str = include_str!("../crabcode-logo.txt");
 const ANSI_RESET: &str = "\x1b[0m";
@@ -664,15 +663,6 @@ fn estimate_text_tokens(content: &str) -> usize {
     content.chars().count().max(1) / 4
 }
 
-fn parse_reasoning_effort_arg(
-    value: &str,
-) -> Result<crate::model::reasoning::ReasoningEffort, String> {
-    value.parse().map_err(|_| {
-        "reasoning effort must be one of none, minimal, low, medium, high, xhigh, or max"
-            .to_string()
-    })
-}
-
 lazy_static::lazy_static! {
     static ref TOAST_MANAGER: Mutex<ToastManager> = Mutex::new(ToastManager::new());
 }
@@ -689,55 +679,61 @@ pub fn get_toast_manager() -> &'static Mutex<ToastManager> {
     &TOAST_MANAGER
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[derive(Cli, Debug)]
+#[usage(
+    bin = "crabcode",
+    version,
+    about = "Rust AI CLI Coding Agent with a beautiful terminal UI",
+    completion,
+    unknown_flags = "error"
+)]
 struct Args {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     command: Option<Command>,
 
     /// Resume a session by ID
-    #[arg(short = 's', long = "session")]
+    #[usage(short = 's', long = "session")]
     session: Option<String>,
 
     /// Run in print mode (non-interactive, streams output to stdout)
-    #[arg(short = 'p', long = "print")]
+    #[usage(short = 'p', long = "print")]
     print_mode: bool,
 
     /// Attach print mode or interactive attach to a remote crabcode host
-    #[arg(long = "attach", value_name = "URL_OR_ALIAS")]
+    #[usage(long = "attach", value_name = "URL_OR_ALIAS")]
     attach: Option<String>,
 
     /// Do not persist session data to disk
-    #[arg(long = "no-session-persistence")]
+    #[usage(long = "no-session-persistence")]
     no_session_persistence: bool,
 
     /// Model to use for this invocation, formatted as provider/model
-    #[arg(short = 'm', long = "model")]
+    #[usage(short = 'm', long = "model")]
     model: Option<String>,
 
     /// Agent to start with (e.g. build, plan). Overrides config `default_agent`.
-    #[arg(long = "agent", value_name = "NAME")]
+    #[usage(long = "agent", value_name = "NAME")]
     agent: Option<String>,
 
     /// Reasoning effort to use for this invocation: none, minimal, low, medium, high, xhigh, or max
-    #[arg(long = "reasoning-effort", value_parser = parse_reasoning_effort_arg)]
+    #[usage(long = "reasoning-effort")]
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
 
     /// Skip permission prompts in print mode. Intended for isolated benchmark/CI workspaces.
-    #[arg(long = "dangerously-skip-permissions")]
+    #[usage(long = "dangerously-skip-permissions")]
     dangerously_skip_permissions: bool,
 
-    #[arg(long = "emit-logs", hide = true)]
+    #[usage(long = "emit-logs", hide)]
     emit_logs: bool,
 
-    #[arg(long = "test-notification", hide = true)]
+    #[usage(long = "test-notification", hide)]
     test_notification: bool,
 
     /// The prompt to run (positional, used in print mode)
     prompt: Vec<String>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommands, Debug)]
 enum Command {
     /// List available models, optionally filtered by provider
     Models {
@@ -748,7 +744,7 @@ enum Command {
     /// Start an Agent Client Protocol server over stdin/stdout
     Acp {
         /// Working directory used for the initial ACP workspace
-        #[arg(long)]
+        #[usage(long = "cwd")]
         cwd: Option<PathBuf>,
     },
 
@@ -758,11 +754,11 @@ enum Command {
     /// Host the current workspace for browser and CLI clients
     Serve {
         /// Address to bind, for example 127.0.0.1:8421 or 0.0.0.0:8421
-        #[arg(long = "bind", default_value = "127.0.0.1:8421")]
+        #[usage(long = "bind", default = "127.0.0.1:8421")]
         bind: String,
 
         /// Require pairing with this code, or use "random" to generate one
-        #[arg(long = "paircode", alias = "pair-code", value_name = "CODE_OR_RANDOM")]
+        #[usage(long = "paircode", alias = "pair-code", value_name = "CODE_OR_RANDOM")]
         pair_code: Option<String>,
     },
 
@@ -783,26 +779,26 @@ enum Command {
 
     /// Manage survive-quit background jobs (list / logs / stop)
     Jobs {
-        #[command(subcommand)]
+        #[usage(subcommand)]
         command: JobsCommand,
     },
 
     /// Periodic cleanup tasks (jobs GC today; workspaces later)
     Maintenance {
-        #[command(subcommand)]
+        #[usage(subcommand)]
         command: MaintenanceCommand,
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommands, Debug)]
 enum JobsCommand {
     /// List background jobs (default: current project only)
     List {
         /// Show jobs from all projects
-        #[arg(long)]
+        #[usage(long)]
         all: bool,
         /// Human-friendly table (future: interactive TUI picker; for now just a pretty table)
-        #[arg(short = 'i', long)]
+        #[usage(short = 'i', long)]
         interactive: bool,
     },
     /// Print a job's output.log
@@ -810,10 +806,10 @@ enum JobsCommand {
         /// Job id (e.g. job_01HXYZ…)
         id: String,
         /// Follow new output (like tail -f)
-        #[arg(long)]
+        #[usage(long)]
         follow: bool,
         /// Number of trailing lines to print
-        #[arg(long, default_value_t = 200)]
+        #[usage(long, default = "200")]
         tail: usize,
     },
     /// Stop a background job (kill process group + update ledger)
@@ -824,7 +820,7 @@ enum JobsCommand {
     /// Stop all running jobs (default: current project only)
     StopAll {
         /// Stop running jobs from every project
-        #[arg(long)]
+        #[usage(long)]
         all: bool,
     },
     /// Restart a background job (same id / command / cwd)
@@ -837,29 +833,29 @@ enum JobsCommand {
     /// Scope: default = current session; `--all` = current project; `--global` = everything.
     Clean {
         /// Clean finished jobs for the current project (all sessions)
-        #[arg(long)]
+        #[usage(long)]
         all: bool,
         /// Clean finished jobs across every project
-        #[arg(long)]
+        #[usage(long)]
         global: bool,
         /// Age threshold (e.g. 7d, 24h, 30m). Ignored when --all/--global.
-        #[arg(long, default_value = "7d")]
+        #[usage(long, default = "7d")]
         older_than: String,
         /// Report what would be removed without deleting
-        #[arg(long)]
+        #[usage(long)]
         dry_run: bool,
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommands, Debug)]
 enum MaintenanceCommand {
     /// Run registered maintenance tasks
     Run {
         /// Only run this task id (e.g. jobs)
-        #[arg(long)]
+        #[usage(long)]
         only: Option<String>,
         /// Report without deleting
-        #[arg(long)]
+        #[usage(long)]
         dry_run: bool,
     },
     /// List registered maintenance tasks
@@ -870,25 +866,20 @@ fn is_completion_help(args: &[String]) -> bool {
     matches!(args, [command, help] if command == "completion" && matches!(help.as_str(), "--help" | "-h"))
 }
 
-fn completion_shell(shell: Option<&str>) -> shells::Shell {
+fn completion_shell(shell: Option<&str>) -> usage::complete::Shell {
     match shell.and_then(|shell| shell.rsplit('/').next()) {
-        Some("zsh") => shells::Shell::Zsh,
-        _ => shells::Shell::Bash,
+        Some("zsh") => usage::complete::Shell::Zsh,
+        _ => usage::complete::Shell::Bash,
     }
 }
 
-fn generate_completion(shell: shells::Shell) -> Vec<u8> {
-    let mut command = Args::command();
-    let mut output = Vec::new();
-    generate(shell, &mut command, "crabcode", &mut output);
-    output
+fn generate_completion(shell: usage::complete::Shell) -> Vec<u8> {
+    Args::completion_script(shell).into_bytes()
 }
 
 fn root_help() -> Result<String> {
-    let mut command = Args::command();
-    let mut output = Vec::new();
-    command.write_long_help(&mut output)?;
-    Ok(String::from_utf8(output).expect("Clap help is valid UTF-8"))
+    Args::render_help(Args::command(), true)
+        .ok_or_else(|| anyhow::anyhow!("failed to render crabcode help"))
 }
 
 fn print_completion() -> Result<()> {
@@ -1179,17 +1170,22 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+
+    fn parse_args(argv: &[&str]) -> Args {
+        let argv: Vec<&OsStr> = argv.iter().copied().map(OsStr::new).collect();
+        Args::try_parse_from(&argv).unwrap_or_else(|err| panic!("parse failed: {err:?}"))
+    }
 
     #[test]
     fn parses_model_after_print_prompt() {
-        let args = Args::try_parse_from([
+        let args = parse_args(&[
             "crabcode",
             "-p",
             "hi",
             "--model",
             "opencode-go/deepseek-v4-flash",
-        ])
-        .unwrap();
+        ]);
 
         assert_eq!(args.prompt, vec!["hi"]);
         assert_eq!(args.model.as_deref(), Some("opencode-go/deepseek-v4-flash"));
@@ -1197,15 +1193,14 @@ mod tests {
 
     #[test]
     fn parses_model_with_no_session_persistence_after_print_prompt() {
-        let args = Args::try_parse_from([
+        let args = parse_args(&[
             "crabcode",
             "-p",
             "hi",
             "--no-session-persistence",
             "--model",
             "opencode-go/kimi-k2.5",
-        ])
-        .unwrap();
+        ]);
 
         assert_eq!(args.prompt, vec!["hi"]);
         assert!(args.no_session_persistence);
@@ -1214,7 +1209,7 @@ mod tests {
 
     #[test]
     fn parses_short_model_alias() {
-        let args = Args::try_parse_from(["crabcode", "-p", "hi", "-m", "openai/gpt-5.2"]).unwrap();
+        let args = parse_args(&["crabcode", "-p", "hi", "-m", "openai/gpt-5.2"]);
 
         assert_eq!(args.prompt, vec!["hi"]);
         assert_eq!(args.model.as_deref(), Some("openai/gpt-5.2"));
@@ -1222,8 +1217,7 @@ mod tests {
 
     #[test]
     fn parses_print_reasoning_effort_override() {
-        let args =
-            Args::try_parse_from(["crabcode", "-p", "hi", "--reasoning-effort", "medium"]).unwrap();
+        let args = parse_args(&["crabcode", "-p", "hi", "--reasoning-effort", "medium"]);
 
         assert_eq!(
             args.reasoning_effort,
@@ -1233,7 +1227,7 @@ mod tests {
 
     #[test]
     fn parses_agent_override() {
-        let args = Args::try_parse_from(["crabcode", "-p", "hi", "--agent", "plan"]).unwrap();
+        let args = parse_args(&["crabcode", "-p", "hi", "--agent", "plan"]);
 
         assert_eq!(args.agent.as_deref(), Some("plan"));
     }
@@ -1254,7 +1248,7 @@ mod tests {
 
     #[test]
     fn parses_serve_command() {
-        let args = Args::try_parse_from(["crabcode", "serve", "--bind", "0.0.0.0:8421"]).unwrap();
+        let args = parse_args(&["crabcode", "serve", "--bind", "0.0.0.0:8421"]);
 
         match args.command {
             Some(Command::Serve { bind, pair_code }) => {
@@ -1267,7 +1261,7 @@ mod tests {
 
     #[test]
     fn parses_acp_command_with_workspace() {
-        let args = Args::try_parse_from(["crabcode", "acp", "--cwd", "/tmp/workspace"]).unwrap();
+        let args = parse_args(&["crabcode", "acp", "--cwd", "/tmp/workspace"]);
 
         match args.command {
             Some(Command::Acp { cwd }) => assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace"))),
@@ -1277,14 +1271,14 @@ mod tests {
 
     #[test]
     fn parses_models_command_with_optional_provider() {
-        let args = Args::try_parse_from(["crabcode", "models", "openai"]).unwrap();
+        let args = parse_args(&["crabcode", "models", "openai"]);
 
         match args.command {
             Some(Command::Models { provider }) => assert_eq!(provider.as_deref(), Some("openai")),
             other => panic!("expected models command, got {other:?}"),
         }
 
-        let args = Args::try_parse_from(["crabcode", "models"]).unwrap();
+        let args = parse_args(&["crabcode", "models"]);
         match args.command {
             Some(Command::Models { provider }) => assert!(provider.is_none()),
             other => panic!("expected models command, got {other:?}"),
@@ -1296,7 +1290,7 @@ mod tests {
         let script =
             String::from_utf8(generate_completion(completion_shell(Some("/bin/bash")))).unwrap();
 
-        assert!(script.contains("_crabcode"));
+        assert!(script.contains("_crabcode") || script.contains("_usage_complete_crabcode"));
         assert!(script.contains("complete"));
         assert!(script.contains("crabcode"));
     }
@@ -1307,7 +1301,7 @@ mod tests {
             String::from_utf8(generate_completion(completion_shell(Some("/bin/zsh")))).unwrap();
 
         assert!(script.starts_with("#compdef crabcode"));
-        assert!(script.contains("_crabcode"));
+        assert!(script.contains("_crabcode") || script.contains("_usage_complete_crabcode"));
     }
 
     #[test]
@@ -1328,15 +1322,17 @@ mod tests {
 
         let help = root_help().unwrap();
         assert!(help.contains("Usage: crabcode"));
-        assert!(help.contains("completion   Generate shell completion script"));
-        assert!(
-            help.contains("serve        Host the current workspace for browser and CLI clients")
-        );
+        assert!(help.contains("completion"));
+        assert!(help.contains("Generate shell completion script"));
+        assert!(help.contains("serve"));
+        assert!(help.contains("Host the current workspace"));
+        assert!(help.contains("jobs"));
+        assert!(help.contains("maintenance"));
     }
 
     #[test]
     fn parses_serve_paircode() {
-        let args = Args::try_parse_from(["crabcode", "serve", "--paircode", "random"]).unwrap();
+        let args = parse_args(&["crabcode", "serve", "--paircode", "random"]);
 
         match args.command {
             Some(Command::Serve { pair_code, .. }) => {
@@ -1348,7 +1344,7 @@ mod tests {
 
     #[test]
     fn parses_attach_command() {
-        let args = Args::try_parse_from(["crabcode", "attach", "http://127.0.0.1:8421"]).unwrap();
+        let args = parse_args(&["crabcode", "attach", "http://127.0.0.1:8421"]);
 
         match args.command {
             Some(Command::Attach { target }) => assert_eq!(target, "http://127.0.0.1:8421"),
@@ -1358,7 +1354,7 @@ mod tests {
 
     #[test]
     fn parses_upgrade_command() {
-        let args = Args::try_parse_from(["crabcode", "upgrade"]).unwrap();
+        let args = parse_args(&["crabcode", "upgrade"]);
 
         assert!(matches!(
             args.command,
@@ -1368,7 +1364,7 @@ mod tests {
 
     #[test]
     fn parses_upgrade_target() {
-        let args = Args::try_parse_from(["crabcode", "upgrade", "0.1.0"]).unwrap();
+        let args = parse_args(&["crabcode", "upgrade", "0.1.0"]);
 
         match args.command {
             Some(Command::Upgrade { target }) => assert_eq!(target.as_deref(), Some("0.1.0")),
@@ -1377,11 +1373,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_jobs_logs_defaults() {
+        let args = parse_args(&["crabcode", "jobs", "logs", "job_01"]);
+
+        match args.command {
+            Some(Command::Jobs {
+                command: JobsCommand::Logs { id, follow, tail },
+            }) => {
+                assert_eq!(id, "job_01");
+                assert!(!follow);
+                assert_eq!(tail, 200);
+            }
+            other => panic!("expected jobs logs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_jobs_stop_all_and_maintenance_run() {
+        let args = parse_args(&["crabcode", "jobs", "stop-all", "--all"]);
+        match args.command {
+            Some(Command::Jobs {
+                command: JobsCommand::StopAll { all },
+            }) => assert!(all),
+            other => panic!("expected jobs stop-all, got {other:?}"),
+        }
+
+        let args = parse_args(&["crabcode", "maintenance", "run", "--dry-run"]);
+        match args.command {
+            Some(Command::Maintenance {
+                command: MaintenanceCommand::Run { only, dry_run },
+            }) => {
+                assert!(only.is_none());
+                assert!(dry_run);
+            }
+            other => panic!("expected maintenance run, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_print_attach_flag() {
-        let args = Args::try_parse_from([
+        let args = parse_args(&[
             "crabcode", "-p", "--attach", "devbox", "continue", "the", "refactor",
-        ])
-        .unwrap();
+        ]);
 
         assert!(args.print_mode);
         assert_eq!(args.attach.as_deref(), Some("devbox"));
@@ -1390,15 +1423,14 @@ mod tests {
 
     #[test]
     fn double_dash_keeps_model_like_tokens_in_prompt() {
-        let args = Args::try_parse_from([
+        let args = parse_args(&[
             "crabcode",
             "-p",
             "hi",
             "--",
             "--model",
             "opencode-go/deepseek-v4-flash",
-        ])
-        .unwrap();
+        ]);
 
         assert_eq!(
             args.prompt,
