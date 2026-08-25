@@ -35,7 +35,10 @@ impl WebsearchTool {
     pub fn new(config: WebsearchConfig) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .use_rustls_tls()
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 

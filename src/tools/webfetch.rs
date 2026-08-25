@@ -87,6 +87,7 @@ impl ToolHandler for WebfetchTool {
         let url = fetch_url_for(&raw_url);
 
         let client = reqwest::Client::builder()
+            .use_rustls_tls()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .map_err(|e| ToolError::Execution(format!("Failed to create HTTP client: {}", e)))?;

@@ -36,7 +36,7 @@ include = [
 ratatui = "0.29"
 tui-textarea = { version = "0.7", features = ["ratatui"] }
 tokio = { version = "1.40", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 json5 = "0.4"
