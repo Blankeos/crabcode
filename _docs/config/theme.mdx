@@ -23,6 +23,8 @@ Every theme has an `appearance` of either `"dark"` or `"light"`:
 - Searchable in `/themes`: type `light` or `dark` to filter the list.
 - Selecting a theme aligns the UI's dark/light color slots to that appearance.
 
+OpenCode dual-mode themes are imported as two selectable entries: the base ID (dark) and `{id}-light` (light). Example: `github` and `github-light`. Themes whose light Mode is identical to dark (fake dual-mode) only keep the base entry.
+
 ## Background transparency
 
 By default the main UI paints a **full-screen solid** theme background (OpenCode-style), so light themes like Grok Day look consistent in any terminal.

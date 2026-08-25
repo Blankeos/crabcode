@@ -3,7 +3,7 @@
 
 // @ts-nocheck
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 type GitHubFile = {
@@ -252,6 +252,113 @@ function injectAppearance(themeJson: Record<string, unknown>) {
   themeJson.appearance = lum !== undefined && lum > 0.5 ? 'light' : 'dark'
 }
 
+/** True when theme.background exposes a distinct light Mode hex. */
+function hasLightMode(themeJson: Record<string, unknown>): boolean {
+  const theme = themeJson.theme
+  if (!theme || typeof theme !== 'object') return false
+  const background = (theme as Record<string, unknown>).background
+  return (
+    !!background &&
+    typeof background === 'object' &&
+    typeof (background as Record<string, unknown>).light === 'string'
+  )
+}
+
+/**
+ * Some OpenCode themes declare `{ dark, light }` Mode objects but use the same
+ * values for both (e.g. aura, nightowl). Emitting a *-light sibling would be a
+ * duplicate — skip those.
+ */
+function hasDistinctLightPalette(themeJson: Record<string, unknown>): boolean {
+  const theme = themeJson.theme
+  if (!theme || typeof theme !== 'object') return false
+
+  let compared = 0
+  for (const value of Object.values(theme as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue
+    const mode = value as Record<string, unknown>
+    if (typeof mode.dark !== 'string' || typeof mode.light !== 'string') continue
+    compared++
+    if (mode.dark !== mode.light) return true
+  }
+  // No Mode slots, or every Mode slot is identical dark===light.
+  return false
+}
+
+/**
+ * Dual-mode OpenCode themes keep both palettes. Emit a sibling `{id}-light.json`
+ * with `appearance: "light"` so `/themes` can filter/select the light palette
+ * as its own entry (dark sibling stays the default).
+ *
+ * Skipped when light Mode is missing or identical to dark (fake dual-mode).
+ */
+function makeLightSibling(
+  themeJson: Record<string, unknown>,
+  baseId: string,
+): Record<string, unknown> | undefined {
+  if (!hasLightMode(themeJson) || !hasDistinctLightPalette(themeJson)) {
+    return undefined
+  }
+  // Keep dual Mode slots; runtime picks light via appearance → dark_mode=false.
+  const sibling = structuredClone(themeJson) as Record<string, unknown>
+  sibling.id = `${baseId}-light`
+  sibling.appearance = 'light'
+  if (typeof sibling.name === 'string' && sibling.name.length > 0) {
+    sibling.name = `${sibling.name} Light`
+  } else {
+    // Title-case the id for nicer /themes labels (e.g. "Github Light").
+    sibling.name =
+      baseId
+        .split('-')
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ') + ' Light'
+  }
+  return sibling
+}
+
+function writeBundledThemesList(generatedIds: string[]) {
+  // Hand-authored themes live in src/themes/; generated ones in src/generated_themes/.
+  const handAuthored: Array<{ id: string; path: string }> = [
+    { id: 'crabcode-orange', path: 'themes/crabcode-orange.json' },
+    { id: 'groknight', path: 'themes/groknight.json' },
+    { id: 'grokday', path: 'themes/grokday.json' },
+  ]
+
+  const formatEntry = (id: string, path: string) => {
+    if (id.includes('-')) {
+      return `    (\n        "${id}",\n        include_str!("${path}"),\n    ),`
+    }
+    return `    ("${id}", include_str!("${path}")),`
+  }
+
+  const entries = [
+    ...handAuthored.map(({ id, path }) => formatEntry(id, path)),
+    ...generatedIds.map((id) => formatEntry(id, `generated_themes/${id}.json`)),
+  ].join('\n')
+
+  const themeRsPath = join(process.cwd(), 'src', 'theme.rs')
+  const themeRs = readFileSync(themeRsPath, 'utf8')
+  const start = 'const BUNDLED_THEMES: &[(&str, &str)] = &['
+  const end = '];'
+  const startIdx = themeRs.indexOf(start)
+  if (startIdx < 0) throw new Error('BUNDLED_THEMES start marker not found in src/theme.rs')
+  const endIdx = themeRs.indexOf(end, startIdx)
+  if (endIdx < 0) throw new Error('BUNDLED_THEMES end marker not found in src/theme.rs')
+
+  const next =
+    themeRs.slice(0, startIdx) +
+    start +
+    '\n' +
+    entries +
+    '\n' +
+    end +
+    themeRs.slice(endIdx + end.length)
+  writeFileSync(themeRsPath, next)
+  console.log(
+    `Updated BUNDLED_THEMES in src/theme.rs (${handAuthored.length + generatedIds.length} themes)`,
+  )
+}
+
 async function fetchThemes() {
   const response = await fetch(GITHUB_API_URL)
   if (!response.ok) {
@@ -262,6 +369,8 @@ async function fetchThemes() {
 
   rmSync(THEMES_DIR, { recursive: true, force: true })
   mkdirSync(THEMES_DIR, { recursive: true })
+
+  const generatedIds: string[] = []
 
   for (const file of files) {
     if (!file?.name?.endsWith('.json')) continue
@@ -277,6 +386,7 @@ async function fetchThemes() {
     }
 
     const themeContent = await themeResponse.text()
+    const baseId = file.name.replace(/\.json$/, '')
     const themePath = join(THEMES_DIR, file.name)
 
     try {
@@ -285,14 +395,27 @@ async function fetchThemes() {
       solidifyBackground(themeJson)
       injectAppearance(themeJson)
       writeFileSync(themePath, JSON.stringify(themeJson, null, 2) + '\n')
+      generatedIds.push(baseId)
+      console.log(`Saved ${file.name}`)
+
+      const lightSibling = makeLightSibling(themeJson, baseId)
+      if (lightSibling) {
+        const lightName = `${baseId}-light.json`
+        writeFileSync(join(THEMES_DIR, lightName), JSON.stringify(lightSibling, null, 2) + '\n')
+        generatedIds.push(`${baseId}-light`)
+        console.log(`Saved ${lightName}`)
+      }
     } catch {
       writeFileSync(themePath, themeContent)
+      generatedIds.push(baseId)
+      console.log(`Saved ${file.name} (raw)`)
     }
-
-    console.log(`Saved ${file.name}`)
   }
 
-  console.log(`\nDone! Themes saved to ${THEMES_DIR}`)
+  generatedIds.sort((a, b) => a.localeCompare(b))
+  writeBundledThemesList(generatedIds)
+
+  console.log(`\nDone! Themes saved to ${THEMES_DIR} (${generatedIds.length} generated)`)
 }
 
 fetchThemes().catch((err) => {

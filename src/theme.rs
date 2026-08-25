@@ -15,6 +15,10 @@ const BUNDLED_THEMES: &[(&str, &str)] = &[
     ("ayu", include_str!("generated_themes/ayu.json")),
     ("carbonfox", include_str!("generated_themes/carbonfox.json")),
     (
+        "carbonfox-light",
+        include_str!("generated_themes/carbonfox-light.json"),
+    ),
+    (
         "catppuccin",
         include_str!("generated_themes/catppuccin.json"),
     ),
@@ -23,51 +27,159 @@ const BUNDLED_THEMES: &[(&str, &str)] = &[
         include_str!("generated_themes/catppuccin-frappe.json"),
     ),
     (
+        "catppuccin-light",
+        include_str!("generated_themes/catppuccin-light.json"),
+    ),
+    (
         "catppuccin-macchiato",
         include_str!("generated_themes/catppuccin-macchiato.json"),
     ),
     ("cobalt2", include_str!("generated_themes/cobalt2.json")),
+    (
+        "cobalt2-light",
+        include_str!("generated_themes/cobalt2-light.json"),
+    ),
     ("cursor", include_str!("generated_themes/cursor.json")),
+    (
+        "cursor-light",
+        include_str!("generated_themes/cursor-light.json"),
+    ),
     ("dracula", include_str!("generated_themes/dracula.json")),
+    (
+        "dracula-light",
+        include_str!("generated_themes/dracula-light.json"),
+    ),
     (
         "everforest",
         include_str!("generated_themes/everforest.json"),
     ),
+    (
+        "everforest-light",
+        include_str!("generated_themes/everforest-light.json"),
+    ),
     ("flexoki", include_str!("generated_themes/flexoki.json")),
+    (
+        "flexoki-light",
+        include_str!("generated_themes/flexoki-light.json"),
+    ),
     ("github", include_str!("generated_themes/github.json")),
+    (
+        "github-light",
+        include_str!("generated_themes/github-light.json"),
+    ),
     ("gruvbox", include_str!("generated_themes/gruvbox.json")),
+    (
+        "gruvbox-light",
+        include_str!("generated_themes/gruvbox-light.json"),
+    ),
     ("kanagawa", include_str!("generated_themes/kanagawa.json")),
+    (
+        "kanagawa-light",
+        include_str!("generated_themes/kanagawa-light.json"),
+    ),
     (
         "lucent-orng",
         include_str!("generated_themes/lucent-orng.json"),
     ),
+    (
+        "lucent-orng-light",
+        include_str!("generated_themes/lucent-orng-light.json"),
+    ),
     ("material", include_str!("generated_themes/material.json")),
+    (
+        "material-light",
+        include_str!("generated_themes/material-light.json"),
+    ),
     ("matrix", include_str!("generated_themes/matrix.json")),
+    (
+        "matrix-light",
+        include_str!("generated_themes/matrix-light.json"),
+    ),
     ("mercury", include_str!("generated_themes/mercury.json")),
+    (
+        "mercury-light",
+        include_str!("generated_themes/mercury-light.json"),
+    ),
     ("monokai", include_str!("generated_themes/monokai.json")),
+    (
+        "monokai-light",
+        include_str!("generated_themes/monokai-light.json"),
+    ),
     ("nightowl", include_str!("generated_themes/nightowl.json")),
     ("nord", include_str!("generated_themes/nord.json")),
+    (
+        "nord-light",
+        include_str!("generated_themes/nord-light.json"),
+    ),
     ("one-dark", include_str!("generated_themes/one-dark.json")),
+    (
+        "one-dark-light",
+        include_str!("generated_themes/one-dark-light.json"),
+    ),
     ("opencode", include_str!("generated_themes/opencode.json")),
+    (
+        "opencode-light",
+        include_str!("generated_themes/opencode-light.json"),
+    ),
     ("orng", include_str!("generated_themes/orng.json")),
+    (
+        "orng-light",
+        include_str!("generated_themes/orng-light.json"),
+    ),
     (
         "osaka-jade",
         include_str!("generated_themes/osaka-jade.json"),
     ),
+    (
+        "osaka-jade-light",
+        include_str!("generated_themes/osaka-jade-light.json"),
+    ),
     ("palenight", include_str!("generated_themes/palenight.json")),
+    (
+        "palenight-light",
+        include_str!("generated_themes/palenight-light.json"),
+    ),
     ("rosepine", include_str!("generated_themes/rosepine.json")),
+    (
+        "rosepine-light",
+        include_str!("generated_themes/rosepine-light.json"),
+    ),
     ("solarized", include_str!("generated_themes/solarized.json")),
+    (
+        "solarized-light",
+        include_str!("generated_themes/solarized-light.json"),
+    ),
     (
         "synthwave84",
         include_str!("generated_themes/synthwave84.json"),
     ),
     (
+        "synthwave84-light",
+        include_str!("generated_themes/synthwave84-light.json"),
+    ),
+    (
         "tokyonight",
         include_str!("generated_themes/tokyonight.json"),
     ),
+    (
+        "tokyonight-light",
+        include_str!("generated_themes/tokyonight-light.json"),
+    ),
     ("vercel", include_str!("generated_themes/vercel.json")),
+    (
+        "vercel-light",
+        include_str!("generated_themes/vercel-light.json"),
+    ),
     ("vesper", include_str!("generated_themes/vesper.json")),
+    (
+        "vesper-light",
+        include_str!("generated_themes/vesper-light.json"),
+    ),
     ("zenburn", include_str!("generated_themes/zenburn.json")),
+    (
+        "zenburn-light",
+        include_str!("generated_themes/zenburn-light.json"),
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -818,6 +930,21 @@ mod tests {
         assert_eq!(grokday.appearance, super::ThemeAppearance::Light);
         let groknight = themes.iter().find(|t| t.id == "groknight").unwrap();
         assert_eq!(groknight.appearance, super::ThemeAppearance::Dark);
+
+        // Dual-mode OpenCode themes emit a selectable *-light sibling.
+        let github_light = themes.iter().find(|t| t.id == "github-light").unwrap();
+        assert_eq!(github_light.appearance, super::ThemeAppearance::Light);
+        let light_count = themes
+            .iter()
+            .filter(|t| matches!(t.appearance, super::ThemeAppearance::Light))
+            .count();
+        assert!(
+            light_count >= 25,
+            "expected dual-mode light siblings, got {light_count} light themes"
+        );
+        // Fake dual-mode (dark===light) must not emit a sibling.
+        assert!(themes.iter().all(|t| t.id != "aura-light"));
+        assert!(themes.iter().all(|t| t.id != "nightowl-light"));
     }
 
     #[test]
