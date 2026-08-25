@@ -920,6 +920,10 @@ pub struct App {
     terminal_title_last: Option<String>,
     terminal_title_animation_origin: std::time::Instant,
     remote_launch_request: Option<RemoteLaunchRequest>,
+    /// False until config/prefs/themes/skills hydrate after first paint.
+    startup_hydrated: bool,
+    pending_model_override: Option<String>,
+    pending_cli_agent: Option<String>,
 }
 
 /// Cached sum of context tokens for all completed messages of the currently
@@ -963,28 +967,36 @@ impl App {
         Self::new_with_model_override(None, None)
     }
 
+    /// Load SQLite session index if needed. Deferred past first TUI paint.
+    pub fn ensure_session_history(&mut self) {
+        let _ = self.session_manager.ensure_history();
+    }
+
     pub fn new_with_model_override(
         model_override: Option<&str>,
         cli_agent: Option<&str>,
     ) -> Result<Self> {
+        Self::new_shell(model_override, cli_agent)
+    }
+
+    /// Minimal App for first paint. Heavy config/prefs/themes/skills load in
+    /// [`Self::ensure_startup_hydrated`].
+    fn new_shell(model_override: Option<&str>, cli_agent: Option<&str>) -> Result<Self> {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
+        let mut input = Input::new();
         let placeholder = Self::get_random_placeholder();
         let placeholder_static: &'static str = Box::leak(placeholder.into_boxed_str());
-        let mut input = Input::new();
         input.set_placeholder(placeholder_static);
+        input.set_image_open_config(crate::config::ImagesConfig::default());
 
-        let cwd_path = crate::utils::cwd::current_dir()?;
-        let cwd = cwd_path
-            .to_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "?".to_string());
-
-        let home_state = init_home();
-        let mut agent = "Build".to_string();
         let mut chat = Chat::new();
-        let suggestions_popup_state = init_suggestions_popup(Popup::new());
+        chat.set_agent_mention_names(Vec::new());
+
+        let popup = Popup::new();
+        let home_state = init_home();
+        let suggestions_popup_state = init_suggestions_popup(popup);
         let agents_dialog_state = init_agents_dialog("Select agent", vec![]);
         let models_dialog_state = init_models_dialog("Models", vec![]);
         let themes_dialog_state = init_themes_dialog("Themes", vec![], false);
@@ -1005,23 +1017,181 @@ impl App {
         let storage_dialog_state = init_storage_dialog();
         let title_dialog_state = init_title_dialog();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
+        let session_manager = SessionManager::new();
 
-        let session_manager = SessionManager::new()
-            .with_history()
-            .unwrap_or_else(|_| SessionManager::new());
+        let cwd_path = crate::utils::cwd::current_dir_or_dot();
+        let cwd = cwd_path.display().to_string();
 
-        let prefs_dao = match crate::persistence::PrefsDAO::new() {
-            Ok(dao) => Some(dao),
-            Err(e) => {
-                crate::startup_diag!("Warning: Failed to initialize preferences DAO: {}", e);
-                None
-            }
+        let (active_model, active_provider_name) = if let Some(model) = model_override {
+            let (provider, model_id) = parse_model_ref(model);
+            (model_id, provider)
+        } else {
+            ("big-pickle".to_string(), "opencode".to_string())
+        };
+        let agent = cli_agent
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(titlecase_agent_name)
+            .unwrap_or_else(|| "Build".to_string());
+
+        // Resolve real theme before first paint (avoids builtin flash).
+        let prefs_dao = crate::persistence::PrefsDAO::new().ok();
+        let prefs_theme_id = prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_active_theme().ok().flatten());
+        let theme_transparent = prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_theme_transparent().ok())
+            .unwrap_or(false);
+        let (themes, current_theme_index, dark_mode, theme_transparent) =
+            crate::config::resolve_startup_theme(
+                &cwd_path,
+                prefs_theme_id.as_deref(),
+                theme_transparent,
+            );
+        let theme_for_colors = themes
+            .get(current_theme_index)
+            .or_else(|| themes.first())
+            .cloned()
+            .unwrap_or_else(theme::Theme::load_builtin_default);
+        let colors = theme_for_colors.get_colors_with(dark_mode, theme_transparent);
+        let chat_state = init_chat(chat, &agent, &colors, true);
+        let session_rename_dialog_state = init_session_rename_dialog(colors);
+        let now = std::time::Instant::now();
+
+        Ok(Self {
+            running: true,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            input,
+            command_registry: registry,
+            session_manager,
+            home_state,
+            chat_state,
+            suggestions_popup_state,
+            agents_dialog_state,
+            models_dialog_state,
+            themes_dialog_state,
+            themes_dialog_original_theme_index: 0,
+            themes_dialog_original_dark_mode: true,
+            themes_dialog_committed: false,
+            connect_dialog_state,
+            connect_dialog_mode: ConnectDialogMode::ProviderSelection,
+            provider_oauth_flow_state,
+            sessions_dialog_state,
+            move_session_dialog_state,
+            session_rename_dialog_state,
+            permission_dialog_state,
+            question_dialog_state,
+            terminal_session_dialog_state,
+            remote_dialog_state,
+            skills_dialog_state,
+            mcp_dialog_state,
+            command_palette_state,
+            find_bar,
+            storage_dialog_state,
+            title_dialog_state,
+            which_key_state,
+            timeline_dialog_state,
+            esc_primed_at: None,
+            copy_actions_dialog: None,
+            message_actions_index: None,
+            message_actions_dialog: None,
+            message_actions_return_focus: OverlayFocus::TimelineDialog,
+            selection_action_bar: None,
+            pending_chat_message_click: None,
+            api_key_input,
+            provider_oauth_receiver: None,
+            provider_oauth_in_progress: None,
+            compaction_receiver: None,
+            compaction_pending: None,
+            storage_receiver: None,
+            models_receiver: None,
+            models_dialog_provider_ids: None,
+            title_generation_receiver: None,
+            prefs_dao,
+            agent,
+            agent_registry: crate::agent::definition::AgentRegistry::default(),
+            agent_steps: std::collections::HashMap::new(),
+            provider_timeouts: std::collections::HashMap::new(),
+            model: active_model,
+            provider_name: active_provider_name,
+            small_model: None,
+            reasoning_efforts: ReasoningEffortOverrides::new(),
+            model_reasoning_options: ModelReasoningOptions::new(),
+            cwd,
+            base_focus: BaseFocus::Home,
+            overlay_focus: OverlayFocus::None,
+            just_closed_overlay: false,
+            ctrl_c_press_count: 0,
+            last_ctrl_c_time: now,
+            themes,
+            current_theme_index,
+            dark_mode,
+            theme_transparent,
+            sounds: crate::sound::ResolvedSoundsConfig::default(),
+            notifications: crate::config::NotificationsConfig::default(),
+            images: crate::config::ImagesConfig::default(),
+            websearch: crate::config::configuration::WebsearchConfig::default(),
+            mcp: crate::config::configuration::McpConfig::default(),
+            config_raw_merged: serde_json::json!({}),
+            custom_instructions: String::new(),
+            terminal_focused: true,
+            tool_permissions: crate::tools::ToolPermissions::new(cwd_path),
+            skills_dirs: Vec::new(),
+            is_streaming: false,
+            pending_session_title: None,
+            session_view_states: std::collections::HashMap::new(),
+            session_spinner_frame: 0,
+            stream_drain_rotation: 0,
+            sessions_dialog_live_dirty: true,
+            last_sessions_dialog_metadata_probe: now,
+            last_frame_size: ratatui::layout::Rect::default(),
+            last_animation_update: now,
+            last_user_activity: now,
+            last_session_spinner_update: now,
+            cached_git_branch: None,
+            cached_git_branch_path: String::new(),
+            last_git_branch_check: now,
+            discovery: None,
+            cached_usage_text: String::new(),
+            cached_usage_check: (0, 0, 0),
+            cached_usage_streaming_base: None,
+            terminal_title_enabled: crate::notify::terminal_title_supported(),
+            terminal_title_items: crate::terminal_title::default_items(),
+            terminal_title_last: None,
+            terminal_title_animation_origin: now,
+            remote_launch_request: None,
+            startup_hydrated: false,
+            pending_model_override: model_override.map(str::to_string),
+            pending_cli_agent: cli_agent.map(str::to_string),
+        })
+    }
+
+    /// Load config/prefs/themes/skills after first paint (or immediately for remote/CLI).
+    pub fn ensure_startup_hydrated(&mut self) -> Result<()> {
+        if self.startup_hydrated {
+            return Ok(());
+        }
+
+        let model_override = self.pending_model_override.as_deref();
+        let cli_agent = self.pending_cli_agent.as_deref();
+        let cwd_path = crate::utils::cwd::current_dir_or_dot();
+
+        // Prefer prefs already opened in new_shell (avoids double SQLite open).
+        let prefs_dao = match self.prefs_dao.take() {
+            Some(dao) => Some(dao),
+            None => match crate::persistence::PrefsDAO::new() {
+                Ok(dao) => Some(dao),
+                Err(e) => {
+                    crate::startup_diag!("Warning: Failed to initialize preferences DAO: {}", e);
+                    None
+                }
+            },
         };
 
         let loaded_config = crate::config::ConfigLoader::load()?;
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
-        // Warm MCP connections in the background so the first chat never waits.
         if !mcp_config.is_empty() {
             let warm_cfg = mcp_config.clone();
             let warm_cwd =
@@ -1030,7 +1200,8 @@ impl App {
                 let _ = crate::mcp::McpManager::ensure(warm_cfg, warm_cwd);
             });
         }
-        input.set_image_open_config(loaded_config.merged_config.images.clone());
+        self.input
+            .set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
                 crate::startup_diag!("Config: {}", msg);
@@ -1050,11 +1221,13 @@ impl App {
 
         crate::skill::init_skill_store(&loaded_config.xdg_config_home, &loaded_config.project_root);
         for command in loaded_config.merged_config.commands.clone() {
-            registry.register_custom(command);
+            self.command_registry.register_custom(command);
         }
-        crate::command::handlers::register_skill_commands(&mut registry);
+        crate::command::handlers::register_skill_commands(&mut self.command_registry);
         let agent_registry = loaded_config.merged_config.agent_registry.clone();
-        chat.set_agent_mention_names(agent_registry.visible_agent_names_for_mentions());
+        self.chat_state
+            .chat
+            .set_agent_mention_names(agent_registry.visible_agent_names_for_mentions());
         let agent_suggestions = agent_registry
             .visible_subagents()
             .into_iter()
@@ -1065,9 +1238,9 @@ impl App {
                 )
             })
             .collect();
-        input.autocomplete = Some(
+        self.input.autocomplete = Some(
             AutoComplete::new_at_with_file_config(
-                crate::autocomplete::CommandAuto::new(&registry),
+                crate::autocomplete::CommandAuto::new(&self.command_registry),
                 &cwd_path,
                 loaded_config.merged_config.watcher.is_enabled(),
                 loaded_config.merged_config.watcher.ignored_paths().to_vec(),
@@ -1075,8 +1248,9 @@ impl App {
             .with_agents(agent_suggestions),
         );
 
+        let mut agent = self.agent.clone();
         if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
-            if !default_agent.trim().is_empty() {
+            if !default_agent.trim().is_empty() && self.pending_cli_agent.is_none() {
                 agent = default_agent;
             }
         }
@@ -1154,39 +1328,10 @@ impl App {
             .map(|prefs| reasoning_effort_overrides_from_prefs(&prefs))
             .unwrap_or_default();
 
-        let configured_theme_id = loaded_config.merged_config.theme.as_deref();
-        let persisted_theme_id = if configured_theme_id.is_none() {
-            prefs_dao
-                .as_ref()
-                .and_then(|dao| dao.get_active_theme().ok().flatten())
-        } else {
-            None
-        };
-        let selected_theme_id = configured_theme_id.or(persisted_theme_id.as_deref());
-        let (themes, current_theme_index) = crate::config::discover_themes(
-            &loaded_config.xdg_config_home,
-            &loaded_config.project_root,
-            &loaded_config.cwd,
-            selected_theme_id,
-        );
+        // Theme already resolved in new_shell for first paint; keep it.
         let agent_steps = agent_registry.max_steps_map();
         let provider_timeouts = loaded_config.merged_config.provider_timeouts.clone();
-        let theme_for_colors = themes
-            .get(current_theme_index)
-            .or_else(|| themes.first())
-            .cloned()
-            .unwrap_or_else(theme::Theme::load_builtin_default);
-        let theme_transparent = prefs_dao
-            .as_ref()
-            .and_then(|dao| dao.get_theme_transparent().ok())
-            .unwrap_or(false);
-        // Align dark_mode with the selected theme's appearance so light themes
-        // don't render with dark-mode color slots by default.
-        let dark_mode = match theme_for_colors.appearance {
-            theme::ThemeAppearance::Light => false,
-            theme::ThemeAppearance::Dark => true,
-        };
-        let colors = theme_for_colors.get_colors_with(dark_mode, theme_transparent);
+        let colors = self.get_current_theme_colors();
 
         let configured_compact_mode = loaded_config.merged_config.tui_compact_mode;
         let persisted_compact_mode = if configured_compact_mode.is_none() {
@@ -1199,122 +1344,41 @@ impl App {
         let compact_mode = configured_compact_mode
             .or(persisted_compact_mode)
             .unwrap_or(true);
-        let chat_state = init_chat(chat, &agent, &colors, compact_mode);
-        let session_rename_dialog_state = init_session_rename_dialog(colors);
+        self.chat_state.compact_mode = compact_mode;
+        let agent_color = crate::theme::agent_color(&agent, &colors);
+        self.chat_state.wave_spinner.set_color(agent_color);
+        self.session_rename_dialog_state.set_colors(colors);
+
         let runtime = crate::config::ConfigRuntime::from_merged(
             &loaded_config.merged_config,
             cwd_path.clone(),
             crate::config::ConfigRuntimeOptions::default(),
         );
-        let tool_permissions = runtime.tool_permissions;
-        let discovery = runtime.discovery;
-        let custom_instructions = runtime.custom_instructions;
-        let now = std::time::Instant::now();
 
-        Ok(Self {
-            running: true,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            input,
-            command_registry: registry,
-            session_manager,
-            home_state,
-            chat_state,
-            suggestions_popup_state,
-            agents_dialog_state,
-            models_dialog_state,
-            themes_dialog_state,
-            themes_dialog_original_theme_index: 0,
-            themes_dialog_original_dark_mode: true,
-            themes_dialog_committed: false,
-            connect_dialog_state,
-            connect_dialog_mode: ConnectDialogMode::ProviderSelection,
-            provider_oauth_flow_state,
-            sessions_dialog_state,
-            move_session_dialog_state,
-            session_rename_dialog_state,
-            permission_dialog_state,
-            question_dialog_state,
-            terminal_session_dialog_state,
-            remote_dialog_state,
-            skills_dialog_state,
-            mcp_dialog_state,
-            command_palette_state,
-            find_bar,
-            storage_dialog_state,
-            title_dialog_state,
-            which_key_state,
-            timeline_dialog_state,
-            esc_primed_at: None,
-            copy_actions_dialog: None,
-            message_actions_index: None,
-            message_actions_dialog: None,
-            message_actions_return_focus: OverlayFocus::TimelineDialog,
-            selection_action_bar: None,
-            pending_chat_message_click: None,
-            api_key_input,
-            provider_oauth_receiver: None,
-            provider_oauth_in_progress: None,
-            compaction_receiver: None,
-            compaction_pending: None,
-            storage_receiver: None,
-            models_receiver: None,
-            models_dialog_provider_ids: None,
-            title_generation_receiver: None,
-            prefs_dao,
-            agent,
-            agent_registry,
-            agent_steps,
-            provider_timeouts,
-            model: active_model,
-            provider_name: active_provider_name,
-            small_model,
-            reasoning_efforts,
-            model_reasoning_options: ModelReasoningOptions::new(),
-            cwd: cwd.clone(),
-            base_focus: BaseFocus::Home,
-            overlay_focus: OverlayFocus::None,
-            just_closed_overlay: false,
-            ctrl_c_press_count: 0,
-            last_ctrl_c_time: std::time::Instant::now(),
-            themes,
-            current_theme_index,
-            dark_mode,
-            theme_transparent,
-            sounds: resolved_sounds,
-            notifications: loaded_config.merged_config.notifications,
-            images: loaded_config.merged_config.images,
-            websearch: loaded_config.merged_config.websearch,
-            mcp: mcp_config.clone(),
-            config_raw_merged: loaded_config.raw_merged,
-            custom_instructions,
-            terminal_focused: true,
-            tool_permissions,
-            skills_dirs: loaded_config.inventory.opencode_skills_dirs,
-            // Note: skills_dirs is legacy; skill loading is now handled by src/skill/mod.rs
-            is_streaming: false,
-            pending_session_title: None,
-            session_view_states: std::collections::HashMap::new(),
-            session_spinner_frame: 0,
-            stream_drain_rotation: 0,
-            sessions_dialog_live_dirty: true,
-            last_sessions_dialog_metadata_probe: now,
-            last_frame_size: ratatui::layout::Rect::default(),
-            last_animation_update: now,
-            last_user_activity: now,
-            last_session_spinner_update: now,
-            cached_git_branch: None,
-            cached_git_branch_path: String::new(),
-            last_git_branch_check: now,
-            discovery,
-            cached_usage_text: String::new(),
-            cached_usage_check: (0, 0, 0),
-            cached_usage_streaming_base: None,
-            terminal_title_enabled: crate::notify::terminal_title_supported(),
-            terminal_title_items,
-            terminal_title_last: None,
-            terminal_title_animation_origin: now,
-            remote_launch_request: None,
-        })
+        self.prefs_dao = prefs_dao;
+        self.agent = agent;
+        self.agent_registry = agent_registry;
+        self.agent_steps = agent_steps;
+        self.provider_timeouts = provider_timeouts;
+        self.model = active_model;
+        self.provider_name = active_provider_name;
+        self.small_model = small_model;
+        self.reasoning_efforts = reasoning_efforts;
+        self.sounds = resolved_sounds;
+        self.notifications = loaded_config.merged_config.notifications.clone();
+        self.images = loaded_config.merged_config.images.clone();
+        self.websearch = loaded_config.merged_config.websearch.clone();
+        self.mcp = mcp_config;
+        self.config_raw_merged = loaded_config.raw_merged;
+        self.custom_instructions = runtime.custom_instructions;
+        self.tool_permissions = runtime.tool_permissions;
+        self.skills_dirs = loaded_config.inventory.opencode_skills_dirs;
+        self.discovery = runtime.discovery;
+        self.terminal_title_items = terminal_title_items;
+        self.startup_hydrated = true;
+        self.pending_model_override = None;
+        self.pending_cli_agent = None;
+        Ok(())
     }
 
     fn play_sound_event(&self, event: crate::sound::SoundEvent) {
@@ -11510,6 +11574,9 @@ mod tests {
             terminal_title_last: None,
             terminal_title_animation_origin: std::time::Instant::now(),
             remote_launch_request: None,
+            startup_hydrated: true,
+            pending_model_override: None,
+            pending_cli_agent: None,
         }
     }
 

@@ -689,10 +689,10 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
         suggested_alias.clone(),
         options.pair_code.clone(),
     )?);
-    let app = Arc::new(TokioMutex::new(App::new_with_model_override(
-        options.model_override.as_deref(),
-        None,
-    )?));
+    let mut app_inner = App::new_with_model_override(options.model_override.as_deref(), None)?;
+    app_inner.ensure_startup_hydrated()?;
+    app_inner.ensure_session_history();
+    let app = Arc::new(TokioMutex::new(app_inner));
 
     {
         let app = app.lock().await;

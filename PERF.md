@@ -29,6 +29,140 @@ settle=`3s` · sample=`8s` · interval=`0.25s` · version runs=`50`
 
 | Agent | mean ± σ | min … max |
 | --- | ---: | ---: |
+| **crabcode** | **7.71 ms ± 0.88** | 6.82 … 10.81 |
+| grok | 10.45 ms ± 0.57 | 9.55 … 12.21 |
+| codex | 12.61 ms ± 0.93 | 10.24 … 14.84 |
+| opencode | 355.67 ms ± 7.51 | 348.53 … 381.50 |
+
+crabcode is **1.35×** faster than grok, **1.64×** than codex, **~46×** than opencode.
+
+### B) TUI first frame (lower is better)
+
+| Agent | mean | best … worst |
+| --- | ---: | ---: |
+| **codex** | **50.9 ms** | 50.5 … 51.6 |
+| crabcode | 54.9 ms | 54.8 … 55.0 |
+| opencode | 1023.7 ms | 969.5 … 1125.0 |
+| grok | 1743.3 ms | 1554.0 … 1936.3 |
+
+### C) Idle CPU after settle (lower is better)
+
+| Agent | mean | p50 | p95 | max | RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **crabcode** | **0.1%** | 0.0% | 0.3% | 1.3% | 52.4 MB |
+| grok | 1.0% | 1.0% | 1.4% | 1.5% | 95.9 MB |
+| codex | 1.0% | 0.7% | 2.3% | 4.6% | 204.3 MB |
+| opencode | 8.8% | 4.8% | 28.5% | 49.3% | 1027.5 MB |
+
+**Verdict:** crabcode best (or tied) on idle CPU.
+
+> Tip: use a **release** binary and `--settle 5 --sample 10+`. Debug builds / short settle can still show Home blink (~60fps) and inflate idle %.
+
+<details>
+<summary>Raw dump</summary>
+
+```
+A) --version startup (hyperfine)
+  crabcode     7.71 ms ±  0.88  (min 6.82, max 10.81, n=50)
+  codex       12.61 ms ±  0.93  (min 10.24, max 14.84, n=50)
+  grok        10.45 ms ±  0.57  (min 9.55, max 12.21, n=50)
+  opencode   355.67 ms ±  7.51  (min 348.53, max 381.50, n=50)
+
+B) TUI first frame
+  crabcode   first_frame    54.9 ms  (best 54.8, worst 55.0)
+  codex      first_frame    50.9 ms  (best 50.5, worst 51.6)
+  grok       first_frame  1743.3 ms  (best 1554.0, worst 1936.3)
+  opencode   first_frame  1023.7 ms  (best 969.5, worst 1125.0)
+
+C) Idle CPU (settle=3s, sample=8s)
+  crabcode   cpu mean=  0.1%  p50=  0.0%  p95=  0.3%  max=  1.3%  rss=  52.4MB  procs=1  n=25
+  codex      cpu mean=  1.0%  p50=  0.7%  p95=  2.3%  max=  4.6%  rss= 204.3MB  procs=1  n=25
+  grok       cpu mean=  1.0%  p50=  1.0%  p95=  1.4%  max=  1.5%  rss=  95.9MB  procs=1  n=25
+  opencode   cpu mean=  8.8%  p50=  4.8%  p95= 28.5%  max= 49.3%  rss=1027.5MB  procs=1  n=26
+```
+
+</details>
+
+---
+
+## History
+
+<details>
+<summary>2026-08-26 · darwin · `Carlos-MacBook-Pro.local` · cwd = repo</summary>
+
+**2026-08-26** · darwin · `Carlos-MacBook-Pro.local` · cwd = repo  
+settle=`3s` · sample=`8s` · interval=`0.25s` · version runs=`50`
+
+### A) `--version` (lower is better)
+
+| Agent | mean ± σ | min … max |
+| --- | ---: | ---: |
+| **crabcode** | **8.98 ms ± 1.33** | 6.53 … 14.01 |
+| grok | 12.74 ms ± 1.49 | 10.35 … 17.83 |
+| codex | 15.24 ms ± 1.18 | 12.58 … 18.59 |
+| opencode | 360.30 ms ± 7.27 | 349.46 … 385.32 |
+
+crabcode is **1.42×** faster than grok, **1.70×** than codex, **~40×** than opencode.
+
+### B) TUI first frame (lower is better)
+
+| Agent | mean | best … worst |
+| --- | ---: | ---: |
+| **codex** | **50.7 ms** | 50.3 … 50.9 |
+| crabcode | 54.6 ms | 53.7 … 55.1 |
+| opencode | 914.3 ms | 908.1 … 924.6 |
+| grok | 1518.7 ms | 1303.7 … 1843.2 |
+
+### C) Idle CPU after settle (lower is better)
+
+| Agent | mean | p50 | p95 | max | RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **crabcode** | **0.1%** | 0.0% | 0.3% | 1.4% | 52.3 MB |
+| grok | 0.8% | 0.9% | 1.2% | 2.1% | 96.8 MB |
+| codex | 0.9% | 0.7% | 2.3% | 2.6% | 209.5 MB |
+| opencode | 5.2% | 2.5% | 21.7% | 27.0% | 999.1 MB |
+
+**Verdict:** crabcode best (or tied) on idle CPU.
+
+> Tip: use a **release** binary and `--settle 5 --sample 10+`. Debug builds / short settle can still show Home blink (~60fps) and inflate idle %.
+
+<details>
+<summary>Raw dump</summary>
+
+```
+A) --version startup (hyperfine)
+  crabcode     8.98 ms ±  1.33  (min 6.53, max 14.01, n=50)
+  codex       15.24 ms ±  1.18  (min 12.58, max 18.59, n=50)
+  grok        12.74 ms ±  1.49  (min 10.35, max 17.83, n=50)
+  opencode   360.30 ms ±  7.27  (min 349.46, max 385.32, n=50)
+
+B) TUI first frame
+  crabcode   first_frame    54.6 ms  (best 53.7, worst 55.1)
+  codex      first_frame    50.7 ms  (best 50.3, worst 50.9)
+  grok       first_frame  1518.7 ms  (best 1303.7, worst 1843.2)
+  opencode   first_frame   914.3 ms  (best 908.1, worst 924.6)
+
+C) Idle CPU (settle=3s, sample=8s)
+  crabcode   cpu mean=  0.1%  p50=  0.0%  p95=  0.3%  max=  1.4%  rss=  52.3MB  procs=1  n=26
+  codex      cpu mean=  0.9%  p50=  0.7%  p95=  2.3%  max=  2.6%  rss= 209.5MB  procs=1  n=26
+  grok       cpu mean=  0.8%  p50=  0.9%  p95=  1.2%  max=  2.1%  rss=  96.8MB  procs=1  n=26
+  opencode   cpu mean=  5.2%  p50=  2.5%  p95= 21.7%  max= 27.0%  rss= 999.1MB  procs=1  n=26
+```
+
+</details>
+
+</details>
+
+<details>
+<summary>2026-08-26 · darwin · `Carlos-MacBook-Pro.local` · cwd = repo</summary>
+
+**2026-08-26** · darwin · `Carlos-MacBook-Pro.local` · cwd = repo  
+settle=`3s` · sample=`8s` · interval=`0.25s` · version runs=`50`
+
+### A) `--version` (lower is better)
+
+| Agent | mean ± σ | min … max |
+| --- | ---: | ---: |
 | **crabcode** | **8.47 ms ± 1.91** | 6.46 … 18.29 |
 | codex | 12.71 ms ± 1.31 | 11.11 … 18.57 |
 | grok | 12.86 ms ± 1.49 | 9.66 … 15.58 |
@@ -83,9 +217,7 @@ C) Idle CPU (settle=3s, sample=8s)
 
 </details>
 
----
-
-## History
+</details>
 
 <details>
 <summary>2026-08-26 · darwin · `Carlos-MacBook-Pro.local` · cwd = repo</summary>
