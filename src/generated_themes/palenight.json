@@ -224,5 +224,6 @@
       "dark": "foreground",
       "light": "#292d3e"
     }
-  }
+  },
+  "appearance": "dark"
 }

@@ -1,30 +1,53 @@
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{layout::Rect, Frame};
 
 use crate::theme::ThemeColors;
-use crate::ui::components::dialog::{Dialog, DialogItem};
+use crate::ui::components::dialog::{Dialog, DialogAction, DialogItem};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThemesDialogAction {
     PreviewTheme { theme_id: String },
     SelectTheme { theme_id: String },
+    ToggleTransparent,
     None,
 }
 
 #[derive(Debug)]
 pub struct ThemesDialogState {
     pub dialog: Dialog,
+    /// Whether the main UI background is transparent (terminal shows through).
+    pub transparent: bool,
 }
 
 impl ThemesDialogState {
-    pub fn new(dialog: Dialog) -> Self {
-        Self { dialog }
+    pub fn new(dialog: Dialog, transparent: bool) -> Self {
+        let mut state = Self {
+            dialog,
+            transparent,
+        };
+        state.sync_actions();
+        state
     }
 
-    pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
-        Self {
-            dialog: Dialog::with_items(title, items),
-        }
+    pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>, transparent: bool) -> Self {
+        Self::new(Dialog::with_items(title, items), transparent)
+    }
+
+    pub fn set_transparent(&mut self, transparent: bool) {
+        self.transparent = transparent;
+        self.sync_actions();
+    }
+
+    pub fn toggle_transparent(&mut self) -> bool {
+        self.transparent = !self.transparent;
+        self.sync_actions();
+        self.transparent
+    }
+
+    fn sync_actions(&mut self) {
+        self.dialog.actions = transparent_actions(self.transparent);
     }
 
     pub fn refresh_items(&mut self, items: Vec<DialogItem>) {
@@ -32,8 +55,12 @@ impl ThemesDialogState {
         let was_visible = self.dialog.is_visible();
         let selected_index = self.dialog.selected_index;
         let items_clone = items.clone();
+        let transparent = self.transparent;
 
         self.dialog = Dialog::with_items(title, items);
+        self.sync_actions();
+        // Keep transparent flag in sync after rebuild.
+        let _ = transparent;
 
         if was_visible {
             self.dialog.show();
@@ -45,8 +72,34 @@ impl ThemesDialogState {
     }
 }
 
-pub fn init_themes_dialog(title: impl Into<String>, items: Vec<DialogItem>) -> ThemesDialogState {
-    ThemesDialogState::with_items(title, items)
+fn transparent_actions(transparent: bool) -> Vec<DialogAction> {
+    let label = if transparent {
+        "transparent: on"
+    } else {
+        "transparent: off"
+    };
+    vec![
+        DialogAction {
+            key: "ctrl+t".to_string(),
+            label: label.to_string(),
+        },
+        DialogAction {
+            key: "esc".to_string(),
+            label: "close".to_string(),
+        },
+        DialogAction {
+            key: "enter".to_string(),
+            label: "select".to_string(),
+        },
+    ]
+}
+
+pub fn init_themes_dialog(
+    title: impl Into<String>,
+    items: Vec<DialogItem>,
+    transparent: bool,
+) -> ThemesDialogState {
+    ThemesDialogState::with_items(title, items, transparent)
 }
 
 pub fn render_themes_dialog(
@@ -64,6 +117,12 @@ pub fn handle_themes_dialog_key_event(
 ) -> ThemesDialogAction {
     if !dialog_state.dialog.is_visible() {
         return ThemesDialogAction::None;
+    }
+
+    // Toggle transparency without leaving the dialog.
+    if event.code == KeyCode::Char('t') && event.modifiers == KeyModifiers::CONTROL {
+        dialog_state.toggle_transparent();
+        return ThemesDialogAction::ToggleTransparent;
     }
 
     let before = dialog_state.dialog.get_selected().map(|it| it.id.clone());
@@ -140,12 +199,12 @@ mod tests {
     use super::*;
     use ratatui::crossterm::event::KeyModifiers;
 
-    fn theme_item(id: &str, name: &str) -> DialogItem {
+    fn theme_item(id: &str, name: &str, appearance: &str) -> DialogItem {
         DialogItem {
             id: id.to_string(),
             name: name.to_string(),
             group: "Built in".to_string(),
-            description: String::new(),
+            description: appearance.to_string(),
             tip: None,
             provider_id: String::new(),
             active: false,
@@ -168,9 +227,10 @@ mod tests {
         let mut state = init_themes_dialog(
             "Themes",
             vec![
-                theme_item("ayu", "Ayu"),
-                theme_item("tokyonight", "Tokyo Night"),
+                theme_item("ayu", "Ayu", "dark"),
+                theme_item("tokyonight", "Tokyo Night", "dark"),
             ],
+            false,
         );
         state.dialog.show();
         state.dialog.dialog_area = Rect {
@@ -203,9 +263,10 @@ mod tests {
         let mut state = init_themes_dialog(
             "Themes",
             vec![
-                theme_item("ayu", "Ayu"),
-                theme_item("tokyonight", "Tokyo Night"),
+                theme_item("ayu", "Ayu", "dark"),
+                theme_item("tokyonight", "Tokyo Night", "dark"),
             ],
+            false,
         );
         state.dialog.show();
         state.dialog.dialog_area = Rect {
@@ -227,5 +288,52 @@ mod tests {
             }
         );
         assert!(state.dialog.is_visible());
+    }
+
+    #[test]
+    fn ctrl_t_toggles_transparent() {
+        let mut state = init_themes_dialog("Themes", vec![theme_item("ayu", "Ayu", "dark")], false);
+        state.dialog.show();
+
+        let action = handle_themes_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, ThemesDialogAction::ToggleTransparent);
+        assert!(state.transparent);
+        assert!(state
+            .dialog
+            .actions
+            .iter()
+            .any(|a| a.label.contains("transparent: on")));
+
+        let action = handle_themes_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, ThemesDialogAction::ToggleTransparent);
+        assert!(!state.transparent);
+    }
+
+    #[test]
+    fn search_matches_appearance_description() {
+        let mut state = init_themes_dialog(
+            "Themes",
+            vec![
+                theme_item("grokday", "Grok Day", "light"),
+                theme_item("groknight", "Grok Night", "dark"),
+            ],
+            false,
+        );
+        state.dialog.show();
+        state.dialog.set_search_query("light");
+        let visible: Vec<_> = state
+            .dialog
+            .filtered_items
+            .iter()
+            .flat_map(|(_, items)| items.iter().map(|i| i.id.as_str()))
+            .collect();
+        assert!(visible.contains(&"grokday"));
+        assert!(!visible.contains(&"groknight"));
     }
 }

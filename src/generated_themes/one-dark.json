@@ -70,8 +70,8 @@
       "light": "lightFgMutedWeak"
     },
     "background": {
-      "dark": "darkBg",
-      "light": "lightBg"
+      "dark": "#282c34",
+      "light": "#fafafa"
     },
     "backgroundPanel": {
       "dark": "darkBgAlt",
@@ -233,5 +233,6 @@
       "dark": "darkFg",
       "light": "lightFg"
     }
-  }
+  },
+  "appearance": "dark"
 }

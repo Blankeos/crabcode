@@ -62,8 +62,8 @@
       "light": "base1Weak"
     },
     "background": {
-      "dark": "base03",
-      "light": "base3"
+      "dark": "#002b36",
+      "light": "#fdf6e3"
     },
     "backgroundPanel": {
       "dark": "base02",
@@ -225,5 +225,6 @@
       "dark": "base0",
       "light": "base00"
     }
-  }
+  },
+  "appearance": "dark"
 }

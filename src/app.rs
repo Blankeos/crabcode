@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph},
+    widgets::{Block, Clear, Paragraph},
 };
 
 use crate::autocomplete::AutoComplete;
@@ -824,6 +824,7 @@ pub struct App {
     pub models_dialog_state: ModelsDialogState,
     pub themes_dialog_state: ThemesDialogState,
     themes_dialog_original_theme_index: usize,
+    themes_dialog_original_dark_mode: bool,
     themes_dialog_committed: bool,
     pub connect_dialog_state: ConnectDialogState,
     connect_dialog_mode: ConnectDialogMode,
@@ -883,6 +884,8 @@ pub struct App {
     pub themes: Vec<Theme>,
     pub current_theme_index: usize,
     pub dark_mode: bool,
+    /// When true, main UI background is Color::Reset (terminal shows through).
+    pub theme_transparent: bool,
     pub sounds: crate::sound::ResolvedSoundsConfig,
     pub notifications: crate::config::NotificationsConfig,
     pub images: crate::config::ImagesConfig,
@@ -982,7 +985,7 @@ impl App {
         let suggestions_popup_state = init_suggestions_popup(Popup::new());
         let agents_dialog_state = init_agents_dialog("Select agent", vec![]);
         let models_dialog_state = init_models_dialog("Models", vec![]);
-        let themes_dialog_state = init_themes_dialog("Themes", vec![]);
+        let themes_dialog_state = init_themes_dialog("Themes", vec![], false);
         let connect_dialog_state = init_connect_dialog();
         let provider_oauth_flow_state = init_provider_oauth_flow();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
@@ -1171,7 +1174,17 @@ impl App {
             .or_else(|| themes.first())
             .cloned()
             .unwrap_or_else(theme::Theme::load_builtin_default);
-        let colors = theme_for_colors.get_colors(true);
+        let theme_transparent = prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_theme_transparent().ok())
+            .unwrap_or(false);
+        // Align dark_mode with the selected theme's appearance so light themes
+        // don't render with dark-mode color slots by default.
+        let dark_mode = match theme_for_colors.appearance {
+            theme::ThemeAppearance::Light => false,
+            theme::ThemeAppearance::Dark => true,
+        };
+        let colors = theme_for_colors.get_colors_with(dark_mode, theme_transparent);
 
         let configured_compact_mode = loaded_config.merged_config.tui_compact_mode;
         let persisted_compact_mode = if configured_compact_mode.is_none() {
@@ -1209,6 +1222,7 @@ impl App {
             models_dialog_state,
             themes_dialog_state,
             themes_dialog_original_theme_index: 0,
+            themes_dialog_original_dark_mode: true,
             themes_dialog_committed: false,
             connect_dialog_state,
             connect_dialog_mode: ConnectDialogMode::ProviderSelection,
@@ -1262,7 +1276,8 @@ impl App {
             last_ctrl_c_time: std::time::Instant::now(),
             themes,
             current_theme_index,
-            dark_mode: true,
+            dark_mode,
+            theme_transparent,
             sounds: resolved_sounds,
             notifications: loaded_config.merged_config.notifications,
             images: loaded_config.merged_config.images,
@@ -2696,7 +2711,7 @@ impl App {
         }
 
         let theme = &self.themes[self.current_theme_index];
-        theme.get_colors(self.dark_mode)
+        theme.get_colors_with(self.dark_mode, self.theme_transparent)
     }
 
     fn active_workspace_path(&self) -> String {
@@ -2844,28 +2859,40 @@ impl App {
     }
 
     fn preview_theme_by_id(&mut self, theme_id: &str) {
-        if let Some((idx, _)) = self
+        if let Some((idx, theme)) = self
             .themes
             .iter()
             .enumerate()
             .find(|(_, theme)| theme.id == theme_id)
         {
             self.current_theme_index = idx;
+            self.dark_mode = matches!(theme.appearance, theme::ThemeAppearance::Dark);
         }
     }
 
     fn commit_theme_by_id(&mut self, theme_id: &str) -> Option<String> {
-        let (idx, selected_theme_id) = self
+        let (idx, selected_theme_id, appearance) = self
             .themes
             .iter()
             .enumerate()
             .find(|(_, theme)| theme.id == theme_id)
-            .map(|(idx, theme)| (idx, theme.id.clone()))?;
+            .map(|(idx, theme)| (idx, theme.id.clone(), theme.appearance))?;
 
         self.current_theme_index = idx;
+        self.dark_mode = matches!(appearance, theme::ThemeAppearance::Dark);
         self.themes_dialog_committed = true;
         self.persist_theme_selection(&selected_theme_id);
         Some(selected_theme_id)
+    }
+
+    fn apply_theme_transparent(&mut self, transparent: bool) {
+        self.theme_transparent = transparent;
+        self.themes_dialog_state.set_transparent(transparent);
+        if let Some(ref dao) = self.prefs_dao {
+            if let Err(e) = dao.set_theme_transparent(transparent) {
+                eprintln!("Failed to save theme transparency: {}", e);
+            }
+        }
     }
 
     fn persist_theme_selection(&self, theme_id: &str) {
@@ -3455,12 +3482,16 @@ impl App {
                             ));
                         }
                     }
+                    crate::views::themes_dialog::ThemesDialogAction::ToggleTransparent => {
+                        self.apply_theme_transparent(self.themes_dialog_state.transparent);
+                    }
                     crate::views::themes_dialog::ThemesDialogAction::None => {}
                 }
 
                 if !self.themes_dialog_state.dialog.is_visible() {
                     if !self.themes_dialog_committed {
                         self.current_theme_index = self.themes_dialog_original_theme_index;
+                        self.dark_mode = self.themes_dialog_original_dark_mode;
                     }
                     self.overlay_focus = OverlayFocus::None;
                 }
@@ -4735,12 +4766,16 @@ impl App {
                         ));
                     }
                 }
+                crate::views::themes_dialog::ThemesDialogAction::ToggleTransparent => {
+                    self.apply_theme_transparent(self.themes_dialog_state.transparent);
+                }
                 crate::views::themes_dialog::ThemesDialogAction::None => {}
             }
 
             if !self.themes_dialog_state.dialog.is_visible() {
                 if !self.themes_dialog_committed {
                     self.current_theme_index = self.themes_dialog_original_theme_index;
+                    self.dark_mode = self.themes_dialog_original_dark_mode;
                 }
                 self.overlay_focus = OverlayFocus::None;
                 return;
@@ -7735,8 +7770,9 @@ impl App {
                 DialogItem {
                     id: t.id.clone(),
                     name: t.id.clone(),
-                    group: String::new(),
-                    description: String::new(),
+                    group: t.appearance.as_str().to_string(),
+                    // Searchable: type "light" or "dark" to filter by appearance.
+                    description: t.appearance.as_str().to_string(),
                     tip: None,
                     provider_id: String::new(),
                     active: is_active,
@@ -7746,7 +7782,7 @@ impl App {
 
         items.sort_by(|a, b| a.id.cmp(&b.id));
 
-        self.themes_dialog_state = init_themes_dialog("Themes", items);
+        self.themes_dialog_state = init_themes_dialog("Themes", items, self.theme_transparent);
 
         if let Some(theme_id) = current_id.as_deref() {
             let _ = self
@@ -7757,6 +7793,7 @@ impl App {
 
         self.themes_dialog_state.dialog.show();
         self.themes_dialog_original_theme_index = self.current_theme_index;
+        self.themes_dialog_original_dark_mode = self.dark_mode;
         self.themes_dialog_committed = false;
         self.overlay_focus = OverlayFocus::ThemesDialog;
     }
@@ -10660,6 +10697,15 @@ impl App {
         self.last_frame_size = size;
         let colors = self.get_current_theme_colors();
 
+        // Solid canvas when transparency is off. Color::Reset (transparent on)
+        // leaves the terminal's own background showing through.
+        if colors.background != ratatui::style::Color::Reset {
+            f.render_widget(
+                Block::default().style(Style::default().bg(colors.background)),
+                size,
+            );
+        }
+
         let fingerprint = (
             self.chat_state.chat.messages.len(),
             self.chat_state.chat.render_revision(),
@@ -11351,8 +11397,9 @@ mod tests {
             suggestions_popup_state: init_suggestions_popup(Popup::new()),
             agents_dialog_state: init_agents_dialog("Select agent", vec![]),
             models_dialog_state: init_models_dialog("Models", vec![]),
-            themes_dialog_state: init_themes_dialog("Themes", vec![]),
+            themes_dialog_state: init_themes_dialog("Themes", vec![], false),
             themes_dialog_original_theme_index: 0,
+            themes_dialog_original_dark_mode: true,
             themes_dialog_committed: false,
             connect_dialog_state: init_connect_dialog(),
             connect_dialog_mode: ConnectDialogMode::ProviderSelection,
@@ -11407,6 +11454,7 @@ mod tests {
             themes: vec![theme],
             current_theme_index: 0,
             dark_mode: true,
+            theme_transparent: false,
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
             images: crate::config::ImagesConfig::default(),

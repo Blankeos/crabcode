@@ -40,7 +40,10 @@
       "dark": "darkFgMutedWeak",
       "light": "darkFgMutedWeak"
     },
-    "background": "darkBg",
+    "background": {
+      "dark": "#0B0E14",
+      "light": "#0B0E14"
+    },
     "backgroundPanel": "darkPanel",
     "backgroundElement": "darkBgAlt",
     "border": "darkGutter",
@@ -81,5 +84,6 @@
     "syntaxType": "darkSpecial",
     "syntaxOperator": "darkOperator",
     "syntaxPunctuation": "darkFg"
-  }
+  },
+  "appearance": "dark"
 }

@@ -98,8 +98,8 @@
       "light": "lightOverlay2Weak"
     },
     "background": {
-      "dark": "darkBase",
-      "light": "lightBase"
+      "dark": "#1e1e2e",
+      "light": "#eff1f5"
     },
     "backgroundPanel": {
       "dark": "darkMantle",
@@ -261,5 +261,6 @@
       "dark": "darkText",
       "light": "lightText"
     }
-  }
+  },
+  "appearance": "dark"
 }

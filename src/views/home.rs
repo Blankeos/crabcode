@@ -250,8 +250,11 @@ pub fn render_home(
     let help = Paragraph::new(help_line).alignment(Alignment::Right);
     f.render_widget(help, status_chunks[2]);
 
-    let blank = Block::default();
-    f.render_widget(blank, home_chunks[3]);
+    // Keep spacer on theme canvas (don't Reset over solid bg).
+    f.render_widget(
+        Block::default().style(Style::default().bg(colors.background)),
+        home_chunks[3],
+    );
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
     status_bar.render(f, main_chunks[1], colors);

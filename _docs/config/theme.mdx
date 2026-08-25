@@ -14,4 +14,29 @@ Reasons:
 2. Keeping only crabcode-owned theme config makes precedence predictable for users.
 3. It avoids accidental overrides when existing OpenCode configs are shared across tools.
 
+## Appearance
+
+Every theme has an `appearance` of either `"dark"` or `"light"`:
+
+- Declared in theme JSON as `"appearance": "dark"` or `"appearance": "light"`.
+- If omitted, Crabcode infers it from the theme's background luminance.
+- Searchable in `/themes`: type `light` or `dark` to filter the list.
+- Selecting a theme aligns the UI's dark/light color slots to that appearance.
+
+OpenCode dual-mode themes are imported as two selectable entries: the base ID (dark) and `{id}-light` (light). Example: `github` and `github-light`. Themes whose light Mode is identical to dark (fake dual-mode) only keep the base entry.
+
+## Background transparency
+
+By default the main UI paints a **full-screen solid** theme background (OpenCode-style), so light themes like Grok Day look consistent in any terminal.
+
+In the `/themes` dialog, press **`ctrl+t`** to toggle transparency on/off. When on, the main canvas uses the terminal's own background (`Color::Reset`). Preference is persisted. Panels and dialogs stay solid either way.
+
+Themes that declared `"background": "transparent"` are solidified when generated/loaded; runtime transparency is only via the toggle.
+
+## Selecting a theme
+
+- Use the `/themes` dialog to preview and select a theme.
+- The selected theme is persisted in the local preferences database and restored on next launch.
+- While the dialog is open, highlighting a theme previews it live; Esc cancels back to the previously active theme.
+
 For theme file format and naming, use the [OpenCode theme docs](https://opencode.ai/docs/themes/).

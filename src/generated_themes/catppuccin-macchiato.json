@@ -71,8 +71,8 @@
       "light": "macOverlay2Weak"
     },
     "background": {
-      "dark": "macBase",
-      "light": "macBase"
+      "dark": "#24273a",
+      "light": "#24273a"
     },
     "backgroundPanel": {
       "dark": "macMantle",
@@ -231,5 +231,6 @@
       "dark": "macText",
       "light": "macText"
     }
-  }
+  },
+  "appearance": "dark"
 }

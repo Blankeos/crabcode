@@ -62,8 +62,8 @@
       "light": "nord1Weak"
     },
     "background": {
-      "dark": "nord0",
-      "light": "nord6"
+      "dark": "#2E3440",
+      "light": "#ECEFF4"
     },
     "backgroundPanel": {
       "dark": "nord1",
@@ -225,5 +225,6 @@
       "dark": "nord4",
       "light": "nord0"
     }
-  }
+  },
+  "appearance": "dark"
 }

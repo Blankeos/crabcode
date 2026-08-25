@@ -228,5 +228,6 @@
       "dark": "foreground",
       "light": "#262335"
     }
-  }
+  },
+  "appearance": "dark"
 }

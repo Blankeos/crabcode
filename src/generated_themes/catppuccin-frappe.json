@@ -71,8 +71,8 @@
       "light": "frappeOverlay2Weak"
     },
     "background": {
-      "dark": "frappeBase",
-      "light": "frappeBase"
+      "dark": "#303446",
+      "light": "#303446"
     },
     "backgroundPanel": {
       "dark": "frappeMantle",
@@ -231,5 +231,6 @@
       "dark": "frappeText",
       "light": "frappeText"
     }
-  }
+  },
+  "appearance": "dark"
 }

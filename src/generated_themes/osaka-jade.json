@@ -79,8 +79,8 @@
       "light": "lightGrayWeak"
     },
     "background": {
-      "dark": "darkBg0",
-      "light": "lightBg0"
+      "dark": "#111c18",
+      "light": "#F6F5DD"
     },
     "backgroundPanel": {
       "dark": "darkBg1",
@@ -242,5 +242,6 @@
       "dark": "darkFg0",
       "light": "lightFg0"
     }
-  }
+  },
+  "appearance": "dark"
 }
