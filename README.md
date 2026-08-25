@@ -143,6 +143,8 @@ Like any benchmark, please take this with a grain of salt. I have a cherry-picke
 | 🔲 opencode |  100% |  19/19 |    34.9s |        4612 |   $0.0279 |
 | ⚛️ codex    |  100% |  19/19 |    33.7s |       36888 |   $0.3506 |
 
+CLI startup / first-frame / idle-CPU vs peers (hyperfine + PTY): see **[PERF.md](PERF.md)** (`just bench-perf`).
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

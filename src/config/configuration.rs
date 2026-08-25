@@ -11,6 +11,49 @@ use std::path::{Path, PathBuf};
 // Re-export json5 for use in load_config_value
 use json5;
 
+/// Cheap theme resolve for first paint: peek config `theme` + prefs, then discover.
+/// Skips full ConfigLoader / skills / agents.
+pub fn resolve_startup_theme(
+    cwd: &Path,
+    prefs_theme_id: Option<&str>,
+    theme_transparent: bool,
+) -> (Vec<crate::theme::Theme>, usize, bool, bool) {
+    let xdg_config_home = xdg_config_home();
+    let project_root = discover_project_root(cwd);
+    let config_theme_id = peek_config_theme_id(&xdg_config_home, &project_root);
+    let selected = config_theme_id
+        .as_deref()
+        .or(prefs_theme_id)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let (themes, idx) = discover_themes(&xdg_config_home, &project_root, cwd, selected);
+    let theme = themes
+        .get(idx)
+        .or_else(|| themes.first())
+        .cloned()
+        .unwrap_or_else(crate::theme::Theme::load_builtin_default);
+    let dark_mode = matches!(theme.appearance, crate::theme::ThemeAppearance::Dark);
+    (themes, idx, dark_mode, theme_transparent)
+}
+
+fn peek_config_theme_id(xdg_config_home: &Path, project_root: &Path) -> Option<String> {
+    let sources = resolve_sources(xdg_config_home, project_root).ok()?;
+    let mut theme_id = None;
+    for source in sources {
+        let Ok(value) = load_config_value(&source.path) else {
+            continue;
+        };
+        let filtered = filter_top_level(value, source.kind);
+        if let Some(id) = filtered.get("theme").and_then(|v| v.as_str()) {
+            let id = id.trim();
+            if !id.is_empty() {
+                theme_id = Some(id.to_string());
+            }
+        }
+    }
+    theme_id
+}
+
 pub fn discover_themes(
     xdg_config_home: &Path,
     project_root: &Path,

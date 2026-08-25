@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 const MAX_SUGGESTIONS: usize = 80;
 const EVENT_DEBOUNCE: Duration = Duration::from_millis(100);
-const INDEXER_POLL_INTERVAL: Duration = Duration::from_secs(1);
+// Wake rarely when idle; notify events still force an immediate refresh via refresh_tx.
+const INDEXER_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const WATCHED_SAFETY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const UNWATCHED_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 

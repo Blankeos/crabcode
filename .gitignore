@@ -4,6 +4,10 @@ app.log
 aisdk_debug.log
 sounds/complete.wav
 
+__pycache__/
+*.py[cod]
+*$py.class
+
 _dev_reference1
 _dev_reference2
 .env

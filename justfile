@@ -48,6 +48,22 @@ gen-themes *args:
 bench-agents *args:
     bun run scripts/bench-agents.ts {{ args }}
 
+[doc("""
+  Startup + idle-CPU perf vs peer CLIs.
+
+  A) hyperfine --version   B) PTY first-frame   C) idle CPU after settle
+  Ends with: Add this to PERF.md? [y/N]
+
+  just bench-perf
+  just bench-perf --agents crabcode,codex,grok
+  just bench-perf --section idle --settle 5 --sample 15
+  just bench-perf --write-perf          # skip prompt, update PERF.md
+  just bench-perf --no-write-perf       # skip prompt, don't update
+  cargo build --release && PATH="./target/release:$PATH" just bench-perf
+""")]
+bench-perf *args:
+    python3 scripts/bench-perf.py {{ args }}
+
 devdocs:
     gittydocs dev _docs
 

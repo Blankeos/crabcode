@@ -14,4 +14,4 @@ pub use configuration::McpLocalConfig;
 #[cfg(target_os = "macos")]
 pub use configuration::MacosNotificationBackend;
 
-pub use configuration::discover_themes;
+pub use configuration::resolve_startup_theme;
