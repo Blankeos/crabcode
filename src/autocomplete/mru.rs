@@ -1,27 +1,19 @@
 //! Slash-command MRU (most-recently-used) store.
 //!
-//! Mirrors grok-build's `slash/mru.rs`: flat per-command timestamps with a
-//! soft-decay recency score used as a ranking boost during **search only**.
-//! Empty `/` menus keep registry order unchanged.
+//! Flat per-command timestamps with a soft-decay recency score used as a
+//! ranking boost during **search only**. Empty `/` menus keep registry order.
+//! Persisted as the `slash_mru` prefs key in `data.db`.
 
-use serde::{Deserialize, Serialize};
+use crate::persistence::{get_data_dir, PrefsDAO};
 use std::collections::HashMap;
 use std::fs;
-use std::io;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Soft half-life (~7 days). Matches grok-build.
+/// Soft half-life (~7 days).
 const HALF_LIFE_SECS: f64 = 7.0 * 86_400.0;
 const MAX_ENTRIES: usize = 256;
-const STORE_FILE: &str = "slash_mru.json";
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct MruFile {
-    /// Canonical command name (no leading `/`) → unix seconds of last use.
-    #[serde(default)]
-    by_command: HashMap<String, u64>,
-}
+/// Legacy sidecar; migrated into prefs once then deleted.
+const LEGACY_STORE_FILE: &str = "slash_mru.json";
 
 /// Persistent slash-command recency store.
 #[derive(Debug, Clone)]
@@ -48,7 +40,7 @@ impl SlashMru {
         }
     }
 
-    /// Tests / ephemeral: never touches disk.
+    /// Unit-test helper: never touches disk / DB.
     pub fn new_in_memory() -> Self {
         Self {
             by_command: HashMap::new(),
@@ -58,10 +50,6 @@ impl SlashMru {
         }
     }
 
-    fn store_path() -> PathBuf {
-        crate::persistence::get_data_dir().join(STORE_FILE)
-    }
-
     fn now_secs() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -69,109 +57,108 @@ impl SlashMru {
             .unwrap_or(0)
     }
 
-    fn normalize_command(name: &str) -> Option<String> {
-        let trimmed = name.trim().trim_start_matches('/').trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        Some(trimmed.to_ascii_lowercase())
+    fn canonicalize(name: &str) -> String {
+        name.trim().trim_start_matches('/').to_ascii_lowercase()
     }
 
-    /// Soft-decay score: recent ≫ week-old ≫ month-old; never-used → 0.
-    pub fn recency_score(last_used: u64, now: u64) -> u64 {
+    /// Soft-decay score in \[0, 1\]. `last_used == 0` → 0.
+    pub fn recency_score(last_used: u64, now: u64) -> u32 {
         if last_used == 0 || now < last_used {
             return 0;
         }
         let age = (now - last_used) as f64;
-        let score = (1_000_000.0_f64) * (-age / HALF_LIFE_SECS).exp();
-        score.round().clamp(0.0, u64::MAX as f64) as u64
+        let score = 0.5_f64.powf(age / HALF_LIFE_SECS);
+        (score * 1_000_000.0).round() as u32
     }
 
     fn ensure_loaded(&mut self) {
-        if self.loaded {
+        if self.loaded || !self.persist_enabled {
             return;
         }
-        if !self.persist_enabled {
-            self.loaded = true;
-            return;
+        self.by_command = Self::load_from_prefs().unwrap_or_default();
+        if self.by_command.is_empty() {
+            if let Some(legacy) = Self::load_legacy_file() {
+                self.by_command = legacy;
+                self.dirty = true; // rewrite into prefs, then drop sidecar
+                let _ = Self::delete_legacy_file();
+            }
         }
-        let path = Self::store_path();
-        match fs::read(&path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                self.loaded = true;
-            }
-            Err(_) => {
-                // Best-effort: empty store, skip disk for this session.
-                self.loaded = true;
-                self.persist_enabled = false;
-            }
-            Ok(bytes) => match serde_json::from_slice::<MruFile>(&bytes) {
-                Ok(file) => {
-                    self.by_command = file.by_command;
-                    self.trim_to_cap();
-                    self.loaded = true;
-                }
-                Err(_) => {
-                    // Corrupt file: start fresh.
-                    self.loaded = true;
-                }
-            },
+        self.loaded = true;
+    }
+
+    fn load_from_prefs() -> Option<HashMap<String, u64>> {
+        let dao = PrefsDAO::new().ok()?;
+        dao.get_slash_mru().ok()
+    }
+
+    fn load_legacy_file() -> Option<HashMap<String, u64>> {
+        let path = get_data_dir().join(LEGACY_STORE_FILE);
+        let bytes = fs::read(&path).ok()?;
+        #[derive(serde::Deserialize)]
+        struct Legacy {
+            #[serde(default)]
+            by_command: HashMap<String, u64>,
+        }
+        serde_json::from_slice::<Legacy>(&bytes)
+            .ok()
+            .map(|l| l.by_command)
+    }
+
+    fn delete_legacy_file() -> std::io::Result<()> {
+        let path = get_data_dir().join(LEGACY_STORE_FILE);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
         }
     }
 
-    fn trim_to_cap(&mut self) {
-        if self.by_command.len() <= MAX_ENTRIES {
-            return;
-        }
-        let mut entries: Vec<(String, u64)> = self.by_command.drain().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
-        entries.truncate(MAX_ENTRIES);
-        self.by_command = entries.into_iter().collect();
-    }
-
-    /// Record use of a canonical command name.
-    pub fn touch(&mut self, command_name: &str) {
-        let Some(cmd) = Self::normalize_command(command_name) else {
-            return;
-        };
+    pub fn last_used(&mut self, name: &str) -> u64 {
         self.ensure_loaded();
-        self.by_command.insert(cmd, Self::now_secs());
-        self.trim_to_cap();
+        let key = Self::canonicalize(name);
+        self.by_command.get(&key).copied().unwrap_or(0)
+    }
+
+    pub fn rank_score(&mut self, name: &str) -> u32 {
+        let last = self.last_used(name);
+        Self::recency_score(last, Self::now_secs())
+    }
+
+    pub fn touch(&mut self, name: &str) {
+        self.ensure_loaded();
+        let key = Self::canonicalize(name);
+        if key.is_empty() {
+            return;
+        }
+        self.by_command.insert(key, Self::now_secs());
+        if self.by_command.len() > MAX_ENTRIES {
+            let mut entries: Vec<_> = self
+                .by_command
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.truncate(MAX_ENTRIES);
+            self.by_command = entries.into_iter().collect();
+        }
         if self.persist_enabled {
             self.dirty = true;
         }
     }
 
-    pub fn last_used(&mut self, command_name: &str) -> u64 {
-        let Some(cmd) = Self::normalize_command(command_name) else {
-            return 0;
-        };
-        self.ensure_loaded();
-        self.by_command.get(&cmd).copied().unwrap_or(0)
-    }
-
-    pub fn rank_score(&mut self, command_name: &str) -> u64 {
-        let ts = self.last_used(command_name);
-        Self::recency_score(ts, Self::now_secs())
-    }
-
-    /// Persist if dirty. Best-effort; clears dirty on success.
     pub fn persist_if_dirty(&mut self) {
-        if !self.persist_enabled || !self.dirty {
+        if !self.dirty || !self.persist_enabled {
             return;
         }
-        if crate::persistence::ensure_data_dir().is_err() {
-            return;
+        if Self::write_to_prefs(&self.by_command).is_ok() {
+            self.dirty = false;
         }
-        let file = MruFile {
-            by_command: self.by_command.clone(),
-        };
-        let path = Self::store_path();
-        if let Ok(bytes) = serde_json::to_vec(&file) {
-            if fs::write(&path, bytes).is_ok() {
-                self.dirty = false;
-            }
-        }
+    }
+
+    fn write_to_prefs(by_command: &HashMap<String, u64>) -> anyhow::Result<()> {
+        let dao = PrefsDAO::new()?;
+        dao.set_slash_mru(by_command)?;
+        Ok(())
     }
 }
 
@@ -180,19 +167,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn touch_records_flat_by_command() {
+    fn canonicalize_strips_slash_and_lowercases() {
         let mut mru = SlashMru::new_in_memory();
-        mru.touch("compact");
-        mru.touch("/compact-mode");
-        assert!(mru.last_used("compact") > 0);
-        assert!(mru.last_used("compact-mode") > 0);
-        assert_eq!(mru.last_used("/compact"), mru.last_used("compact"));
-    }
-
-    #[test]
-    fn strips_leading_slash() {
-        let mut mru = SlashMru::new_in_memory();
-        mru.touch("/model");
+        mru.touch("/Model");
         assert!(mru.last_used("model") > 0);
         assert_eq!(mru.last_used("/model"), mru.last_used("model"));
     }

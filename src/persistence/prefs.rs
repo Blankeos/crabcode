@@ -9,6 +9,7 @@ const MODEL_PREFS_KEY: &str = "model_preferences";
 const ACTIVE_THEME_KEY: &str = "active_theme";
 const TERMINAL_TITLE_ITEMS_KEY: &str = "terminal_title_items";
 const COMPACT_MODE_KEY: &str = "compact_mode";
+const SLASH_MRU_KEY: &str = "slash_mru";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRef {
@@ -247,6 +248,27 @@ impl PrefsDAO {
         self.set_pref(key, &json_str)
     }
 
+    /// Slash-command MRU map: canonical name → last-used unix seconds.
+    pub fn get_slash_mru(&self) -> Result<std::collections::HashMap<String, u64>> {
+        match self.get_pref(SLASH_MRU_KEY)? {
+            Some(json_str) => {
+                #[derive(serde::Deserialize)]
+                struct SlashMruPref {
+                    #[serde(default)]
+                    by_command: std::collections::HashMap<String, u64>,
+                }
+                let pref: SlashMruPref = serde_json::from_str(&json_str)?;
+                Ok(pref.by_command)
+            }
+            None => Ok(std::collections::HashMap::new()),
+        }
+    }
+
+    pub fn set_slash_mru(&self, by_command: &std::collections::HashMap<String, u64>) -> Result<()> {
+        let value = serde_json::json!({ "by_command": by_command });
+        self.set_pref(SLASH_MRU_KEY, &serde_json::to_string(&value)?)
+    }
+
     pub fn toggle_favorite(&self, provider_id: String, model_id: String) -> Result<bool> {
         let mut prefs = self.get_model_preferences()?;
         let was_favorite = prefs.is_favorite(&provider_id, &model_id);
@@ -372,6 +394,21 @@ mod tests {
 
         assert_eq!(ref1, ref2);
         assert_ne!(ref1, ref3);
+    }
+
+    #[test]
+    fn test_slash_mru_round_trip() {
+        let dao = setup_test_dao();
+        assert!(dao.get_slash_mru().unwrap().is_empty());
+
+        let mut map = std::collections::HashMap::new();
+        map.insert("connect".to_string(), 1_700_000_000);
+        map.insert("compact-mode".to_string(), 1_700_000_100);
+        dao.set_slash_mru(&map).unwrap();
+
+        let loaded = dao.get_slash_mru().unwrap();
+        assert_eq!(loaded.get("connect"), Some(&1_700_000_000));
+        assert_eq!(loaded.get("compact-mode"), Some(&1_700_000_100));
     }
 
     #[test]

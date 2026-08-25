@@ -6115,6 +6115,11 @@ impl App {
 
         match parse_input(input) {
             InputType::Command(mut parsed) => {
+                // Popup Accept / autocomplete_and_submit land here — must record MRU
+                // (process_command_input is only used by some Enter paths).
+                if let Some(autocomplete) = self.input.autocomplete.as_ref() {
+                    autocomplete.command_auto.touch_mru(&parsed.name);
+                }
                 if self.command_registry.is_custom_command(&parsed.name) {
                     parsed.prefs_data = self
                         .prefs_dao
