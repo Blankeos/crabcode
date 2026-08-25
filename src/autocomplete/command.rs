@@ -1,4 +1,6 @@
+use crate::autocomplete::mru::SlashMru;
 use crate::command::registry::Registry;
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,11 +66,22 @@ impl Suggestion {
     }
 }
 
-#[derive(Default)]
 pub struct CommandAuto {
     commands: Vec<Suggestion>,
     hidden_token_map: Vec<(String, String)>,
     chat_only_commands: HashSet<String>,
+    mru: RefCell<SlashMru>,
+}
+
+impl Default for CommandAuto {
+    fn default() -> Self {
+        Self {
+            commands: Vec::new(),
+            hidden_token_map: Vec::new(),
+            chat_only_commands: HashSet::new(),
+            mru: RefCell::new(SlashMru::new()),
+        }
+    }
 }
 
 impl CommandAuto {
@@ -103,11 +116,27 @@ impl CommandAuto {
             commands,
             hidden_token_map,
             chat_only_commands,
+            mru: RefCell::new(SlashMru::new()),
         }
+    }
+
+    /// Tests / ephemeral: never touches disk.
+    #[cfg(test)]
+    fn with_in_memory_mru(mut self) -> Self {
+        self.mru = RefCell::new(SlashMru::new_in_memory());
+        self
+    }
+
+    /// Record that a slash command was executed (boosts future search ranking).
+    pub fn touch_mru(&self, command_name: &str) {
+        let mut mru = self.mru.borrow_mut();
+        mru.touch(command_name);
+        mru.persist_if_dirty();
     }
 
     pub fn get_suggestions(&self, input: &str, is_chat: bool) -> Vec<Suggestion> {
         let input_lower = input.to_lowercase();
+        let trimmed = input.trim();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut results: Vec<Suggestion> = Vec::new();
 
@@ -133,6 +162,16 @@ impl CommandAuto {
                     }
                 }
             }
+        }
+
+        // Empty `/` keeps registry order. Non-empty search: MRU recency boost.
+        if !trimmed.is_empty() && results.len() > 1 {
+            let mut mru = self.mru.borrow_mut();
+            results.sort_by(|a, b| {
+                let score_b = mru.rank_score(&b.name);
+                let score_a = mru.rank_score(&a.name);
+                score_b.cmp(&score_a).then_with(|| a.name.cmp(&b.name))
+            });
         }
 
         results
@@ -280,5 +319,47 @@ mod tests {
         let suggestions = auto.get_suggestions("HELP", true);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].name, "help");
+    }
+
+    #[test]
+    fn empty_query_keeps_registry_order_even_with_mru() {
+        let registry = setup_registry();
+        let auto = CommandAuto::new(&registry).with_in_memory_mru();
+        let before: Vec<String> = auto
+            .get_suggestions("", true)
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        auto.touch_mru("exit");
+        auto.touch_mru("compact");
+        let after: Vec<String> = auto
+            .get_suggestions("", true)
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn search_ranks_recently_used_first() {
+        let mut registry = setup_registry();
+        registry.register(Command {
+            name: "compact-mode".to_string(),
+            description: "Toggle compact mode".to_string(),
+            handler: dummy_handler,
+            hidden_tokens: vec![],
+            chat_only: true,
+        });
+        let auto = CommandAuto::new(&registry).with_in_memory_mru();
+
+        // Without MRU, registry order: compact then compact-mode
+        let before = auto.get_suggestions("comp", true);
+        assert_eq!(before[0].name, "compact");
+        assert_eq!(before[1].name, "compact-mode");
+
+        auto.touch_mru("compact-mode");
+        let after = auto.get_suggestions("comp", true);
+        assert_eq!(after[0].name, "compact-mode");
+        assert_eq!(after[1].name, "compact");
     }
 }
