@@ -4063,6 +4063,27 @@ impl App {
         }
     }
 
+    fn set_compact_mode(&mut self, enabled: bool) {
+        if self.chat_state.compact_mode == enabled {
+            return;
+        }
+        self.chat_state.compact_mode = enabled;
+        if let Some(dao) = &self.prefs_dao {
+            if let Err(error) = dao.set_compact_mode(enabled) {
+                eprintln!("Failed to persist compact mode preference: {error}");
+            }
+        }
+        push_toast(Toast::new(
+            if enabled {
+                "Compact mode enabled"
+            } else {
+                "Compact mode disabled"
+            },
+            ToastLevel::Info,
+            Some(std::time::Duration::from_secs(2)),
+        ));
+    }
+
     fn toggle_agent_mode(&mut self) {
         let agents = self.agent_registry.visible_primary_agent_names();
         if agents.is_empty() {
@@ -5372,9 +5393,14 @@ impl App {
 
         clear_suggestions(&mut self.suggestions_popup_state);
         let thinking_visible = self.chat_state.chat.thinking_visible();
+        let compact_mode = self.chat_state.compact_mode;
         let is_chat = self.can_open_find_bar();
-        self.command_palette_state
-            .refresh_items(&self.command_registry, is_chat, thinking_visible);
+        self.command_palette_state.refresh_items(
+            &self.command_registry,
+            is_chat,
+            thinking_visible,
+            compact_mode,
+        );
         self.command_palette_state.show();
         self.overlay_focus = OverlayFocus::CommandPalette;
     }
@@ -5602,6 +5628,9 @@ impl App {
                     }
                     CommandPaletteAppAction::CycleReasoningEffort => {
                         let _ = self.cycle_active_reasoning_effort();
+                    }
+                    CommandPaletteAppAction::SetCompactMode(enabled) => {
+                        self.set_compact_mode(enabled);
                     }
                     CommandPaletteAppAction::OpenStorage => self.open_storage_dialog(),
                     CommandPaletteAppAction::OpenSkillsDialog => self.show_skills_dialog(),
@@ -6235,21 +6264,7 @@ impl App {
                     return;
                 }
                 if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
-                    self.chat_state.compact_mode = !self.chat_state.compact_mode;
-                    if let Some(dao) = &self.prefs_dao {
-                        if let Err(error) = dao.set_compact_mode(self.chat_state.compact_mode) {
-                            eprintln!("Failed to persist compact mode preference: {error}");
-                        }
-                    }
-                    push_toast(Toast::new(
-                        if self.chat_state.compact_mode {
-                            "Compact mode enabled"
-                        } else {
-                            "Compact mode disabled"
-                        },
-                        ToastLevel::Info,
-                        Some(std::time::Duration::from_secs(2)),
-                    ));
+                    self.set_compact_mode(!self.chat_state.compact_mode);
                     return;
                 }
                 if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat
@@ -6485,21 +6500,7 @@ impl App {
             return;
         }
         if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
-            self.chat_state.compact_mode = !self.chat_state.compact_mode;
-            if let Some(dao) = &self.prefs_dao {
-                if let Err(error) = dao.set_compact_mode(self.chat_state.compact_mode) {
-                    eprintln!("Failed to persist compact mode preference: {error}");
-                }
-            }
-            push_toast(Toast::new(
-                if self.chat_state.compact_mode {
-                    "Compact mode enabled"
-                } else {
-                    "Compact mode disabled"
-                },
-                ToastLevel::Info,
-                Some(std::time::Duration::from_secs(2)),
-            ));
+            self.set_compact_mode(!self.chat_state.compact_mode);
             return;
         }
         if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat {
