@@ -36,6 +36,48 @@ pub fn resolve_startup_theme(
     (themes, idx, dark_mode, theme_transparent)
 }
 
+fn plugin_command_directories(plugins: &[PluginSpec], project_root: &Path) -> Vec<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cache_home = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cache"));
+    let mut directories = Vec::new();
+
+    for plugin in plugins {
+        let source = plugin.source.trim();
+        if source.is_empty() {
+            continue;
+        }
+
+        let package_dir = if source.starts_with('.') || Path::new(source).is_absolute() {
+            let path = PathBuf::from(source);
+            Some(if path.is_absolute() {
+                path
+            } else {
+                project_root.join(path)
+            })
+        } else {
+            let candidates = [
+                project_root.join("node_modules").join(source),
+                cache_home
+                    .join("opencode/packages")
+                    .join(source)
+                    .join("node_modules")
+                    .join(source),
+            ];
+            candidates.into_iter().find(|path| path.is_dir())
+        };
+
+        if let Some(package_dir) = package_dir.filter(|path| path.is_dir()) {
+            directories.push(package_dir.join(".opencode"));
+        }
+    }
+
+    directories.sort();
+    directories.dedup();
+    directories
+}
+
 fn peek_config_theme_id(xdg_config_home: &Path, project_root: &Path) -> Option<String> {
     let sources = resolve_sources(xdg_config_home, project_root).ok()?;
     let mut theme_id = None;
@@ -685,14 +727,15 @@ impl ConfigLoader {
 
         substitute_placeholders(&mut merged, &provenance, &mut diagnostics);
 
+        let mut merged_config = parse_merged_config(&merged, &mut diagnostics);
         let commands = load_custom_commands(
             &sources,
             &xdg_config_home,
             &project_root,
+            &merged_config.plugins,
             &mut inventory,
             &mut diagnostics,
         );
-        let mut merged_config = parse_merged_config(&merged, &mut diagnostics);
         append_discovered_plugins(&mut merged_config.plugins, &inventory.plugin_files);
         merged_config.instructions =
             load_instruction_files(&merged_config.instructions, &project_root, &mut diagnostics);
@@ -857,12 +900,26 @@ fn load_custom_commands(
     sources: &[SourceFile],
     xdg_config_home: &Path,
     project_root: &Path,
+    plugins: &[PluginSpec],
     inventory: &mut ConfigInventory,
     diagnostics: &mut ConfigDiagnostics,
 ) -> Vec<crate::command::custom::CustomCommand> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut commands = Vec::new();
     let mut command_by_name: HashMap<String, usize> = HashMap::new();
+
+    // OpenCode packages can ship slash commands in `.opencode/command`. Load
+    // these first so user/project command definitions retain their usual
+    // higher precedence.
+    for dir in plugin_command_directories(plugins, project_root) {
+        for command in crate::command::custom::commands_from_directory(
+            &dir,
+            project_root,
+            &mut diagnostics.warnings,
+        ) {
+            upsert_custom_command(&mut commands, &mut command_by_name, command);
+        }
+    }
 
     for layer in command_layers(xdg_config_home, project_root, &home) {
         if let Some(source) = sources.iter().find(|source| source.label == layer.label) {
@@ -2816,6 +2873,36 @@ mod tests {
         assert_eq!(config.plugins.len(), 1);
         assert_eq!(config.plugins[0].source, "./plugin.mjs");
         assert!(collect_unimplemented_keys(&filtered).is_empty());
+    }
+
+    #[test]
+    fn discovers_commands_shipped_by_a_local_plugin_package() {
+        let project = tempfile::tempdir().expect("project temp dir");
+        let package = project.path().join("node_modules/example-plugin");
+        let command_dir = package.join(".opencode/command");
+        std::fs::create_dir_all(&command_dir).unwrap();
+        std::fs::write(
+            command_dir.join("hello.md"),
+            "---\ndescription: Hello from plugin\n---\nSay hello to $ARGUMENTS",
+        )
+        .unwrap();
+
+        let plugins = vec![PluginSpec {
+            source: "example-plugin".to_string(),
+            options: Value::Null,
+        }];
+        let dirs = plugin_command_directories(&plugins, project.path());
+        assert_eq!(dirs, vec![package.join(".opencode")]);
+
+        let mut warnings = Vec::new();
+        let commands = crate::command::custom::commands_from_directory(
+            &dirs[0],
+            project.path(),
+            &mut warnings,
+        );
+        assert!(warnings.is_empty());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "hello");
     }
 
     #[test]
