@@ -84,8 +84,8 @@
       "light": "lightGray600Weak"
     },
     "background": {
-      "dark": "background200",
-      "light": "lightBackground"
+      "dark": "#000000",
+      "light": "#FFFFFF"
     },
     "backgroundPanel": {
       "dark": "gray100",
@@ -247,5 +247,6 @@
       "dark": "gray1000",
       "light": "lightGray1000"
     }
-  }
+  },
+  "appearance": "dark"
 }

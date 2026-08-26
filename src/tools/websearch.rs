@@ -14,6 +14,7 @@ pub struct WebsearchTool {
 }
 
 const DEFAULT_EXA_MCP_ENDPOINT: &str = "https://mcp.exa.ai/mcp";
+const DEFAULT_FIRECRAWL_MCP_ENDPOINT: &str = "https://mcp.firecrawl.dev/v2/mcp";
 const DEFAULT_EXA_ENDPOINT: &str = "https://api.exa.ai/search";
 const DEFAULT_TAVILY_ENDPOINT: &str = "https://api.tavily.com/search";
 const DEFAULT_PERPLEXITY_ENDPOINT: &str = "https://api.perplexity.ai/search";
@@ -34,7 +35,10 @@ impl WebsearchTool {
     pub fn new(config: WebsearchConfig) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .use_rustls_tls()
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -45,6 +49,9 @@ impl WebsearchTool {
     fn adapter(&self) -> Box<dyn WebsearchAdapter + Send + Sync + '_> {
         match self.config.provider {
             WebsearchProvider::ExaHostedMcp => Box::new(ExaHostedMcpAdapter {
+                config: &self.config,
+            }),
+            WebsearchProvider::FirecrawlHostedMcp => Box::new(FirecrawlHostedMcpAdapter {
                 config: &self.config,
             }),
             WebsearchProvider::Exa => Box::new(ExaApiAdapter {
@@ -78,7 +85,7 @@ impl ToolHandler for WebsearchTool {
         Tool {
             id: "websearch".to_string(),
             description: format!(
-                "Search the web for current information beyond the model's knowledge cutoff.\n\nProvider: {}. Exa hosted MCP works without an API key; keyed providers use websearch.apiKey, commonly with {{env:...}} placeholders.\n\nUse websearch for discovery and webfetch when you already know the URL.",
+                "Search the web for current information beyond the model's knowledge cutoff.\n\nProvider: {}. Exa hosted MCP and Firecrawl hosted MCP work without an API key; keyed providers use websearch.apiKey, commonly with {{env:...}} placeholders.\n\nUse websearch for discovery and webfetch when you already know the URL.",
                 self.config.provider.as_str()
             ),
             parameters: vec![
@@ -211,6 +218,9 @@ trait WebsearchAdapter {
 struct ExaHostedMcpAdapter<'a> {
     config: &'a WebsearchConfig,
 }
+struct FirecrawlHostedMcpAdapter<'a> {
+    config: &'a WebsearchConfig,
+}
 struct ExaApiAdapter<'a> {
     config: &'a WebsearchConfig,
 }
@@ -273,9 +283,62 @@ impl WebsearchAdapter for ExaHostedMcpAdapter<'_> {
             .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS));
 
         let body = send_text(request, self.provider_name()).await?;
-        parse_mcp_response(&body).ok_or_else(|| {
+        let text = parse_mcp_response(&body).ok_or_else(|| {
             ToolError::Execution("websearch provider returned no text content".to_string())
-        })
+        })?;
+        Ok(format_results(
+            self.provider_name(),
+            &input.query,
+            parse_exa_mcp_text(&text),
+            None,
+        ))
+    }
+}
+
+#[async_trait]
+impl WebsearchAdapter for FirecrawlHostedMcpAdapter<'_> {
+    fn provider_name(&self) -> &'static str {
+        "firecrawl-hosted-mcp"
+    }
+
+    async fn search(
+        &self,
+        client: &reqwest::Client,
+        input: &WebsearchInput,
+    ) -> Result<String, ToolError> {
+        let endpoint = endpoint_or(&self.config.endpoint, DEFAULT_FIRECRAWL_MCP_ENDPOINT);
+        let mut request = client
+            .post(&endpoint)
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "firecrawl_search",
+                    "arguments": {
+                        "query": input.query,
+                        "limit": input.num_results,
+                    }
+                }
+            }))
+            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        if let Some(api_key) = configured_api_key(self.config) {
+            request = request.bearer_auth(api_key);
+        }
+
+        let body = send_text(request, self.provider_name()).await?;
+        let text = parse_mcp_response(&body).ok_or_else(|| {
+            ToolError::Execution("websearch provider returned no text content".to_string())
+        })?;
+        let value = parse_json_body(&text, self.provider_name())?;
+        Ok(format_results(
+            self.provider_name(),
+            &input.query,
+            parse_firecrawl_results(&value),
+            None,
+        ))
     }
 }
 
@@ -589,6 +652,7 @@ async fn send_text(request: reqwest::RequestBuilder, provider: &str) -> Result<S
 
 fn sanitize_provider_error(body: &str) -> String {
     body.replace("web_search_exa", "websearch")
+        .replace("firecrawl_search", "websearch")
 }
 
 fn parse_json_body(body: &str, provider: &str) -> Result<Value, ToolError> {
@@ -642,6 +706,125 @@ fn parse_exa_results(value: &Value) -> Vec<SearchItem> {
                 url,
                 snippet,
                 date,
+            })
+        })
+        .collect()
+}
+
+/// Parse Exa hosted MCP `web_search_exa` text blocks shaped like:
+/// `Title: …\nURL: …\nPublished: …\nAuthor: …\nHighlights:\n…`
+fn parse_exa_mcp_text(text: &str) -> Vec<SearchItem> {
+    let mut results = Vec::new();
+    let mut title: Option<String> = None;
+    let mut url: Option<String> = None;
+    let mut date: Option<String> = None;
+    let mut highlights = String::new();
+    let mut in_highlights = false;
+
+    let flush = |results: &mut Vec<SearchItem>,
+                 title: &mut Option<String>,
+                 url: &mut Option<String>,
+                 date: &mut Option<String>,
+                 highlights: &mut String| {
+        if let (Some(title), Some(url)) = (title.take(), url.take()) {
+            let snippet = {
+                let cleaned = clean_snippet(highlights);
+                (!cleaned.is_empty()).then_some(cleaned)
+            };
+            let date = date.take().and_then(|value| {
+                let trimmed = value.trim();
+                (trimmed != "N/A" && !trimmed.is_empty()).then(|| trimmed.to_string())
+            });
+            results.push(SearchItem {
+                title,
+                url,
+                snippet,
+                date,
+            });
+        } else {
+            title.take();
+            url.take();
+            date.take();
+        }
+        highlights.clear();
+    };
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Title: ") {
+            if title.is_some() || url.is_some() {
+                flush(
+                    &mut results,
+                    &mut title,
+                    &mut url,
+                    &mut date,
+                    &mut highlights,
+                );
+            }
+            title = Some(rest.trim().to_string());
+            in_highlights = false;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("URL: ") {
+            url = Some(rest.trim().to_string());
+            in_highlights = false;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Published: ") {
+            date = Some(rest.trim().to_string());
+            in_highlights = false;
+            continue;
+        }
+        if line.starts_with("Author: ") {
+            in_highlights = false;
+            continue;
+        }
+        if line.trim() == "Highlights:" {
+            in_highlights = true;
+            continue;
+        }
+        if in_highlights {
+            if !highlights.is_empty() {
+                highlights.push(' ');
+            }
+            highlights.push_str(line.trim());
+        }
+    }
+    flush(
+        &mut results,
+        &mut title,
+        &mut url,
+        &mut date,
+        &mut highlights,
+    );
+    results
+}
+
+fn parse_firecrawl_results(value: &Value) -> Vec<SearchItem> {
+    let items = value
+        .pointer("/data/web")
+        .or_else(|| value.get("web"))
+        .or_else(|| value.get("data"))
+        .or_else(|| value.get("results"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+
+    items
+        .filter_map(|item| {
+            let title = string_field(item, "title").unwrap_or_else(|| {
+                string_field(item, "url").unwrap_or_else(|| "Untitled".to_string())
+            });
+            let url = string_field(item, "url")?;
+            let snippet = string_field(item, "description")
+                .or_else(|| string_field(item, "snippet"))
+                .or_else(|| string_field(item, "markdown"))
+                .or_else(|| string_field(item, "content"))
+                .map(|value| clean_snippet(&value));
+            Some(SearchItem {
+                title,
+                url,
+                snippet,
+                date: None,
             })
         })
         .collect()
@@ -923,6 +1106,69 @@ mod tests {
     }
 
     #[test]
+    fn parses_exa_mcp_text_blocks() {
+        let text = "\
+Title: axum - Rust
+URL: https://docs.rs/axum/latest/axum/
+Published: N/A
+Author: N/A
+Highlights:
+axum is an HTTP routing library
+that focuses on ergonomics.
+Title: Second Result
+URL: https://example.com/second
+Published: 2026-01-02
+Author: Someone
+Highlights:
+Useful second snippet
+";
+        assert_eq!(
+            parse_exa_mcp_text(text),
+            vec![
+                SearchItem {
+                    title: "axum - Rust".to_string(),
+                    url: "https://docs.rs/axum/latest/axum/".to_string(),
+                    snippet: Some(
+                        "axum is an HTTP routing library that focuses on ergonomics.".to_string()
+                    ),
+                    date: None,
+                },
+                SearchItem {
+                    title: "Second Result".to_string(),
+                    url: "https://example.com/second".to_string(),
+                    snippet: Some("Useful second snippet".to_string()),
+                    date: Some("2026-01-02".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_firecrawl_results() {
+        let value = json!({
+            "success": true,
+            "data": {
+                "web": [{
+                    "url": "https://docs.rs/axum",
+                    "title": "axum - Rust",
+                    "description": "Web framework that focuses on ergonomics and modularity"
+                }]
+            }
+        });
+        assert_eq!(
+            parse_firecrawl_results(&value),
+            vec![SearchItem {
+                title: "axum - Rust".to_string(),
+                url: "https://docs.rs/axum".to_string(),
+                snippet: Some(
+                    "Web framework that focuses on ergonomics and modularity".to_string()
+                ),
+                date: None,
+            }]
+        );
+    }
+
+    #[test]
     fn parses_tavily_results() {
         let value = json!({
             "answer": "short answer",
@@ -1016,6 +1262,10 @@ mod tests {
         assert_eq!(
             sanitize_provider_error("web_search_exa error (401): Invalid API key"),
             "websearch error (401): Invalid API key"
+        );
+        assert_eq!(
+            sanitize_provider_error("firecrawl_search error (429): rate limited"),
+            "websearch error (429): rate limited"
         );
     }
 }

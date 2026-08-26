@@ -479,6 +479,18 @@ impl Dialog {
     ) -> Option<u32> {
         let mut best_score = None;
 
+        // Exact appearance tags ("light" / "dark") should filter strictly so
+        // fuzzy matches don't leak opposite themes (e.g. "light" → "groknight").
+        let query_norm = Self::normalize_search_text(query);
+        if matches!(query_norm.as_str(), "light" | "dark") {
+            let desc = Self::normalize_search_text(&item.description);
+            let grp = Self::normalize_search_text(group);
+            if desc == query_norm || grp == query_norm {
+                return Some(u32::MAX);
+            }
+            return None;
+        }
+
         Self::consider_search_field(
             pattern,
             matcher,

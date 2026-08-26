@@ -1,6 +1,6 @@
 {
   "name": "crabcode",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "description": "Rust AI CLI coding agent with a beautiful terminal UI",
   "main": "bin.js",
   "bin": {

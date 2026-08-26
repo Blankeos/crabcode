@@ -87,8 +87,8 @@
       "light": "lfg3Weak"
     },
     "background": {
-      "dark": "bg1",
-      "light": "lbg0"
+      "dark": "#161616",
+      "light": "#ffffff"
     },
     "backgroundPanel": {
       "dark": "bg1a",
@@ -250,5 +250,6 @@
       "dark": "fg2",
       "light": "lfg1"
     }
-  }
+  },
+  "appearance": "dark"
 }

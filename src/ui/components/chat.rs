@@ -365,6 +365,8 @@ pub struct ChatImageTarget {
 pub struct ChatHyperlinkHover {
     content_line: usize,
     range: crate::ui::hyperlink::HyperlinkRange,
+    /// Underline ranges for every wrap segment of the hovered link.
+    segments: Vec<crate::ui::hyperlink::HyperlinkLineRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1716,6 +1718,7 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
+            pending_scroll_to_message: None,
             search_matches: Vec::new(),
             search_active_match: None,
             search_query: String::new(),
@@ -1735,7 +1738,6 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
-            pending_scroll_to_message: None,
         }
     }
 
@@ -1787,6 +1789,7 @@ impl Chat {
             selection_edge_scroll: None,
             pending_click_anchor: None,
             highlighted_message_index: None,
+            pending_scroll_to_message: None,
             search_matches: Vec::new(),
             search_active_match: None,
             search_query: String::new(),
@@ -1806,7 +1809,6 @@ impl Chat {
             cached_has_active_tools: std::cell::Cell::new(false),
             hovered_image: None,
             hovered_hyperlink: None,
-            pending_scroll_to_message: None,
         }
     }
 
@@ -2051,7 +2053,8 @@ impl Chat {
 
     pub fn clear(&mut self) {
         self.messages.clear();
-        self.scroll_offset = 0;
+        self.scroll_offset = usize::MAX;
+        self.user_scrolled_up = false;
         self.scrollbar_state = ScrollbarState::default();
         self.is_dragging_scrollbar = false;
         self.scrollbar_drag_offset = None;
@@ -2910,9 +2913,18 @@ impl Chat {
 
     pub fn scroll_down(&mut self, amount: usize) {
         let max_offset = self.max_scroll_offset();
-        self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
-        // Check if we're now at the bottom
-        self.user_scrolled_up = self.scroll_offset < max_offset;
+        let next = self
+            .resolved_scroll_offset()
+            .saturating_add(amount)
+            .min(max_offset);
+        if next >= max_offset {
+            // Stick-to-bottom: keep MAX so later content growth stays pinned.
+            self.scroll_offset = usize::MAX;
+            self.user_scrolled_up = false;
+        } else {
+            self.scroll_offset = next;
+            self.user_scrolled_up = true;
+        }
         self.update_scrollbar();
     }
 
@@ -2940,13 +2952,22 @@ impl Chat {
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        // Resolve MAX to the current bottom; leave other concrete offsets alone
+        // so callers/tests can set scroll_offset before content_height is known.
+        let current = if self.scroll_offset == usize::MAX {
+            self.max_scroll_offset()
+        } else {
+            self.scroll_offset
+        };
+        self.scroll_offset = current.saturating_sub(amount);
         self.user_scrolled_up = true;
         self.update_scrollbar();
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.max_scroll_offset();
+        // Prefer the MAX sentinel so stick-to-bottom survives content growth
+        // between frames (streaming / ensure_render_cache before render).
+        self.scroll_offset = usize::MAX;
         self.user_scrolled_up = false;
         self.update_scrollbar();
     }
@@ -2963,25 +2984,69 @@ impl Chat {
             return;
         }
         self.scroll_bottom_padding = padding;
-        let max_offset = self.max_scroll_offset();
-        if self.scroll_offset > max_offset {
-            self.scroll_offset = max_offset;
-        }
         if !self.user_scrolled_up {
-            self.scroll_offset = max_offset;
+            // Stick-to-bottom uses the MAX sentinel so padding / content-height
+            // changes cannot materialize a stale concrete offset (or 0).
+            self.scroll_offset = usize::MAX;
+        } else if self.scroll_offset != usize::MAX {
+            let max_offset = self.max_scroll_offset();
+            if self.scroll_offset > max_offset {
+                self.scroll_offset = max_offset;
+            }
         }
         self.update_scrollbar();
     }
 
-    fn max_scroll_offset(&self) -> usize {
+    pub fn max_scroll_offset(&self) -> usize {
         self.content_height
             .saturating_add(self.scroll_bottom_padding)
             .saturating_sub(self.viewport_height)
     }
 
+    /// Concrete scroll offset, resolving the stick-to-bottom MAX sentinel.
+    pub fn resolved_scroll_offset(&self) -> usize {
+        let max_offset = self.max_scroll_offset();
+        if self.scroll_offset == usize::MAX {
+            max_offset
+        } else {
+            self.scroll_offset.min(max_offset)
+        }
+    }
+
     fn scroll_content_height(&self) -> usize {
         self.content_height
             .saturating_add(self.scroll_bottom_padding)
+    }
+
+    /// Re-paint the vertical scrollbar over `area` (rightmost column).
+    /// Used by overlays (e.g. compact sticky) that would otherwise cover the thumb.
+    pub fn render_scrollbar_over(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        track_color: Color,
+        thumb_color: Color,
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+        render_scrollbar(
+            f,
+            ScrollMetrics::new(
+                self.scroll_content_height(),
+                self.viewport_height,
+                self.resolved_scroll_offset(),
+            ),
+            scrollbar_area,
+            track_color,
+            thumb_color,
+        );
     }
 
     pub fn set_search_query(
@@ -3072,6 +3137,10 @@ impl Chat {
     /// immediately after bulk-replacing the message list (e.g. compaction).
     pub fn scroll_to_message_on_next_render(&mut self, idx: usize) {
         self.pending_scroll_to_message = Some(idx);
+        // Prevent pin-to-bottom / autoscroll from overriding the marker jump
+        // on the next frame (replace_messages re-enables autoscroll).
+        self.autoscroll_enabled = false;
+        self.user_scrolled_up = true;
     }
 
     pub fn set_highlighted_message(&mut self, idx: Option<usize>) {
@@ -3113,8 +3182,8 @@ impl Chat {
             return None;
         }
 
-        let content_line =
-            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_line = (event.row.saturating_sub(content_area.y) as usize)
+            .saturating_add(self.resolved_scroll_offset());
         let content_col = event.column.saturating_sub(content_area.x) as usize;
         let message_index =
             self.message_index_at_content_line(content_line, self.content_height)?;
@@ -3150,11 +3219,15 @@ impl Chat {
             return None;
         }
 
-        let content_line =
-            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_line = (event.row.saturating_sub(content_area.y) as usize)
+            .saturating_add(self.resolved_scroll_offset());
         let content_col = event.column.saturating_sub(content_area.x) as usize;
-        let line = self.cached_lines.get(content_line)?;
-        let range = crate::ui::hyperlink::hyperlink_range_at_line_col(line, content_col)?;
+        let range = crate::ui::hyperlink::hyperlink_range_at_wrapped_lines(
+            &self.cached_lines,
+            content_line,
+            content_col,
+            self.cached_width,
+        )?;
 
         self.resolve_hyperlink_target(content_line, &range)
             .or_else(|| Some(range.target))
@@ -3174,11 +3247,15 @@ impl Chat {
             return None;
         }
 
-        let content_line =
-            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_line = (event.row.saturating_sub(content_area.y) as usize)
+            .saturating_add(self.resolved_scroll_offset());
         let content_col = event.column.saturating_sub(content_area.x) as usize;
-        let line = self.cached_lines.get(content_line)?;
-        let range = crate::ui::hyperlink::hyperlink_range_at_line_col(line, content_col)?;
+        let (range, segments) = crate::ui::hyperlink::hyperlink_segments_at_wrapped_lines(
+            &self.cached_lines,
+            content_line,
+            content_col,
+            self.cached_width,
+        )?;
 
         let clickable = self
             .resolve_hyperlink_target(content_line, &range)
@@ -3188,6 +3265,7 @@ impl Chat {
         clickable.then_some(ChatHyperlinkHover {
             content_line,
             range,
+            segments,
         })
     }
 
@@ -3286,8 +3364,8 @@ impl Chat {
             return None;
         }
 
-        let content_line =
-            (event.row.saturating_sub(content_area.y) as usize).saturating_add(self.scroll_offset);
+        let content_line = (event.row.saturating_sub(content_area.y) as usize)
+            .saturating_add(self.resolved_scroll_offset());
         let content_height = self.content_height.max(
             self.message_line_positions
                 .iter()
@@ -3384,7 +3462,9 @@ impl Chat {
     fn update_scrollbar(&mut self) {
         let max_offset = self.max_scroll_offset();
         let content_length = max_offset.saturating_add(1).max(1);
-        let position = self.scroll_offset.min(content_length.saturating_sub(1));
+        let position = self
+            .resolved_scroll_offset()
+            .min(content_length.saturating_sub(1));
         self.scrollbar_state = self.scrollbar_state.content_length(content_length);
         self.scrollbar_state = self.scrollbar_state.position(position);
     }
@@ -3402,21 +3482,21 @@ impl Chat {
             return false;
         }
 
-        let before = self.scroll_offset;
+        let before = self.resolved_scroll_offset();
         match edge_scroll.direction {
             EdgeScrollDirection::Up => self.scroll_up(1),
             EdgeScrollDirection::Down => self.scroll_down(1),
         }
 
-        if self.scroll_offset == before {
+        if self.resolved_scroll_offset() == before {
             self.selection_edge_scroll = None;
             return false;
         }
 
         let line = match edge_scroll.direction {
-            EdgeScrollDirection::Up => self.scroll_offset,
+            EdgeScrollDirection::Up => self.resolved_scroll_offset(),
             EdgeScrollDirection::Down => self
-                .scroll_offset
+                .resolved_scroll_offset()
                 .saturating_add(self.viewport_height.saturating_sub(1))
                 .min(self.content_height.saturating_sub(1)),
         };
@@ -3476,8 +3556,8 @@ impl Chat {
 
     fn drag_selection_to_position(&mut self, content_area: Rect, event: MouseEvent) {
         let content_line = (Self::clamped_content_row(content_area, event.row) as usize
-            + self.scroll_offset)
-            .min(self.content_height.saturating_sub(1));
+            + self.resolved_scroll_offset())
+        .min(self.content_height.saturating_sub(1));
         let content_col = Self::clamped_content_column(content_area, event.column);
         self.selection.extend(content_line, content_col);
     }
@@ -3623,7 +3703,7 @@ impl Chat {
                     let metrics = ScrollMetrics::new(
                         self.scroll_content_height(),
                         self.viewport_height,
-                        self.scroll_offset,
+                        self.resolved_scroll_offset(),
                     );
                     if let Some(grab_offset) =
                         scrollbar_grab_offset(metrics, scrollbar_area, event.row)
@@ -3637,7 +3717,7 @@ impl Chat {
                     }
                 } else if is_in_content {
                     let content_line = (event.row.saturating_sub(rendered_content_area.y) as usize)
-                        .saturating_add(self.scroll_offset);
+                        .saturating_add(self.resolved_scroll_offset());
                     let content_col = event.column.saturating_sub(rendered_content_area.x) as usize;
                     self.pending_click_anchor = self.selection.anchor;
 
@@ -3687,7 +3767,7 @@ impl Chat {
                     {
                         let content_line = (event.row.saturating_sub(rendered_content_area.y)
                             as usize)
-                            .saturating_add(self.scroll_offset);
+                            .saturating_add(self.resolved_scroll_offset());
                         let content_col =
                             event.column.saturating_sub(rendered_content_area.x) as usize;
                         if let Some(anchor) = self.pending_click_anchor {
@@ -3731,16 +3811,25 @@ impl Chat {
 
         let max_offset = self.max_scroll_offset();
         let content_height = self.scroll_content_height();
-        let metrics = ScrollMetrics::new(content_height, self.viewport_height, self.scroll_offset);
+        let metrics = ScrollMetrics::new(
+            content_height,
+            self.viewport_height,
+            self.resolved_scroll_offset(),
+        );
         let grab_offset = self
             .scrollbar_drag_offset
             .or_else(|| scrollbar_grab_offset(metrics, scrollbar_area, row))
             .unwrap_or(0);
         let new_offset =
             scrollbar_offset_from_row_with_grab(metrics, scrollbar_area, row, grab_offset);
-        self.scroll_offset = new_offset.min(max_offset);
-        // Track if user scrolled away from bottom
-        self.user_scrolled_up = self.scroll_offset < max_offset;
+        let next = new_offset.min(max_offset);
+        if next >= max_offset {
+            self.scroll_offset = usize::MAX;
+            self.user_scrolled_up = false;
+        } else {
+            self.scroll_offset = next;
+            self.user_scrolled_up = true;
+        }
         self.update_scrollbar();
     }
 
@@ -3804,6 +3893,10 @@ impl Chat {
         for line in &mut self.cached_lines {
             *line = sanitize_styled_line(line);
         }
+
+        // Keep content_height in sync so callers (e.g. sticky overlay) can
+        // resolve last-message end lines without waiting for Chat::render.
+        self.content_height = self.cached_lines.len();
 
         self.cached_revision = self.render_revision;
         self.cached_width = max_width;
@@ -3878,9 +3971,10 @@ impl Chat {
 
         let viewport = self.viewport_height.max(1);
         let line = search_match.line;
-        if line < self.scroll_offset {
+        let current = self.resolved_scroll_offset();
+        if line < current {
             self.scroll_offset = line;
-        } else if line >= self.scroll_offset.saturating_add(viewport) {
+        } else if line >= current.saturating_add(viewport) {
             self.scroll_offset = line.saturating_sub(viewport.saturating_sub(1));
         }
         self.user_scrolled_up = true;
@@ -3906,6 +4000,12 @@ impl Chat {
 
         let max_width = content_area.width as usize;
 
+        // Stick-to-bottom is owned by `!user_scrolled_up` + the MAX sentinel.
+        // Do not compare a concrete offset to max_scroll_offset() here: compact
+        // mode may call ensure_render_cache (and grow content_height) before
+        // render, which would make a previous bottom offset look scrolled-up.
+        let mut was_pinned_to_bottom = !self.user_scrolled_up;
+
         self.ensure_render_cache(max_width, model, colors);
         self.ensure_search_matches(max_width, colors);
 
@@ -3916,6 +4016,7 @@ impl Chat {
 
         // Resolve any deferred scroll-to-message request (e.g. after compaction).
         // Keep the pending request if positions are not ready yet (viewport=0).
+        // Must win over pin-to-bottom when applied.
         if let Some(target_idx) = self.pending_scroll_to_message {
             if viewport > 0 {
                 if let Some(&line) = positions.get(target_idx) {
@@ -3934,7 +4035,9 @@ impl Chat {
                     // Stick-to-bottom only runs when user_scrolled_up is false;
                     // keep this true so the offset is not immediately overwritten.
                     self.user_scrolled_up = true;
+                    self.autoscroll_enabled = false;
                     self.pending_scroll_to_message = None;
+                    was_pinned_to_bottom = false;
                 }
             }
         }
@@ -3942,12 +4045,10 @@ impl Chat {
         let max_offset = content_height
             .saturating_add(self.scroll_bottom_padding)
             .saturating_sub(viewport);
-        let was_pinned_to_bottom = self.scroll_offset == usize::MAX
-            || (self.scroll_offset >= self.max_scroll_offset() && !self.user_scrolled_up);
         let clamped_scroll = if was_pinned_to_bottom {
             max_offset
         } else {
-            self.scroll_offset.min(max_offset)
+            self.resolved_scroll_offset().min(max_offset)
         };
         let visible_start = clamped_scroll.min(content_height);
         let visible_end = content_height.min(clamped_scroll.saturating_add(viewport));
@@ -4038,18 +4139,29 @@ impl Chat {
 
         f.render_widget(paragraph, render_area);
         if let Some(hovered) = &self.hovered_hyperlink {
-            if hovered.content_line >= visible_start && hovered.content_line < visible_end {
-                crate::ui::hyperlink::mark_hyperlink_range(
-                    f.buffer_mut(),
-                    render_area,
-                    hovered.content_line - visible_start,
-                    &hovered.range,
-                );
+            let buf = f.buffer_mut();
+            for segment in &hovered.segments {
+                if segment.line_idx >= visible_start && segment.line_idx < visible_end {
+                    crate::ui::hyperlink::mark_hyperlink_line_range(
+                        buf,
+                        render_area,
+                        segment.line_idx - visible_start,
+                        segment.start_col,
+                        segment.end_col,
+                    );
+                }
             }
         }
 
         self.content_height = content_height;
-        self.scroll_offset = clamped_scroll;
+        // Keep the MAX sentinel while pinned so a later ensure_render_cache
+        // (e.g. compact sticky before the next render) cannot make a concrete
+        // bottom offset look "scrolled up" after content grows mid-stream.
+        self.scroll_offset = if was_pinned_to_bottom {
+            usize::MAX
+        } else {
+            clamped_scroll
+        };
         self.update_scrollbar();
 
         let scrollbar_area = Rect {
@@ -5137,6 +5249,61 @@ impl Chat {
         );
         let locations = infer_editor_locations_for_lines(message, &lines);
         (lines, locations)
+    }
+
+    /// Format a user message's content into wrapped, styled lines, mirroring
+    /// `format_message`'s user branch exactly (image-placeholder colors,
+    /// `@agent` mention colors, wrap width, horizontal padding). Returns
+    /// content lines only — no border/padding rows. Used by the compact-mode
+    /// sticky message so it renders like a real user message.
+    pub fn format_user_message_content_lines(
+        &self,
+        idx: usize,
+        max_width: usize,
+        colors: &ThemeColors,
+    ) -> Vec<Line<'static>> {
+        let Some(message) = self.messages.get(idx) else {
+            return Vec::new();
+        };
+        if message.role != MessageRole::User {
+            return Vec::new();
+        }
+
+        let max_width = max_width.max(1);
+        let bg = colors.background_element;
+        let text_style = Style::default().fg(colors.text).bg(bg);
+        let image_style = |placeholder: &str| {
+            let is_hovered = self.hovered_image.as_ref().is_some_and(|target| {
+                target.message_index == idx && target.placeholder == placeholder
+            });
+            if is_hovered {
+                Style::default().fg(colors.markdown_image_text).bg(bg)
+            } else {
+                Style::default().fg(colors.markdown_image).bg(bg)
+            }
+        };
+
+        let horizontal_padding = 2usize;
+        let right_padding = 2usize;
+        let wrap_width = max_width
+            .saturating_sub(1 + horizontal_padding + right_padding)
+            .max(1);
+
+        message
+            .content
+            .split('\n')
+            .flat_map(|content_line| {
+                let content_line = content_line.strip_suffix('\r').unwrap_or(content_line);
+                let styled_content = Line::from(style_agent_mentions_in_line(
+                    content_line,
+                    &self.agent_mention_names,
+                    colors,
+                    text_style,
+                    &image_style,
+                ));
+                wrap_styled_line(&styled_content, WrapOptions::new(wrap_width))
+            })
+            .collect::<Vec<_>>()
     }
 
     fn format_tool_row<'a>(
@@ -8952,6 +9119,67 @@ mod tests {
     }
 
     #[test]
+    fn test_wrapped_hyperlink_underline_covers_all_segments() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let colors = test_colors();
+        let path = "/Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md";
+        let mut chat = Chat::with_messages(vec![Message::assistant(format!("Added {path}"))]);
+        // Narrow enough that the absolute path must wrap.
+        let area = Rect::new(0, 0, 36, 12);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+
+        let (line_idx, col) = chat
+            .cached_lines
+            .iter()
+            .enumerate()
+            .find_map(|(line_idx, line)| {
+                let text = line_text(line);
+                text.find('/').map(|col| (line_idx, col as u16))
+            })
+            .expect("path position");
+        let hover = chat
+            .hyperlink_hover_at_position(
+                mouse(
+                    MouseEventKind::Moved,
+                    col,
+                    line_idx as u16,
+                    KeyModifiers::empty(),
+                ),
+                area,
+            )
+            .expect("hyperlink hover");
+        assert!(
+            hover.segments.len() > 1,
+            "expected wrapped path hover segments, got {:?}",
+            hover.segments
+        );
+        chat.set_hovered_hyperlink(Some(hover.clone()));
+
+        terminal
+            .draw(|f| chat.render(f, area, "Plan", "model", &colors))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let underlined = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].modifier.contains(Modifier::UNDERLINED))
+            .count();
+
+        let expected: usize = hover
+            .segments
+            .iter()
+            .map(|seg| seg.end_col.saturating_sub(seg.start_col))
+            .sum();
+        assert_eq!(underlined, expected);
+        assert!(underlined >= path.len());
+    }
+
+    #[test]
     fn test_hyperlink_underline_only_renders_on_hover() {
         use ratatui::{backend::TestBackend, Terminal};
 
@@ -10062,7 +10290,8 @@ codex exec --skip-git-repo-check \
 
         chat.clear();
         assert!(chat.messages.is_empty());
-        assert_eq!(chat.scroll_offset, 0);
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
     }
 
     #[test]
@@ -10352,7 +10581,9 @@ codex exec --skip-git-repo-check \
         chat.viewport_height = 20;
         chat.scroll_offset = 10;
         chat.scroll_to_bottom();
-        assert_eq!(chat.scroll_offset, 80);
+        // MAX sentinel survives content growth between frames (streaming).
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
     }
 
     #[test]
@@ -10380,7 +10611,8 @@ codex exec --skip-git-repo-check \
             ),
             area,
         ));
-        assert_eq!(chat.scroll_offset, 90);
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
         assert!(chat.is_dragging_scrollbar);
 
         assert!(chat.handle_mouse_event(
@@ -10454,6 +10686,49 @@ codex exec --skip-git-repo-check \
         chat.add_user_message("test");
         // Should autoscroll (scroll_offset set to MAX)
         assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+    }
+
+    #[test]
+    fn test_stick_to_bottom_survives_content_height_growth() {
+        let mut chat = Chat::new();
+        chat.viewport_height = 20;
+        chat.content_height = 100;
+        chat.scroll_to_bottom();
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+
+        // Simulate streaming growth + compact ensure_render_cache before render.
+        chat.content_height = 250;
+        assert_eq!(chat.resolved_scroll_offset(), chat.max_scroll_offset());
+        assert!(!chat.user_scrolled_up);
+
+        // Padding change must not drop the pin to a concrete/zero offset.
+        chat.set_scroll_bottom_padding(8);
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+        assert_eq!(chat.resolved_scroll_offset(), chat.max_scroll_offset());
+    }
+
+    #[test]
+    fn test_stick_to_bottom_survives_zero_content_height() {
+        let mut chat = Chat::new();
+        chat.viewport_height = 20;
+        chat.content_height = 100;
+        chat.scroll_to_bottom();
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+
+        // Simulate a transient zero extent (stale/unbuilt cache). Pin must
+        // remain via the MAX sentinel, not materialize to offset 0.
+        chat.content_height = 0;
+        chat.set_scroll_bottom_padding(4);
+        assert_eq!(chat.scroll_offset, usize::MAX);
+        assert!(!chat.user_scrolled_up);
+        assert_eq!(chat.resolved_scroll_offset(), 0);
+
+        chat.content_height = 200;
+        assert_eq!(chat.resolved_scroll_offset(), 184);
         assert!(!chat.user_scrolled_up);
     }
 

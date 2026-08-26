@@ -59,8 +59,8 @@
       "light": "nightOwlMutedWeak"
     },
     "background": {
-      "dark": "nightOwlBg",
-      "light": "nightOwlBg"
+      "dark": "#011627",
+      "light": "#011627"
     },
     "backgroundPanel": {
       "dark": "nightOwlPanel",
@@ -222,5 +222,6 @@
       "dark": "nightOwlFg",
       "light": "nightOwlFg"
     }
-  }
+  },
+  "appearance": "dark"
 }

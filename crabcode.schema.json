@@ -262,6 +262,7 @@
     "WebsearchProvider": {
       "enum": [
         "exa-hosted-mcp",
+        "firecrawl-hosted-mcp",
         "exa",
         "tavily",
         "perplexity",
@@ -289,7 +290,7 @@
           ]
         },
         "apiKey": {
-          "description": "Optional API key value. Use placeholders like {env:EXA_API_KEY} or {file:~/.keys/exa}. Required for keyed providers; optional for exa-hosted-mcp.",
+          "description": "Optional API key value. Use placeholders like {env:EXA_API_KEY} or {file:~/.keys/exa}. Required for keyed providers; optional for exa-hosted-mcp and firecrawl-hosted-mcp.",
           "anyOf": [
             {
               "type": "string"
@@ -381,6 +382,21 @@
         "string",
         "null"
       ]
+    },
+    "tui": {
+      "description": "Crabcode terminal UI settings. compactMode takes precedence over the saved /compact-mode preference.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "compactMode": {
+          "description": "Enable sticky headers for compact mode. Alias: compact_mode.",
+          "type": "boolean"
+        },
+        "compact_mode": {
+          "description": "Alias for compactMode.",
+          "type": "boolean"
+        }
+      }
     },
     "tools": true,
     "websearch": {

@@ -11,6 +11,49 @@ use std::path::{Path, PathBuf};
 // Re-export json5 for use in load_config_value
 use json5;
 
+/// Cheap theme resolve for first paint: peek config `theme` + prefs, then discover.
+/// Skips full ConfigLoader / skills / agents.
+pub fn resolve_startup_theme(
+    cwd: &Path,
+    prefs_theme_id: Option<&str>,
+    theme_transparent: bool,
+) -> (Vec<crate::theme::Theme>, usize, bool, bool) {
+    let xdg_config_home = xdg_config_home();
+    let project_root = discover_project_root(cwd);
+    let config_theme_id = peek_config_theme_id(&xdg_config_home, &project_root);
+    let selected = config_theme_id
+        .as_deref()
+        .or(prefs_theme_id)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let (themes, idx) = discover_themes(&xdg_config_home, &project_root, cwd, selected);
+    let theme = themes
+        .get(idx)
+        .or_else(|| themes.first())
+        .cloned()
+        .unwrap_or_else(crate::theme::Theme::load_builtin_default);
+    let dark_mode = matches!(theme.appearance, crate::theme::ThemeAppearance::Dark);
+    (themes, idx, dark_mode, theme_transparent)
+}
+
+fn peek_config_theme_id(xdg_config_home: &Path, project_root: &Path) -> Option<String> {
+    let sources = resolve_sources(xdg_config_home, project_root).ok()?;
+    let mut theme_id = None;
+    for source in sources {
+        let Ok(value) = load_config_value(&source.path) else {
+            continue;
+        };
+        let filtered = filter_top_level(value, source.kind);
+        if let Some(id) = filtered.get("theme").and_then(|v| v.as_str()) {
+            let id = id.trim();
+            if !id.is_empty() {
+                theme_id = Some(id.to_string());
+            }
+        }
+    }
+    theme_id
+}
+
 pub fn discover_themes(
     xdg_config_home: &Path,
     project_root: &Path,
@@ -325,6 +368,7 @@ impl Default for ImagesConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebsearchProvider {
     ExaHostedMcp,
+    FirecrawlHostedMcp,
     Exa,
     Tavily,
     Perplexity,
@@ -338,6 +382,7 @@ impl WebsearchProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ExaHostedMcp => "exa-hosted-mcp",
+            Self::FirecrawlHostedMcp => "firecrawl-hosted-mcp",
             Self::Exa => "exa",
             Self::Tavily => "tavily",
             Self::Perplexity => "perplexity",
@@ -476,6 +521,7 @@ pub enum ProviderTimeout {
 #[derive(Debug, Clone, Default)]
 pub struct MergedConfig {
     pub theme: Option<String>,
+    pub tui_compact_mode: Option<bool>,
     pub model: Option<String>,
     pub small_model: Option<String>,
     pub default_agent: Option<String>,
@@ -1119,6 +1165,7 @@ fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     out.insert("notifications");
     out.insert("images");
     out.insert("websearch");
+    out.insert("tui");
     out
 }
 
@@ -1415,6 +1462,12 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
             out.theme = Some(theme.trim().to_string());
         }
     }
+
+    out.tui_compact_mode = obj
+        .get("tui")
+        .and_then(Value::as_object)
+        .and_then(|tui| tui.get("compactMode").or_else(|| tui.get("compact_mode")))
+        .and_then(Value::as_bool);
 
     if let Some(Value::String(model)) = obj.get("model") {
         if !model.trim().is_empty() {
@@ -1771,7 +1824,7 @@ fn parse_websearch(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -
                     match parse_websearch_provider(raw) {
                         Some(provider) => websearch.provider = provider,
                         _ => diagnostics.warnings.push(format!(
-                            "websearch.provider must be one of: exa-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro; got {}",
+                            "websearch.provider must be one of: exa-hosted-mcp, firecrawl-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro; got {}",
                             raw
                         )),
                     }
@@ -1830,6 +1883,7 @@ fn parse_websearch_provider(raw: &str) -> Option<WebsearchProvider> {
     let normalized = raw.trim().to_ascii_lowercase().replace('_', "-");
     match normalized.as_str() {
         "exa-hosted-mcp" => Some(WebsearchProvider::ExaHostedMcp),
+        "firecrawl-hosted-mcp" => Some(WebsearchProvider::FirecrawlHostedMcp),
         "exa" => Some(WebsearchProvider::Exa),
         "tavily" => Some(WebsearchProvider::Tavily),
         "perplexity" => Some(WebsearchProvider::Perplexity),
@@ -2692,6 +2746,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "notifications",
         "images",
         "websearch",
+        "tui",
         "instructions",
         "tools",
         "watcher",
@@ -2874,6 +2929,24 @@ mod tests {
             config.small_model.as_deref(),
             Some("anthropic/claude-haiku")
         );
+    }
+
+    #[test]
+    fn parses_tui_compact_mode_aliases() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({ "tui": { "compactMode": false } }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.tui_compact_mode, Some(false));
+
+        let config = parse_merged_config(
+            &json!({ "tui": { "compact_mode": true } }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.tui_compact_mode, Some(true));
     }
 
     #[test]
@@ -3082,6 +3155,10 @@ mod tests {
         assert_eq!(
             parse_websearch_provider("exa-hosted-mcp"),
             Some(WebsearchProvider::ExaHostedMcp)
+        );
+        assert_eq!(
+            parse_websearch_provider("firecrawl-hosted-mcp"),
+            Some(WebsearchProvider::FirecrawlHostedMcp)
         );
         assert_eq!(
             parse_websearch_provider("exa"),

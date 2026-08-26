@@ -22,6 +22,7 @@ pub enum CommandPaletteAppAction {
     OpenFind,
     SetThinkingVisible(bool),
     CycleReasoningEffort,
+    SetCompactMode(bool),
     OpenStorage,
     OpenSkillsDialog,
     OpenMcpDialog,
@@ -39,7 +40,13 @@ impl CommandPaletteState {
         }
     }
 
-    pub fn refresh_items(&mut self, registry: &Registry, is_chat: bool, thinking_visible: bool) {
+    pub fn refresh_items(
+        &mut self,
+        registry: &Registry,
+        is_chat: bool,
+        thinking_visible: bool,
+        compact_mode: bool,
+    ) {
         let was_visible = self.dialog.is_visible();
         let search_query = self.dialog.search_query.clone();
         let selected = self
@@ -47,7 +54,7 @@ impl CommandPaletteState {
             .get_selected()
             .map(|item| (item.id.clone(), item.provider_id.clone()));
 
-        let mut items = core_palette_items(registry, is_chat, thinking_visible);
+        let mut items = core_palette_items(registry, is_chat, thinking_visible, compact_mode);
         items.insert(
             items
                 .iter()
@@ -194,6 +201,12 @@ fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
             "cycle-reasoning-effort" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::CycleReasoningEffort)
             }
+            "enable-compact-mode" => {
+                CommandPaletteAction::RunAppAction(CommandPaletteAppAction::SetCompactMode(true))
+            }
+            "disable-compact-mode" => {
+                CommandPaletteAction::RunAppAction(CommandPaletteAppAction::SetCompactMode(false))
+            }
             "open-storage" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenStorage)
             }
@@ -221,6 +234,7 @@ fn core_palette_items(
     registry: &Registry,
     is_chat: bool,
     thinking_visible: bool,
+    compact_mode: bool,
 ) -> Vec<DialogItem> {
     let mut items = Vec::new();
 
@@ -398,6 +412,30 @@ fn core_palette_items(
                 &hidden_tokens,
             ),
         );
+
+        let (id, name, description, hidden_tokens) = if compact_mode {
+            (
+                "disable-compact-mode",
+                "Disable Compact Mode",
+                "Show timestamps and full assistant metadata",
+                ["compact mode", "expand"],
+            )
+        } else {
+            (
+                "enable-compact-mode",
+                "Enable Compact Mode",
+                "Hide timestamps and reduce assistant metadata",
+                ["compact mode", "collapse"],
+            )
+        };
+
+        items.insert(
+            items
+                .iter()
+                .position(|item| item.group == "Appearance")
+                .unwrap_or(items.len()),
+            app_action_item(id, name, "Appearance", description, None, &hidden_tokens),
+        );
     }
 
     items.insert(
@@ -561,7 +599,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, false, true);
+        state.refresh_items(&registry, false, true, false);
 
         assert!(state.dialog.items.iter().any(|item| item.id == "models"));
         assert!(!state.dialog.items.iter().any(|item| item.id == "copy"));
@@ -579,7 +617,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true, true);
+        state.refresh_items(&registry, true, true, false);
 
         assert!(state.dialog.items.iter().any(|item| item.id == "copy"));
         assert!(state.dialog.items.iter().any(|item| item.id == "fork"));
@@ -593,7 +631,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true, true);
+        state.refresh_items(&registry, true, true, false);
         state.dialog.set_search_query("branch");
 
         let matches = state
@@ -614,7 +652,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true, true);
+        state.refresh_items(&registry, true, true, false);
 
         assert!(state
             .dialog
@@ -634,7 +672,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true, false);
+        state.refresh_items(&registry, true, false, false);
 
         assert!(state
             .dialog
@@ -649,12 +687,52 @@ mod tests {
     }
 
     #[test]
+    fn palette_shows_enable_compact_mode_when_disabled() {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+        let mut state = init_command_palette();
+
+        state.refresh_items(&registry, true, true, false);
+
+        assert!(state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "enable-compact-mode" && item.name == "Enable Compact Mode"));
+        assert!(!state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "disable-compact-mode"));
+    }
+
+    #[test]
+    fn palette_shows_disable_compact_mode_when_enabled() {
+        let mut registry = Registry::new();
+        register_all_commands(&mut registry);
+        let mut state = init_command_palette();
+
+        state.refresh_items(&registry, true, true, true);
+
+        assert!(state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "disable-compact-mode" && item.name == "Disable Compact Mode"));
+        assert!(!state
+            .dialog
+            .items
+            .iter()
+            .any(|item| item.id == "enable-compact-mode"));
+    }
+
+    #[test]
     fn palette_search_matches_hidden_thinking_tokens() {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true, false);
+        state.refresh_items(&registry, true, false, false);
         state.dialog.set_search_query("show thinking");
 
         let matches = state
@@ -670,7 +748,7 @@ mod tests {
             .iter()
             .any(|(_, name)| name.contains("Show thinking")));
 
-        state.refresh_items(&registry, true, true);
+        state.refresh_items(&registry, true, true, false);
         state.dialog.set_search_query("hide thinking");
 
         let matches = state
@@ -739,7 +817,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, false, true);
+        state.refresh_items(&registry, false, true, false);
 
         let item = state
             .dialog
@@ -761,7 +839,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, false, true);
+        state.refresh_items(&registry, false, true, false);
 
         let item = state
             .dialog
@@ -783,7 +861,7 @@ mod tests {
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true, true);
+        state.refresh_items(&registry, true, true, false);
 
         assert!(state
             .dialog
@@ -814,7 +892,7 @@ mod tests {
         });
         let mut state = init_command_palette();
 
-        state.refresh_items(&registry, true, true);
+        state.refresh_items(&registry, true, true, false);
 
         let custom = state
             .dialog

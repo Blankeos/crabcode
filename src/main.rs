@@ -76,10 +76,7 @@ use ratatui::crossterm::{
         MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{
-        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
-        LeaveAlternateScreen,
-    },
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, buffer::Buffer, style::Color, Terminal};
 use std::io::{self, IsTerminal, Read, Write};
@@ -293,12 +290,36 @@ fn format_post_close_message(
     msg
 }
 
+fn resolve_startup_agent(
+    registry: &crate::agent::definition::AgentRegistry,
+    default_agent: Option<&str>,
+    cli_agent: Option<&str>,
+) -> Result<String> {
+    if let Some(name) = cli_agent.map(str::trim).filter(|name| !name.is_empty()) {
+        if registry.primary_agent(name).is_none() {
+            anyhow::bail!(
+                "Unknown agent '{}'. Available: {}",
+                name,
+                registry.visible_primary_agent_names().join(", ")
+            );
+        }
+        return Ok(crate::app::titlecase_agent_name(name));
+    }
+
+    Ok(default_agent
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(crate::app::titlecase_agent_name)
+        .unwrap_or_else(|| "Build".to_string()))
+}
+
 async fn run_print_mode(
     prompt: &str,
     model_override: Option<&str>,
     reasoning_override: Option<crate::model::reasoning::ReasoningEffort>,
     no_session_persistence: bool,
     dangerously_skip_permissions: bool,
+    cli_agent: Option<&str>,
 ) -> Result<()> {
     use crate::llm::client::stream_llm_with_cancellation;
     use crate::session::types::Message;
@@ -331,11 +352,11 @@ async fn run_print_mode(
         }
     };
 
-    let agent_mode = loaded_config
-        .merged_config
-        .default_agent
-        .clone()
-        .unwrap_or_else(|| "Build".to_string());
+    let agent_mode = resolve_startup_agent(
+        &loaded_config.merged_config.agent_registry,
+        loaded_config.merged_config.default_agent.as_deref(),
+        cli_agent,
+    )?;
 
     let saved_reasoning = prefs_dao
         .as_ref()
@@ -410,6 +431,7 @@ async fn run_print_mode(
     )
     .with_tool_registry(prompt_registry.clone())
     .with_agent_registry(agent_registry.clone())
+    .with_active_agent(agent_mode.clone())
     .with_custom_instructions(custom_instructions)
     .with_print_mode(true);
     let system_prompt = composer.compose().await;
@@ -618,6 +640,10 @@ struct Args {
     /// Model to use for this invocation, formatted as provider/model
     #[arg(short = 'm', long = "model")]
     model: Option<String>,
+
+    /// Agent to start with (e.g. build, plan). Overrides config `default_agent`.
+    #[arg(long = "agent", value_name = "NAME")]
+    agent: Option<String>,
 
     /// Reasoning effort to use for this invocation: none, minimal, low, medium, high, xhigh, or max
     #[arg(long = "reasoning-effort", value_parser = parse_reasoning_effort_arg)]
@@ -857,41 +883,48 @@ async fn main() -> Result<()> {
             args.reasoning_effort,
             args.no_session_persistence,
             args.dangerously_skip_permissions,
+            args.agent.as_deref(),
         )
         .await;
     }
 
-    let mut app = App::new_with_model_override(args.model.as_deref())?;
+    let mut app = App::new_with_model_override(args.model.as_deref(), args.agent.as_deref())?;
     let plugins_enabled = std::env::var("CRABCODE_ENABLE_OPENCODE_PLUGINS")
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let mut plugin_host = None;
-    if plugins_enabled && !app.plugin_specs.is_empty() {
-        let cache_dir = crate::persistence::get_data_dir().join("cache");
-        match crate::plugin::PluginHost::start(&cache_dir, &app.project_root).await {
-            Ok(mut host) => match host.load_plugins(&app.plugin_specs).await {
-                Ok(result) => {
-                    crate::startup_diag!("Plugins: {}", result);
-                    plugin_host = Some(host);
-                }
+    if plugins_enabled {
+        // Plugin configuration is loaded during startup hydration. Hydrate early only
+        // when the experimental plugin host has been explicitly enabled.
+        app.ensure_startup_hydrated()?;
+        if !app.plugin_specs.is_empty() {
+            let cache_dir = crate::persistence::get_data_dir().join("cache");
+            match crate::plugin::PluginHost::start(&cache_dir, &app.project_root).await {
+                Ok(mut host) => match host.load_plugins(&app.plugin_specs).await {
+                    Ok(result) => {
+                        crate::startup_diag!("Plugins: {}", result);
+                        plugin_host = Some(host);
+                    }
+                    Err(error) => {
+                        crate::startup_diag!("Plugin warning: failed to load plugins: {}", error);
+                        let _ = host.shutdown().await;
+                    }
+                },
                 Err(error) => {
-                    crate::startup_diag!("Plugin warning: failed to load plugins: {}", error);
-                    let _ = host.shutdown().await;
+                    crate::startup_diag!("Plugin warning: failed to start Bun sidecar: {}", error);
                 }
-            },
-            Err(error) => {
-                crate::startup_diag!("Plugin warning: failed to start Bun sidecar: {}", error);
             }
         }
-    } else if !app.plugin_specs.is_empty() {
-        crate::startup_diag!(
-            "Plugins: {} discovered but disabled; set CRABCODE_ENABLE_OPENCODE_PLUGINS=1 to enable the experimental host",
-            app.plugin_specs.len()
-        );
     }
     // Keep herdr authority until this guard drops (normal exit or panic).
     let _herdr = crate::herdr::Session::start();
 
+    let mut session_history_loaded = false;
+
     if let Some(ref session_id) = args.session {
+        // --session needs full hydrate + SQLite index before first paint.
+        app.ensure_startup_hydrated()?;
+        app.ensure_session_history();
+        session_history_loaded = true;
         if app.session_manager.ensure_session_loaded(session_id) {
             app.session_manager.switch_session(session_id);
             if let Some(session) = app.session_manager.get_session(session_id) {
@@ -908,7 +941,9 @@ async fn main() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
 
-    let keyboard_enhancement = supports_keyboard_enhancement()?;
+    // Skip blocking supports_keyboard_enhancement() CSI probe (Codex pattern).
+    // Always push flags; terminals that ignore them are fine. Opt out via env.
+    let keyboard_enhancement = std::env::var_os("CRABCODE_DISABLE_KEYBOARD_ENHANCEMENT").is_none();
     if keyboard_enhancement {
         execute!(
             stdout,
@@ -934,7 +969,14 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_event_loop(&mut terminal, &mut app).await;
+    let startup_hydrated = args.session.is_some();
+    let result = run_event_loop(
+        &mut terminal,
+        &mut app,
+        session_history_loaded,
+        startup_hydrated,
+    )
+    .await;
     let remote_launch_request = app.take_remote_launch_request();
 
     let close_info = {
@@ -1032,6 +1074,27 @@ mod tests {
             args.reasoning_effort,
             Some(crate::model::reasoning::ReasoningEffort::Medium)
         );
+    }
+
+    #[test]
+    fn parses_agent_override() {
+        let args = Args::try_parse_from(["crabcode", "-p", "hi", "--agent", "plan"]).unwrap();
+
+        assert_eq!(args.agent.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn resolve_startup_agent_prefers_cli_over_default() {
+        let registry = crate::agent::definition::AgentRegistry::default();
+        let agent = resolve_startup_agent(&registry, Some("Build"), Some("plan")).unwrap();
+        assert_eq!(agent, "Plan");
+    }
+
+    #[test]
+    fn resolve_startup_agent_rejects_unknown() {
+        let registry = crate::agent::definition::AgentRegistry::default();
+        let err = resolve_startup_agent(&registry, None, Some("not-a-real-agent")).unwrap_err();
+        assert!(err.to_string().contains("Unknown agent"));
     }
 
     #[test]
@@ -1251,12 +1314,14 @@ mod tests {
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    mut session_history_loaded: bool,
+    mut startup_hydrated: bool,
 ) -> Result<()> {
-    // Adaptive poll duration: fast when animations run (home page / streaming),
-    // slow otherwise to avoid wasting CPU on unnecessary re-renders.
+    // Adaptive poll: fast for home blink / streaming, park nearly forever when idle.
+    // A short "idle" poll still burns needless redraws/sec; block until input instead.
     const FAST_POLL: Duration = Duration::from_millis(16); // ~60fps for interactive animations
     const STREAMING_POLL: Duration = Duration::from_millis(40); // 25fps, matches wave spinner
-    const SLOW_POLL: Duration = Duration::from_millis(250); // ~4fps idle
+    const IDLE_POLL: Duration = Duration::from_secs(30); // wake only on input / timeout
 
     let mut needs_redraw = true;
     let mut last_complete_frame: Option<Buffer> = None;
@@ -1272,7 +1337,7 @@ async fn run_event_loop(
         } else if animation_needed {
             FAST_POLL
         } else {
-            SLOW_POLL
+            IDLE_POLL
         };
 
         let elapsed_before_poll = loop_start.elapsed();
@@ -1445,6 +1510,18 @@ async fn run_event_loop(
                 last_full_render_at = std::time::Instant::now();
             }
             needs_redraw = false;
+
+            // Hydrate config/prefs/themes/skills, then session index, after first paint.
+            if !startup_hydrated {
+                let _ = app.ensure_startup_hydrated();
+                startup_hydrated = true;
+                needs_redraw = true;
+            }
+            if !session_history_loaded {
+                app.ensure_session_history();
+                session_history_loaded = true;
+                needs_redraw = true;
+            }
         }
     }
     Ok(())

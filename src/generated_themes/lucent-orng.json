@@ -66,8 +66,8 @@
       "light": "#ffffff"
     },
     "background": {
-      "dark": "transparent",
-      "light": "transparent"
+      "dark": "#2a1a15",
+      "light": "#fff5f0"
     },
     "backgroundPanel": {
       "dark": "transparent",
@@ -230,5 +230,6 @@
       "dark": "darkStep12",
       "light": "lightStep12"
     }
-  }
+  },
+  "appearance": "dark"
 }

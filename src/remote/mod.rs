@@ -689,9 +689,10 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
         suggested_alias.clone(),
         options.pair_code.clone(),
     )?);
-    let app = Arc::new(TokioMutex::new(App::new_with_model_override(
-        options.model_override.as_deref(),
-    )?));
+    let mut app_inner = App::new_with_model_override(options.model_override.as_deref(), None)?;
+    app_inner.ensure_startup_hydrated()?;
+    app_inner.ensure_session_history();
+    let app = Arc::new(TokioMutex::new(app_inner));
 
     {
         let app = app.lock().await;
@@ -4000,7 +4001,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_status_exposes_visible_primary_agents() {
-        let mut app = App::new_with_model_override(None).unwrap();
+        let mut app = App::new_with_model_override(None, None).unwrap();
         let mut warnings = Vec::new();
         let defs = crate::agent::definition::parse_agent_definitions_from_config(
             Some(&serde_json::json!({

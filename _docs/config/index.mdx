@@ -38,6 +38,9 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
   "$schema": "https://raw.githubusercontent.com/blankeos/crabcode/main/crabcode.schema.json",
   "model": "openai/gpt-5.2",
   "theme": "crabcode-orange",
+  "tui": {
+    "compactMode": true
+  },
   "notifications": {
     "terminalCondition": "unfocused",
     "complete": {
@@ -64,6 +67,20 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
   }
 }
 ```
+
+## Terminal UI
+
+Use `tui.compactMode` to explicitly control compact mode and its sticky message header:
+
+```jsonc title="crabcode.jsonc"
+{
+  "tui": {
+    "compactMode": false
+  }
+}
+```
+
+`compactMode` takes priority over the preference saved by `/compact-mode`. Without a config value, crabcode restores the last `/compact-mode` choice; new installations default to enabled. `compact_mode` is accepted as an alias.
 
 ## Permissions
 

@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph},
+    widgets::{Block, Clear, Paragraph},
 };
 
 use crate::autocomplete::AutoComplete;
@@ -191,7 +191,7 @@ impl From<crate::aisdk::retry::RetryStatus> for StreamingRetryStatus {
     }
 }
 
-fn titlecase_agent_name(name: &str) -> String {
+pub(crate) fn titlecase_agent_name(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
         return "Build".to_string();
@@ -824,6 +824,7 @@ pub struct App {
     pub models_dialog_state: ModelsDialogState,
     pub themes_dialog_state: ThemesDialogState,
     themes_dialog_original_theme_index: usize,
+    themes_dialog_original_dark_mode: bool,
     themes_dialog_committed: bool,
     pub connect_dialog_state: ConnectDialogState,
     connect_dialog_mode: ConnectDialogMode,
@@ -883,6 +884,8 @@ pub struct App {
     pub themes: Vec<Theme>,
     pub current_theme_index: usize,
     pub dark_mode: bool,
+    /// When true, main UI background is Color::Reset (terminal shows through).
+    pub theme_transparent: bool,
     pub sounds: crate::sound::ResolvedSoundsConfig,
     pub notifications: crate::config::NotificationsConfig,
     pub images: crate::config::ImagesConfig,
@@ -904,6 +907,8 @@ pub struct App {
     last_sessions_dialog_metadata_probe: std::time::Instant,
     last_frame_size: ratatui::layout::Rect,
     last_animation_update: std::time::Instant,
+    /// Last keyboard/mouse/paste (or Home entry). Home blink runs only briefly after this.
+    last_user_activity: std::time::Instant,
     last_session_spinner_update: std::time::Instant,
     cached_git_branch: Option<String>,
     cached_git_branch_path: String,
@@ -917,6 +922,10 @@ pub struct App {
     terminal_title_last: Option<String>,
     terminal_title_animation_origin: std::time::Instant,
     remote_launch_request: Option<RemoteLaunchRequest>,
+    /// False until config/prefs/themes/skills hydrate after first paint.
+    startup_hydrated: bool,
+    pending_model_override: Option<String>,
+    pending_cli_agent: Option<String>,
 }
 
 /// Cached sum of context tokens for all completed messages of the currently
@@ -957,31 +966,42 @@ impl App {
     }
 
     pub fn new() -> Result<Self> {
-        Self::new_with_model_override(None)
+        Self::new_with_model_override(None, None)
     }
 
-    pub fn new_with_model_override(model_override: Option<&str>) -> Result<Self> {
+    /// Load SQLite session index if needed. Deferred past first TUI paint.
+    pub fn ensure_session_history(&mut self) {
+        let _ = self.session_manager.ensure_history();
+    }
+
+    pub fn new_with_model_override(
+        model_override: Option<&str>,
+        cli_agent: Option<&str>,
+    ) -> Result<Self> {
+        Self::new_shell(model_override, cli_agent)
+    }
+
+    /// Minimal App for first paint. Heavy config/prefs/themes/skills load in
+    /// [`Self::ensure_startup_hydrated`].
+    fn new_shell(model_override: Option<&str>, cli_agent: Option<&str>) -> Result<Self> {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
+        let mut input = Input::new();
         let placeholder = Self::get_random_placeholder();
         let placeholder_static: &'static str = Box::leak(placeholder.into_boxed_str());
-        let mut input = Input::new();
         input.set_placeholder(placeholder_static);
+        input.set_image_open_config(crate::config::ImagesConfig::default());
 
-        let cwd_path = crate::utils::cwd::current_dir()?;
-        let cwd = cwd_path
-            .to_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "?".to_string());
-
-        let home_state = init_home();
-        let mut agent = "Build".to_string();
         let mut chat = Chat::new();
-        let suggestions_popup_state = init_suggestions_popup(Popup::new());
+        chat.set_agent_mention_names(Vec::new());
+
+        let popup = Popup::new();
+        let home_state = init_home();
+        let suggestions_popup_state = init_suggestions_popup(popup);
         let agents_dialog_state = init_agents_dialog("Select agent", vec![]);
         let models_dialog_state = init_models_dialog("Models", vec![]);
-        let themes_dialog_state = init_themes_dialog("Themes", vec![]);
+        let themes_dialog_state = init_themes_dialog("Themes", vec![], false);
         let connect_dialog_state = init_connect_dialog();
         let provider_oauth_flow_state = init_provider_oauth_flow();
         let sessions_dialog_state = init_sessions_dialog("Sessions", vec![]);
@@ -999,17 +1019,178 @@ impl App {
         let storage_dialog_state = init_storage_dialog();
         let title_dialog_state = init_title_dialog();
         let api_key_input = crate::ui::components::api_key_input::ApiKeyInput::new();
+        let session_manager = SessionManager::new();
 
-        let session_manager = SessionManager::new()
-            .with_history()
-            .unwrap_or_else(|_| SessionManager::new());
+        let cwd_path = crate::utils::cwd::current_dir_or_dot();
+        let cwd = cwd_path.display().to_string();
 
-        let prefs_dao = match crate::persistence::PrefsDAO::new() {
-            Ok(dao) => Some(dao),
-            Err(e) => {
-                crate::startup_diag!("Warning: Failed to initialize preferences DAO: {}", e);
-                None
-            }
+        let (active_model, active_provider_name) = if let Some(model) = model_override {
+            let (provider, model_id) = parse_model_ref(model);
+            (model_id, provider)
+        } else {
+            ("big-pickle".to_string(), "opencode".to_string())
+        };
+        let agent = cli_agent
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(titlecase_agent_name)
+            .unwrap_or_else(|| "Build".to_string());
+
+        // Resolve real theme before first paint (avoids builtin flash).
+        let prefs_dao = crate::persistence::PrefsDAO::new().ok();
+        let prefs_theme_id = prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_active_theme().ok().flatten());
+        let theme_transparent = prefs_dao
+            .as_ref()
+            .and_then(|dao| dao.get_theme_transparent().ok())
+            .unwrap_or(false);
+        let (themes, current_theme_index, dark_mode, theme_transparent) =
+            crate::config::resolve_startup_theme(
+                &cwd_path,
+                prefs_theme_id.as_deref(),
+                theme_transparent,
+            );
+        let theme_for_colors = themes
+            .get(current_theme_index)
+            .or_else(|| themes.first())
+            .cloned()
+            .unwrap_or_else(theme::Theme::load_builtin_default);
+        let colors = theme_for_colors.get_colors_with(dark_mode, theme_transparent);
+        let chat_state = init_chat(chat, &agent, &colors, true);
+        let session_rename_dialog_state = init_session_rename_dialog(colors);
+        let now = std::time::Instant::now();
+
+        Ok(Self {
+            running: true,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            input,
+            command_registry: registry,
+            session_manager,
+            home_state,
+            chat_state,
+            suggestions_popup_state,
+            agents_dialog_state,
+            models_dialog_state,
+            themes_dialog_state,
+            themes_dialog_original_theme_index: 0,
+            themes_dialog_original_dark_mode: true,
+            themes_dialog_committed: false,
+            connect_dialog_state,
+            connect_dialog_mode: ConnectDialogMode::ProviderSelection,
+            provider_oauth_flow_state,
+            sessions_dialog_state,
+            move_session_dialog_state,
+            session_rename_dialog_state,
+            permission_dialog_state,
+            question_dialog_state,
+            terminal_session_dialog_state,
+            remote_dialog_state,
+            skills_dialog_state,
+            mcp_dialog_state,
+            command_palette_state,
+            find_bar,
+            storage_dialog_state,
+            title_dialog_state,
+            which_key_state,
+            timeline_dialog_state,
+            esc_primed_at: None,
+            copy_actions_dialog: None,
+            message_actions_index: None,
+            message_actions_dialog: None,
+            message_actions_return_focus: OverlayFocus::TimelineDialog,
+            selection_action_bar: None,
+            pending_chat_message_click: None,
+            api_key_input,
+            provider_oauth_receiver: None,
+            provider_oauth_in_progress: None,
+            compaction_receiver: None,
+            compaction_pending: None,
+            storage_receiver: None,
+            models_receiver: None,
+            models_dialog_provider_ids: None,
+            title_generation_receiver: None,
+            prefs_dao,
+            agent,
+            agent_registry: crate::agent::definition::AgentRegistry::default(),
+            agent_steps: std::collections::HashMap::new(),
+            provider_timeouts: std::collections::HashMap::new(),
+            model: active_model,
+            provider_name: active_provider_name,
+            small_model: None,
+            reasoning_efforts: ReasoningEffortOverrides::new(),
+            model_reasoning_options: ModelReasoningOptions::new(),
+            cwd,
+            base_focus: BaseFocus::Home,
+            overlay_focus: OverlayFocus::None,
+            just_closed_overlay: false,
+            ctrl_c_press_count: 0,
+            last_ctrl_c_time: now,
+            themes,
+            current_theme_index,
+            dark_mode,
+            theme_transparent,
+            sounds: crate::sound::ResolvedSoundsConfig::default(),
+            notifications: crate::config::NotificationsConfig::default(),
+            images: crate::config::ImagesConfig::default(),
+            websearch: crate::config::configuration::WebsearchConfig::default(),
+            mcp: crate::config::configuration::McpConfig::default(),
+            config_raw_merged: serde_json::json!({}),
+            custom_instructions: String::new(),
+            terminal_focused: true,
+            tool_permissions: crate::tools::ToolPermissions::new(cwd_path),
+            skills_dirs: Vec::new(),
+            plugin_specs: Vec::new(),
+            project_root: std::path::PathBuf::from("."),
+            is_streaming: false,
+            pending_session_title: None,
+            session_view_states: std::collections::HashMap::new(),
+            session_spinner_frame: 0,
+            stream_drain_rotation: 0,
+            sessions_dialog_live_dirty: true,
+            last_sessions_dialog_metadata_probe: now,
+            last_frame_size: ratatui::layout::Rect::default(),
+            last_animation_update: now,
+            last_user_activity: now,
+            last_session_spinner_update: now,
+            cached_git_branch: None,
+            cached_git_branch_path: String::new(),
+            last_git_branch_check: now,
+            discovery: None,
+            cached_usage_text: String::new(),
+            cached_usage_check: (0, 0, 0),
+            cached_usage_streaming_base: None,
+            terminal_title_enabled: crate::notify::terminal_title_supported(),
+            terminal_title_items: crate::terminal_title::default_items(),
+            terminal_title_last: None,
+            terminal_title_animation_origin: now,
+            remote_launch_request: None,
+            startup_hydrated: false,
+            pending_model_override: model_override.map(str::to_string),
+            pending_cli_agent: cli_agent.map(str::to_string),
+        })
+    }
+
+    /// Load config/prefs/themes/skills after first paint (or immediately for remote/CLI).
+    pub fn ensure_startup_hydrated(&mut self) -> Result<()> {
+        if self.startup_hydrated {
+            return Ok(());
+        }
+
+        let model_override = self.pending_model_override.as_deref();
+        let cli_agent = self.pending_cli_agent.as_deref();
+        let cwd_path = crate::utils::cwd::current_dir_or_dot();
+
+        // Prefer prefs already opened in new_shell (avoids double SQLite open).
+        let prefs_dao = match self.prefs_dao.take() {
+            Some(dao) => Some(dao),
+            None => match crate::persistence::PrefsDAO::new() {
+                Ok(dao) => Some(dao),
+                Err(e) => {
+                    crate::startup_diag!("Warning: Failed to initialize preferences DAO: {}", e);
+                    None
+                }
+            },
         };
 
         let loaded_config = crate::config::ConfigLoader::load()?;
@@ -1017,7 +1198,6 @@ impl App {
         let project_root = loaded_config.project_root.clone();
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
-        // Warm MCP connections in the background so the first chat never waits.
         if !mcp_config.is_empty() {
             let warm_cfg = mcp_config.clone();
             let warm_cwd =
@@ -1026,7 +1206,8 @@ impl App {
                 let _ = crate::mcp::McpManager::ensure(warm_cfg, warm_cwd);
             });
         }
-        input.set_image_open_config(loaded_config.merged_config.images.clone());
+        self.input
+            .set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
                 crate::startup_diag!("Config: {}", msg);
@@ -1046,11 +1227,13 @@ impl App {
 
         crate::skill::init_skill_store(&loaded_config.xdg_config_home, &loaded_config.project_root);
         for command in loaded_config.merged_config.commands.clone() {
-            registry.register_custom(command);
+            self.command_registry.register_custom(command);
         }
-        crate::command::handlers::register_skill_commands(&mut registry);
+        crate::command::handlers::register_skill_commands(&mut self.command_registry);
         let agent_registry = loaded_config.merged_config.agent_registry.clone();
-        chat.set_agent_mention_names(agent_registry.visible_agent_names_for_mentions());
+        self.chat_state
+            .chat
+            .set_agent_mention_names(agent_registry.visible_agent_names_for_mentions());
         let agent_suggestions = agent_registry
             .visible_subagents()
             .into_iter()
@@ -1061,9 +1244,9 @@ impl App {
                 )
             })
             .collect();
-        input.autocomplete = Some(
+        self.input.autocomplete = Some(
             AutoComplete::new_at_with_file_config(
-                crate::autocomplete::CommandAuto::new(&registry),
+                crate::autocomplete::CommandAuto::new(&self.command_registry),
                 &cwd_path,
                 loaded_config.merged_config.watcher.is_enabled(),
                 loaded_config.merged_config.watcher.ignored_paths().to_vec(),
@@ -1071,10 +1254,21 @@ impl App {
             .with_agents(agent_suggestions),
         );
 
+        let mut agent = self.agent.clone();
         if let Some(default_agent) = loaded_config.merged_config.default_agent.clone() {
-            if !default_agent.trim().is_empty() {
+            if !default_agent.trim().is_empty() && self.pending_cli_agent.is_none() {
                 agent = default_agent;
             }
+        }
+        if let Some(name) = cli_agent.map(str::trim).filter(|name| !name.is_empty()) {
+            if agent_registry.primary_agent(name).is_none() {
+                anyhow::bail!(
+                    "Unknown agent '{}'. Available: {}",
+                    name,
+                    agent_registry.visible_primary_agent_names().join(", ")
+                );
+            }
+            agent = titlecase_agent_name(name);
         }
 
         let (resolved_sounds, notification_warnings) =
@@ -1140,145 +1334,59 @@ impl App {
             .map(|prefs| reasoning_effort_overrides_from_prefs(&prefs))
             .unwrap_or_default();
 
-        let configured_theme_id = loaded_config.merged_config.theme.as_deref();
-        let persisted_theme_id = if configured_theme_id.is_none() {
+        // Theme already resolved in new_shell for first paint; keep it.
+        let agent_steps = agent_registry.max_steps_map();
+        let provider_timeouts = loaded_config.merged_config.provider_timeouts.clone();
+        let colors = self.get_current_theme_colors();
+
+        let configured_compact_mode = loaded_config.merged_config.tui_compact_mode;
+        let persisted_compact_mode = if configured_compact_mode.is_none() {
             prefs_dao
                 .as_ref()
-                .and_then(|dao| dao.get_active_theme().ok().flatten())
+                .and_then(|dao| dao.get_compact_mode().ok().flatten())
         } else {
             None
         };
-        let selected_theme_id = configured_theme_id.or(persisted_theme_id.as_deref());
-        let (themes, current_theme_index) = crate::config::discover_themes(
-            &loaded_config.xdg_config_home,
-            &loaded_config.project_root,
-            &loaded_config.cwd,
-            selected_theme_id,
-        );
-        let agent_steps = agent_registry.max_steps_map();
-        let provider_timeouts = loaded_config.merged_config.provider_timeouts.clone();
-        let theme_for_colors = themes
-            .get(current_theme_index)
-            .or_else(|| themes.first())
-            .cloned()
-            .unwrap_or_else(theme::Theme::load_builtin_default);
-        let colors = theme_for_colors.get_colors(true);
+        let compact_mode = configured_compact_mode
+            .or(persisted_compact_mode)
+            .unwrap_or(true);
+        self.chat_state.compact_mode = compact_mode;
+        let agent_color = crate::theme::agent_color(&agent, &colors);
+        self.chat_state.wave_spinner.set_color(agent_color);
+        self.session_rename_dialog_state.set_colors(colors);
 
-        let chat_state = init_chat(chat, &agent, &colors);
-        let session_rename_dialog_state = init_session_rename_dialog(colors);
         let runtime = crate::config::ConfigRuntime::from_merged(
             &loaded_config.merged_config,
             cwd_path.clone(),
             crate::config::ConfigRuntimeOptions::default(),
         );
-        let tool_permissions = runtime.tool_permissions;
-        let discovery = runtime.discovery;
-        let custom_instructions = runtime.custom_instructions;
-        let now = std::time::Instant::now();
 
-        Ok(Self {
-            running: true,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            input,
-            command_registry: registry,
-            session_manager,
-            home_state,
-            chat_state,
-            suggestions_popup_state,
-            agents_dialog_state,
-            models_dialog_state,
-            themes_dialog_state,
-            themes_dialog_original_theme_index: 0,
-            themes_dialog_committed: false,
-            connect_dialog_state,
-            connect_dialog_mode: ConnectDialogMode::ProviderSelection,
-            provider_oauth_flow_state,
-            sessions_dialog_state,
-            move_session_dialog_state,
-            session_rename_dialog_state,
-            permission_dialog_state,
-            question_dialog_state,
-            terminal_session_dialog_state,
-            remote_dialog_state,
-            skills_dialog_state,
-            mcp_dialog_state,
-            command_palette_state,
-            find_bar,
-            storage_dialog_state,
-            title_dialog_state,
-            which_key_state,
-            timeline_dialog_state,
-            esc_primed_at: None,
-            copy_actions_dialog: None,
-            message_actions_index: None,
-            message_actions_dialog: None,
-            message_actions_return_focus: OverlayFocus::TimelineDialog,
-            selection_action_bar: None,
-            pending_chat_message_click: None,
-            api_key_input,
-            provider_oauth_receiver: None,
-            provider_oauth_in_progress: None,
-            compaction_receiver: None,
-            compaction_pending: None,
-            storage_receiver: None,
-            models_receiver: None,
-            models_dialog_provider_ids: None,
-            title_generation_receiver: None,
-            prefs_dao,
-            agent,
-            agent_registry,
-            agent_steps,
-            provider_timeouts,
-            model: active_model,
-            provider_name: active_provider_name,
-            small_model,
-            reasoning_efforts,
-            model_reasoning_options: ModelReasoningOptions::new(),
-            cwd: cwd.clone(),
-            base_focus: BaseFocus::Home,
-            overlay_focus: OverlayFocus::None,
-            just_closed_overlay: false,
-            ctrl_c_press_count: 0,
-            last_ctrl_c_time: std::time::Instant::now(),
-            themes,
-            current_theme_index,
-            dark_mode: true,
-            sounds: resolved_sounds,
-            notifications: loaded_config.merged_config.notifications,
-            images: loaded_config.merged_config.images,
-            websearch: loaded_config.merged_config.websearch,
-            mcp: mcp_config.clone(),
-            config_raw_merged: loaded_config.raw_merged,
-            custom_instructions,
-            terminal_focused: true,
-            tool_permissions,
-            skills_dirs: loaded_config.inventory.opencode_skills_dirs,
-            plugin_specs,
-            project_root,
-            // Note: skills_dirs is legacy; skill loading is now handled by src/skill/mod.rs
-            is_streaming: false,
-            pending_session_title: None,
-            session_view_states: std::collections::HashMap::new(),
-            session_spinner_frame: 0,
-            stream_drain_rotation: 0,
-            sessions_dialog_live_dirty: true,
-            last_sessions_dialog_metadata_probe: now,
-            last_frame_size: ratatui::layout::Rect::default(),
-            last_animation_update: now,
-            last_session_spinner_update: now,
-            cached_git_branch: None,
-            cached_git_branch_path: String::new(),
-            last_git_branch_check: now,
-            discovery,
-            cached_usage_text: String::new(),
-            cached_usage_check: (0, 0, 0),
-            cached_usage_streaming_base: None,
-            terminal_title_enabled: crate::notify::terminal_title_supported(),
-            terminal_title_items,
-            terminal_title_last: None,
-            terminal_title_animation_origin: now,
-            remote_launch_request: None,
-        })
+        self.prefs_dao = prefs_dao;
+        self.agent = agent;
+        self.agent_registry = agent_registry;
+        self.agent_steps = agent_steps;
+        self.provider_timeouts = provider_timeouts;
+        self.model = active_model;
+        self.provider_name = active_provider_name;
+        self.small_model = small_model;
+        self.reasoning_efforts = reasoning_efforts;
+        self.sounds = resolved_sounds;
+        self.notifications = loaded_config.merged_config.notifications.clone();
+        self.images = loaded_config.merged_config.images.clone();
+        self.websearch = loaded_config.merged_config.websearch.clone();
+        self.mcp = mcp_config;
+        self.config_raw_merged = loaded_config.raw_merged;
+        self.custom_instructions = runtime.custom_instructions;
+        self.tool_permissions = runtime.tool_permissions;
+        self.skills_dirs = loaded_config.inventory.opencode_skills_dirs;
+        self.plugin_specs = plugin_specs;
+        self.project_root = project_root;
+        self.discovery = runtime.discovery;
+        self.terminal_title_items = terminal_title_items;
+        self.startup_hydrated = true;
+        self.pending_model_override = None;
+        self.pending_cli_agent = None;
+        Ok(())
     }
 
     fn play_sound_event(&self, event: crate::sound::SoundEvent) {
@@ -1976,6 +2084,7 @@ impl App {
         self.chat_state.chat.clear();
         self.input.clear();
         self.base_focus = BaseFocus::Home;
+        self.note_user_activity();
         self.sync_active_streaming_flag();
         self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         self.refresh_sessions_dialog();
@@ -1992,6 +2101,7 @@ impl App {
         self.chat_state.chat.clear();
         self.input.clear();
         self.base_focus = BaseFocus::Home;
+        self.note_user_activity();
         self.sync_active_streaming_flag();
         self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         self.refresh_sessions_dialog();
@@ -2678,7 +2788,7 @@ impl App {
         }
 
         let theme = &self.themes[self.current_theme_index];
-        theme.get_colors(self.dark_mode)
+        theme.get_colors_with(self.dark_mode, self.theme_transparent)
     }
 
     fn active_workspace_path(&self) -> String {
@@ -2826,28 +2936,40 @@ impl App {
     }
 
     fn preview_theme_by_id(&mut self, theme_id: &str) {
-        if let Some((idx, _)) = self
+        if let Some((idx, theme)) = self
             .themes
             .iter()
             .enumerate()
             .find(|(_, theme)| theme.id == theme_id)
         {
             self.current_theme_index = idx;
+            self.dark_mode = matches!(theme.appearance, theme::ThemeAppearance::Dark);
         }
     }
 
     fn commit_theme_by_id(&mut self, theme_id: &str) -> Option<String> {
-        let (idx, selected_theme_id) = self
+        let (idx, selected_theme_id, appearance) = self
             .themes
             .iter()
             .enumerate()
             .find(|(_, theme)| theme.id == theme_id)
-            .map(|(idx, theme)| (idx, theme.id.clone()))?;
+            .map(|(idx, theme)| (idx, theme.id.clone(), theme.appearance))?;
 
         self.current_theme_index = idx;
+        self.dark_mode = matches!(appearance, theme::ThemeAppearance::Dark);
         self.themes_dialog_committed = true;
         self.persist_theme_selection(&selected_theme_id);
         Some(selected_theme_id)
+    }
+
+    fn apply_theme_transparent(&mut self, transparent: bool) {
+        self.theme_transparent = transparent;
+        self.themes_dialog_state.set_transparent(transparent);
+        if let Some(ref dao) = self.prefs_dao {
+            if let Err(e) = dao.set_theme_transparent(transparent) {
+                eprintln!("Failed to save theme transparency: {}", e);
+            }
+        }
     }
 
     fn persist_theme_selection(&self, theme_id: &str) {
@@ -3070,7 +3192,73 @@ impl App {
     }
 
     fn current_chat_area(&self) -> Rect {
-        self.chat_area_for_size(self.last_frame_size)
+        // Prefer the last-rendered chat content rect (excludes compact chrome).
+        self.chat_state
+            .last_chat_area
+            .unwrap_or_else(|| self.chat_area_for_size(self.last_frame_size))
+    }
+
+    /// Forward chat mouse events while a permission/question dialog is open.
+    /// Clicks on dialog controls are handled by the dialog; everything else
+    /// (scroll + text selection) reaches the chat behind it.
+    fn forward_chat_mouse_through_dialog(&mut self, mouse: MouseEvent) {
+        if self.base_focus != BaseFocus::Chat {
+            return;
+        }
+
+        let is_scroll = matches!(
+            mouse.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        );
+        let is_selection = matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        );
+        if !is_scroll && !is_selection {
+            return;
+        }
+
+        let chat_area = self.current_chat_area();
+        let was_dragging = self.chat_state.chat.selection.is_dragging;
+        if !self.chat_state.chat.handle_mouse_event(mouse, chat_area) {
+            return;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.selection_action_bar = None;
+        }
+
+        // Same as the normal chat path: show actions as soon as a drag creates a
+        // selection, because mouse-up may never arrive if released outside the terminal.
+        if was_dragging
+            && self.chat_state.chat.selection.is_dragging
+            && matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+        {
+            self.show_selection_action_bar_for(SelectionActionTarget::Chat);
+        } else if was_dragging && !self.chat_state.chat.selection.is_dragging {
+            self.show_selection_action_bar_for(SelectionActionTarget::Chat);
+        }
+    }
+
+    /// Region where a mouse wheel scrolls the chat. In compact mode this
+    /// extends above the chat content to include the 3-row header (and the
+    /// sticky overlay which sits inside the transcript top), so scrolling
+    /// works even when the pointer is over that chrome.
+    fn chat_scroll_region(&self) -> Rect {
+        let chat_area = self.current_chat_area();
+        if !self.chat_state.compact_mode {
+            return chat_area;
+        }
+        // Sticky is an overlay inside chat_area; only the header sits above it.
+        let top = chat_area.y.saturating_sub(3); // header rows
+        Rect {
+            x: chat_area.x,
+            y: top,
+            width: chat_area.width,
+            height: chat_area.bottom().saturating_sub(top),
+        }
     }
 
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
@@ -3079,7 +3267,7 @@ impl App {
             OverlayFocus::None | OverlayFocus::FindBar
         ) && self.base_focus == BaseFocus::Chat
         {
-            let chat_area = self.current_chat_area();
+            let chat_area = self.chat_scroll_region();
             if chat_area.contains(Position::new(mouse.column, mouse.row))
                 && self
                     .chat_state
@@ -3102,6 +3290,7 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        self.note_user_activity();
 
         if self.overlay_focus == OverlayFocus::FindBar && !self.can_open_find_bar() {
             self.close_find_bar_focus();
@@ -3371,12 +3560,16 @@ impl App {
                             ));
                         }
                     }
+                    crate::views::themes_dialog::ThemesDialogAction::ToggleTransparent => {
+                        self.apply_theme_transparent(self.themes_dialog_state.transparent);
+                    }
                     crate::views::themes_dialog::ThemesDialogAction::None => {}
                 }
 
                 if !self.themes_dialog_state.dialog.is_visible() {
                     if !self.themes_dialog_committed {
                         self.current_theme_index = self.themes_dialog_original_theme_index;
+                        self.dark_mode = self.themes_dialog_original_dark_mode;
                     }
                     self.overlay_focus = OverlayFocus::None;
                 }
@@ -3979,6 +4172,27 @@ impl App {
         }
     }
 
+    fn set_compact_mode(&mut self, enabled: bool) {
+        if self.chat_state.compact_mode == enabled {
+            return;
+        }
+        self.chat_state.compact_mode = enabled;
+        if let Some(dao) = &self.prefs_dao {
+            if let Err(error) = dao.set_compact_mode(enabled) {
+                eprintln!("Failed to persist compact mode preference: {error}");
+            }
+        }
+        push_toast(Toast::new(
+            if enabled {
+                "Compact mode enabled"
+            } else {
+                "Compact mode disabled"
+            },
+            ToastLevel::Info,
+            Some(std::time::Duration::from_secs(2)),
+        ));
+    }
+
     fn toggle_agent_mode(&mut self) {
         let agents = self.agent_registry.visible_primary_agent_names();
         if agents.is_empty() {
@@ -4444,6 +4658,9 @@ impl App {
     }
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if !matches!(mouse.kind, MouseEventKind::Moved) {
+            self.note_user_activity();
+        }
         if std::env::var_os("CRABCODE_MOUSE_TRACE").is_some() {
             crate::emit_log!(
                 "Handle mouse: kind={:?} modifiers={:?} col={} row={} base={:?} overlay={:?}",
@@ -4482,8 +4699,14 @@ impl App {
             return;
         }
 
-        // If text is selected and user clicks on an overlay, clear selection instead
+        // If text is selected and user clicks on an overlay, clear selection instead.
+        // Permission/question dialogs intentionally forward outside clicks to chat so
+        // text can still be highlighted (same idea as scroll-through).
         if self.overlay_focus != OverlayFocus::None
+            && !matches!(
+                self.overlay_focus,
+                OverlayFocus::PermissionDialog | OverlayFocus::QuestionDialog
+            )
             && (self.chat_state.chat.has_selection() || self.input.has_selection())
             && self.selection_action_bar.is_none()
             && matches!(
@@ -4578,52 +4801,9 @@ impl App {
             if let PermissionDialogAction::Respond(response) = action {
                 self.remote_respond_permission(response);
             }
-            if !handled
-                && matches!(
-                    mouse.kind,
-                    ratatui::crossterm::event::MouseEventKind::ScrollDown
-                        | ratatui::crossterm::event::MouseEventKind::ScrollUp
-                )
-                && self.base_focus == BaseFocus::Chat
-            {
-                let size = self.last_frame_size;
-                let main_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(size);
-                let input_height = self.input.get_height_for_width(size.width);
-                let input_height = if self.is_subagent_session_active() {
-                    SUBAGENT_FOOTER_HEIGHT
-                } else {
-                    input_height
-                };
-                let help_height = if self.is_subagent_session_active() {
-                    0
-                } else {
-                    1
-                };
-                let above_status_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(help_height),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(main_chunks[0]);
-                let chat_area = above_status_chunks[1];
-                let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
+            if !handled {
+                // Allow chat scroll + text selection outside the permission dialog.
+                self.forward_chat_mouse_through_dialog(mouse);
             }
         } else if self.overlay_focus == OverlayFocus::QuestionDialog {
             let action = handle_question_dialog_mouse_event(&mut self.question_dialog_state, mouse);
@@ -4644,52 +4824,9 @@ impl App {
                 }
                 QuestionDialogAction::Handled | QuestionDialogAction::NotHandled => {}
             }
-            if !handled
-                && matches!(
-                    mouse.kind,
-                    ratatui::crossterm::event::MouseEventKind::ScrollDown
-                        | ratatui::crossterm::event::MouseEventKind::ScrollUp
-                )
-                && self.base_focus == BaseFocus::Chat
-            {
-                let size = self.last_frame_size;
-                let main_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(size);
-                let input_height = self.input.get_height_for_width(size.width);
-                let input_height = if self.is_subagent_session_active() {
-                    SUBAGENT_FOOTER_HEIGHT
-                } else {
-                    input_height
-                };
-                let help_height = if self.is_subagent_session_active() {
-                    0
-                } else {
-                    1
-                };
-                let above_status_chunks = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints(
-                        [
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Min(0),
-                            ratatui::layout::Constraint::Length(0),
-                            ratatui::layout::Constraint::Length(input_height),
-                            ratatui::layout::Constraint::Length(help_height),
-                            ratatui::layout::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(main_chunks[0]);
-                let chat_area = above_status_chunks[1];
-                let _ = self.chat_state.chat.handle_mouse_event(mouse, chat_area);
+            if !handled {
+                // Allow chat scroll + text selection outside the question dialog.
+                self.forward_chat_mouse_through_dialog(mouse);
             }
         } else if self.overlay_focus == OverlayFocus::RemoteDialog {
             let action = handle_remote_dialog_mouse_event(&mut self.remote_dialog_state, mouse);
@@ -4710,12 +4847,16 @@ impl App {
                         ));
                     }
                 }
+                crate::views::themes_dialog::ThemesDialogAction::ToggleTransparent => {
+                    self.apply_theme_transparent(self.themes_dialog_state.transparent);
+                }
                 crate::views::themes_dialog::ThemesDialogAction::None => {}
             }
 
             if !self.themes_dialog_state.dialog.is_visible() {
                 if !self.themes_dialog_committed {
                     self.current_theme_index = self.themes_dialog_original_theme_index;
+                    self.dark_mode = self.themes_dialog_original_dark_mode;
                 }
                 self.overlay_focus = OverlayFocus::None;
                 return;
@@ -4956,6 +5097,23 @@ impl App {
             if self.base_focus == BaseFocus::Chat {
                 let chat_area = self.current_chat_area();
 
+                // Compact-mode sticky user message: click to scroll to that message.
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    && mouse.modifiers.is_empty()
+                {
+                    if let Some((sticky_rect, msg_idx)) = self.chat_state.sticky_click_target {
+                        if sticky_rect.contains(Position::new(mouse.column, mouse.row)) {
+                            self.chat_state.chat.scroll_to_message_index(msg_idx);
+                            // Clear sticky state so the scrolled-to message re-enters
+                            // the viewport cleanly without residual sticky chrome.
+                            self.chat_state.sticky_message_index = None;
+                            self.chat_state.sticky_click_target = None;
+                            self.pending_chat_message_click = None;
+                            return;
+                        }
+                    }
+                }
+
                 match mouse.kind {
                     MouseEventKind::Moved
                         if !self.chat_state.chat.has_selection()
@@ -5148,6 +5306,7 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: String) {
+        self.note_user_activity();
         const MAX_PASTE_SIZE: usize = 20 * 1024 * 1024;
 
         if text.len() > MAX_PASTE_SIZE {
@@ -5351,9 +5510,14 @@ impl App {
 
         clear_suggestions(&mut self.suggestions_popup_state);
         let thinking_visible = self.chat_state.chat.thinking_visible();
+        let compact_mode = self.chat_state.compact_mode;
         let is_chat = self.can_open_find_bar();
-        self.command_palette_state
-            .refresh_items(&self.command_registry, is_chat, thinking_visible);
+        self.command_palette_state.refresh_items(
+            &self.command_registry,
+            is_chat,
+            thinking_visible,
+            compact_mode,
+        );
         self.command_palette_state.show();
         self.overlay_focus = OverlayFocus::CommandPalette;
     }
@@ -5581,6 +5745,9 @@ impl App {
                     }
                     CommandPaletteAppAction::CycleReasoningEffort => {
                         let _ = self.cycle_active_reasoning_effort();
+                    }
+                    CommandPaletteAppAction::SetCompactMode(enabled) => {
+                        self.set_compact_mode(enabled);
                     }
                     CommandPaletteAppAction::OpenStorage => self.open_storage_dialog(),
                     CommandPaletteAppAction::OpenSkillsDialog => self.show_skills_dialog(),
@@ -5963,7 +6130,7 @@ impl App {
         self.cached_usage_check = (usize::MAX, u64::MAX, usize::MAX);
         let _ = self.session_manager.set_session_status(
             session_id,
-            crate::session::types::SessionStatus::Waiting,
+            crate::session::types::SessionStatus::Streaming,
             None,
         );
         push_toast(Toast::new(
@@ -6094,6 +6261,11 @@ impl App {
 
         match parse_input(input) {
             InputType::Command(mut parsed) => {
+                // Popup Accept / autocomplete_and_submit land here — must record MRU
+                // (process_command_input is only used by some Enter paths).
+                if let Some(autocomplete) = self.input.autocomplete.as_ref() {
+                    autocomplete.command_auto.touch_mru(&parsed.name);
+                }
                 if self.command_registry.is_custom_command(&parsed.name) {
                     parsed.prefs_data = self
                         .prefs_dao
@@ -6208,6 +6380,10 @@ impl App {
                     }
                     return;
                 }
+                if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
+                    self.set_compact_mode(!self.chat_state.compact_mode);
+                    return;
+                }
                 if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat
                 {
                     self.handle_fork_command(&parsed.args);
@@ -6231,6 +6407,7 @@ impl App {
                         if parsed.name == "new" || parsed.name == "home" {
                             self.chat_state.chat.clear();
                             self.base_focus = BaseFocus::Home;
+                            self.note_user_activity();
                             self.pending_session_title = None;
                             self.session_manager.clear_current_session();
                         } else if self.base_focus == BaseFocus::Home
@@ -6326,6 +6503,9 @@ impl App {
     }
 
     async fn process_command_input(&mut self, mut parsed: crate::command::parser::ParsedCommand) {
+        if let Some(autocomplete) = self.input.autocomplete.as_ref() {
+            autocomplete.command_auto.touch_mru(&parsed.name);
+        }
         if self.command_registry.is_custom_command(&parsed.name) {
             parsed.prefs_data = self
                 .prefs_dao
@@ -6437,6 +6617,10 @@ impl App {
             }
             return;
         }
+        if parsed.name == "compact-mode" && self.base_focus == BaseFocus::Chat {
+            self.set_compact_mode(!self.chat_state.compact_mode);
+            return;
+        }
         if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat {
             self.handle_fork_command(&parsed.args);
             return;
@@ -6459,6 +6643,7 @@ impl App {
                 if parsed.name == "new" || parsed.name == "home" {
                     self.chat_state.chat.clear();
                     self.base_focus = BaseFocus::Home;
+                    self.note_user_activity();
                     self.pending_session_title = None;
                     self.session_manager.clear_current_session();
                 } else if self.base_focus == BaseFocus::Home && parsed.name != "refreshmodels" {
@@ -7669,8 +7854,9 @@ impl App {
                 DialogItem {
                     id: t.id.clone(),
                     name: t.id.clone(),
-                    group: String::new(),
-                    description: String::new(),
+                    group: t.appearance.as_str().to_string(),
+                    // Searchable: type "light" or "dark" to filter by appearance.
+                    description: t.appearance.as_str().to_string(),
                     tip: None,
                     provider_id: String::new(),
                     active: is_active,
@@ -7680,7 +7866,7 @@ impl App {
 
         items.sort_by(|a, b| a.id.cmp(&b.id));
 
-        self.themes_dialog_state = init_themes_dialog("Themes", items);
+        self.themes_dialog_state = init_themes_dialog("Themes", items, self.theme_transparent);
 
         if let Some(theme_id) = current_id.as_deref() {
             let _ = self
@@ -7691,6 +7877,7 @@ impl App {
 
         self.themes_dialog_state.dialog.show();
         self.themes_dialog_original_theme_index = self.current_theme_index;
+        self.themes_dialog_original_dark_mode = self.dark_mode;
         self.themes_dialog_committed = false;
         self.overlay_focus = OverlayFocus::ThemesDialog;
     }
@@ -8295,28 +8482,50 @@ impl App {
                     {
                         Ok(()) => {
                             let is_active = self.is_active_session(&session_id);
-                            // Marker is appended last — pin to bottom so the
-                            // "Context compacted" line is visible without jump.
-                            let mut chat = self.chat_with_messages(messages.clone());
-                            chat.scroll_to_bottom_on_next_render();
-                            if let Some(marker_idx) = messages
+                            // Marker is last in soft layout — pin to bottom so the
+                            // "Context compacted" line is visible without mid-history jump.
+                            // Prefer replace_messages on the live chat: rebuilding via
+                            // chat_with_messages zeros content_height and can desync
+                            // sticky/live scroll state until the next session load.
+                            let marker_idx = messages
                                 .iter()
-                                .rposition(|m| crate::session::compaction::is_compaction_marker(m))
-                            {
-                                chat.set_highlighted_message(Some(marker_idx));
-                            } else {
-                                chat.clear_highlighted_message();
-                            }
-
+                                .rposition(|m| crate::session::compaction::is_compaction_marker(m));
                             if is_active {
-                                self.chat_state.chat = chat.clone();
+                                self.chat_state.chat.replace_messages(messages.clone());
+                                self.chat_state.chat.scroll_to_bottom_on_next_render();
+                                if let Some(marker_idx) = marker_idx {
+                                    self.chat_state
+                                        .chat
+                                        .set_highlighted_message(Some(marker_idx));
+                                } else {
+                                    self.chat_state.chat.clear_highlighted_message();
+                                }
                             }
 
-                            // Always keep view-state in sync so reopen/switch
-                            // shows the same compacted history + marker.
                             self.ensure_session_view_state(&session_id);
+                            // Build parked chat before mutably borrowing session_view_states
+                            // (chat_with_messages needs &self).
+                            let parked_chat = if !is_active {
+                                let mut view_chat = self.chat_with_messages(messages);
+                                view_chat.scroll_to_bottom_on_next_render();
+                                if let Some(marker_idx) = marker_idx {
+                                    view_chat.set_highlighted_message(Some(marker_idx));
+                                } else {
+                                    view_chat.clear_highlighted_message();
+                                }
+                                Some(view_chat)
+                            } else {
+                                None
+                            };
                             if let Some(state) = self.session_view_states.get_mut(&session_id) {
-                                state.chat = chat;
+                                // Keep the active session's live chat out of
+                                // session_view_states (same invariant as
+                                // load_session_view_state / switch_to_session).
+                                // Never park an empty new_chat() here — that would
+                                // wipe the marker on the next session restore.
+                                if let Some(view_chat) = parked_chat {
+                                    state.chat = view_chat;
+                                }
                                 state.tool_calls = ToolCallViewState::default();
                                 state.unread_completed = !is_active;
                             }
@@ -8683,8 +8892,17 @@ impl App {
         }
     }
 
+    /// How long the Home cursor blink keeps the ~60fps loop alive after activity.
+    const HOME_ANIM_IDLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+    pub fn note_user_activity(&mut self) {
+        self.last_user_activity = std::time::Instant::now();
+    }
+
     pub fn is_animation_running(&self) -> bool {
-        self.base_focus == BaseFocus::Home
+        let home_animating = self.base_focus == BaseFocus::Home
+            && self.last_user_activity.elapsed() < Self::HOME_ANIM_IDLE;
+        home_animating
             || self.has_active_selection_edge_scroll()
             || self.is_streaming
             || self.chat_state.chat.has_active_tool_messages()
@@ -9950,11 +10168,21 @@ impl App {
         is_chat: bool,
     ) -> Vec<crate::autocomplete::Suggestion> {
         match trigger {
-            "slash" => crate::autocomplete::CommandAuto::new(&self.command_registry)
-                .get_suggestions(query, is_chat)
-                .into_iter()
-                .filter(|suggestion| !is_remote_browser_unsupported_command(&suggestion.name))
-                .collect(),
+            "slash" => {
+                let suggestions = self
+                    .input
+                    .autocomplete
+                    .as_ref()
+                    .map(|ac| ac.command_auto.get_suggestions(query, is_chat))
+                    .unwrap_or_else(|| {
+                        crate::autocomplete::CommandAuto::new(&self.command_registry)
+                            .get_suggestions(query, is_chat)
+                    });
+                suggestions
+                    .into_iter()
+                    .filter(|suggestion| !is_remote_browser_unsupported_command(&suggestion.name))
+                    .collect()
+            }
             "mention" => {
                 let query_lower = query.to_ascii_lowercase();
                 let mut suggestions = self
@@ -10154,6 +10382,7 @@ impl App {
 
         if self.session_manager.get_current_session_id().is_none() {
             self.base_focus = BaseFocus::Home;
+            self.note_user_activity();
             self.overlay_focus = OverlayFocus::None;
             self.pending_session_title = None;
             self.input.clear();
@@ -10562,6 +10791,15 @@ impl App {
         self.last_frame_size = size;
         let colors = self.get_current_theme_colors();
 
+        // Solid canvas when transparency is off. Color::Reset (transparent on)
+        // leaves the terminal's own background showing through.
+        if colors.background != ratatui::style::Color::Reset {
+            f.render_widget(
+                Block::default().style(Style::default().bg(colors.background)),
+                size,
+            );
+        }
+
         let fingerprint = (
             self.chat_state.chat.messages.len(),
             self.chat_state.chat.render_revision(),
@@ -10658,6 +10896,9 @@ impl App {
                     &queued_messages,
                     &mut self.find_bar,
                     self.overlay_focus == OverlayFocus::None,
+                    self.session_manager
+                        .get_current_session()
+                        .map(|s| s.title.as_str()),
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -11246,12 +11487,13 @@ mod tests {
             command_registry: registry,
             session_manager: SessionManager::new(),
             home_state: init_home(),
-            chat_state: init_chat(Chat::new(), "Build", &colors),
+            chat_state: init_chat(Chat::new(), "Build", &colors, true),
             suggestions_popup_state: init_suggestions_popup(Popup::new()),
             agents_dialog_state: init_agents_dialog("Select agent", vec![]),
             models_dialog_state: init_models_dialog("Models", vec![]),
-            themes_dialog_state: init_themes_dialog("Themes", vec![]),
+            themes_dialog_state: init_themes_dialog("Themes", vec![], false),
             themes_dialog_original_theme_index: 0,
+            themes_dialog_original_dark_mode: true,
             themes_dialog_committed: false,
             connect_dialog_state: init_connect_dialog(),
             connect_dialog_mode: ConnectDialogMode::ProviderSelection,
@@ -11306,6 +11548,7 @@ mod tests {
             themes: vec![theme],
             current_theme_index: 0,
             dark_mode: true,
+            theme_transparent: false,
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
             images: crate::config::ImagesConfig::default(),
@@ -11327,6 +11570,7 @@ mod tests {
             last_sessions_dialog_metadata_probe: std::time::Instant::now(),
             last_frame_size: ratatui::layout::Rect::default(),
             last_animation_update: std::time::Instant::now(),
+            last_user_activity: std::time::Instant::now(),
             last_session_spinner_update: std::time::Instant::now(),
             cached_git_branch: None,
             cached_git_branch_path: ".".to_string(),
@@ -11340,6 +11584,9 @@ mod tests {
             terminal_title_last: None,
             terminal_title_animation_origin: std::time::Instant::now(),
             remote_launch_request: None,
+            startup_hydrated: true,
+            pending_model_override: None,
+            pending_cli_agent: None,
         }
     }
 
@@ -11980,6 +12227,75 @@ mod tests {
     }
 
     #[test]
+    fn permission_dialog_forwards_chat_text_selection() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant(
+                "alpha beta gamma",
+            ));
+        app.chat_state.chat.content_height = 25;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+        let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
+        app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_id: "list".to_string(),
+            action: PermissionAction::List,
+            permission: "external_directory".to_string(),
+            patterns: vec!["/tmp/*".to_string()],
+            target: Some("/tmp".to_string()),
+            command: None,
+            workdir: None,
+            reason: "approval required".to_string(),
+            response_tx: permission_tx,
+        });
+        app.overlay_focus = OverlayFocus::PermissionDialog;
+
+        // Outside dialog controls: start + drag selection on chat text.
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), 8, 1));
+
+        assert!(
+            app.chat_state.chat.has_selection() || app.chat_state.chat.selection.is_dragging,
+            "chat text should be selectable while permission dialog is open"
+        );
+    }
+
+    #[test]
+    fn question_dialog_forwards_chat_text_selection() {
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::assistant(
+                "alpha beta gamma",
+            ));
+        app.chat_state.chat.content_height = 25;
+        app.chat_state.chat.viewport_height = 18;
+        app.chat_state.chat.scroll_offset = 0;
+        let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
+        app.question_dialog_state.enqueue(
+            json!([{
+                "question": "Continue?",
+                "options": [{ "label": "Yes" }, { "label": "No" }]
+            }]),
+            question_tx,
+        );
+        app.overlay_focus = OverlayFocus::QuestionDialog;
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), 8, 1));
+
+        assert!(
+            app.chat_state.chat.has_selection() || app.chat_state.chat.selection.is_dragging,
+            "chat text should be selectable while question dialog is open"
+        );
+    }
+
+    #[test]
     fn chat_selection_action_bar_shows_before_mouse_up() {
         let mut app = test_app();
         app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
@@ -12503,6 +12819,20 @@ mod tests {
 
         assert!(app.is_animation_running());
         assert!(!app.is_streaming_animation_only());
+    }
+
+    #[test]
+    fn home_animation_freezes_after_idle() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Home;
+        app.note_user_activity();
+        assert!(app.is_animation_running());
+
+        app.last_user_activity = std::time::Instant::now() - std::time::Duration::from_secs(4);
+        assert!(
+            !app.is_animation_running(),
+            "Home alone must not pin the 60fps loop after idle"
+        );
     }
 
     #[test]

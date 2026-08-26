@@ -161,7 +161,7 @@
   .streamdown > * + * { margin-top: 0.85em; }
   .streamdown p { margin: 0 0 0.25em; }
   .streamdown h1, .streamdown h2, .streamdown h3, .streamdown h4 {
-    margin: 1.4em 0 0;
+    margin: 1.4em 0 0.55em;
     color: var(--text);
     font-weight: 650;
     line-height: 1.3;

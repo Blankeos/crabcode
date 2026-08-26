@@ -81,14 +81,32 @@ impl SessionManager {
         }
     }
 
-    pub fn with_history(self) -> Result<Self, SessionError> {
-        self.with_history_for_workspace(crate::utils::cwd::current_dir_or_dot())
+    pub fn with_history(mut self) -> Result<Self, SessionError> {
+        self.ensure_history()?;
+        Ok(self)
     }
 
     pub fn with_history_for_workspace(
         mut self,
         workspace: impl AsRef<std::path::Path>,
     ) -> Result<Self, SessionError> {
+        self.ensure_history_for_workspace(workspace)?;
+        Ok(self)
+    }
+
+    /// Load session history if not already loaded. Safe to call repeatedly.
+    /// Deferred past first paint on the interactive TUI path.
+    pub fn ensure_history(&mut self) -> Result<(), SessionError> {
+        self.ensure_history_for_workspace(crate::utils::cwd::current_dir_or_dot())
+    }
+
+    pub fn ensure_history_for_workspace(
+        &mut self,
+        workspace: impl AsRef<std::path::Path>,
+    ) -> Result<(), SessionError> {
+        if self.history_dao.is_some() {
+            return Ok(());
+        }
         let history_dao = HistoryDAO::new_for_workspace(workspace)
             .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
         self.current_workspace_id = history_dao.current_workspace_id();
@@ -97,7 +115,7 @@ impl SessionManager {
         self.refresh_workspace_sort_orders(&history_dao)?;
         self.load_sessions_from_db(&history_dao)?;
         self.history_dao = Some(history_dao);
-        Ok(self)
+        Ok(())
     }
 
     fn refresh_workspace_sort_orders(&mut self, dao: &HistoryDAO) -> Result<(), SessionError> {
@@ -327,6 +345,7 @@ impl SessionManager {
         parent_id: Option<String>,
         make_current: bool,
     ) -> String {
+        let _ = self.ensure_history();
         self.session_counter += 1;
         let title = name
             .clone()

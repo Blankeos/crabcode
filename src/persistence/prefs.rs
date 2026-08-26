@@ -7,7 +7,10 @@ use super::{ensure_data_dir, get_data_dir};
 
 const MODEL_PREFS_KEY: &str = "model_preferences";
 const ACTIVE_THEME_KEY: &str = "active_theme";
+const THEME_TRANSPARENT_KEY: &str = "theme_transparent";
 const TERMINAL_TITLE_ITEMS_KEY: &str = "terminal_title_items";
+const COMPACT_MODE_KEY: &str = "compact_mode";
+const SLASH_MRU_KEY: &str = "slash_mru";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRef {
@@ -204,6 +207,33 @@ impl PrefsDAO {
         self.set_pref(ACTIVE_THEME_KEY, theme_id.trim())
     }
 
+    pub fn get_compact_mode(&self) -> Result<Option<bool>> {
+        match self.get_pref(COMPACT_MODE_KEY)? {
+            Some(value) => Ok(serde_json::from_str(&value).ok()),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_compact_mode(&self, enabled: bool) -> Result<()> {
+        self.set_pref(COMPACT_MODE_KEY, &enabled.to_string())
+    }
+
+    /// Whether the main UI background should be transparent (terminal shows through).
+    /// Default: false (solid theme background).
+    pub fn get_theme_transparent(&self) -> Result<bool> {
+        Ok(self
+            .get_pref(THEME_TRANSPARENT_KEY)?
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false))
+    }
+
+    pub fn set_theme_transparent(&self, transparent: bool) -> Result<()> {
+        self.set_pref(
+            THEME_TRANSPARENT_KEY,
+            if transparent { "true" } else { "false" },
+        )
+    }
+
     pub fn get_terminal_title_items(
         &self,
     ) -> Result<Option<Vec<crate::terminal_title::TerminalTitleItem>>> {
@@ -233,6 +263,27 @@ impl PrefsDAO {
     pub fn set_json_pref(&self, key: &str, value: &serde_json::Value) -> Result<()> {
         let json_str = serde_json::to_string(value)?;
         self.set_pref(key, &json_str)
+    }
+
+    /// Slash-command MRU map: canonical name → last-used unix seconds.
+    pub fn get_slash_mru(&self) -> Result<std::collections::HashMap<String, u64>> {
+        match self.get_pref(SLASH_MRU_KEY)? {
+            Some(json_str) => {
+                #[derive(serde::Deserialize)]
+                struct SlashMruPref {
+                    #[serde(default)]
+                    by_command: std::collections::HashMap<String, u64>,
+                }
+                let pref: SlashMruPref = serde_json::from_str(&json_str)?;
+                Ok(pref.by_command)
+            }
+            None => Ok(std::collections::HashMap::new()),
+        }
+    }
+
+    pub fn set_slash_mru(&self, by_command: &std::collections::HashMap<String, u64>) -> Result<()> {
+        let value = serde_json::json!({ "by_command": by_command });
+        self.set_pref(SLASH_MRU_KEY, &serde_json::to_string(&value)?)
     }
 
     pub fn toggle_favorite(&self, provider_id: String, model_id: String) -> Result<bool> {
@@ -363,6 +414,21 @@ mod tests {
     }
 
     #[test]
+    fn test_slash_mru_round_trip() {
+        let dao = setup_test_dao();
+        assert!(dao.get_slash_mru().unwrap().is_empty());
+
+        let mut map = std::collections::HashMap::new();
+        map.insert("connect".to_string(), 1_700_000_000);
+        map.insert("compact-mode".to_string(), 1_700_000_100);
+        dao.set_slash_mru(&map).unwrap();
+
+        let loaded = dao.get_slash_mru().unwrap();
+        assert_eq!(loaded.get("connect"), Some(&1_700_000_000));
+        assert_eq!(loaded.get("compact-mode"), Some(&1_700_000_100));
+    }
+
+    #[test]
     fn test_active_theme_round_trip() {
         let dao = setup_test_dao();
 
@@ -374,5 +440,18 @@ mod tests {
             dao.get_active_theme().unwrap(),
             Some("tokyonight".to_string())
         );
+    }
+
+    #[test]
+    fn test_compact_mode_round_trip() {
+        let dao = setup_test_dao();
+
+        assert_eq!(dao.get_compact_mode().unwrap(), None);
+
+        dao.set_compact_mode(false).unwrap();
+        assert_eq!(dao.get_compact_mode().unwrap(), Some(false));
+
+        dao.set_compact_mode(true).unwrap();
+        assert_eq!(dao.get_compact_mode().unwrap(), Some(true));
     }
 }

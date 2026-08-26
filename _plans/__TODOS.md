@@ -440,7 +440,7 @@ I think this is how the TUI works already anyway right?
 - [x] When typing subagents names.. highlight them. In the chat input.
 
 - [ ] Cool Grok features
-  - [ ] I wanna imitate grok-build's `/compact-mode` and by default a sticky "most recent message i made" is just sticky top-0 essentially, so no matter where I am, my latest message follows the response it triggered
+  - [x] I wanna imitate grok-build's `/compact-mode` and by default a sticky "most recent message i made" is just sticky top-0 essentially, so no matter where I am, my latest message follows the response it triggered
   - [ ] /create-workflow /workflows /workflow ??
   - [ ] memory??
 
@@ -470,10 +470,13 @@ I think this is how the TUI works already anyway right?
 - [x] compacting context but when done, it doesnt show the 'Context compacted (56.1K -> 19.2K, saved 66%)' message part in the UI scrollable part.. Only see it after I close and open. (fixed: soft-compaction marker is mid-history; after /compact we now scroll+highlight the marker live)
 
 - [x] Light mode themes + grok build theme (people like the monochrome aesthetic)
-  - [ ] Add the background now, no more transparent background - but 'transparency' is activateable
+  - [x] Add the background now, no more transparent background - but 'transparency' is activateable
 
 - [x] Thought time with Thought for 0.2s, and Thinking...
 
 - [x] I wanna be able to type `/compact|` (imagine "|" is my cursor) and press `ctrl-t` or `ctrl-x m`.. Right now doing those kinda make me stay in the focus of the autosuggestions popover, so I think it's an event handling thing, but it's such an often thing that happens that I wanna make a special case for it.
 
 - [x] I wanna make it scrollable even when doing ctrl-f find, with my mouse
+- [x] "providers" config, does it work
+
+- [x] Pressing a file link when it's wrapped does not point to anything, because it's wrapped. But when not wrapped it's okay. For instance `⬢ Added /Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md` is clickable. But when I shrink the screen and it's wrapped, first half is clickable and the 2nd half is also clickabe but they point to nothing for obvious reasons
