@@ -17,6 +17,8 @@ use tokio::{
 use crate::config::configuration::PluginSpec;
 use protocol::{Request, Response, PROTOCOL_VERSION};
 
+pub mod installer;
+
 const SIDECAR_SOURCE: &str = include_str!("sidecar.mjs");
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 

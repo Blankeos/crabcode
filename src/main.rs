@@ -701,6 +701,13 @@ enum Command {
     /// List remembered remote hosts
     Hosts,
 
+    /// Install a plugin and add it to the shared global OpenCode configuration
+    #[command(alias = "plug")]
+    Plugin {
+        /// npm package specifier, for example `@dietrichgebert/ponytail@latest`
+        module: String,
+    },
+
     /// Upgrade crabcode to the latest (or a specific) version
     Upgrade {
         /// Target version (e.g. `0.0.12`) or `latest`
@@ -837,6 +844,10 @@ async fn main() -> Result<()> {
         }
         Some(Command::Attach { target }) => {
             return crate::remote::attach(target).await;
+        }
+        Some(Command::Plugin { module }) => {
+            crate::plugin::installer::install_plugin(module)?;
+            return Ok(());
         }
         Some(Command::Hosts) => {
             crate::remote::list_hosts()?;
