@@ -357,6 +357,8 @@ pub enum WebsearchProvider {
     OllamaCloud,
     SerpApi,
     Keiro,
+    Parallel,
+    Tako,
 }
 
 impl WebsearchProvider {
@@ -371,6 +373,37 @@ impl WebsearchProvider {
             Self::OllamaCloud => "ollama-cloud",
             Self::SerpApi => "serpapi",
             Self::Keiro => "keiro",
+            Self::Parallel => "parallel",
+            Self::Tako => "tako",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebsearchNativeConfig {
+    /// Provider-executed web search (`web_search` / Anthropic hosted web / OpenRouter web plugin).
+    /// Default false. When true, substitutes for the local `websearch` tool if the active provider supports it.
+    pub web: Option<bool>,
+    /// Provider-executed X/Twitter search (`x_search`). Default true. xAI-only; ignored elsewhere.
+    /// Independent of `web` — can stay on while a local backend handles web search.
+    pub x: Option<bool>,
+}
+
+impl WebsearchNativeConfig {
+    pub fn web_enabled(&self) -> bool {
+        self.web.unwrap_or(false)
+    }
+
+    pub fn x_enabled(&self) -> bool {
+        self.x.unwrap_or(true)
+    }
+}
+
+impl Default for WebsearchNativeConfig {
+    fn default() -> Self {
+        Self {
+            web: None,
+            x: None,
         }
     }
 }
@@ -378,6 +411,8 @@ impl WebsearchProvider {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebsearchConfig {
     pub enabled: Option<bool>,
+    /// Provider-executed search tools. Host policy only — aisdk receives the resulting tools list.
+    pub native: WebsearchNativeConfig,
     pub provider: WebsearchProvider,
     pub endpoint: Option<String>,
     pub api_key: Option<String>,
@@ -387,6 +422,7 @@ impl Default for WebsearchConfig {
     fn default() -> Self {
         Self {
             enabled: None,
+            native: WebsearchNativeConfig::default(),
             provider: WebsearchProvider::ExaHostedMcp,
             endpoint: None,
             api_key: None,
@@ -1716,12 +1752,40 @@ fn parse_websearch(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -
                 }
             }
 
+            if let Some(native) = map.get("native") {
+                match native.as_object() {
+                    Some(native_map) => {
+                        if let Some(web) = native_map.get("web") {
+                            if let Some(v) = web.as_bool() {
+                                websearch.native.web = Some(v);
+                            } else {
+                                diagnostics
+                                    .warnings
+                                    .push("websearch.native.web must be a boolean".to_string());
+                            }
+                        }
+                        if let Some(x) = native_map.get("x") {
+                            if let Some(v) = x.as_bool() {
+                                websearch.native.x = Some(v);
+                            } else {
+                                diagnostics
+                                    .warnings
+                                    .push("websearch.native.x must be a boolean".to_string());
+                            }
+                        }
+                    }
+                    None => diagnostics
+                        .warnings
+                        .push("websearch.native must be an object".to_string()),
+                }
+            }
+
             if let Some(provider) = map.get("provider") {
                 if let Some(raw) = provider.as_str() {
                     match parse_websearch_provider(raw) {
                         Some(provider) => websearch.provider = provider,
                         _ => diagnostics.warnings.push(format!(
-                            "websearch.provider must be one of: exa-hosted-mcp, firecrawl-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro; got {}",
+                            "websearch.provider must be one of: exa-hosted-mcp, firecrawl-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro, parallel, tako; got {}",
                             raw
                         )),
                     }
@@ -1788,6 +1852,8 @@ fn parse_websearch_provider(raw: &str) -> Option<WebsearchProvider> {
         "ollama-cloud" => Some(WebsearchProvider::OllamaCloud),
         "serpapi" => Some(WebsearchProvider::SerpApi),
         "keiro" => Some(WebsearchProvider::Keiro),
+        "parallel" => Some(WebsearchProvider::Parallel),
+        "tako" => Some(WebsearchProvider::Tako),
         _ => None,
     }
 }
@@ -2907,6 +2973,8 @@ mod tests {
         );
 
         assert_eq!(config.websearch.enabled, Some(true));
+        assert!(!config.websearch.native.web_enabled());
+        assert!(config.websearch.native.x_enabled());
         assert_eq!(config.websearch.provider, WebsearchProvider::Exa);
         assert_eq!(config.websearch.provider.as_str(), "exa");
         assert_eq!(
@@ -2916,6 +2984,29 @@ mod tests {
         assert_eq!(config.websearch.api_key.as_deref(), Some("secret"));
         assert!(diagnostics.warnings.is_empty());
     }
+
+    #[test]
+    fn parses_websearch_native_flags() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "websearch": {
+                    "native": {
+                        "web": false,
+                        "x": true
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.websearch.native.web, Some(false));
+        assert_eq!(config.websearch.native.x, Some(true));
+        assert!(!config.websearch.native.web_enabled());
+        assert!(config.websearch.native.x_enabled());
+        assert!(diagnostics.warnings.is_empty());
+    }
+
 
     #[test]
     fn parses_websearch_boolean_shorthand() {
@@ -2982,6 +3073,14 @@ mod tests {
         assert_eq!(
             parse_websearch_provider("keiro"),
             Some(WebsearchProvider::Keiro)
+        );
+        assert_eq!(
+            parse_websearch_provider("parallel"),
+            Some(WebsearchProvider::Parallel)
+        );
+        assert_eq!(
+            parse_websearch_provider("tako"),
+            Some(WebsearchProvider::Tako)
         );
         assert_eq!(parse_websearch_provider("ollama"), None);
         assert_eq!(parse_websearch_provider("keiro-labs"), None);

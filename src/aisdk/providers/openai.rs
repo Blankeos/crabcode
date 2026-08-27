@@ -59,6 +59,7 @@ pub struct OpenAI {
     responses_websocket: bool,
     responses_lite: bool,
     prompt_cache_key: Option<String>,
+
     response_retry_policy: Option<Arc<dyn HttpResponseRetryPolicy>>,
     websocket_state: Arc<Mutex<OpenAIWebsocketState>>,
 }
@@ -97,6 +98,7 @@ pub struct OpenAIBuilder {
     responses_websocket: bool,
     responses_lite: bool,
     prompt_cache_key: Option<String>,
+
     response_retry_policy: Option<Arc<dyn HttpResponseRetryPolicy>>,
 }
 
@@ -212,6 +214,7 @@ impl OpenAIBuilder {
             responses_websocket: self.responses_websocket,
             responses_lite: self.responses_lite,
             prompt_cache_key: self.prompt_cache_key,
+
             response_retry_policy: self.response_retry_policy,
             websocket_state: Arc::new(Mutex::new(OpenAIWebsocketState::default())),
         })
@@ -575,30 +578,37 @@ impl OpenAI {
         mut input: Vec<serde_json::Value>,
         tools: &[Tool],
     ) -> serde_json::Value {
-        let tool_params: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|t| {
-                let schema = serde_json::to_value(&t.input_schema).unwrap_or_default();
-                let mut tool = serde_json::json!({
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": schema,
-                });
-
-                if let Some(strict) = self.tool_strict_override {
-                    tool = serde_json::json!({
+        let mut tool_params: Vec<serde_json::Value> = Vec::new();
+        for t in tools {
+            match &t.transport {
+                crate::aisdk::tool::ToolTransport::ProviderNative(value) => {
+                    tool_params.push(value.clone());
+                }
+                crate::aisdk::tool::ToolTransport::OpenRouterPlugin(_) => {
+                    // Plugins are not Responses `tools` entries.
+                }
+                crate::aisdk::tool::ToolTransport::ClientFunction => {
+                    let schema = serde_json::to_value(&t.input_schema).unwrap_or_default();
+                    let mut tool = serde_json::json!({
                         "type": "function",
                         "name": t.name,
-                        "strict": strict,
-                        "parameters": schema,
                         "description": t.description,
+                        "parameters": schema,
                     });
-                }
 
-                tool
-            })
-            .collect();
+                    if let Some(strict) = self.tool_strict_override {
+                        tool = serde_json::json!({
+                            "type": "function",
+                            "name": t.name,
+                            "strict": strict,
+                            "parameters": schema,
+                            "description": t.description,
+                        });
+                    }
+                    tool_params.push(tool);
+                }
+            }
+        }
 
         if self.responses_lite {
             let mut prefix = vec![serde_json::json!({
@@ -1537,9 +1547,10 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
             if let Some(message_phase) = responses_assistant_message_phase_chunk(&value) {
                 Some(Ok(message_phase))
             } else if let Some(tool_call) = responses_function_call_chunk(&value) {
+                // Only known client function_call shapes. Hosted search events
+                // (`web_search_call` / `custom_tool_call` for x_search) contain
+                // "tool_call" but must not enter the client tool accumulator.
                 Some(Ok(ChunkType::ToolCall(tool_call)))
-            } else if event_type.contains("tool_call") {
-                Some(Ok(ChunkType::ToolCall(data.to_string())))
             } else {
                 None
             }
@@ -1754,6 +1765,24 @@ fn parse_message_phase(phase: &str) -> Option<MessagePhase> {
         "final_answer" => Some(MessagePhase::FinalAnswer),
         _ => None,
     }
+}
+
+/// Client-executed function tool events (not provider-hosted search).
+///
+/// Hosted search SSE names also contain `"tool_call"` and must be ignored:
+/// - `response.web_search_call.*`
+/// - `response.custom_tool_call_*` (xAI `x_search` streams as custom_tool_call)
+/// - `response.file_search_call.*`
+fn is_client_tool_call_event(event_type: &str) -> bool {
+    if !event_type.contains("tool_call") {
+        return false;
+    }
+    let lower = event_type.to_ascii_lowercase();
+    !(lower.contains("web_search")
+        || lower.contains("x_search")
+        || lower.contains("custom_tool")
+        || lower.contains("file_search")
+        || lower.contains("code_interpreter"))
 }
 
 fn responses_function_call_chunk(value: &serde_json::Value) -> Option<String> {
@@ -2019,11 +2048,12 @@ fn openai_tool_output_content(tool: &crate::message::ToolOutputMessage) -> serde
 mod tests {
     use super::{
         add_responses_lite_header, build_openai_messages, build_websocket_request_body,
-        fresh_websocket_request_body, openai_chunk_is_terminal, request_snapshot_from_body,
-        response_sse_data_to_chunk, responses_function_call_chunk, websocket_connection_is_idle,
-        websocket_continuation_mode_after_idle_policy, websocket_continuation_mode_from_state,
-        OpenAI, OpenAIResponseSnapshot, OpenAIWebsocketState, WebsocketContinuationMode,
-        WebsocketStreamProgress, OPENAI_CODEX_WINDOW_ID_HEADER, OPENAI_RESPONSES_LITE_HEADER,
+        fresh_websocket_request_body, is_client_tool_call_event, openai_chunk_is_terminal,
+        request_snapshot_from_body, response_sse_data_to_chunk, responses_function_call_chunk,
+        websocket_connection_is_idle, websocket_continuation_mode_after_idle_policy,
+        websocket_continuation_mode_from_state, OpenAI, OpenAIResponseSnapshot,
+        OpenAIWebsocketState, WebsocketContinuationMode, WebsocketStreamProgress,
+        OPENAI_CODEX_WINDOW_ID_HEADER, OPENAI_RESPONSES_LITE_HEADER,
         OPENAI_RESPONSES_LITE_WS_METADATA_KEY, OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK,
         OPENAI_WEBSOCKET_IDLE_MAX,
     };
@@ -2238,6 +2268,44 @@ mod tests {
                 phase: Some(MessagePhase::Commentary)
             })
         ));
+    }
+
+    #[test]
+    fn ignores_hosted_search_tool_call_sse_events() {
+        // xAI x_search streams as custom_tool_call_*; must not enter client tool loop.
+        for event_type in [
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
+            "response.web_search_call.in_progress",
+            "response.web_search_call.completed",
+            "response.web_search_call.searching",
+        ] {
+            let chunk = response_sse_data_to_chunk(
+                &serde_json::json!({
+                    "type": event_type,
+                    "item_id": "ws_1",
+                    "delta": "{\"query\":\"carlo_taleon\"}"
+                })
+                .to_string(),
+            );
+            assert!(
+                chunk.is_none(),
+                "expected hosted search event {event_type} to be ignored"
+            );
+        }
+
+        assert!(!is_client_tool_call_event(
+            "response.custom_tool_call_input.delta"
+        ));
+        assert!(!is_client_tool_call_event(
+            "response.web_search_call.in_progress"
+        ));
+        // function_call_arguments.delta is handled by responses_function_call_chunk,
+        // not the tool_call catch-all (it doesn't contain "tool_call").
+        assert!(!is_client_tool_call_event(
+            "response.function_call_arguments.delta"
+        ));
+        assert!(is_client_tool_call_event("chat.completion.tool_call.delta"));
     }
 
     #[test]

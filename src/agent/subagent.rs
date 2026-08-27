@@ -68,7 +68,7 @@ pub async fn run_subagent(
 
     let scoped_registry = build_scoped_registry(full_registry, &agent).await;
 
-    let aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
+    let mut aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
         &scoped_registry,
         sender.clone(),
         agent.name.clone(),
@@ -79,6 +79,30 @@ pub async fn run_subagent(
         cancel_token.clone(),
     )
     .await;
+    let hosted_selection = match crate::config::ConfigLoader::load() {
+        Ok(loaded) => {
+            let ws = &loaded.merged_config.websearch;
+            if ws.enabled.unwrap_or(true) {
+                Some(
+                    crate::aisdk::providers::hosted_search::HostedSearchSelection {
+                        web: ws.native.web_enabled(),
+                        x: ws.native.x_enabled(),
+                    },
+                )
+            } else {
+                None
+            }
+        }
+        Err(_) => Some(crate::aisdk::providers::hosted_search::HostedSearchSelection::DEFAULT),
+    };
+    if let Some(selection) = hosted_selection {
+        if selection.web || selection.x {
+            aisdk_tools.extend(crate::aisdk::providers::hosted_search::tools_for(
+                &session.provider_name,
+                selection,
+            ));
+        }
+    }
 
     let system_prompt = agent
         .instructions

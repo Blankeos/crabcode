@@ -484,3 +484,7 @@ I think this is how the TUI works already anyway right?
 - [x] I want to add 'g e' to scroll down.
 
 - [ ] I wanna be able to cancel queued messages if needed.
+
+- [x] Hosted search
+
+- [ ] Asking crabcode to run some tui like `lazygitrs` is causing it to crash the agent.

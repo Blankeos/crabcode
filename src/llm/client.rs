@@ -469,6 +469,18 @@ pub async fn stream_llm_with_cancellation(
     if text_only_image_turn {
         aisdk_tools.retain(|tool| tool.name != "view_image");
     }
+    if websearch_config.enabled.unwrap_or(true) {
+        let selection = crate::aisdk::providers::hosted_search::HostedSearchSelection {
+            web: websearch_config.native.web_enabled(),
+            x: websearch_config.native.x_enabled(),
+        };
+        if selection.web || selection.x {
+            aisdk_tools.extend(crate::aisdk::providers::hosted_search::tools_for(
+                &request_config.provider_name,
+                selection,
+            ));
+        }
+    }
 
     let message_count = aisdk_messages.len();
     let tool_count = aisdk_tools.len();
@@ -924,6 +936,8 @@ fn apply_provider_request_defaults(
         // Ask xAI not to persist Responses, including subagent requests.
         request_config.openai_options.force_store_false = true;
     }
+
+    // Hosted search tools are appended to the tools list later (AI-SDK style).
 }
 
 fn maybe_apply_unauthenticated_free_provider_key(
