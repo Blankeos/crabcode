@@ -81,12 +81,28 @@ impl std::fmt::Debug for ToolExecute {
     }
 }
 
+/// How a tool is exposed on the wire.
+///
+/// Client tools become provider `function` tools and run locally via [`Tool::execute`].
+/// Provider-executed tools carry a native request fragment (or OpenRouter plugin)
+/// and are run by the model provider — same call-site shape as Rig / Vercel AI SDK.
+#[derive(Debug, Clone, Default)]
+pub enum ToolTransport {
+    #[default]
+    ClientFunction,
+    /// Native tool object, e.g. `{ "type": "web_search" }` or Anthropic hosted tools.
+    ProviderNative(serde_json::Value),
+    /// OpenRouter `plugins` entry, e.g. `{ "id": "web" }`.
+    OpenRouterPlugin(serde_json::Value),
+}
+
 #[derive(Clone)]
 pub struct Tool {
     pub name: String,
     pub description: String,
     pub input_schema: Schema,
     pub execute: ToolExecute,
+    pub transport: ToolTransport,
 }
 
 impl std::fmt::Debug for Tool {
@@ -94,6 +110,7 @@ impl std::fmt::Debug for Tool {
         f.debug_struct("Tool")
             .field("name", &self.name)
             .field("description", &self.description)
+            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -101,6 +118,10 @@ impl std::fmt::Debug for Tool {
 impl Tool {
     pub fn builder() -> ToolBuilder {
         ToolBuilder::default()
+    }
+
+    pub fn is_provider_executed(&self) -> bool {
+        !matches!(self.transport, ToolTransport::ClientFunction)
     }
 }
 
@@ -110,6 +131,7 @@ pub struct ToolBuilder {
     description: Option<String>,
     input_schema: Option<Schema>,
     execute: Option<ToolExecute>,
+    transport: ToolTransport,
 }
 
 impl ToolBuilder {
@@ -133,12 +155,18 @@ impl ToolBuilder {
         self
     }
 
+    pub fn transport(mut self, transport: ToolTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
     pub fn build(self) -> Result<Tool, String> {
         Ok(Tool {
             name: self.name.ok_or("name is required")?,
             description: self.description.ok_or("description is required")?,
             input_schema: self.input_schema.ok_or("input_schema is required")?,
             execute: self.execute.ok_or("execute is required")?,
+            transport: self.transport,
         })
     }
 }

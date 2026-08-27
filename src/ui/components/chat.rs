@@ -52,13 +52,31 @@ fn assistant_tool_part_info(
             Some(info)
         }
         "tool_result" => {
-            let mut info = parsed_tool_message_from_object(part.data.as_object()?, false);
-            if info.args.is_none() {
-                info.args = part
-                    .tool_id()
-                    .and_then(|id| message.tool_call_part_data(id))
-                    .and_then(|call| call.get("args"))
-                    .cloned();
+            // Show output_preview for ok/completed hosted-search cards.
+            let status = part
+                .data
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ok");
+            let include_preview =
+                status.eq_ignore_ascii_case("ok") || status.eq_ignore_ascii_case("completed");
+            let mut info = parsed_tool_message_from_object(part.data.as_object()?, include_preview);
+            let call_args = part
+                .tool_id()
+                .and_then(|id| message.tool_call_part_data(id))
+                .and_then(|call| call.get("args"))
+                .cloned();
+            let result_args_hollow = info
+                .args
+                .as_ref()
+                .map(crate::llm::client::hosted_search_args_are_hollow)
+                .unwrap_or(true);
+            if info.args.is_none() || result_args_hollow {
+                if let Some(args) =
+                    call_args.filter(|a| !crate::llm::client::hosted_search_args_are_hollow(a))
+                {
+                    info.args = Some(args);
+                }
             }
             Some(info)
         }

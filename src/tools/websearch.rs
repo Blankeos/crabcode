@@ -22,6 +22,8 @@ const DEFAULT_BRAVE_ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/se
 const DEFAULT_OLLAMA_CLOUD_ENDPOINT: &str = "https://ollama.com/api/web_search";
 const DEFAULT_SERPAPI_ENDPOINT: &str = "https://serpapi.com/search.json";
 const DEFAULT_KEIRO_ENDPOINT: &str = "https://kierolabs.space/api/v2/keiro";
+const DEFAULT_PARALLEL_ENDPOINT: &str = "https://api.parallel.ai/v1/search";
+const DEFAULT_TAKO_ENDPOINT: &str = "https://tako.com/api/v3/search";
 const DEFAULT_TIMEOUT_SECS: u64 = 25;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const DEFAULT_NUM_RESULTS: i64 = 8;
@@ -42,8 +44,14 @@ impl WebsearchTool {
         }
     }
 
-    pub fn is_enabled_for_provider(_provider_name: &str, config: &WebsearchConfig) -> bool {
-        config.enabled.unwrap_or(true)
+    pub fn is_enabled_for_provider(provider_name: &str, config: &WebsearchConfig) -> bool {
+        if !config.enabled.unwrap_or(true) {
+            return false;
+        }
+        crate::aisdk::providers::should_register_local_websearch(
+            provider_name,
+            config.native.web_enabled(),
+        )
     }
 
     fn adapter(&self) -> Box<dyn WebsearchAdapter + Send + Sync + '_> {
@@ -73,6 +81,12 @@ impl WebsearchTool {
                 config: &self.config,
             }),
             WebsearchProvider::Keiro => Box::new(KeiroAdapter {
+                config: &self.config,
+            }),
+            WebsearchProvider::Parallel => Box::new(ParallelAdapter {
+                config: &self.config,
+            }),
+            WebsearchProvider::Tako => Box::new(TakoAdapter {
                 config: &self.config,
             }),
         }
@@ -198,11 +212,11 @@ struct WebsearchInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SearchItem {
-    title: String,
-    url: String,
-    snippet: Option<String>,
-    date: Option<String>,
+pub(crate) struct SearchItem {
+    pub title: String,
+    pub url: String,
+    pub snippet: Option<String>,
+    pub date: Option<String>,
 }
 
 #[async_trait]
@@ -242,6 +256,14 @@ struct SerpApiAdapter<'a> {
 }
 
 struct KeiroAdapter<'a> {
+    config: &'a WebsearchConfig,
+}
+
+struct ParallelAdapter<'a> {
+    config: &'a WebsearchConfig,
+}
+
+struct TakoAdapter<'a> {
     config: &'a WebsearchConfig,
 }
 
@@ -594,6 +616,89 @@ impl WebsearchAdapter for KeiroAdapter<'_> {
     }
 }
 
+#[async_trait]
+impl WebsearchAdapter for ParallelAdapter<'_> {
+    fn provider_name(&self) -> &'static str {
+        "parallel"
+    }
+
+    async fn search(
+        &self,
+        client: &reqwest::Client,
+        input: &WebsearchInput,
+    ) -> Result<String, ToolError> {
+        let api_key = require_api_key(self.config, self.provider_name(), "PARALLEL_API_KEY")?;
+        let endpoint = endpoint_or(&self.config.endpoint, DEFAULT_PARALLEL_ENDPOINT);
+        let mode = match input.search_type.as_str() {
+            "fast" => "turbo",
+            "deep" => "advanced",
+            _ => "fast",
+        };
+        let request = client
+            .post(&endpoint)
+            .header("x-api-key", api_key)
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .json(&serde_json::json!({
+                "objective": input.query,
+                "search_queries": [input.query],
+                "mode": mode,
+                "max_results": input.num_results,
+            }))
+            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        let body = send_text(request, self.provider_name()).await?;
+        let value = parse_json_body(&body, self.provider_name())?;
+        Ok(format_results(
+            self.provider_name(),
+            &input.query,
+            parse_parallel_results(&value),
+            None,
+        ))
+    }
+}
+
+#[async_trait]
+impl WebsearchAdapter for TakoAdapter<'_> {
+    fn provider_name(&self) -> &'static str {
+        "tako"
+    }
+
+    async fn search(
+        &self,
+        client: &reqwest::Client,
+        input: &WebsearchInput,
+    ) -> Result<String, ToolError> {
+        let api_key = require_api_key(self.config, self.provider_name(), "TAKO_API_KEY")?;
+        let endpoint = endpoint_or(&self.config.endpoint, DEFAULT_TAKO_ENDPOINT);
+        let effort = match input.search_type.as_str() {
+            "fast" => "instant",
+            "deep" => "deep",
+            _ => "fast",
+        };
+        let count = input.num_results.clamp(1, 20);
+        let request = client
+            .post(&endpoint)
+            .header("X-API-Key", api_key)
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .json(&serde_json::json!({
+                "query": input.query,
+                "effort": effort,
+                "sources": {
+                    "data": { "count": count },
+                    "web": { "count": count }
+                }
+            }))
+            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        let body = send_text(request, self.provider_name()).await?;
+        let value = parse_json_body(&body, self.provider_name())?;
+        Ok(format_results(
+            self.provider_name(),
+            &input.query,
+            parse_tako_results(&value),
+            None,
+        ))
+    }
+}
+
 fn endpoint_or(configured: &Option<String>, default: &str) -> String {
     configured.clone().unwrap_or_else(|| default.to_string())
 }
@@ -937,6 +1042,79 @@ fn parse_keiro_results(value: &Value) -> Vec<SearchItem> {
     parse_standard_results(value, &["snippet", "content", "text", "description"])
 }
 
+fn parse_parallel_results(value: &Value) -> Vec<SearchItem> {
+    value
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let title = string_field(item, "title")?;
+            let url = string_field(item, "url")?;
+            let snippet = item
+                .get("excerpts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find(|excerpt| !excerpt.trim().is_empty())
+                .map(|excerpt| clean_snippet(excerpt));
+            let date = string_field(item, "publish_date");
+            Some(SearchItem {
+                title,
+                url,
+                snippet,
+                date,
+            })
+        })
+        .collect()
+}
+
+fn parse_tako_results(value: &Value) -> Vec<SearchItem> {
+    let mut results = Vec::new();
+
+    if let Some(cards) = value.get("cards").and_then(Value::as_array) {
+        for card in cards {
+            let Some(title) = string_field(card, "title") else {
+                continue;
+            };
+            let Some(url) = string_field(card, "webpage_url")
+                .or_else(|| string_field(card, "embed_url"))
+                .or_else(|| string_field(card, "url"))
+            else {
+                continue;
+            };
+            results.push(SearchItem {
+                title,
+                url,
+                snippet: string_field(card, "description").map(|value| clean_snippet(&value)),
+                date: None,
+            });
+        }
+    }
+
+    if let Some(web) = value.get("web_results").and_then(Value::as_array) {
+        for item in web {
+            let Some(title) = string_field(item, "title") else {
+                continue;
+            };
+            let Some(url) = string_field(item, "url") else {
+                continue;
+            };
+            results.push(SearchItem {
+                title,
+                url,
+                snippet: string_field(item, "snippet")
+                    .or_else(|| string_field(item, "content"))
+                    .map(|value| clean_snippet(&value)),
+                date: string_field(item, "publish_date"),
+            });
+        }
+    }
+
+    results
+}
+
 fn parse_standard_results(value: &Value, snippet_keys: &[&str]) -> Vec<SearchItem> {
     value
         .get("results")
@@ -960,7 +1138,7 @@ fn parse_standard_results(value: &Value, snippet_keys: &[&str]) -> Vec<SearchIte
         .collect()
 }
 
-fn format_results(
+pub(crate) fn format_results(
     provider: &str,
     query: &str,
     results: Vec<SearchItem>,
@@ -1106,6 +1284,61 @@ mod tests {
     }
 
     #[test]
+    fn parses_parallel_results() {
+        let value = json!({
+            "results": [{
+                "url": "https://example.com/parallel",
+                "title": "Parallel Result",
+                "publish_date": "2025-11-19",
+                "excerpts": ["First excerpt", "Second excerpt"]
+            }]
+        });
+        assert_eq!(
+            parse_parallel_results(&value),
+            vec![SearchItem {
+                title: "Parallel Result".to_string(),
+                url: "https://example.com/parallel".to_string(),
+                snippet: Some("First excerpt".to_string()),
+                date: Some("2025-11-19".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_tako_results() {
+        let value = json!({
+            "cards": [{
+                "title": "Silver Spot Price",
+                "description": "Spot price of silver",
+                "webpage_url": "https://tako.com/card/abc/"
+            }],
+            "web_results": [{
+                "title": "Web Hit",
+                "url": "https://example.com/web",
+                "snippet": "A web snippet",
+                "publish_date": "2026-01-02"
+            }]
+        });
+        assert_eq!(
+            parse_tako_results(&value),
+            vec![
+                SearchItem {
+                    title: "Silver Spot Price".to_string(),
+                    url: "https://tako.com/card/abc/".to_string(),
+                    snippet: Some("Spot price of silver".to_string()),
+                    date: None,
+                },
+                SearchItem {
+                    title: "Web Hit".to_string(),
+                    url: "https://example.com/web".to_string(),
+                    snippet: Some("A web snippet".to_string()),
+                    date: Some("2026-01-02".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn parses_exa_mcp_text_blocks() {
         let text = "\
 Title: axum - Rust
@@ -1236,8 +1469,17 @@ Useful second snippet
 
     #[test]
     fn enabled_by_default_but_config_can_disable() {
+        // Default keeps local websearch even on providers with hosted web tools.
+        assert!(WebsearchTool::is_enabled_for_provider(
+            "ollama",
+            &WebsearchConfig::default()
+        ));
         assert!(WebsearchTool::is_enabled_for_provider(
             "openai",
+            &WebsearchConfig::default()
+        ));
+        assert!(WebsearchTool::is_enabled_for_provider(
+            "xai",
             &WebsearchConfig::default()
         ));
 
@@ -1246,6 +1488,20 @@ Useful second snippet
         assert!(!WebsearchTool::is_enabled_for_provider(
             "opencode", &disabled
         ));
+
+        // native.web true skips local on supported providers
+        let mut prefer_native_web = WebsearchConfig::default();
+        prefer_native_web.native.web = Some(true);
+        assert!(!WebsearchTool::is_enabled_for_provider(
+            "openai",
+            &prefer_native_web
+        ));
+
+        // native.x alone must not displace local websearch
+        let mut x_only = WebsearchConfig::default();
+        x_only.native.web = Some(false);
+        x_only.native.x = Some(true);
+        assert!(WebsearchTool::is_enabled_for_provider("xai", &x_only));
     }
 
     #[test]
