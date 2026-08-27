@@ -406,6 +406,13 @@ pub(crate) fn hosted_search_args_are_hollow(args: &serde_json::Value) -> bool {
         }
         serde_json::Value::Object(map) if map.is_empty() => true,
         serde_json::Value::Object(map) => {
+            // Non-search tool args (read/list/grep/glob/…) must not look hollow —
+            // otherwise assistant_tool_part_info refuses to merge call args onto
+            // tool_result parts and exploration grouping falls apart.
+            const SEARCH_KEYS: &[&str] = &["query", "sources", "type", "limit"];
+            if map.keys().any(|k| !SEARCH_KEYS.contains(&k.as_str())) {
+                return false;
+            }
             let query_empty = map
                 .get("query")
                 .and_then(|v| v.as_str())
@@ -580,6 +587,7 @@ pub async fn stream_llm_with_cancellation(
     tool_registry: Option<crate::tools::ToolRegistry>,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
+    process_registry: std::sync::Arc<crate::tools::ProcessRegistry>,
 ) -> Result<(), DynError> {
     struct SessionConfigGuard(crate::agent::config::LlmSessionRegistration);
     impl Drop for SessionConfigGuard {
@@ -618,6 +626,7 @@ pub async fn stream_llm_with_cancellation(
                 &websearch_config,
                 &mcp_config,
                 &workspace,
+                process_registry.clone(),
             )
             .await;
             crate::tools::refresh_mcp_tools(&registry, &mcp_config, &workspace).await;
@@ -677,6 +686,7 @@ pub async fn stream_llm_with_cancellation(
         None,
         request_config.supports_image_input,
         cancel_token.clone(),
+        Some(process_registry.clone()),
     )
     .await;
     if text_only_image_turn {
@@ -3609,6 +3619,14 @@ mod tests {
             "type": "search",
             "query": "crabcode",
             "sources": []
+        })));
+        // Local exploration tool args must never look hollow.
+        assert!(!super::hosted_search_args_are_hollow(&serde_json::json!({
+            "pattern": "Explored",
+            "path": "src"
+        })));
+        assert!(!super::hosted_search_args_are_hollow(&serde_json::json!({
+            "file_path": "/repo/justfile"
         })));
     }
 

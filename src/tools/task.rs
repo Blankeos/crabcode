@@ -443,6 +443,7 @@ impl ToolHandler for TaskTool {
             subagent_cancel_token,
             permissions,
             max_steps,
+            ctx.process_registry.clone(),
         )
         .await
         {

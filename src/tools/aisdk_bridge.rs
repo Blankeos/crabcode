@@ -1,9 +1,10 @@
 use crate::aisdk::core::tools::{ToolExecute, ToolOutput};
 use crate::aisdk::core::Tool;
-use crate::tools::{ToolContext, ToolRegistry};
+use crate::tools::{ProcessRegistry, ToolContext, ToolRegistry};
 use schemars::Schema;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +26,7 @@ pub async fn convert_to_aisdk_tools(
     message_id: Option<String>,
     supports_image_input: bool,
     cancel_token: CancellationToken,
+    process_registry: Option<Arc<ProcessRegistry>>,
 ) -> Vec<Tool> {
     let mut aisdk_tools = Vec::new();
     let tools = registry.list().await;
@@ -47,6 +49,7 @@ pub async fn convert_to_aisdk_tools(
         let session_id = session_id.clone();
         let message_id = message_id.clone();
         let cancel_token = cancel_token.clone();
+        let process_registry = process_registry.clone();
 
         let execute = ToolExecute::new(move |input: Value| {
             let tool_id = tool_id.clone();
@@ -60,6 +63,7 @@ pub async fn convert_to_aisdk_tools(
             let session_id = session_id.clone();
             let message_id = message_id.clone();
             let cancel_token = cancel_token.clone();
+            let process_registry = process_registry.clone();
             let supports_image_input = supports_image_input;
 
             async move {
@@ -160,7 +164,7 @@ pub async fn convert_to_aisdk_tools(
                     return Err(err);
                 }
 
-                let ctx = ToolContext::from_cancel_token(
+                let mut ctx = ToolContext::from_cancel_token(
                     session_id.clone().unwrap_or_else(|| "session".to_string()),
                     message_id.clone().unwrap_or_else(|| "message".to_string()),
                     agent_mode.clone(),
@@ -168,6 +172,9 @@ pub async fn convert_to_aisdk_tools(
                 )
                 .with_call_id(call_id.clone())
                 .with_workdir(permissions.workdir().to_path_buf());
+                if let Some(ref process_registry) = process_registry {
+                    ctx = ctx.with_process_registry(process_registry.clone());
+                }
 
                 let tool_result = handler
                     .execute(input, &ctx)

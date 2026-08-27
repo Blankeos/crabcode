@@ -43,6 +43,10 @@ pub enum ChunkMessage {
         tool_call_id: String,
         event: TerminalSessionEvent,
     },
+    BackgroundJobEvent {
+        job_id: String,
+        event: BackgroundJobEventKind,
+    },
     End,
     Failed(String),
     Cancelled,
@@ -50,6 +54,21 @@ pub enum ChunkMessage {
         token_count: usize,
         duration_ms: u64,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum BackgroundJobEventKind {
+    Started {
+        command: String,
+        description: String,
+        kind: String,
+    },
+    /// Reserved for incremental output streaming (unused in v1).
+    Output,
+    Exited {
+        exit_code: Option<i32>,
+    },
+    Killed,
 }
 
 pub type ChunkSender = mpsc::UnboundedSender<ChunkMessage>;

@@ -6015,8 +6015,57 @@ impl Chat {
                 })
                 .or_else(|| strip_tool_title(title.as_deref(), "Bash"))
                 .unwrap_or("command");
+            let mode = metadata
+                .as_ref()
+                .and_then(|m| m.get("mode"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    args_obj
+                        .and_then(|o| o.get("mode"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("foreground");
+            let task_id = metadata
+                .as_ref()
+                .and_then(|m| m.get("task_id"))
+                .and_then(|v| v.as_str());
+            let description = metadata
+                .as_ref()
+                .and_then(|m| m.get("description"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    args_obj
+                        .and_then(|o| o.get("description"))
+                        .and_then(|v| v.as_str())
+                });
             let active = matches!(status.as_str(), "running" | "pending");
-            let verb = if active { "Running" } else { "Ran" };
+            let verb = if mode == "background" {
+                if active {
+                    "Background"
+                } else {
+                    "Background done"
+                }
+            } else if mode == "interactive" {
+                if active {
+                    "Interactive"
+                } else {
+                    "Interactive done"
+                }
+            } else if active {
+                "Running"
+            } else {
+                "Ran"
+            };
+            // Collapsed summary for background jobs: Background · desc · task_id
+            let bg_summary = if mode == "background" {
+                let desc = description.unwrap_or(command);
+                match task_id {
+                    Some(id) => Some(format!("Background · {desc} · {id}")),
+                    None => Some(format!("Background · {desc}")),
+                }
+            } else {
+                None
+            };
             let marker_style = Style::default()
                 .fg(if status == "error" {
                     colors.error
@@ -6034,18 +6083,31 @@ impl Chat {
                 })
                 .add_modifier(Modifier::BOLD);
             let command_style = Style::default().fg(colors.text);
-            push_wrapped(
-                &mut out,
-                Line::from(vec![
-                    Span::styled(self.tool_marker(active), marker_style),
-                    Span::raw(" "),
-                    Span::styled(verb.to_string(), title_style),
-                    Span::raw(" "),
-                    Span::styled(command.to_string(), command_style),
-                ]),
-                max_width,
-                Line::from(Span::styled("  ", marker_style)),
-            );
+            if let Some(summary) = bg_summary {
+                push_wrapped(
+                    &mut out,
+                    Line::from(vec![
+                        Span::styled(self.tool_marker(active), marker_style),
+                        Span::raw(" "),
+                        Span::styled(summary, title_style),
+                    ]),
+                    max_width,
+                    Line::from(Span::styled("  ", marker_style)),
+                );
+            } else {
+                push_wrapped(
+                    &mut out,
+                    Line::from(vec![
+                        Span::styled(self.tool_marker(active), marker_style),
+                        Span::raw(" "),
+                        Span::styled(verb.to_string(), title_style),
+                        Span::raw(" "),
+                        Span::styled(command.to_string(), command_style),
+                    ]),
+                    max_width,
+                    Line::from(Span::styled("  ", marker_style)),
+                );
+            }
             if status == "ok" {
                 if let Some(ref preview) = output_preview {
                     let result_style = Style::default()

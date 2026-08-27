@@ -1,4 +1,6 @@
+use crate::tools::process_registry::ProcessRegistry;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct ToolContext {
     pub session_id: String,
@@ -9,6 +11,7 @@ pub struct ToolContext {
     pub call_id: Option<String>,
     pub extra: Option<serde_json::Value>,
     workdir: PathBuf,
+    pub process_registry: Option<Arc<ProcessRegistry>>,
 }
 
 impl ToolContext {
@@ -27,6 +30,7 @@ impl ToolContext {
             call_id: None,
             extra: None,
             workdir: crate::utils::cwd::current_dir_or_dot(),
+            process_registry: None,
         }
     }
 
@@ -46,6 +50,7 @@ impl ToolContext {
             call_id: None,
             extra: None,
             workdir: crate::utils::cwd::current_dir_or_dot(),
+            process_registry: None,
         }
     }
 
@@ -61,6 +66,11 @@ impl ToolContext {
 
     pub fn with_workdir(mut self, workdir: impl Into<PathBuf>) -> Self {
         self.workdir = workdir.into();
+        self
+    }
+
+    pub fn with_process_registry(mut self, registry: Arc<ProcessRegistry>) -> Self {
+        self.process_registry = Some(registry);
         self
     }
 

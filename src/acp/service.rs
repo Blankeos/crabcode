@@ -635,6 +635,7 @@ impl AcpService {
         }
         messages.push(user_message);
 
+        let process_registry = std::sync::Arc::new(crate::tools::ProcessRegistry::new());
         let prompt_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
             None,
             tool_permissions(&session),
@@ -644,6 +645,7 @@ impl AcpService {
             &session.config.merged_config.websearch,
             &session.config.merged_config.mcp,
             &session.cwd,
+            process_registry.clone(),
         )
         .await;
         let is_git_repo =
@@ -669,6 +671,7 @@ impl AcpService {
         let stream_sender = sender.clone();
         let stream_session = session.clone();
         let stream_tool_registry = prompt_registry;
+        let stream_process_registry = process_registry;
         tokio::spawn(async move {
             let result = crate::llm::client::stream_llm_with_cancellation(
                 stream_cancellation,
@@ -691,6 +694,7 @@ impl AcpService {
                 Some(stream_tool_registry),
                 messages,
                 sender,
+                stream_process_registry,
             )
             .await;
             if let Err(error) = result {
@@ -1414,7 +1418,9 @@ fn replay_tool_result(
 
 fn tool_kind(tool_name: &str) -> ToolKind {
     match tool_name {
-        "bash" | "terminal_session" => ToolKind::Execute,
+        "bash" | "bash_output" | "bash_kill" | "bash_restart" | "terminal_session" => {
+            ToolKind::Execute
+        }
         "webfetch" => ToolKind::Fetch,
         "grep" | "glob" | "context" => ToolKind::Search,
         "read" | "view_image" => ToolKind::Read,

@@ -44,6 +44,10 @@ use crate::views::connect_dialog::{
     init_connect_dialog, render_connect_dialog,
 };
 use crate::views::home::{init_home, render_home};
+use crate::views::jobs_dialog::{
+    handle_jobs_dialog_key_event, handle_jobs_dialog_mouse_event, init_jobs_dialog,
+    render_jobs_dialog, JobsDialogAction,
+};
 use crate::views::mcp_dialog::{
     handle_mcp_dialog_key_event, handle_mcp_dialog_mouse_event, init_mcp_dialog, render_mcp_dialog,
     McpDialogAction,
@@ -102,10 +106,11 @@ use crate::views::title_dialog::{
     render_title_dialog, TitleDialogAction,
 };
 use crate::views::{
-    AgentsDialogState, ChatState, ConnectDialogState, HomeState, McpDialogState, ModelsDialogState,
-    MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState, QuestionDialogState,
-    RemoteDialogState, SessionRenameDialogState, SessionsDialogState, StorageDialogState,
-    SuggestionsPopupState, TerminalSessionDialogState, ThemesDialogState, TitleDialogState,
+    AgentsDialogState, ChatState, ConnectDialogState, HomeState, JobsDialogState, McpDialogState,
+    ModelsDialogState, MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState,
+    QuestionDialogState, RemoteDialogState, SessionRenameDialogState, SessionsDialogState,
+    StorageDialogState, SuggestionsPopupState, TerminalSessionDialogState, ThemesDialogState,
+    TitleDialogState,
 };
 
 use crate::{
@@ -236,6 +241,7 @@ pub enum OverlayFocus {
     SkillsDialog,
     McpDialog,
     TimelineDialog,
+    JobsDialog,
     CopyActions,
     MessageActions,
     CommandPalette,
@@ -429,6 +435,7 @@ struct ToolCallViewState {
 enum SelectionActionTarget {
     Chat,
     Input,
+    JobsDetail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -844,6 +851,9 @@ pub struct App {
     pub title_dialog_state: TitleDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
+    pub jobs_dialog_state: JobsDialogState,
+    /// Last-rendered jobs chip hit area (chat status line); set during render.
+    jobs_chip_area: Option<ratatui::layout::Rect>,
     /// First Esc arms a double-Esc gesture (cancel while streaming, timeline when idle).
     /// Matches OpenCode: second Esc confirms; arm expires after [`Self::ESC_ARM_TIMEOUT`].
     esc_primed_at: Option<std::time::Instant>,
@@ -924,6 +934,8 @@ pub struct App {
     startup_hydrated: bool,
     pending_model_override: Option<String>,
     pending_cli_agent: Option<String>,
+    /// Shared background/interactive process registry (jobs UI next).
+    pub process_registry: std::sync::Arc<crate::tools::ProcessRegistry>,
 }
 
 /// Cached sum of context tokens for all completed messages of the currently
@@ -1012,6 +1024,7 @@ impl App {
         let mcp_dialog_state = init_mcp_dialog("MCP", vec![]);
         let which_key_state = crate::views::which_key::init_which_key();
         let timeline_dialog_state = crate::views::timeline_dialog::init_timeline_dialog();
+        let jobs_dialog_state = init_jobs_dialog();
         let command_palette_state = init_command_palette();
         let find_bar = FindBar::new();
         let storage_dialog_state = init_storage_dialog();
@@ -1092,6 +1105,8 @@ impl App {
             title_dialog_state,
             which_key_state,
             timeline_dialog_state,
+            jobs_dialog_state,
+            jobs_chip_area: None,
             esc_primed_at: None,
             copy_actions_dialog: None,
             message_actions_index: None,
@@ -1136,7 +1151,7 @@ impl App {
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
-            tool_permissions: crate::tools::ToolPermissions::new(cwd_path),
+            tool_permissions: crate::tools::ToolPermissions::new(cwd_path.clone()),
             skills_dirs: Vec::new(),
             is_streaming: false,
             pending_session_title: None,
@@ -1164,6 +1179,9 @@ impl App {
             startup_hydrated: false,
             pending_model_override: model_override.map(str::to_string),
             pending_cli_agent: cli_agent.map(str::to_string),
+            process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
+                cwd_path,
+            )),
         })
     }
 
@@ -2876,7 +2894,8 @@ impl App {
             .with_context(|| format!("failed to switch to {}", path.display()))?;
         self.cwd = path_text.clone();
         self.cached_git_branch_path.clear();
-        self.tool_permissions = self.tool_permissions.clone().with_workdir(path);
+        self.tool_permissions = self.tool_permissions.clone().with_workdir(path.clone());
+        self.process_registry.set_workdir_blocking(&path);
         self.session_manager
             .switch_current_workspace_path(&path_text)
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
@@ -2898,6 +2917,29 @@ impl App {
                 self.suggestions_popup_anchor_area(),
                 self.input.selection_screen_row(),
             ),
+            SelectionActionTarget::JobsDetail => {
+                let content = self.jobs_dialog_state.detail_content_area();
+                let selection = &self.jobs_dialog_state.selection;
+                let ((s_line, _), (e_line, _)) = selection.range();
+                let top_line = s_line.min(e_line);
+                let scroll = self.jobs_dialog_state.detail_scroll as usize;
+                let visible_row = top_line.saturating_sub(scroll) as u16;
+                let row = content
+                    .y
+                    .saturating_add(visible_row)
+                    .saturating_sub(1)
+                    .max(content.y.saturating_sub(1));
+                let width = selection_action_bar_width(state);
+                let x = content
+                    .x
+                    .saturating_add(content.width.saturating_sub(width) / 2);
+                Rect {
+                    x,
+                    y: row.min(content.y.saturating_add(content.height.saturating_sub(1))),
+                    width: width.min(content.width.max(1)),
+                    height: 1,
+                }
+            }
         })
     }
 
@@ -2992,6 +3034,13 @@ impl App {
             return true;
         }
 
+        if let Some(text) = self.jobs_dialog_state.selected_text() {
+            self.copy_text_with_toast(&text, "Copied to clipboard");
+            self.jobs_dialog_state.clear_selection();
+            self.selection_action_bar = None;
+            return true;
+        }
+
         false
     }
 
@@ -3003,6 +3052,10 @@ impl App {
         }
         if self.input.has_selection() {
             self.input.clear_selection();
+            return true;
+        }
+        if self.jobs_dialog_state.selection.active {
+            self.jobs_dialog_state.clear_selection();
             return true;
         }
         false
@@ -3051,6 +3104,7 @@ impl App {
                 .has_selection()
                 .then(|| self.input.get_selected_text())
                 .filter(|text| !text.is_empty()),
+            SelectionActionTarget::JobsDetail => self.jobs_dialog_state.selected_text(),
         }
     }
 
@@ -3302,12 +3356,26 @@ impl App {
         if self.overlay_focus == OverlayFocus::TerminalSessionDialog
             && self.terminal_session_dialog_state.has_active()
         {
+            let job_id = self
+                .terminal_session_dialog_state
+                .active_job_id()
+                .map(str::to_string);
             let resp = handle_terminal_session_dialog_key_event(
                 &mut self.terminal_session_dialog_state,
                 key,
             );
-            if resp == TerminalSessionResponse::Close {
-                self.after_terminal_session_overlay_closed();
+            match resp {
+                TerminalSessionResponse::Close => {
+                    if let Some(id) = job_id {
+                        let _ = self.process_registry.kill_blocking(&id);
+                    }
+                    self.after_terminal_session_overlay_closed();
+                }
+                TerminalSessionResponse::Minimize => {
+                    // Park session: keep running, dismiss overlay only.
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                TerminalSessionResponse::Handled | TerminalSessionResponse::NotHandled => {}
             }
             self.record_overlay_close_after_key(overlay_before_key);
             return;
@@ -3922,6 +3990,22 @@ impl App {
                     crate::views::timeline_dialog::TimelineDialogAction::NotHandled => false,
                 }
             }
+            OverlayFocus::JobsDialog => {
+                if !(key.code == KeyCode::Char('y')
+                    && key.modifiers == event::KeyModifiers::NONE
+                    && self.jobs_dialog_state.is_detail_open()
+                    && self.try_copy_selection())
+                {
+                    let action = handle_jobs_dialog_key_event(
+                        &mut self.jobs_dialog_state,
+                        key,
+                        &self.process_registry,
+                        self.session_spinner_frame,
+                    );
+                    self.handle_jobs_dialog_action(action);
+                }
+                true
+            }
             OverlayFocus::CopyActions => {
                 if let Some(ref mut dialog) = self.copy_actions_dialog {
                     let event = dialog.handle_key_event(key);
@@ -4016,6 +4100,10 @@ impl App {
                     crate::views::which_key::WhichKeyAction::ShowTimeline => {
                         self.overlay_focus = OverlayFocus::None;
                         self.open_timeline_dialog();
+                    }
+                    crate::views::which_key::WhichKeyAction::ShowJobs => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.open_jobs_dialog();
                     }
                     crate::views::which_key::WhichKeyAction::ToggleThinking => {
                         self.overlay_focus = OverlayFocus::None;
@@ -4521,6 +4609,7 @@ impl App {
         let selection_is_dragging = match state.target {
             SelectionActionTarget::Chat => self.chat_state.chat.selection.is_dragging,
             SelectionActionTarget::Input => self.input.is_selection_dragging(),
+            SelectionActionTarget::JobsDetail => self.jobs_dialog_state.selection.is_dragging,
         };
         if selection_is_dragging {
             if area.contains(point) && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -4528,6 +4617,7 @@ impl App {
                 match state.target {
                     SelectionActionTarget::Chat => self.chat_state.chat.finish_selection_drag(),
                     SelectionActionTarget::Input => self.input.finish_selection_drag(),
+                    SelectionActionTarget::JobsDetail => self.jobs_dialog_state.selection.finish(),
                 }
             } else {
                 return false;
@@ -4690,6 +4780,19 @@ impl App {
         {
             self.dismiss_selection_actions();
             return;
+        }
+
+        // Bottom-right jobs chip → open jobs dialog.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && mouse.modifiers.is_empty()
+            && self.overlay_focus == OverlayFocus::None
+        {
+            if let Some(area) = self.jobs_chip_area {
+                if area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    self.open_jobs_dialog();
+                    return;
+                }
+            }
         }
 
         if matches!(mouse.kind, MouseEventKind::Moved) && self.base_focus != BaseFocus::Chat {
@@ -4954,6 +5057,41 @@ impl App {
             if !self.timeline_dialog_state.dialog.is_visible() {
                 self.chat_state.chat.clear_highlighted_message();
                 self.overlay_focus = OverlayFocus::None;
+            }
+        } else if self.overlay_focus == OverlayFocus::JobsDialog {
+            let action = handle_jobs_dialog_mouse_event(
+                &mut self.jobs_dialog_state,
+                mouse,
+                &self.process_registry,
+                self.session_spinner_frame,
+            );
+            self.handle_jobs_dialog_action(action);
+            // Click-outside hides via Dialog::handle_mouse_event → Handled, not Close.
+            // Mirror Sessions/Skills/Mcp: clear overlay when the dialog is gone, otherwise
+            // keys stay trapped in JobsDialog and the TUI looks frozen (ctrl-cc still works).
+            if !self.jobs_dialog_state.is_visible() {
+                self.selection_action_bar = None;
+                self.overlay_focus = OverlayFocus::None;
+            } else if self.jobs_dialog_state.is_detail_open() {
+                match mouse.kind {
+                    MouseEventKind::Up(MouseButton::Left)
+                        if self.jobs_dialog_state.selection.active
+                            && !self.jobs_dialog_state.selection.is_dragging =>
+                    {
+                        self.show_selection_action_bar_for(SelectionActionTarget::JobsDetail);
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if !self.jobs_dialog_state.selection.active
+                            && self.selection_action_bar
+                                == Some(SelectionActionBarState {
+                                    target: SelectionActionTarget::JobsDetail,
+                                    can_open_in_editor: false,
+                                }) =>
+                    {
+                        self.selection_action_bar = None;
+                    }
+                    _ => {}
+                }
             }
         } else if self.overlay_focus == OverlayFocus::CopyActions {
             if let Some(ref mut dialog) = self.copy_actions_dialog {
@@ -5756,6 +5894,7 @@ impl App {
                     CommandPaletteAppAction::OpenStorage => self.open_storage_dialog(),
                     CommandPaletteAppAction::OpenSkillsDialog => self.show_skills_dialog(),
                     CommandPaletteAppAction::OpenMcpDialog => self.show_mcp_dialog(),
+                    CommandPaletteAppAction::OpenJobs => self.open_jobs_dialog(),
                 }
                 self.clear_suggestions_and_blur();
             }
@@ -6934,6 +7073,74 @@ impl App {
             if let Ok(idx) = selected.id.parse::<usize>() {
                 self.chat_state.chat.scroll_to_message_index(idx);
                 self.chat_state.chat.set_highlighted_message(Some(idx));
+            }
+        }
+    }
+
+    fn open_jobs_dialog(&mut self) {
+        self.reset_esc_primed_state();
+        self.jobs_dialog_state
+            .refresh_from_registry(&self.process_registry, self.session_spinner_frame);
+        self.jobs_dialog_state.show();
+        self.overlay_focus = OverlayFocus::JobsDialog;
+    }
+
+    fn handle_jobs_dialog_action(&mut self, action: JobsDialogAction) {
+        match action {
+            JobsDialogAction::Close => {
+                self.jobs_dialog_state.hide();
+                self.selection_action_bar = None;
+                if self.overlay_focus == OverlayFocus::JobsDialog {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+            }
+            JobsDialogAction::NotHandled => {}
+            JobsDialogAction::Handled => {}
+            JobsDialogAction::Kill(id) => {
+                let _ = self.process_registry.kill_blocking(&id);
+                // If we killed the parked interactive session, drop it too.
+                if self.terminal_session_dialog_state.active_job_id() == Some(id.as_str()) {
+                    self.terminal_session_dialog_state.close_current();
+                    if self.overlay_focus == OverlayFocus::TerminalSessionDialog {
+                        self.after_terminal_session_overlay_closed();
+                    }
+                }
+                if self.jobs_dialog_state.is_detail_open() {
+                    let _ = self
+                        .jobs_dialog_state
+                        .refresh_detail_output(&self.process_registry);
+                } else {
+                    self.jobs_dialog_state
+                        .refresh_from_registry(&self.process_registry, self.session_spinner_frame);
+                }
+            }
+            JobsDialogAction::Restart(id) => match self.process_registry.restart_blocking(&id) {
+                Ok(_) => {
+                    if self.jobs_dialog_state.is_detail_open() {
+                        let _ = self
+                            .jobs_dialog_state
+                            .refresh_detail_output(&self.process_registry);
+                    } else {
+                        self.jobs_dialog_state.refresh_from_registry(
+                            &self.process_registry,
+                            self.session_spinner_frame,
+                        );
+                    }
+                }
+                Err(err) => {
+                    crate::emit_log!("[JOBS] restart failed id={} err={}", id, err);
+                }
+            },
+            JobsDialogAction::FocusInteractive(id) => {
+                self.jobs_dialog_state.hide();
+                self.selection_action_bar = None;
+                if self.terminal_session_dialog_state.active_job_id() == Some(id.as_str())
+                    && self.terminal_session_dialog_state.has_active()
+                {
+                    self.overlay_focus = OverlayFocus::TerminalSessionDialog;
+                } else if self.overlay_focus == OverlayFocus::JobsDialog {
+                    self.overlay_focus = OverlayFocus::None;
+                }
             }
         }
     }
@@ -8893,6 +9100,16 @@ impl App {
             self.session_spinner_frame = (self.session_spinner_frame + 1) % 6;
             self.last_session_spinner_update = std::time::Instant::now();
             self.update_sessions_dialog_live_state(true);
+            if self.jobs_dialog_state.is_visible() {
+                if self.jobs_dialog_state.is_detail_open() {
+                    let _ = self
+                        .jobs_dialog_state
+                        .refresh_detail_output(&self.process_registry);
+                } else {
+                    self.jobs_dialog_state
+                        .refresh_from_registry(&self.process_registry, self.session_spinner_frame);
+                }
+            }
         }
     }
 
@@ -8923,6 +9140,9 @@ impl App {
             || (self.overlay_focus == OverlayFocus::SessionsDialog
                 && self.sessions_dialog_state.dialog.is_visible()
                 && self.sessions_dialog_has_streaming_rows())
+            // Keep ticking while the jobs dialog is open so duration/spinner
+            // stay live — never call running_count_blocking here (can stall UI).
+            || self.jobs_dialog_state.is_visible()
     }
 
     fn sessions_dialog_has_streaming_rows(&self) -> bool {
@@ -9289,6 +9509,21 @@ impl App {
                 event,
             } => {
                 self.handle_terminal_session_stream_event(&tool_call_id, event);
+                true
+            }
+            crate::llm::ChunkMessage::BackgroundJobEvent { .. } => {
+                if self.jobs_dialog_state.is_visible() {
+                    if self.jobs_dialog_state.is_detail_open() {
+                        let _ = self
+                            .jobs_dialog_state
+                            .refresh_detail_output(&self.process_registry);
+                    } else {
+                        self.jobs_dialog_state.refresh_from_registry(
+                            &self.process_registry,
+                            self.session_spinner_frame,
+                        );
+                    }
+                }
                 true
             }
         }
@@ -9984,6 +10219,7 @@ impl App {
         let websearch_config = self.websearch.clone();
         let mcp_config = self.mcp.clone();
         let custom_instructions = self.custom_instructions.clone();
+        let process_registry = self.process_registry.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -10009,6 +10245,7 @@ impl App {
                         &websearch_config,
                         &mcp_config,
                         &cwd,
+                        process_registry.clone(),
                     )
                     .await;
                     crate::tools::scope_tool_registry_for_agent(
@@ -10057,6 +10294,7 @@ impl App {
                 None,
                 messages,
                 sender_clone.clone(),
+                process_registry,
             );
 
             let result: Result<Result<(), Box<dyn std::error::Error>>, u64> = match provider_timeout
@@ -10632,6 +10870,7 @@ impl App {
         let parent_agent = self.agent.clone();
         let tool_permissions = self.tool_permissions.clone();
         let agent_registry = self.agent_registry.clone();
+        let process_registry = self.process_registry.clone();
         let task_description = format!("{} mention", agent_name);
         let sender_for_error = sender.clone();
 
@@ -10651,6 +10890,7 @@ impl App {
                     tool_permissions.clone(),
                     agent_registry.clone(),
                     cancel_token.clone(),
+                    process_registry,
                 )
                 .await;
                 let task = crate::tools::TaskTool::new(registry)
@@ -10997,6 +11237,8 @@ impl App {
                     self.session_manager
                         .get_current_session()
                         .map(|s| s.title.as_str()),
+                    self.process_registry.running_count(),
+                    &mut self.jobs_chip_area,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -11110,6 +11352,13 @@ impl App {
             );
         }
 
+        if self.jobs_dialog_state.is_visible()
+            && (self.overlay_focus == OverlayFocus::JobsDialog
+                || self.jobs_dialog_state.dialog.is_visible())
+        {
+            render_jobs_dialog(f, &mut self.jobs_dialog_state, size, colors);
+        }
+
         if self.overlay_focus == OverlayFocus::CopyActions {
             if let Some(ref mut dialog) = self.copy_actions_dialog {
                 dialog.render(f, size, colors);
@@ -11201,6 +11450,9 @@ impl App {
                     self.suggestions_popup_anchor_area(),
                     self.input.selection_screen_row(),
                 ),
+                SelectionActionTarget::JobsDetail => {
+                    self.current_selection_action_bar_area().unwrap_or_default()
+                }
             };
             render_selection_action_bar(f, area, state, &colors);
         }
@@ -11244,10 +11496,14 @@ fn selection_action_for_column(state: SelectionActionBarState, column: usize) ->
             SelectionAction::Dismiss
         }
         SelectionActionTarget::Chat => SelectionAction::Dismiss,
-        SelectionActionTarget::Input if column < INPUT_SELECTION_ACTION_ESC_COL => {
+        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail
+            if column < INPUT_SELECTION_ACTION_ESC_COL =>
+        {
             SelectionAction::Copy
         }
-        SelectionActionTarget::Input => SelectionAction::Dismiss,
+        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail => {
+            SelectionAction::Dismiss
+        }
     }
 }
 
@@ -11308,7 +11564,9 @@ fn selection_action_bar_width(state: SelectionActionBarState) -> u16 {
     match state.target {
         SelectionActionTarget::Chat if state.can_open_in_editor => SELECTION_ACTION_BAR_WIDTH,
         SelectionActionTarget::Chat => CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR as u16 + 4,
-        SelectionActionTarget::Input => INPUT_SELECTION_ACTION_ESC_COL as u16 + 4,
+        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail => {
+            INPUT_SELECTION_ACTION_ESC_COL as u16 + 4
+        }
     }
 }
 
@@ -11625,6 +11883,8 @@ mod tests {
             title_dialog_state: init_title_dialog(),
             which_key_state: crate::views::which_key::init_which_key(),
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
+            jobs_dialog_state: init_jobs_dialog(),
+            jobs_chip_area: None,
             esc_primed_at: None,
             copy_actions_dialog: None,
             message_actions_index: None,
@@ -11697,6 +11957,9 @@ mod tests {
             startup_hydrated: true,
             pending_model_override: None,
             pending_cli_agent: None,
+            process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
+                std::path::PathBuf::from("."),
+            )),
         }
     }
 
@@ -12205,6 +12468,30 @@ mod tests {
             row,
             modifiers: KeyModifiers::empty(),
         }
+    }
+
+    #[test]
+    fn jobs_dialog_click_outside_clears_overlay_focus() {
+        // Regression: Dialog::handle_mouse_event hides on outside click and
+        // returns Handled (not Close). Without clearing overlay_focus here,
+        // keys stay trapped in JobsDialog → TUI looks frozen (ctrl-cc still works).
+        let mut app = test_app();
+        app.open_jobs_dialog();
+        assert_eq!(app.overlay_focus, OverlayFocus::JobsDialog);
+        assert!(app.jobs_dialog_state.is_visible());
+
+        app.jobs_dialog_state.dialog.dialog_area = ratatui::layout::Rect::new(10, 5, 40, 12);
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+
+        assert!(
+            !app.jobs_dialog_state.is_visible(),
+            "click outside should hide the jobs dialog"
+        );
+        assert_eq!(
+            app.overlay_focus,
+            OverlayFocus::None,
+            "overlay focus must clear so the input can receive keys again"
+        );
     }
 
     #[test]
