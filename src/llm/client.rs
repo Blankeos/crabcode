@@ -283,6 +283,101 @@ impl ToolCallLogInfo {
     }
 }
 
+/// Map a provider-executed tool payload into UI ToolCalls / ToolResult events.
+///
+/// Hosted search never runs client-side; these events are display-only.
+
+fn is_provider_executed_tool_part(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    if obj
+        .get("provider_executed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    matches!(
+        obj.get("name").and_then(|v| v.as_str()),
+        Some("x_search") | Some("web_search") | Some("file_search")
+    )
+}
+
+pub(crate) fn provider_tool_call_ui_events(
+    payload: &str,
+) -> (
+    Vec<crate::llm::ToolCall>,
+    Option<crate::llm::ToolCallResult>,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return (Vec::new(), None);
+    };
+
+    let id = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hosted_search")
+        .to_string();
+    let name = value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("web_search")
+        .to_string();
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("running");
+
+    let arguments = match value.get("arguments") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => "{}".to_string(),
+    };
+
+    // Emit ToolCalls only while running so completed events don't duplicate cards.
+    // Completed/failed emit ToolResult (and a ToolCalls create if the running event
+    // was never seen — handled below by always including calls for first paint).
+    let calls = if status == "running" || status == "completed" || status == "failed" {
+        // Always include a ToolCalls create; add_tool_calls_to_session may duplicate
+        // if we already inserted — prefer upsert in app for hosted ids.
+        vec![crate::llm::ToolCall {
+            id: id.clone(),
+            call_type: "function".to_string(),
+            function: crate::llm::FunctionCall {
+                name: name.clone(),
+                arguments: arguments.clone(),
+            },
+        }]
+    } else {
+        Vec::new()
+    };
+
+    let result = if status == "completed" || status == "failed" {
+        let output_preview = if let Some(output) = value.get("output") {
+            match output {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }
+        } else {
+            format!("Provider-executed {name} {status}.")
+        };
+        let payload = serde_json::json!({
+            "status": if status == "failed" { "error" } else { "completed" },
+            "provider_executed": true,
+            "output_preview": output_preview,
+            "title": name,
+        });
+        Some(crate::llm::ToolCallResult {
+            tool_call_id: id,
+            role: "tool".to_string(),
+            name,
+            content: payload.to_string(),
+        })
+    } else {
+        None
+    };
+
+    (calls, result)
+}
+
 fn tool_call_log_info(tool_call: &str) -> ToolCallLogInfo {
     let mut info = ToolCallLogInfo::default();
     let Ok(value) = serde_json::from_str::<serde_json::Value>(tool_call) else {
@@ -719,6 +814,7 @@ pub async fn summarize_for_compaction(
             }
             ChunkType::Reasoning(_)
             | ChunkType::ToolCall(_)
+            | ChunkType::ProviderToolCall(_)
             | ChunkType::End { .. }
             | ChunkType::AssistantMessagePhase { .. }
             | ChunkType::ResponseCompleted { .. }
@@ -776,6 +872,7 @@ pub async fn generate_session_title(
             }
             ChunkType::Reasoning(_)
             | ChunkType::ToolCall(_)
+            | ChunkType::ProviderToolCall(_)
             | ChunkType::End { .. }
             | ChunkType::AssistantMessagePhase { .. }
             | ChunkType::ResponseCompleted { .. }
@@ -1619,6 +1716,23 @@ async fn relay_stream_to_sender(
                     tool_call.len(),
                 );
             }
+            ChunkType::ProviderToolCall(payload) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("ProviderToolCall", elapsed_ms);
+                stats.tool_call_chunks += 1;
+                stats.tool_call_bytes += payload.len();
+                crate::emit_log!(
+                    "[RELAY] ProviderToolCall chunk received bytes={}",
+                    payload.len()
+                );
+                let (calls, result) = provider_tool_call_ui_events(&payload);
+                if !calls.is_empty() {
+                    let _ = sender.send(crate::llm::ChunkMessage::ToolCalls(calls));
+                }
+                if let Some(result) = result {
+                    let _ = sender.send(crate::llm::ChunkMessage::ToolResult(result));
+                }
+            }
             ChunkType::End { reason } => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("End", elapsed_ms);
@@ -1921,13 +2035,18 @@ fn append_assistant_parts_for_model(
                 aisdk_messages.push(AisdkMessage::assistant(text));
             }
             "tool_call" => {
-                if pending_tools.is_complete() {
-                    pending_tools.flush_complete_pairs(aisdk_messages);
-                }
-
                 let Some(obj) = part.data.as_object() else {
                     continue;
                 };
+                // Hosted search cards are display-only; do not replay as client
+                // function_call history (provider already executed them).
+                // Local websearch tool id is `websearch`; hosted names differ.
+                if is_provider_executed_tool_part(obj) {
+                    continue;
+                }
+                if pending_tools.is_complete() {
+                    pending_tools.flush_complete_pairs(aisdk_messages);
+                }
                 if let Some(message) = tool_call_message_from_model_obj(obj) {
                     if let Some(id) = part.tool_id() {
                         pending_tools.add_call(id.to_string(), message);
@@ -1938,6 +2057,9 @@ fn append_assistant_parts_for_model(
                 let Some(obj) = part.data.as_object() else {
                     continue;
                 };
+                if is_provider_executed_tool_part(obj) {
+                    continue;
+                }
 
                 let Some(id) = part.tool_id().map(str::to_string) else {
                     continue;
@@ -3250,6 +3372,54 @@ mod tests {
         assert!(rendered.iter().any(|c| c == "tail"));
         assert!(!rendered.iter().any(|c| c == "old user"));
         assert!(!rendered.iter().any(|c| c == "old assistant"));
+    }
+
+    #[test]
+    fn provider_tool_call_ui_events_emits_running_and_completed() {
+        let (calls, result) = super::provider_tool_call_ui_events(
+            r#"{"id":"xs_1","name":"x_search","status":"running","arguments":{"query":"carlo"}}"#,
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "xs_1");
+        assert_eq!(calls[0].function.name, "x_search");
+        assert!(result.is_none());
+
+        let (calls, result) = super::provider_tool_call_ui_events(
+            r#"{"id":"xs_1","name":"x_search","status":"completed","arguments":{"query":"carlo"}}"#,
+        );
+        assert_eq!(calls.len(), 1);
+        let result = result.expect("completed should emit ToolResult");
+        assert_eq!(result.tool_call_id, "xs_1");
+        assert_eq!(result.name, "x_search");
+        let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["provider_executed"], true);
+    }
+
+    #[test]
+    fn convert_messages_skips_provider_executed_hosted_search_parts() {
+        let mut assistant = crate::session::types::Message::assistant("");
+        assistant.add_tool_call_part("xs_1", "x_search", serde_json::json!({"query": "carlo"}));
+        if let Some(part) = assistant.parts.last_mut() {
+            if let Some(obj) = part.data.as_object_mut() {
+                obj.insert("provider_executed".into(), serde_json::Value::Bool(true));
+            }
+        }
+        assistant.add_or_update_tool_result_part(serde_json::json!({
+            "id": "xs_1",
+            "name": "x_search",
+            "status": "completed",
+            "provider_executed": true,
+            "output_preview": "done"
+        }));
+
+        let messages = convert_messages(&[assistant]);
+        assert!(
+            messages
+                .iter()
+                .all(|m| !matches!(m, AisdkMessage::ToolCall(_) | AisdkMessage::ToolOutput(_))),
+            "hosted search parts must not replay into API history"
+        );
     }
 }
 fn content_with_vlm_agent_hint(content: &str, image_paths: &[String]) -> String {

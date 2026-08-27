@@ -401,10 +401,7 @@ impl WebsearchNativeConfig {
 
 impl Default for WebsearchNativeConfig {
     fn default() -> Self {
-        Self {
-            web: None,
-            x: None,
-        }
+        Self { web: None, x: None }
     }
 }
 
@@ -3006,7 +3003,6 @@ mod tests {
         assert!(config.websearch.native.x_enabled());
         assert!(diagnostics.warnings.is_empty());
     }
-
 
     #[test]
     fn parses_websearch_boolean_shorthand() {

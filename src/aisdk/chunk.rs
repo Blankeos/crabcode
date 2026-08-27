@@ -4,13 +4,28 @@ pub enum ChunkType {
     Text(String),
     Reasoning(String),
     ToolCall(String),
-    AssistantMessagePhase { phase: Option<MessagePhase> },
-    ResponseCompleted { end_turn: Option<bool> },
+    /// Provider-executed tool lifecycle (hosted search, etc.).
+    ///
+    /// Display / observability only — must never enter the client tool-execute
+    /// loop. Payload JSON:
+    /// `{ "id", "name", "status": "running"|"completed"|"failed", "arguments"?, "output"? }`.
+    ProviderToolCall(String),
+    AssistantMessagePhase {
+        phase: Option<MessagePhase>,
+    },
+    ResponseCompleted {
+        end_turn: Option<bool>,
+    },
     Retry(crate::retry::RetryStatus),
-    StreamRollback { text: String, reasoning: String },
+    StreamRollback {
+        text: String,
+        reasoning: String,
+    },
     Warning(String),
     Metadata(String),
-    End { reason: Option<FinishReason> },
+    End {
+        reason: Option<FinishReason>,
+    },
     RetryableFailure(crate::retry::RetryError),
     Failed(String),
     Incomplete(String),

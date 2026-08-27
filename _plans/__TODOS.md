@@ -488,3 +488,7 @@ I think this is how the TUI works already anyway right?
 - [x] Hosted search
 
 - [ ] Asking crabcode to run some tui like `lazygitrs` is causing it to crash the agent.
+
+- [ ] Extra padding in non compact mode. Or idk. controllable in tui? field? Right now it's close to the edge and it only looks good in some terminals.
+
+- [ ] /btw command

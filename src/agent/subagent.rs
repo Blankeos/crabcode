@@ -178,6 +178,19 @@ pub async fn run_subagent(
                     .unwrap_or(1);
                 tool_call_count = tool_call_count.saturating_add(calls);
             }
+            ChunkType::ProviderToolCall(payload) => {
+                tool_call_count = tool_call_count.saturating_add(1);
+                if let Some(sender) = sender.as_ref() {
+                    let (calls, result) =
+                        crate::llm::client::provider_tool_call_ui_events(&payload);
+                    if !calls.is_empty() {
+                        let _ = sender.send(crate::llm::ChunkMessage::ToolCalls(calls));
+                    }
+                    if let Some(result) = result {
+                        let _ = sender.send(crate::llm::ChunkMessage::ToolResult(result));
+                    }
+                }
+            }
             ChunkType::Failed(err) => {
                 crate::emit_log!(
                     "[SUBAGENT] stream_failed session_id={} subagent_type={} duration_ms={} error={}",

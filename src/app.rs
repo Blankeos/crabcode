@@ -9671,8 +9671,48 @@ impl App {
                             });
 
                         let call_id = call.id.clone();
-                        msg.add_tool_call_part(call.id, call.function.name, args_value);
-                        inserted.push((call_id, idx));
+                        // Upsert: hosted search may emit running then completed with same id.
+                        if let Some(existing) = msg.parts.iter_mut().find(|part| {
+                            part.part_type == "tool_call"
+                                && part.tool_id() == Some(call_id.as_str())
+                        }) {
+                            if let Some(obj) = existing.data.as_object_mut() {
+                                obj.insert(
+                                    "name".into(),
+                                    serde_json::Value::String(call.function.name.clone()),
+                                );
+                                obj.insert("args".into(), args_value);
+                                if matches!(
+                                    call.function.name.as_str(),
+                                    "x_search" | "web_search" | "file_search"
+                                ) {
+                                    obj.insert(
+                                        "provider_executed".into(),
+                                        serde_json::Value::Bool(true),
+                                    );
+                                }
+                            }
+                        } else {
+                            msg.add_tool_call_part(
+                                call.id.clone(),
+                                call.function.name.clone(),
+                                args_value,
+                            );
+                            if matches!(
+                                call.function.name.as_str(),
+                                "x_search" | "web_search" | "file_search"
+                            ) {
+                                if let Some(part) = msg.parts.last_mut() {
+                                    if let Some(obj) = part.data.as_object_mut() {
+                                        obj.insert(
+                                            "provider_executed".into(),
+                                            serde_json::Value::Bool(true),
+                                        );
+                                    }
+                                }
+                            }
+                            inserted.push((call_id, idx));
+                        }
                     }
                     chat.mark_streaming_tool_render_pending(idx);
                 }
@@ -9720,6 +9760,12 @@ impl App {
                     };
                     v["id"] = serde_json::Value::String(result.tool_call_id.clone());
                     v["name"] = serde_json::Value::String(result.name.clone());
+                    if matches!(
+                        result.name.as_str(),
+                        "x_search" | "web_search" | "file_search"
+                    ) {
+                        v["provider_executed"] = serde_json::Value::Bool(true);
+                    }
 
                     if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&result.content)
                     {

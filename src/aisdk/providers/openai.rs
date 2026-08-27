@@ -1546,10 +1546,11 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
         _ => {
             if let Some(message_phase) = responses_assistant_message_phase_chunk(&value) {
                 Some(Ok(message_phase))
+            } else if let Some(payload) = responses_hosted_search_chunk(&value) {
+                // Provider-executed hosted search — UI only, never client execute.
+                Some(Ok(ChunkType::ProviderToolCall(payload)))
             } else if let Some(tool_call) = responses_function_call_chunk(&value) {
-                // Only known client function_call shapes. Hosted search events
-                // (`web_search_call` / `custom_tool_call` for x_search) contain
-                // "tool_call" but must not enter the client tool accumulator.
+                // Only known client function_call shapes.
                 Some(Ok(ChunkType::ToolCall(tool_call)))
             } else {
                 None
@@ -1767,9 +1768,19 @@ fn parse_message_phase(phase: &str) -> Option<MessagePhase> {
     }
 }
 
+/// True when an SSE event type is a provider-hosted search lifecycle event.
+fn is_hosted_search_event(event_type: &str) -> bool {
+    let lower = event_type.to_ascii_lowercase();
+    lower.contains("web_search")
+        || lower.contains("x_search")
+        || lower.contains("custom_tool")
+        || lower.contains("file_search")
+}
+
 /// Client-executed function tool events (not provider-hosted search).
 ///
-/// Hosted search SSE names also contain `"tool_call"` and must be ignored:
+/// Hosted search SSE names also contain `"tool_call"` and must not enter the
+/// client tool accumulator:
 /// - `response.web_search_call.*`
 /// - `response.custom_tool_call_*` (xAI `x_search` streams as custom_tool_call)
 /// - `response.file_search_call.*`
@@ -1778,11 +1789,135 @@ fn is_client_tool_call_event(event_type: &str) -> bool {
         return false;
     }
     let lower = event_type.to_ascii_lowercase();
-    !(lower.contains("web_search")
-        || lower.contains("x_search")
-        || lower.contains("custom_tool")
-        || lower.contains("file_search")
-        || lower.contains("code_interpreter"))
+    // Hosted search + other provider-executed tools stay out of the client loop.
+    !(is_hosted_search_event(event_type) || lower.contains("code_interpreter"))
+}
+
+fn hosted_search_item_name(item_type: &str) -> Option<&'static str> {
+    let lower = item_type.to_ascii_lowercase();
+    // xAI streams x_search as `custom_tool_call`.
+    if lower.contains("x_search") || lower.contains("custom_tool") {
+        Some("x_search")
+    } else if lower.contains("web_search") {
+        Some("web_search")
+    } else if lower.contains("file_search") {
+        Some("file_search")
+    } else {
+        None
+    }
+}
+
+fn hosted_search_status_from_event(event_type: &str) -> &'static str {
+    let lower = event_type.to_ascii_lowercase();
+    if lower.contains("failed") || lower.contains("error") {
+        "failed"
+    } else if lower.contains("completed") || lower.ends_with(".done") {
+        "completed"
+    } else {
+        "running"
+    }
+}
+
+/// Build a display-only ProviderToolCall payload from hosted-search SSE.
+fn responses_hosted_search_chunk(value: &serde_json::Value) -> Option<String> {
+    let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if !is_hosted_search_event(event_type)
+        && !matches!(
+            event_type,
+            "response.output_item.added" | "response.output_item.done"
+        )
+    {
+        return None;
+    }
+
+    // Prefer nested item (output_item.added/done); else top-level fields.
+    let item = value.get("item").unwrap_or(value);
+    let item_type = item.get("type").and_then(|v| v.as_str()).or_else(|| {
+        // custom_tool_call_input.* may not nest under item
+        if is_hosted_search_event(event_type) {
+            Some(event_type)
+        } else {
+            None
+        }
+    })?;
+
+    let name = if let Some(n) = item.get("name").and_then(|v| v.as_str()) {
+        if n.eq_ignore_ascii_case("x_search") || n.eq_ignore_ascii_case("web_search") {
+            n.to_string()
+        } else if is_hosted_search_event(item_type) || is_hosted_search_event(event_type) {
+            hosted_search_item_name(item_type)
+                .or_else(|| hosted_search_item_name(event_type))
+                .unwrap_or("web_search")
+                .to_string()
+        } else {
+            return None;
+        }
+    } else {
+        hosted_search_item_name(item_type)
+            .or_else(|| hosted_search_item_name(event_type))?
+            .to_string()
+    };
+
+    // Must look like hosted search — don't mis-classify client function_call items.
+    if !is_hosted_search_event(item_type)
+        && !is_hosted_search_event(event_type)
+        && !matches!(name.as_str(), "x_search" | "web_search" | "file_search")
+    {
+        return None;
+    }
+    if item_type == "function_call" {
+        return None;
+    }
+
+    let id = item
+        .get("call_id")
+        .or_else(|| item.get("id"))
+        .or_else(|| value.get("item_id"))
+        .or_else(|| value.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("hosted_search")
+        .to_string();
+
+    let status = if event_type == "response.output_item.done" {
+        "completed"
+    } else if event_type == "response.output_item.added" {
+        "running"
+    } else {
+        hosted_search_status_from_event(event_type)
+    };
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("id".into(), serde_json::Value::String(id));
+    payload.insert("name".into(), serde_json::Value::String(name));
+    payload.insert("status".into(), serde_json::Value::String(status.into()));
+    payload.insert("provider_executed".into(), serde_json::Value::Bool(true));
+
+    // Arguments / query from various shapes
+    let args = item
+        .get("arguments")
+        .cloned()
+        .or_else(|| item.get("input").cloned())
+        .or_else(|| item.get("action").cloned())
+        .or_else(|| value.get("input").cloned())
+        .or_else(|| value.get("delta").cloned());
+    if let Some(args) = args {
+        let args_val = match args {
+            serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(&s)
+                .unwrap_or(serde_json::Value::String(s)),
+            other => other,
+        };
+        payload.insert("arguments".into(), args_val);
+    }
+
+    if let Some(output) = item
+        .get("output")
+        .cloned()
+        .or_else(|| item.get("result").cloned())
+    {
+        payload.insert("output".into(), output);
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(payload)).ok()
 }
 
 fn responses_function_call_chunk(value: &serde_json::Value) -> Option<String> {
@@ -2271,8 +2406,9 @@ mod tests {
     }
 
     #[test]
-    fn ignores_hosted_search_tool_call_sse_events() {
-        // xAI x_search streams as custom_tool_call_*; must not enter client tool loop.
+    fn surfaces_hosted_search_sse_as_provider_tool_call() {
+        // xAI x_search streams as custom_tool_call_*; must not enter client tool loop,
+        // but should surface as ProviderToolCall for host observability.
         for event_type in [
             "response.custom_tool_call_input.delta",
             "response.custom_tool_call_input.done",
@@ -2288,10 +2424,45 @@ mod tests {
                 })
                 .to_string(),
             );
-            assert!(
-                chunk.is_none(),
-                "expected hosted search event {event_type} to be ignored"
-            );
+            match chunk {
+                Some(Ok(ChunkType::ProviderToolCall(payload))) => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&payload).expect("valid provider tool payload");
+                    assert_eq!(parsed["id"], "ws_1");
+                    assert!(parsed["provider_executed"].as_bool().unwrap_or(false));
+                    assert!(
+                        matches!(
+                            parsed["name"].as_str(),
+                            Some("x_search") | Some("web_search")
+                        ),
+                        "unexpected name for {event_type}: {}",
+                        parsed["name"]
+                    );
+                }
+                other => panic!("expected ProviderToolCall for {event_type}, got {other:?}"),
+            }
+        }
+
+        let chunk = response_sse_data_to_chunk(
+            &serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "id": "ws_done",
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"query": "rust async"}
+                }
+            })
+            .to_string(),
+        );
+        match chunk {
+            Some(Ok(ChunkType::ProviderToolCall(payload))) => {
+                let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                assert_eq!(parsed["name"], "web_search");
+                assert_eq!(parsed["status"], "completed");
+                assert_eq!(parsed["id"], "ws_done");
+            }
+            other => panic!("expected completed ProviderToolCall, got {other:?}"),
         }
 
         assert!(!is_client_tool_call_event(

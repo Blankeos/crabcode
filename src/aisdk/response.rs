@@ -264,6 +264,11 @@ pub async fn stream_with_tools<P: Provider>(
                             return;
                         }
                     }
+                    Ok(ChunkType::ProviderToolCall(payload)) => {
+                        // Hosted / server-side tools: forward for UI only.
+                        emitted_non_replayable_output = true;
+                        let _ = tx_loop.send(ChunkType::ProviderToolCall(payload));
+                    }
                     Ok(ChunkType::End { reason }) => {
                         // Processed internally — NOT forwarded to tx_loop.
                         // Forwarding End would cause relay_stream_to_sender

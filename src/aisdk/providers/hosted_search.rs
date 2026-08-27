@@ -38,9 +38,15 @@ pub struct HostedSearchSelection {
 
 impl HostedSearchSelection {
     pub const ALL: Self = Self { web: true, x: true };
-    pub const NONE: Self = Self { web: false, x: false };
+    pub const NONE: Self = Self {
+        web: false,
+        x: false,
+    };
     /// Product default: local websearch + complementary provider X search when available.
-    pub const DEFAULT: Self = Self { web: false, x: true };
+    pub const DEFAULT: Self = Self {
+        web: false,
+        x: true,
+    };
 }
 
 /// Whether the host should also register its local `websearch` tool.
