@@ -5066,7 +5066,13 @@ impl App {
                 self.session_spinner_frame,
             );
             self.handle_jobs_dialog_action(action);
-            if self.jobs_dialog_state.is_detail_open() {
+            // Click-outside hides via Dialog::handle_mouse_event → Handled, not Close.
+            // Mirror Sessions/Skills/Mcp: clear overlay when the dialog is gone, otherwise
+            // keys stay trapped in JobsDialog and the TUI looks frozen (ctrl-cc still works).
+            if !self.jobs_dialog_state.is_visible() {
+                self.selection_action_bar = None;
+                self.overlay_focus = OverlayFocus::None;
+            } else if self.jobs_dialog_state.is_detail_open() {
                 match mouse.kind {
                     MouseEventKind::Up(MouseButton::Left)
                         if self.jobs_dialog_state.selection.active
@@ -12462,6 +12468,30 @@ mod tests {
             row,
             modifiers: KeyModifiers::empty(),
         }
+    }
+
+    #[test]
+    fn jobs_dialog_click_outside_clears_overlay_focus() {
+        // Regression: Dialog::handle_mouse_event hides on outside click and
+        // returns Handled (not Close). Without clearing overlay_focus here,
+        // keys stay trapped in JobsDialog → TUI looks frozen (ctrl-cc still works).
+        let mut app = test_app();
+        app.open_jobs_dialog();
+        assert_eq!(app.overlay_focus, OverlayFocus::JobsDialog);
+        assert!(app.jobs_dialog_state.is_visible());
+
+        app.jobs_dialog_state.dialog.dialog_area = ratatui::layout::Rect::new(10, 5, 40, 12);
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+
+        assert!(
+            !app.jobs_dialog_state.is_visible(),
+            "click outside should hide the jobs dialog"
+        );
+        assert_eq!(
+            app.overlay_focus,
+            OverlayFocus::None,
+            "overlay focus must clear so the input can receive keys again"
+        );
     }
 
     #[test]
