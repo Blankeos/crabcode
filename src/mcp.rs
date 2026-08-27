@@ -550,6 +550,11 @@ impl ToolHandler for McpToolHandler {
 fn normalize_input_schema(schema: &Value) -> Value {
     let mut schema = schema.clone();
     if let Value::Object(map) = &mut schema {
+        // OpenAI/xAI Responses require tool `parameters` to be a plain object schema.
+        // MCP servers (e.g. cua-driver `browser_prepare`) sometimes emit root anyOf/oneOf
+        // with non-object branches; strip those before we send the schema upstream.
+        flatten_root_non_object_unions(map);
+
         map.entry("type".to_string())
             .or_insert_with(|| Value::String("object".to_string()));
         map.entry("properties".to_string())
@@ -558,6 +563,49 @@ fn normalize_input_schema(schema: &Value) -> Value {
             .or_insert_with(|| Value::Bool(false));
     }
     schema
+}
+
+fn branch_is_typed_object(branch: &Value) -> bool {
+    let Some(obj) = branch.as_object() else {
+        return false;
+    };
+    match obj.get("type") {
+        Some(Value::String(t)) => t == "object",
+        Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("object")),
+        _ => false,
+    }
+}
+
+fn flatten_root_non_object_unions(map: &mut serde_json::Map<String, Value>) {
+    for key in ["anyOf", "oneOf"] {
+        let Some(Value::Array(branches)) = map.get(key).cloned() else {
+            continue;
+        };
+        if !branches
+            .iter()
+            .any(|branch| !branch_is_typed_object(branch))
+        {
+            continue;
+        }
+
+        let root_is_object = map
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t == "object")
+            || map.contains_key("properties");
+        if !root_is_object {
+            if let Some(Value::Object(branch)) = branches
+                .into_iter()
+                .find(|branch| branch_is_typed_object(branch))
+            {
+                for (k, v) in branch {
+                    map.entry(k).or_insert(v);
+                }
+            }
+        }
+
+        map.remove(key);
+    }
 }
 
 fn parameters_from_schema(schema: &Value) -> Vec<ParameterSchema> {
@@ -603,5 +651,97 @@ fn parameter_type_from_schema(schema: &Value) -> ParameterType {
         )),
         Some("object") => ParameterType::Object(HashMap::new()),
         _ => ParameterType::String,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_strips_root_anyof_with_non_object_branches() {
+        // Mirrors cua-driver `browser_prepare`: object root + anyOf of required-only
+        // branches that omit `type: object`. xAI Responses rejects that shape.
+        let input = json!({
+            "type": "object",
+            "properties": {
+                "pid": { "type": "integer" },
+                "allow_launch": { "type": "boolean" }
+            },
+            "required": [],
+            "additionalProperties": true,
+            "anyOf": [
+                { "required": ["pid"] },
+                {
+                    "properties": {
+                        "allow_launch": { "const": true }
+                    },
+                    "required": ["allow_launch"]
+                }
+            ]
+        });
+
+        let normalized = normalize_input_schema(&input);
+        assert_eq!(
+            normalized.get("type").and_then(Value::as_str),
+            Some("object")
+        );
+        assert!(normalized.get("anyOf").is_none());
+        assert!(normalized.get("oneOf").is_none());
+        assert!(normalized
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some());
+        assert_eq!(normalized.get("additionalProperties"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn normalize_keeps_object_only_anyof_branches() {
+        let input = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } },
+                    "required": ["a"]
+                },
+                {
+                    "type": "object",
+                    "properties": { "b": { "type": "integer" } },
+                    "required": ["b"]
+                }
+            ]
+        });
+
+        let normalized = normalize_input_schema(&input);
+        assert!(normalized.get("anyOf").is_some());
+        assert_eq!(
+            normalized.get("type").and_then(Value::as_str),
+            Some("object")
+        );
+    }
+
+    #[test]
+    fn normalize_promotes_sole_object_branch_when_root_lacks_object() {
+        let input = json!({
+            "anyOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "properties": { "x": { "type": "string" } },
+                    "required": ["x"]
+                }
+            ]
+        });
+
+        let normalized = normalize_input_schema(&input);
+        assert!(normalized.get("anyOf").is_none());
+        assert_eq!(
+            normalized.get("type").and_then(Value::as_str),
+            Some("object")
+        );
+        assert!(normalized
+            .pointer("/properties/x")
+            .is_some_and(|v| v.get("type").and_then(Value::as_str) == Some("string")));
     }
 }
