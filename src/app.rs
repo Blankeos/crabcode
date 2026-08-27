@@ -4056,8 +4056,19 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         self.chat_state.chat.scroll_down(1);
                     }
-                    crate::views::which_key::WhichKeyAction::None => {
+                    crate::views::which_key::WhichKeyAction::ScrollToTop => {
                         self.overlay_focus = OverlayFocus::None;
+                        self.chat_state.chat.scroll_to_top();
+                    }
+                    crate::views::which_key::WhichKeyAction::ScrollToBottom => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.chat_state.chat.scroll_to_bottom();
+                    }
+                    crate::views::which_key::WhichKeyAction::None => {
+                        // Keep focus while which-key is still open (e.g. nested submenu).
+                        if !self.which_key_state.is_visible() {
+                            self.overlay_focus = OverlayFocus::None;
+                        }
                     }
                 }
                 true

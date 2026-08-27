@@ -480,3 +480,7 @@ I think this is how the TUI works already anyway right?
 - [x] "providers" config, does it work
 
 - [x] Pressing a file link when it's wrapped does not point to anything, because it's wrapped. But when not wrapped it's okay. For instance `⬢ Added /Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md` is clickable. But when I shrink the screen and it's wrapped, first half is clickable and the 2nd half is also clickabe but they point to nothing for obvious reasons
+
+- [x] I want to add 'g e' to scroll down.
+
+- [ ] I wanna be able to cancel queued messages if needed.

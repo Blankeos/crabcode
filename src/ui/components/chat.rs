@@ -2964,6 +2964,12 @@ impl Chat {
         self.update_scrollbar();
     }
 
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = 0;
+        self.user_scrolled_up = true;
+        self.update_scrollbar();
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         // Prefer the MAX sentinel so stick-to-bottom survives content growth
         // between frames (streaming / ensure_render_cache before render).
