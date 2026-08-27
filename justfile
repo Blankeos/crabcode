@@ -1,6 +1,9 @@
 default:
     just --list
 
+check-aisdk-boundary:
+    bash scripts/check-aisdk-boundary.sh
+
 dev:
     cargo r
 

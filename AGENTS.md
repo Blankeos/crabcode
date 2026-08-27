@@ -67,3 +67,13 @@ The cache stores provider and model information from models.dev and expires afte
 ### References
 
 There are important code references that you can check. For that the `devrefs --help` cli. Use `devrefs list` to get all current references, everything is in `.devrefs/references/*`
+
+
+## aisdk (`src/aisdk/`)
+
+Dogfooded future crate: a generic multi-provider AI SDK (Vercel AI SDK / Rig spirit), not crabcode product code.
+
+When editing `src/aisdk/`, read [`src/aisdk/README.md`](src/aisdk/README.md) first. Update that README only if the change affects the public shape or boundary rules.
+
+Enforce with: `scripts/check-aisdk-boundary.sh`
+
