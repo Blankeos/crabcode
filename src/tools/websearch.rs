@@ -212,11 +212,11 @@ struct WebsearchInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SearchItem {
-    title: String,
-    url: String,
-    snippet: Option<String>,
-    date: Option<String>,
+pub(crate) struct SearchItem {
+    pub title: String,
+    pub url: String,
+    pub snippet: Option<String>,
+    pub date: Option<String>,
 }
 
 #[async_trait]
@@ -1138,7 +1138,7 @@ fn parse_standard_results(value: &Value, snippet_keys: &[&str]) -> Vec<SearchIte
         .collect()
 }
 
-fn format_results(
+pub(crate) fn format_results(
     provider: &str,
     query: &str,
     results: Vec<SearchItem>,

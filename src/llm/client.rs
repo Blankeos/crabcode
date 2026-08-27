@@ -301,6 +301,130 @@ fn is_provider_executed_tool_part(obj: &serde_json::Map<String, serde_json::Valu
     )
 }
 
+/// Build a display preview for provider-executed hosted search.
+/// Prefer explicit `output`; otherwise summarize `arguments.sources` / `action`
+/// (xAI web_search often only returns sources on the call args).
+pub(crate) fn hosted_search_output_preview(
+    name: &str,
+    status: &str,
+    value: &serde_json::Value,
+) -> String {
+    if let Some(output) = value.get("output") {
+        let preview = match output {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        if !preview.trim().is_empty() {
+            return preview;
+        }
+    }
+
+    // Prefer arguments, then action (OpenAI Responses nests query/sources there).
+    let args = value
+        .get("arguments")
+        .or_else(|| value.get("action"))
+        .unwrap_or(&serde_json::Value::Null);
+
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+
+    let provider_label = match name {
+        "x_search" => "native (x)",
+        _ => "native",
+    };
+
+    let sources = args
+        .get("sources")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if query.is_empty() && sources.is_empty() {
+        return format!("Provider-executed {name} {status}.");
+    }
+
+    let results: Vec<crate::tools::websearch::SearchItem> = sources
+        .iter()
+        .filter_map(|source| {
+            let url = source
+                .get("url")
+                .and_then(|u| u.as_str())
+                .or_else(|| source.as_str())
+                .map(str::trim)
+                .filter(|u| !u.is_empty())?
+                .to_string();
+            let title = source
+                .get("title")
+                .and_then(|t| t.as_str())
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .unwrap_or(url.as_str())
+                .to_string();
+            let snippet = source
+                .get("snippet")
+                .or_else(|| source.get("description"))
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let date = source
+                .get("date")
+                .or_else(|| source.get("published_date"))
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            Some(crate::tools::websearch::SearchItem {
+                title,
+                url,
+                snippet,
+                date,
+            })
+        })
+        .take(8)
+        .collect();
+
+    // x_search usually has no URL sources — don't claim "No search results found".
+    if results.is_empty() && name == "x_search" {
+        return format!("Search provider: {provider_label}\nQuery: {query}\n");
+    }
+
+    crate::tools::websearch::format_results(provider_label, query, results, None)
+}
+
+/// Hosted-search args that look populated but carry no usable query/sources.
+pub(crate) fn hosted_search_args_are_hollow(args: &serde_json::Value) -> bool {
+    match args {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            t.is_empty() || t == "{}"
+        }
+        serde_json::Value::Object(map) if map.is_empty() => true,
+        serde_json::Value::Object(map) => {
+            let query_empty = map
+                .get("query")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            let sources_empty = match map.get("sources") {
+                None => true,
+                Some(serde_json::Value::Array(a)) => a.is_empty(),
+                Some(serde_json::Value::Null) => true,
+                Some(_) => false,
+            };
+            // Keep non-search keys (e.g. limit) from blocking hollow detection when
+            // the only useful fields (query/sources) are blank.
+            query_empty && sources_empty
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn provider_tool_call_ui_events(
     payload: &str,
 ) -> (
@@ -351,16 +475,10 @@ pub(crate) fn provider_tool_call_ui_events(
     };
 
     let result = if status == "completed" || status == "failed" {
-        let output_preview = if let Some(output) = value.get("output") {
-            match output {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            }
-        } else {
-            format!("Provider-executed {name} {status}.")
-        };
+        let output_preview = hosted_search_output_preview(&name, status, &value);
+        // Use "ok" so the TUI shows output_preview (it gates on status == "ok").
         let payload = serde_json::json!({
-            "status": if status == "failed" { "error" } else { "completed" },
+            "status": if status == "failed" { "error" } else { "ok" },
             "provider_executed": true,
             "output_preview": output_preview,
             "title": name,
@@ -3425,8 +3543,73 @@ mod tests {
         assert_eq!(result.tool_call_id, "xs_1");
         assert_eq!(result.name, "x_search");
         let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();
-        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["status"], "ok");
         assert_eq!(payload["provider_executed"], true);
+        // x_search with query only still shows provider + query header.
+        assert_eq!(
+            payload["output_preview"],
+            "Search provider: native (x)\nQuery: carlo\n"
+        );
+    }
+
+    #[test]
+    fn provider_tool_call_ui_events_web_search_preview_lists_sources() {
+        let payload = serde_json::json!({
+            "id": "ws_1",
+            "name": "web_search",
+            "status": "completed",
+            "provider_executed": true,
+            "arguments": {
+                "type": "search",
+                "query": "carlo taleon",
+                "sources": [
+                    {"type": "url", "url": "https://carlo.tl/", "title": "Carlo"},
+                    {"type": "url", "url": "https://github.com/blankeos"}
+                ]
+            }
+        });
+        let (_calls, result) = super::provider_tool_call_ui_events(&payload.to_string());
+        let result = result.expect("completed web_search should emit ToolResult");
+        let body: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(body["status"], "ok");
+        let preview = body["output_preview"].as_str().unwrap();
+        // Same formatter as local websearch (`format_results`).
+        assert_eq!(
+            preview,
+            crate::tools::websearch::format_results(
+                "native",
+                "carlo taleon",
+                vec![
+                    crate::tools::websearch::SearchItem {
+                        title: "Carlo".into(),
+                        url: "https://carlo.tl/".into(),
+                        snippet: None,
+                        date: None,
+                    },
+                    crate::tools::websearch::SearchItem {
+                        title: "https://github.com/blankeos".into(),
+                        url: "https://github.com/blankeos".into(),
+                        snippet: None,
+                        date: None,
+                    },
+                ],
+                None,
+            )
+        );
+    }
+
+    #[test]
+    fn hosted_search_args_are_hollow_detects_empty_query_sources() {
+        assert!(super::hosted_search_args_are_hollow(&serde_json::json!({
+            "type": "search",
+            "query": "",
+            "sources": []
+        })));
+        assert!(!super::hosted_search_args_are_hollow(&serde_json::json!({
+            "type": "search",
+            "query": "crabcode",
+            "sources": []
+        })));
     }
 
     #[test]

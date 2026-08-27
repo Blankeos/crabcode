@@ -9681,7 +9681,17 @@ impl App {
                                     "name".into(),
                                     serde_json::Value::String(call.function.name.clone()),
                                 );
-                                obj.insert("args".into(), args_value);
+                                // Hosted search completed events sometimes omit sources /
+                                // wipe query to ""; don't replace richer running args.
+                                let incoming_hollow =
+                                    crate::llm::client::hosted_search_args_are_hollow(&args_value);
+                                let existing_hollow = obj
+                                    .get("args")
+                                    .map(crate::llm::client::hosted_search_args_are_hollow)
+                                    .unwrap_or(true);
+                                if !incoming_hollow || existing_hollow {
+                                    obj.insert("args".into(), args_value);
+                                }
                                 if matches!(
                                     call.function.name.as_str(),
                                     "x_search" | "web_search" | "file_search"
@@ -9805,6 +9815,44 @@ impl App {
                         };
                         v["status"] = serde_json::Value::String(status.to_string());
                         v["output_preview"] = serde_json::Value::String(result.content.clone());
+                    }
+
+                    // Hosted search completed SSE often omits sources / clears query;
+                    // reuse running tool_call args for preview + result card header.
+                    if matches!(
+                        result.name.as_str(),
+                        "web_search" | "x_search" | "file_search"
+                    ) {
+                        if let Some(args) = msg
+                            .tool_call_part_data(&result.tool_call_id)
+                            .and_then(|part| part.get("args"))
+                            .filter(|a| !crate::llm::client::hosted_search_args_are_hollow(a))
+                            .cloned()
+                        {
+                            let result_args_hollow = v
+                                .get("args")
+                                .map(crate::llm::client::hosted_search_args_are_hollow)
+                                .unwrap_or(true);
+                            if result_args_hollow {
+                                v["args"] = args.clone();
+                            }
+
+                            let preview_is_stub = v
+                                .get("output_preview")
+                                .and_then(|p| p.as_str())
+                                .map(|s| s.trim().is_empty() || s.starts_with("Provider-executed "))
+                                .unwrap_or(true);
+                            if preview_is_stub {
+                                let enriched = crate::llm::client::hosted_search_output_preview(
+                                    &result.name,
+                                    v.get("status").and_then(|s| s.as_str()).unwrap_or("ok"),
+                                    &serde_json::json!({ "arguments": args }),
+                                );
+                                if !enriched.starts_with("Provider-executed ") {
+                                    v["output_preview"] = serde_json::Value::String(enriched);
+                                }
+                            }
+                        }
                     }
 
                     if msg.role == crate::session::types::MessageRole::Assistant {
