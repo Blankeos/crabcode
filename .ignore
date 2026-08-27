@@ -1,2 +1,15 @@
-!_dev_reference1
-!_dev_reference2
+# Helix <space>f + keep RA/file watchers off junk
+node_modules
+remote-client/dist
+.git
+target
+*.log
+.benchmarks
+benchmark-reports
+.DS_Store
+.env
+.worktrees
+.claude
+.agents
+.devrefs
+**/.venv
