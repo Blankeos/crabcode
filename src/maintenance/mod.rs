@@ -21,21 +21,12 @@ pub trait MaintenanceTask: Send + Sync {
     fn run(&self, opts: &RunOpts) -> Result<TaskReport>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RunOpts {
     /// If true, don't delete — just report what would happen.
     pub dry_run: bool,
     /// Only run this task id (None = all).
     pub only: Option<String>,
-}
-
-impl Default for RunOpts {
-    fn default() -> Self {
-        Self {
-            dry_run: false,
-            only: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]

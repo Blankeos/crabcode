@@ -1278,8 +1278,10 @@ mod tests {
 
         let help = root_help().unwrap();
         assert!(help.contains("Usage: crabcode"));
-        assert!(help.contains("completion  Generate shell completion script"));
-        assert!(help.contains("serve       Host the current workspace"));
+        assert!(help.contains("completion   Generate shell completion script"));
+        assert!(
+            help.contains("serve        Host the current workspace for browser and CLI clients")
+        );
     }
 
     #[test]

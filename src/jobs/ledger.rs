@@ -133,7 +133,7 @@ pub fn list_metas() -> Result<Vec<JobMeta>> {
         }
     }
 
-    out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    out.sort_by_key(|a| std::cmp::Reverse(a.started_at));
     Ok(out)
 }
 
@@ -182,7 +182,7 @@ pub fn is_pid_alive(pid: u32) -> bool {
         }
         let err = std::io::Error::last_os_error();
         // EPERM means the process exists but we can't signal it.
-        return err.raw_os_error() == Some(libc::EPERM);
+        err.raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(windows)]
     {

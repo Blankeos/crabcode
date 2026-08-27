@@ -1202,6 +1202,7 @@ mod tests {
         assert!(!policies.is_allowed("plan", "bash"));
         assert!(!policies.is_allowed("plan", "bash_output"));
         assert!(!policies.is_allowed("plan", "bash_kill"));
+        assert!(!policies.is_allowed("plan", "bash_restart"));
         assert!(!policies.is_allowed("plan", "terminal_session"));
         assert!(!policies.is_allowed("plan", "write"));
         assert!(!policies.is_allowed("plan", "write_files"));

@@ -2251,9 +2251,7 @@ mod tests {
         assert_eq!(request.current_index, 1);
         assert_eq!(request.response(), json!([[]]));
 
-        let colors = crate::theme::Theme::load_from_file("src/theme.json")
-            .unwrap()
-            .get_colors(true);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
         let confirm_text = confirm_body_lines(request, &colors)
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -2750,9 +2748,7 @@ mod tests {
             ]),
             tx,
         );
-        let colors = crate::theme::Theme::load_from_file("src/theme.json")
-            .unwrap()
-            .get_colors(true);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
         let line = question_tabs_line(&request, 0, &colors);
         let text: String = line
             .spans
@@ -2778,9 +2774,7 @@ mod tests {
             }]),
             tx,
         );
-        let colors = crate::theme::Theme::load_from_file("src/theme.json")
-            .unwrap()
-            .get_colors(true);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
         let body = question_body_lines(
             &request.questions[0],
             &request.answers[0],
@@ -2824,9 +2818,7 @@ mod tests {
             ]),
             tx,
         );
-        let colors = crate::theme::Theme::load_from_file("src/theme.json")
-            .unwrap()
-            .get_colors(true);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
         let body = question_body_lines(
             &request.questions[1],
             &request.answers[1],
@@ -2865,9 +2857,7 @@ mod tests {
         for ch in "this is a long custom answer that should not be truncated".chars() {
             request.insert_char(ch);
         }
-        let colors = crate::theme::Theme::load_from_file("src/theme.json")
-            .unwrap()
-            .get_colors(true);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
         let body = confirm_body_lines(&request, &colors);
         let text = body
             .iter()
@@ -2892,9 +2882,7 @@ mod tests {
             }]),
             tx,
         );
-        let colors = crate::theme::Theme::load_from_file("src/theme.json")
-            .unwrap()
-            .get_colors(true);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
         let line = question_tabs_line(&request, 0, &colors);
 
         assert_eq!(line.spans[0].content.as_ref(), " Question 1 ");
@@ -2919,9 +2907,7 @@ mod tests {
             ]),
             tx,
         );
-        let colors = crate::theme::Theme::load_from_file("src/theme.json")
-            .unwrap()
-            .get_colors(true);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
         let line = footer_line(&request, &colors);
         let text: String = line
             .spans
@@ -2949,9 +2935,7 @@ mod tests {
 
         assert!(request.questions[0].multiple);
 
-        let colors = crate::theme::Theme::load_from_file("src/theme.json")
-            .unwrap()
-            .get_colors(true);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
         let footer = footer_line(&request, &colors);
         let footer_text: String = footer
             .spans
@@ -3319,9 +3303,7 @@ mod tests {
             label: "A".to_string(),
             description: String::new(),
         };
-        let colors = crate::theme::Theme::load_from_file("src/theme.json")
-            .unwrap()
-            .get_colors(true);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
         let line = option_line(&option, true, true, false, &colors);
         let text: String = line
             .spans

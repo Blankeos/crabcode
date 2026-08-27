@@ -5075,16 +5075,14 @@ impl App {
                         self.show_selection_action_bar_for(SelectionActionTarget::JobsDetail);
                     }
                     MouseEventKind::Down(MouseButton::Left)
-                        if !self.jobs_dialog_state.selection.active =>
+                        if !self.jobs_dialog_state.selection.active
+                            && self.selection_action_bar
+                                == Some(SelectionActionBarState {
+                                    target: SelectionActionTarget::JobsDetail,
+                                    can_open_in_editor: false,
+                                }) =>
                     {
-                        if self.selection_action_bar
-                            == Some(SelectionActionBarState {
-                                target: SelectionActionTarget::JobsDetail,
-                                can_open_in_editor: false,
-                            })
-                        {
-                            self.selection_action_bar = None;
-                        }
+                        self.selection_action_bar = None;
                     }
                     _ => {}
                 }
