@@ -2368,7 +2368,9 @@ enum ProviderKind {
 impl ProviderKind {
     fn from_provider(_provider_name: &str, npm_package: &str) -> Self {
         match npm_package {
-            "@ai-sdk/openai-compatible" | "@ai-sdk/gateway" => Self::OpenAICompatible,
+            "@ai-sdk/openai-compatible" | "@ai-sdk/gateway" | "@openrouter/ai-sdk-provider" => {
+                Self::OpenAICompatible
+            }
             "@ai-sdk/anthropic" => Self::Anthropic,
             _ => Self::OpenAI,
         }
@@ -2747,6 +2749,37 @@ mod tests {
                 ProviderKind::OpenAICompatible.normalize_base_url(&route.api)
             },
             "https://ai-gateway.vercel.sh"
+        );
+    }
+
+    #[test]
+    fn openrouter_uses_openai_compatible_chat_completions() {
+        let provider: crate::model::discovery::Provider =
+            serde_json::from_value(serde_json::json!({
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "api": "https://openrouter.ai/api/v1",
+                "env": ["OPENROUTER_API_KEY"],
+                "npm": "@openrouter/ai-sdk-provider",
+                "models": {
+                    "z-ai/glm-5.2:free": {
+                        "id": "z-ai/glm-5.2:free",
+                        "name": "GLM 5.2 Free"
+                    }
+                }
+            }))
+            .unwrap();
+
+        let route = resolve_model_route(&provider, "z-ai/glm-5.2:free".to_string());
+        assert_eq!(route.npm_package, "@openrouter/ai-sdk-provider");
+        assert_eq!(route.api, "https://openrouter.ai/api/v1");
+        assert_eq!(
+            ProviderKind::from_provider("openrouter", &route.npm_package),
+            ProviderKind::OpenAICompatible
+        );
+        assert_eq!(
+            ProviderKind::OpenAICompatible.normalize_base_url(&route.api),
+            "https://openrouter.ai/api/v1"
         );
     }
 
