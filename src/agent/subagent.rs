@@ -40,6 +40,7 @@ pub async fn run_subagent(
     cancel_token: tokio_util::sync::CancellationToken,
     permissions: crate::tools::ToolPermissions,
     max_steps: Option<usize>,
+    process_registry: Option<std::sync::Arc<crate::tools::ProcessRegistry>>,
 ) -> Result<SubAgentRunResult, String> {
     use crate::aisdk::core::{
         chunk::ChunkType, response::StreamTextResponse, stop::StopReason, Message as AisdkMessage,
@@ -77,6 +78,7 @@ pub async fn run_subagent(
         None,
         session.supports_image_input,
         cancel_token.clone(),
+        process_registry,
     )
     .await;
     let hosted_selection = match crate::config::ConfigLoader::load() {

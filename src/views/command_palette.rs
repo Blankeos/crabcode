@@ -26,6 +26,7 @@ pub enum CommandPaletteAppAction {
     OpenStorage,
     OpenSkillsDialog,
     OpenMcpDialog,
+    OpenJobs,
 }
 
 #[derive(Debug)]
@@ -216,6 +217,7 @@ fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
             "open-mcp-dialog" => {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenMcpDialog)
             }
+            "open-jobs" => CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenJobs),
             _ => CommandPaletteAction::None,
         };
     }
@@ -465,6 +467,21 @@ fn core_palette_items(
             "View and toggle configured MCP servers",
             None,
             &["mcp", "model context protocol", "servers"],
+        ),
+    );
+
+    items.insert(
+        items
+            .iter()
+            .position(|item| item.group == "Application")
+            .unwrap_or(items.len()),
+        app_action_item(
+            "open-jobs",
+            "Background Jobs",
+            "Application",
+            "List and manage background/interactive shell jobs",
+            Some("ctrl+x j"),
+            &["jobs", "background", "bash_output", "bash_kill", "process"],
         ),
     );
 

@@ -1,7 +1,8 @@
 use crate::tools::{
     fs::{GlobTool, GrepTool, ListTool, ReadTool, ViewImageTool, WriteFilesTool, WriteTool},
-    ApplyPatchTool, BashTool, EditTool, QuestionTool, SkillTool, TaskTool, TerminalSessionTool,
-    ToolPermissions, ToolRegistry, UpdatePlanTool, WebfetchTool, WebsearchTool,
+    ApplyPatchTool, BashKillTool, BashOutputTool, BashRestartTool, BashTool, EditTool,
+    ProcessRegistry, QuestionTool, SkillTool, TaskTool, TerminalSessionTool, ToolPermissions,
+    ToolRegistry, UpdatePlanTool, WebfetchTool, WebsearchTool,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -12,6 +13,7 @@ pub async fn initialize_tool_registry() -> ToolRegistry {
         &crate::config::configuration::WebsearchConfig::default(),
         &crate::config::configuration::McpConfig::default(),
         ".",
+        Arc::new(ProcessRegistry::new()),
     )
     .await
 }
@@ -21,6 +23,7 @@ pub async fn initialize_tool_registry_with_config(
     websearch_config: &crate::config::configuration::WebsearchConfig,
     mcp_config: &crate::config::configuration::McpConfig,
     workspace: impl Into<std::path::PathBuf>,
+    process_registry: Arc<ProcessRegistry>,
 ) -> ToolRegistry {
     let registry = ToolRegistry::new();
 
@@ -32,7 +35,20 @@ pub async fn initialize_tool_registry_with_config(
     registry.register(Arc::new(ApplyPatchTool::new())).await;
     registry.register(Arc::new(WriteTool::new())).await;
     registry.register(Arc::new(WriteFilesTool::new())).await;
-    registry.register(Arc::new(BashTool::new())).await;
+    registry
+        .register(Arc::new(
+            BashTool::new().with_registry(process_registry.clone()),
+        ))
+        .await;
+    registry
+        .register(Arc::new(BashOutputTool::new(process_registry.clone())))
+        .await;
+    registry
+        .register(Arc::new(BashKillTool::new(process_registry.clone())))
+        .await;
+    registry
+        .register(Arc::new(BashRestartTool::new(process_registry.clone())))
+        .await;
     registry.register(Arc::new(EditTool::new())).await;
     registry.register(Arc::new(SkillTool::new())).await;
     registry.register(Arc::new(WebfetchTool::new())).await;
@@ -100,7 +116,26 @@ pub async fn register_dynamic_tools(
     permissions: ToolPermissions,
     agent_registry: crate::agent::definition::AgentRegistry,
     cancel_token: CancellationToken,
+    process_registry: Arc<ProcessRegistry>,
 ) {
+    // Keep bash tools wired to the shared registry + optional chunk sender for interactive.
+    registry
+        .register(Arc::new(
+            BashTool::new()
+                .with_sender_opt(sender.clone())
+                .with_registry(process_registry.clone()),
+        ))
+        .await;
+    registry
+        .register(Arc::new(BashOutputTool::new(process_registry.clone())))
+        .await;
+    registry
+        .register(Arc::new(BashKillTool::new(process_registry.clone())))
+        .await;
+    registry
+        .register(Arc::new(BashRestartTool::new(process_registry.clone())))
+        .await;
+
     registry
         .register(Arc::new(
             QuestionTool::new().with_sender_opt(sender.clone()),
@@ -115,8 +150,13 @@ pub async fn register_dynamic_tools(
         ))
         .await;
 
+    // Keep terminal_session as a thin interactive alias for back-compat.
     registry
-        .register(Arc::new(TerminalSessionTool::new().with_sender_opt(sender)))
+        .register(Arc::new(
+            TerminalSessionTool::new()
+                .with_sender_opt(sender)
+                .with_registry(process_registry),
+        ))
         .await;
 }
 
@@ -125,9 +165,25 @@ pub async fn initialize_tool_registry_with_dynamic(
     permissions: ToolPermissions,
     agent_registry: crate::agent::definition::AgentRegistry,
     cancel_token: CancellationToken,
+    process_registry: Arc<ProcessRegistry>,
 ) -> ToolRegistry {
-    let registry = initialize_tool_registry().await;
-    register_dynamic_tools(&registry, sender, permissions, agent_registry, cancel_token).await;
+    let registry = initialize_tool_registry_with_config(
+        None,
+        &crate::config::configuration::WebsearchConfig::default(),
+        &crate::config::configuration::McpConfig::default(),
+        ".",
+        process_registry.clone(),
+    )
+    .await;
+    register_dynamic_tools(
+        &registry,
+        sender,
+        permissions,
+        agent_registry,
+        cancel_token,
+        process_registry,
+    )
+    .await;
     registry
 }
 
@@ -140,15 +196,25 @@ pub async fn initialize_tool_registry_with_dynamic_config(
     websearch_config: &crate::config::configuration::WebsearchConfig,
     mcp_config: &crate::config::configuration::McpConfig,
     workspace: impl Into<std::path::PathBuf>,
+    process_registry: Arc<ProcessRegistry>,
 ) -> ToolRegistry {
     let registry = initialize_tool_registry_with_config(
         provider_name,
         websearch_config,
         mcp_config,
         workspace,
+        process_registry.clone(),
     )
     .await;
-    register_dynamic_tools(&registry, sender, permissions, agent_registry, cancel_token).await;
+    register_dynamic_tools(
+        &registry,
+        sender,
+        permissions,
+        agent_registry,
+        cancel_token,
+        process_registry,
+    )
+    .await;
     registry
 }
 
@@ -179,12 +245,16 @@ mod tests {
             ToolPermissions::new("."),
             crate::agent::definition::AgentRegistry::default(),
             CancellationToken::new(),
+            Arc::new(ProcessRegistry::new()),
         )
         .await;
 
         assert!(registry.get("question").await.is_some());
         assert!(registry.get("task").await.is_some());
         assert!(registry.get("terminal_session").await.is_some());
+        assert!(registry.get("bash_output").await.is_some());
+        assert!(registry.get("bash_kill").await.is_some());
+        assert!(registry.get("bash_restart").await.is_some());
     }
 
     #[tokio::test]
@@ -195,6 +265,7 @@ mod tests {
             permissions.clone(),
             crate::agent::definition::AgentRegistry::default(),
             CancellationToken::new(),
+            Arc::new(ProcessRegistry::new()),
         )
         .await;
         let scoped = scope_tool_registry_for_agent(&registry, &permissions, "plan").await;
@@ -202,6 +273,9 @@ mod tests {
         assert!(scoped.get("read").await.is_some());
         assert!(scoped.get("task").await.is_some());
         assert!(scoped.get("bash").await.is_none());
+        assert!(scoped.get("bash_output").await.is_none());
+        assert!(scoped.get("bash_kill").await.is_none());
+        assert!(scoped.get("bash_restart").await.is_none());
         assert!(scoped.get("terminal_session").await.is_none());
         assert!(scoped.get("apply_patch").await.is_none());
         assert!(scoped.get("write").await.is_none());

@@ -3,6 +3,9 @@ use serde_json::Value;
 
 pub mod aisdk_bridge;
 pub mod bash;
+pub mod bash_kill;
+pub mod bash_output;
+pub mod bash_restart;
 pub mod context;
 pub mod edit;
 pub mod fs;
@@ -10,6 +13,7 @@ pub mod init;
 pub mod mutation;
 pub mod patch;
 pub mod permission;
+pub mod process_registry;
 pub mod question;
 pub mod registry;
 pub mod skill;
@@ -21,6 +25,9 @@ pub mod webfetch;
 pub mod websearch;
 
 pub use bash::BashTool;
+pub use bash_kill::BashKillTool;
+pub use bash_output::BashOutputTool;
+pub use bash_restart::BashRestartTool;
 pub use context::ToolContext;
 pub use edit::EditTool;
 pub use init::{
@@ -32,6 +39,10 @@ pub use permission::{
     expand_permission_pattern, AgentToolPolicies, PermissionAction, PermissionGrant,
     PermissionPolicyAction, PermissionPrompt, PermissionResponse, PermissionRule, PermissionRules,
     ToolPermissions,
+};
+#[allow(unused_imports)]
+pub use process_registry::{
+    JobKind, JobOutput, JobStatus, ProcessJobSnapshot, ProcessRegistry, SpawnedJob,
 };
 pub use question::QuestionTool;
 pub use registry::ToolRegistry;

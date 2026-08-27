@@ -18,6 +18,8 @@ pub enum WhichKeyAction {
     ShowThemes,
     ShowSessions,
     ShowTimeline,
+    /// Ctrl+X opens WhichKey; bind `j` here for jobs (don't steal Ctrl+X).
+    ShowJobs,
     ToggleThinking,
     GoChild,
     GoParent,
@@ -83,6 +85,12 @@ impl WhichKeyState {
                 key: "n".to_string(),
                 description: "Create new session".to_string(),
                 target: BindingTarget::Action(WhichKeyAction::NewSession),
+            },
+            // Ctrl+X opens WhichKey; jobs are bound here (don't steal Ctrl+X).
+            KeyBinding {
+                key: "j".to_string(),
+                description: "Jobs (background/interactive)".to_string(),
+                target: BindingTarget::Action(WhichKeyAction::ShowJobs),
             },
             KeyBinding {
                 key: "q".to_string(),

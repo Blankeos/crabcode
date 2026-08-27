@@ -156,7 +156,10 @@ pub fn render_chat(
     find_bar: &mut FindBar,
     show_terminal_cursor: bool,
     session_title: Option<&str>,
+    running_jobs: usize,
+    jobs_chip_area: &mut Option<Rect>,
 ) {
+    *jobs_chip_area = None;
     let size = f.area();
     let is_subagent_view = subagent_tabs
         .as_ref()
@@ -486,10 +489,23 @@ pub fn render_chat(
         return;
     }
 
-    let help_text = vec![
-        Span::styled("ctrl+p", Style::default().fg(colors.info)),
-        Span::raw(" commands"),
-    ];
+    let mut help_text = Vec::new();
+    if running_jobs > 0 {
+        let chip_label = if running_jobs == 1 {
+            "● 1 job".to_string()
+        } else {
+            format!("● {running_jobs} jobs")
+        };
+        help_text.push(Span::styled(
+            chip_label,
+            Style::default()
+                .fg(colors.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+        help_text.push(Span::raw("  "));
+    }
+    help_text.push(Span::styled("ctrl+p", Style::default().fg(colors.info)));
+    help_text.push(Span::raw(" commands"));
     let help_line = Line::from(help_text);
     let help_width = help_line.width() as u16;
     let available_width = above_status_chunks[5].width;
@@ -550,8 +566,24 @@ pub fn render_chat(
         f.render_widget(usage, status_chunks[2]);
     }
 
-    let help = Paragraph::new(help_line).alignment(Alignment::Right);
+    let help = Paragraph::new(help_line.clone()).alignment(Alignment::Right);
     f.render_widget(help, status_chunks[3]);
+    if running_jobs > 0 {
+        // Right-aligned chip sits at the start of the help line content.
+        let chip_label_width = if running_jobs == 1 {
+            "● 1 job".chars().count() as u16
+        } else {
+            format!("● {running_jobs} jobs").chars().count() as u16
+        };
+        let area = status_chunks[3];
+        let chip_x = area.x.saturating_add(area.width.saturating_sub(help_width));
+        *jobs_chip_area = Some(Rect {
+            x: chip_x,
+            y: area.y,
+            width: chip_label_width.min(area.width),
+            height: 1,
+        });
+    }
 
     f.render_widget(
         Block::default().style(Style::default().bg(colors.background)),
@@ -2114,6 +2146,8 @@ mod tests {
                     &mut find_bar,
                     true,
                     Some("Session"),
+                    0,
+                    &mut None,
                 );
             })
             .expect("draw without sticky");
@@ -2169,6 +2203,8 @@ mod tests {
                     &mut find_bar,
                     true,
                     Some("Session"),
+                    0,
+                    &mut None,
                 );
             })
             .expect("draw with sticky");
@@ -2244,6 +2280,8 @@ mod tests {
                     &mut find_bar,
                     true,
                     Some("Session"),
+                    0,
+                    &mut None,
                 );
             })
             .expect("draw");

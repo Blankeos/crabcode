@@ -9,8 +9,10 @@ mod autocomplete;
 mod command;
 mod config;
 mod herdr;
+mod jobs;
 mod llm;
 mod logging;
+mod maintenance;
 mod mcp;
 mod model;
 mod notify;
@@ -402,6 +404,7 @@ async fn run_print_mode(
         .get(&agent_mode)
         .and_then(|agent| agent.max_steps);
     let cancel_token = tokio_util::sync::CancellationToken::new();
+    let process_registry = std::sync::Arc::new(crate::tools::ProcessRegistry::new());
 
     let prompt_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
         Some(sender.clone()),
@@ -412,6 +415,7 @@ async fn run_print_mode(
         &websearch_config,
         &mcp_config,
         &cwd,
+        process_registry.clone(),
     )
     .await;
     let prompt_registry = crate::tools::scope_tool_registry_for_agent(
@@ -458,6 +462,7 @@ async fn run_print_mode(
             Some(prompt_registry),
             messages,
             sender,
+            process_registry,
         )
         .await
         {
@@ -483,7 +488,8 @@ async fn run_print_mode(
             | crate::llm::ChunkMessage::StreamRollback { .. }
             | crate::llm::ChunkMessage::SubagentStarted { .. }
             | crate::llm::ChunkMessage::SubagentChunk { .. }
-            | crate::llm::ChunkMessage::TerminalSessionEvent { .. } => {}
+            | crate::llm::ChunkMessage::TerminalSessionEvent { .. }
+            | crate::llm::ChunkMessage::BackgroundJobEvent { .. } => {}
             crate::llm::ChunkMessage::End => {
                 println!();
                 play_resolved_sound(&sounds, crate::sound::SoundEvent::Complete);
@@ -705,6 +711,90 @@ enum Command {
         /// Target version (e.g. `0.0.12`) or `latest`
         target: Option<String>,
     },
+
+    /// Manage survive-quit background jobs (list / logs / stop)
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
+
+    /// Periodic cleanup tasks (jobs GC today; workspaces later)
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum JobsCommand {
+    /// List background jobs (default: current project only)
+    List {
+        /// Show jobs from all projects
+        #[arg(long)]
+        all: bool,
+        /// Human-friendly table (future: interactive TUI picker; for now just a pretty table)
+        #[arg(short = 'i', long)]
+        interactive: bool,
+    },
+    /// Print a job's output.log
+    Logs {
+        /// Job id (e.g. job_01HXYZ…)
+        id: String,
+        /// Follow new output (like tail -f)
+        #[arg(long)]
+        follow: bool,
+        /// Number of trailing lines to print
+        #[arg(long, default_value_t = 200)]
+        tail: usize,
+    },
+    /// Stop a background job (kill process group + update ledger)
+    Stop {
+        /// Job id
+        id: String,
+    },
+    /// Stop all running jobs (default: current project only)
+    StopAll {
+        /// Stop running jobs from every project
+        #[arg(long)]
+        all: bool,
+    },
+    /// Restart a background job (same id / command / cwd)
+    Restart {
+        /// Job id
+        id: String,
+    },
+    /// Remove finished background jobs
+    ///
+    /// Scope: default = current session; `--all` = current project; `--global` = everything.
+    Clean {
+        /// Clean finished jobs for the current project (all sessions)
+        #[arg(long)]
+        all: bool,
+        /// Clean finished jobs across every project
+        #[arg(long)]
+        global: bool,
+        /// Age threshold (e.g. 7d, 24h, 30m). Ignored when --all/--global.
+        #[arg(long, default_value = "7d")]
+        older_than: String,
+        /// Report what would be removed without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MaintenanceCommand {
+    /// Run registered maintenance tasks
+    Run {
+        /// Only run this task id (e.g. jobs)
+        #[arg(long)]
+        only: Option<String>,
+        /// Report without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List registered maintenance tasks
+    List,
 }
 
 fn is_completion_help(args: &[String]) -> bool {
@@ -843,6 +933,54 @@ async fn main() -> Result<()> {
         }
         Some(Command::Upgrade { target }) => {
             return crate::upgrade::upgrade(target.as_deref());
+        }
+        Some(Command::Jobs { command }) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            match command {
+                JobsCommand::List { all, interactive } => {
+                    crate::jobs::cli::run_list(crate::jobs::cli::ListOpts {
+                        all: *all,
+                        interactive: *interactive,
+                        cwd,
+                    })?;
+                }
+                JobsCommand::Logs { id, follow, tail } => {
+                    crate::jobs::cli::run_logs(crate::jobs::cli::LogsOpts {
+                        id: id.clone(),
+                        follow: *follow,
+                        tail: *tail,
+                    })?;
+                }
+                JobsCommand::Stop { id } => {
+                    crate::jobs::cli::run_stop(id)?;
+                }
+                JobsCommand::StopAll { all } => {
+                    crate::jobs::cli::run_stop_all(*all, &cwd)?;
+                }
+                JobsCommand::Restart { id } => {
+                    crate::jobs::cli::run_restart(id)?;
+                }
+                JobsCommand::Clean {
+                    all,
+                    global,
+                    older_than,
+                    dry_run,
+                } => {
+                    crate::jobs::cli::run_clean(*all, *global, older_than, *dry_run, &cwd)?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Command::Maintenance { command }) => {
+            match command {
+                MaintenanceCommand::Run { only, dry_run } => {
+                    crate::maintenance::cli_run(only.clone(), *dry_run)?;
+                }
+                MaintenanceCommand::List => {
+                    crate::maintenance::cli_list()?;
+                }
+            }
+            return Ok(());
         }
         None => {}
     }

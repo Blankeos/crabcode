@@ -580,6 +580,7 @@ pub async fn stream_llm_with_cancellation(
     tool_registry: Option<crate::tools::ToolRegistry>,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
+    process_registry: std::sync::Arc<crate::tools::ProcessRegistry>,
 ) -> Result<(), DynError> {
     struct SessionConfigGuard(crate::agent::config::LlmSessionRegistration);
     impl Drop for SessionConfigGuard {
@@ -618,6 +619,7 @@ pub async fn stream_llm_with_cancellation(
                 &websearch_config,
                 &mcp_config,
                 &workspace,
+                process_registry.clone(),
             )
             .await;
             crate::tools::refresh_mcp_tools(&registry, &mcp_config, &workspace).await;
@@ -677,6 +679,7 @@ pub async fn stream_llm_with_cancellation(
         None,
         request_config.supports_image_input,
         cancel_token.clone(),
+        Some(process_registry.clone()),
     )
     .await;
     if text_only_image_turn {
