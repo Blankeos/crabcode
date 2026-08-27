@@ -2889,13 +2889,14 @@ impl App {
         self.selection_action_bar.map(|state| match state.target {
             SelectionActionTarget::Chat => chat_selection_action_bar_area(
                 self.current_chat_area(),
-                self.chat_state.chat.scroll_offset,
+                self.chat_state.chat.resolved_scroll_offset(),
                 &self.chat_state.chat.selection,
                 state,
             ),
             SelectionActionTarget::Input => input_selection_action_bar_area(
                 self.last_frame_size,
                 self.suggestions_popup_anchor_area(),
+                self.input.selection_screen_row(),
             ),
         })
     }
@@ -11085,14 +11086,16 @@ impl App {
         if let Some(state) = self.selection_action_bar {
             let area = match state.target {
                 SelectionActionTarget::Chat => chat_selection_action_bar_area(
-                    self.chat_area_for_size(size),
-                    self.chat_state.chat.scroll_offset,
+                    self.current_chat_area(),
+                    self.chat_state.chat.resolved_scroll_offset(),
                     &self.chat_state.chat.selection,
                     state,
                 ),
-                SelectionActionTarget::Input => {
-                    input_selection_action_bar_area(size, self.suggestions_popup_anchor_area())
-                }
+                SelectionActionTarget::Input => input_selection_action_bar_area(
+                    size,
+                    self.suggestions_popup_anchor_area(),
+                    self.input.selection_screen_row(),
+                ),
             };
             render_selection_action_bar(f, area, state, &colors);
         }
@@ -11156,9 +11159,16 @@ fn chat_selection_action_bar_area(
         height: chat_area.height,
     };
     let ((start_line, start_col), (end_line, _)) = selection.range();
+    // Stick-to-bottom stores `scroll_offset = usize::MAX`. Resolve it here too so
+    // the bar still anchors to the selection if a caller forgets.
+    let visible_start = if scroll_offset == usize::MAX {
+        start_line.saturating_sub(content_area.height.saturating_sub(1) as usize)
+    } else {
+        scroll_offset
+    };
     selection_action_bar_area_for_anchor(
         content_area,
-        scroll_offset,
+        visible_start,
         start_line,
         end_line,
         start_col,
@@ -11166,8 +11176,13 @@ fn chat_selection_action_bar_area(
     )
 }
 
-fn input_selection_action_bar_area(frame_area: Rect, input_area: Rect) -> Rect {
-    let y = input_area.y.saturating_sub(1);
+fn input_selection_action_bar_area(
+    frame_area: Rect,
+    input_area: Rect,
+    selection_row: Option<u16>,
+) -> Rect {
+    // Prefer one row above the selection; fall back to one above the input box.
+    let y = selection_row.unwrap_or(input_area.y).saturating_sub(1);
     let x = input_area.x.saturating_add(1);
     clamp_action_bar_area(
         frame_area,
@@ -12126,6 +12141,45 @@ mod tests {
             selection_action_for_column(input, 8),
             SelectionAction::Dismiss
         );
+    }
+
+    #[test]
+    fn chat_selection_action_bar_anchors_near_selection_when_stuck_to_bottom() {
+        let chat_area = Rect::new(0, 0, 80, 20);
+        let selection = crate::ui::selection::Selection {
+            active: true,
+            start_line: 100,
+            start_col: 4,
+            end_line: 100,
+            end_col: 10,
+            is_dragging: false,
+            anchor: None,
+        };
+        let state = SelectionActionBarState {
+            target: SelectionActionTarget::Chat,
+            can_open_in_editor: false,
+        };
+
+        // Stick-to-bottom sentinel must resolve instead of pinning to the top.
+        let stuck = chat_selection_action_bar_area(chat_area, usize::MAX, &selection, state);
+        assert_eq!(stuck.y, chat_area.y + 18);
+        assert!(stuck.y > chat_area.y + 10);
+
+        // Explicit resolved scroll (selection near bottom of viewport) matches.
+        let resolved_start = 100usize.saturating_sub(19);
+        let area = chat_selection_action_bar_area(chat_area, resolved_start, &selection, state);
+        assert_eq!(area.y, chat_area.y + 18); // one above last viewport row
+        assert_eq!(area.y, stuck.y);
+    }
+
+    #[test]
+    fn input_selection_action_bar_anchors_above_selection_row() {
+        let frame = Rect::new(0, 0, 80, 24);
+        let input_area = Rect::new(2, 18, 40, 4);
+        let area = input_selection_action_bar_area(frame, input_area, Some(20));
+        assert_eq!(area.y, 19);
+        let fallback = input_selection_action_bar_area(frame, input_area, None);
+        assert_eq!(fallback.y, 17);
     }
 
     #[test]
