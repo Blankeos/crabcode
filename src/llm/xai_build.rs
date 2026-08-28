@@ -12,6 +12,11 @@ const TOKEN_AUTH_VALUE: &str = "xai-grok-cli";
 const VERSION_HEADER: &str = "x-grok-client-version";
 
 const PROTOCOL_VERSION_FALLBACK: &str = "0.2.111";
+/// Grok Build sampler default window.
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampling-types/src/doom_loop.rs`
+/// (`DoomLoopRecoveryPolicy::DEFAULT_RECOVERY_WINDOW_TOKENS`).
+const DOOM_LOOP_CHECK_HEADER: &str = "x-grok-doom-loop-check";
+const DOOM_LOOP_CHECK_WINDOW_TOKENS: &str = "1024";
 const VERSION_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const VERSION_RETRY_TTL: Duration = Duration::from_secs(5 * 60);
 const VERSION_URLS: &[&str] = &[
@@ -101,6 +106,15 @@ fn request_overrides_with_version(
     );
     headers.insert(VERSION_HEADER.to_string(), protocol_version);
     headers.insert("x-grok-client-mode".to_string(), "default".to_string());
+    // Same opt-in as Grok Build's sampler: send `x-grok-doom-loop-check` so
+    // cli-chat-proxy emits `response.doom_loop_check` with
+    // `tail_repetition:{n}@thinking`.
+    // `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/doom_loop.rs`
+    // `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampling-types/src/doom_loop.rs`
+    headers.insert(
+        DOOM_LOOP_CHECK_HEADER.to_string(),
+        DOOM_LOOP_CHECK_WINDOW_TOKENS.to_string(),
+    );
 
     RequestOverrides {
         api_key: oauth_access,
@@ -232,6 +246,7 @@ pub(crate) fn new_req_id() -> String {
 }
 
 /// grok-4.5 / grok-4.6 catalog: `compaction_at_tokens: true` with 500k × 80%.
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-models/default_models.json`
 const COMPACTION_HINT_CONTEXT_WINDOW: u64 = 500_000;
 const COMPACTION_HINT_THRESHOLD_PERCENT: u8 = 80;
 
@@ -252,6 +267,7 @@ pub(crate) fn model_sends_compaction_hints(model: &str) -> bool {
 ///
 /// Matches grok-4.5/4.6 catalog: remaining is a fixed `1`; `x-compaction-at`
 /// is `context_window * 80 / 100` until the session has compacted, then omitted.
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-models/default_models.json`
 pub(crate) fn inject_compaction_hint_headers(
     headers: &mut std::collections::HashMap<String, String>,
     model: &str,
@@ -451,6 +467,13 @@ mod tests {
         assert_eq!(
             overrides.headers.get("User-Agent").map(String::as_str),
             Some(concat!("crabcode/", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(
+            overrides
+                .headers
+                .get(super::DOOM_LOOP_CHECK_HEADER)
+                .map(String::as_str),
+            Some(super::DOOM_LOOP_CHECK_WINDOW_TOKENS)
         );
     }
 

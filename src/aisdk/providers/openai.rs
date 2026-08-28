@@ -1553,6 +1553,22 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
                 reasoning_items: reasoning_items_from_response_output(resp),
             }))
         }
+        // Grok Build / cli-chat-proxy: `response.doom_loop_check` with
+        // `doom_loop_check.triggers` like `tail_repetition:8@thinking`.
+        // `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/doom_loop.rs`
+        "response.doom_loop_check" => {
+            let triggers = value
+                .pointer("/doom_loop_check/triggers")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            Some(Ok(ChunkType::Metadata(format!(
+                "doom_loop_check triggers={triggers}"
+            ))))
+        }
         "response.incomplete" => Some(Ok(ChunkType::RetryableFailure(RetryError::from_message(
             responses_incomplete_message(&value),
         )))),
@@ -2894,6 +2910,21 @@ mod tests {
                 assert_eq!(reasoning_items[0].summary, "plan");
             }
             other => panic!("expected ResponseCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doom_loop_check_sse_becomes_metadata() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#,
+        )
+        .expect("expected metadata chunk");
+        match chunk {
+            Ok(ChunkType::Metadata(message)) => {
+                assert!(message.contains("doom_loop_check"));
+                assert!(message.contains("tail_repetition:8@thinking"));
+            }
+            other => panic!("expected Metadata, got {other:?}"),
         }
     }
 

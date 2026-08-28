@@ -13,11 +13,25 @@ use tokio::sync::mpsc;
 
 const PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT: usize = 1;
 const PROVIDER_STEP_MAX_RETRIES: usize = 10;
+/// Grok Build only acts on `tail_repetition:{n}@thinking` from
+/// `response.doom_loop_check` — never on tool names across steps.
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/doom_loop.rs`
+/// After [`DOOM_LOOP_MAX_RECOVERIES`] resamples the abort is disarmed and
+/// the generation is accepted (`.devrefs/.../request_task.rs`).
+const DOOM_LOOP_MAX_RECOVERIES: usize = 2;
+/// Grok Build `RECOVERY_REMINDER`. Request-only (not the durable transcript).
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/doom_loop_recovery.rs`
+const DOOM_LOOP_REMINDER: &str = "<system_reminder>Your messages have been flagged as looping. Your response has been flagged as repeating the same text pattern. Avoid excessive repetition. If you are having trouble ask the user for guidance.</system_reminder>";
 
-/// Keep the newest N tool outputs intact for the model; older ones are pruned.
-const KEEP_RECENT_TOOL_OUTPUTS: usize = 6;
-/// Tool outputs older than this many user turns are hard-cleared (turn-age gate).
-const KEEP_RECENT_USER_TURNS: usize = 2;
+/// Grok Build `PruningConfig::keep_last_n_turns` (`.devrefs/.../memory.rs`).
+/// Never prune tool results from this many most recent **user turns**.
+const KEEP_RECENT_USER_TURNS: usize = 3;
+/// Grok Build `PruningConfig::hard_clear_age_turns`.
+const HARD_CLEAR_AGE_TURNS: usize = 10;
+/// Grok Build `should_prune`: only when total tokens > 50% of the context
+/// window (`.devrefs/.../request_builder.rs`). grok-4.6 is 500k, so 250k.
+/// Estimate tokens as UTF-8 bytes / 4. Under this, every tool result stays.
+const PRUNE_AFTER_ESTIMATED_TOKENS: usize = 250_000;
 /// Soft-trim threshold for older-but-still-retained tool outputs (chars).
 const TOOL_OUTPUT_SOFT_TRIM_CHARS: usize = 4_000;
 const TOOL_OUTPUT_SOFT_TRIM_HEAD: usize = 1_500;
@@ -118,6 +132,7 @@ pub async fn stream_with_tools<P: Provider>(
         let max_steps = max_steps.unwrap_or(usize::MAX);
         let mut cached_repeatable_tool_results: HashMap<String, ToolOutput> = HashMap::new();
         let mut phase_less_ambiguous_follow_ups = 0usize;
+        let mut doom_loop = DoomLoopTracker::default();
 
         loop {
             step_idx += 1;
@@ -146,11 +161,11 @@ pub async fn stream_with_tools<P: Provider>(
             }
 
             let step_summary = provider_step_log_summary(&current_messages, &tools);
-            let pruned = prune_stale_tool_outputs_in_place(&mut current_messages);
+            let pruned = maybe_prune_stale_tool_outputs(&mut current_messages);
             if pruned > 0 {
                 let _ = tx_loop.send(ChunkType::Metadata(format!(
-                    "tool_outputs_pruned count={} keep_recent={} keep_user_turns={}",
-                    pruned, KEEP_RECENT_TOOL_OUTPUTS, KEEP_RECENT_USER_TURNS
+                    "tool_outputs_pruned count={} keep_user_turns={} hard_clear_age={}",
+                    pruned, KEEP_RECENT_USER_TURNS, HARD_CLEAR_AGE_TURNS
                 )));
             }
             let images_evicted = compact_images_to_budget_in_place(&mut current_messages);
@@ -206,6 +221,7 @@ pub async fn stream_with_tools<P: Provider>(
             let mut accumulated_text = String::new();
             let mut accumulated_reasoning = String::new();
             let mut reasoning_replay_items: Vec<ReasoningReplayItem> = Vec::new();
+            let mut server_doom_loop = false;
             let mut saw_terminal_event = false;
             let mut response_end_turn = None;
             let mut provider_finish_reason = None;
@@ -304,6 +320,9 @@ pub async fn stream_with_tools<P: Provider>(
                         }
                     }
                     Ok(ChunkType::Metadata(msg)) => {
+                        if doom_loop_metadata_is_confident(&msg) {
+                            server_doom_loop = true;
+                        }
                         let _ = tx_loop.send(ChunkType::Metadata(msg));
                     }
                     Ok(ChunkType::Warning(msg)) => {
@@ -630,6 +649,19 @@ pub async fn stream_with_tools<P: Provider>(
                 }
             };
 
+            // Only the server thinking-channel check, matching Grok Build.
+            // Repeating tools are missing context, not a loop to abort.
+            if server_doom_loop {
+                if let Some(reminder_text) = doom_loop.begin_recovery() {
+                    let _ = tx_loop.send(ChunkType::Metadata(format!(
+                        "doom_loop_detected step={} recoveries={}",
+                        step_idx, doom_loop.recoveries,
+                    )));
+                    current_messages.push(Message::user(reminder_text));
+                    continue;
+                }
+            }
+
             let mut tool_results_to_observe = Vec::new();
             let mut tool_calls_to_run = Vec::new();
             let mut tool_call_messages = Vec::new();
@@ -833,68 +865,44 @@ fn rollback_provider_attempt(
 /// provider request. Durable UI/history copies are left intact — this only
 /// mutates the request-facing message list.
 ///
-/// Strategy:
-/// - Keep the newest [`KEEP_RECENT_TOOL_OUTPUTS`] results full-size
+/// Matches Grok Build `prune_conversation`
+/// (`.devrefs/references/xai-org/grok-build/crates/codegen/xai-chat-state/src/actor/request_builder.rs`):
+/// - Never prune tool results from the last [`KEEP_RECENT_USER_TURNS`] user turns
+///   (the current implement turn stays intact no matter how many tools it used)
 /// - Soft-trim large older results to head+tail
-/// - Hard-clear anything older than 2× the keep window **or** older than
-///   [`KEEP_RECENT_USER_TURNS`] user turns
+/// - Hard-clear anything older than [`HARD_CLEAR_AGE_TURNS`] user turns
 /// - Drop attached images on pruned outputs (base64 is extremely expensive)
+///
+/// Grok Build only runs this when context is already over half full
+/// (`should_prune`). See [`maybe_prune_stale_tool_outputs`].
 fn prune_stale_tool_outputs_in_place(messages: &mut [Message]) -> usize {
-    let tool_output_indices: Vec<usize> = messages
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, message)| matches!(message, Message::ToolOutput(_)).then_some(idx))
-        .collect();
-
-    if tool_output_indices.is_empty() {
-        return 0;
-    }
-
-    // Turn age: count User messages from the end. Tools in older turns are
-    // cheaper to drop even if they still fall inside the rank keep window.
-    let mut turn_from_end_by_index = vec![0usize; messages.len()];
-    {
-        let mut turn_from_end = 0usize;
-        let mut seen_user = false;
-        for i in (0..messages.len()).rev() {
-            if matches!(&messages[i], Message::User(_)) {
-                if seen_user {
-                    turn_from_end += 1;
-                } else {
-                    seen_user = true;
-                }
-            }
-            turn_from_end_by_index[i] = turn_from_end;
-        }
-    }
-
-    let keep_from = tool_output_indices
-        .len()
-        .saturating_sub(KEEP_RECENT_TOOL_OUTPUTS);
-    let hard_clear_before = tool_output_indices
-        .len()
-        .saturating_sub(KEEP_RECENT_TOOL_OUTPUTS.saturating_mul(2));
+    let mut turn_from_end: usize = 0;
+    let mut seen_first_user = false;
     let mut pruned = 0usize;
 
-    for (rank, &idx) in tool_output_indices.iter().enumerate() {
-        let turn_age = turn_from_end_by_index[idx];
-        let in_rank_keep = rank >= keep_from;
-        let in_turn_keep = turn_age < KEEP_RECENT_USER_TURNS;
-        // Keep full only when recent by tool-count *and* by user-turn.
-        if in_rank_keep && in_turn_keep {
+    for i in (0..messages.len()).rev() {
+        if is_injected_system_reminder(&messages[i]) {
+            continue;
+        }
+        if matches!(&messages[i], Message::User(_)) {
+            if seen_first_user {
+                turn_from_end += 1;
+            }
+            seen_first_user = true;
             continue;
         }
 
-        let hard_by_rank = rank < hard_clear_before;
-        let hard_by_turn = !in_turn_keep;
-
-        let Message::ToolOutput(output) = &mut messages[idx] else {
+        let Message::ToolOutput(output) = &mut messages[i] else {
             continue;
         };
 
+        if turn_from_end < KEEP_RECENT_USER_TURNS {
+            continue;
+        }
+
         let had_images = !output.images.is_empty();
         let original_len = output.output.len();
-        if hard_by_rank || hard_by_turn {
+        if turn_from_end >= HARD_CLEAR_AGE_TURNS {
             if original_len > PRUNED_TOOL_OUTPUT_PLACEHOLDER.len() || had_images {
                 output.output = PRUNED_TOOL_OUTPUT_PLACEHOLDER.to_string();
                 output.images.clear();
@@ -912,6 +920,20 @@ fn prune_stale_tool_outputs_in_place(messages: &mut [Message]) -> usize {
     }
 
     pruned
+}
+
+fn estimated_input_tokens(messages: &[Message]) -> usize {
+    (message_log_summary(messages).text_bytes + total_image_bytes(messages)) / 4
+}
+
+/// No-op until the transcript is large enough that Grok Build would prune
+/// (`total_tokens > context_window / 2`). Hard probing is almost always
+/// the model rereading because we already cleared the bytes it needed.
+fn maybe_prune_stale_tool_outputs(messages: &mut [Message]) -> usize {
+    if estimated_input_tokens(messages) <= PRUNE_AFTER_ESTIMATED_TOKENS {
+        return 0;
+    }
+    prune_stale_tool_outputs_in_place(messages)
 }
 
 /// Evict oldest inline images with hysteresis:
@@ -1167,6 +1189,57 @@ fn tool_results_log_summary(results: &[ToolExecutionResult]) -> String {
         "output_bytes={} error_results={} max_output[tool={},bytes={}]",
         output_bytes, error_results, max_tool, max_bytes,
     )
+}
+
+#[derive(Debug, Default)]
+struct DoomLoopTracker {
+    recoveries: usize,
+}
+
+impl DoomLoopTracker {
+    fn begin_recovery(&mut self) -> Option<&'static str> {
+        if self.recoveries >= DOOM_LOOP_MAX_RECOVERIES {
+            return None;
+        }
+        self.recoveries += 1;
+        Some(DOOM_LOOP_REMINDER)
+    }
+}
+
+/// Grok Build tags these `SyntheticReason::SystemReminder` so pruning and
+/// the pager skip them as real user turns. Crabcode keeps the same
+/// `<system_reminder>` user-role wire shape and recognizes it by prefix.
+fn is_injected_system_reminder(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::User(user) if user.content.starts_with("<system_reminder>")
+    )
+}
+
+fn doom_loop_metadata_is_confident(msg: &str) -> bool {
+    let Some(rest) = msg.strip_prefix("doom_loop_check triggers=") else {
+        return false;
+    };
+    rest.split(',')
+        .map(str::trim)
+        .any(doom_loop_trigger_is_confident)
+}
+
+/// Grok Build `DoomLoopRecoveryPolicy::is_confident`: only
+/// `tail_repetition:{t}@thinking` with `t` in 2..=64 (default max_threshold).
+/// `@response` and `low_logprob` are warn-only.
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampling-types/src/doom_loop.rs`
+fn doom_loop_trigger_is_confident(trigger: &str) -> bool {
+    let Some((kind, channel)) = trigger.split_once('@') else {
+        return false;
+    };
+    if channel != "thinking" {
+        return false;
+    }
+    let Some(threshold) = kind.strip_prefix("tail_repetition:") else {
+        return false;
+    };
+    matches!(threshold.parse::<u32>(), Ok(n) if (2..=64).contains(&n))
 }
 
 fn merge_reasoning_replay_item(
@@ -1634,10 +1707,12 @@ fn tool_call_key(item: &serde_json::Value, array_index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_images_to_budget_in_place, prune_stale_tool_outputs_in_place,
-        soft_trim_tool_output, stream_with_tools, total_image_bytes, ToolCallAccumulator,
+        compact_images_to_budget_in_place, doom_loop_metadata_is_confident,
+        doom_loop_trigger_is_confident, maybe_prune_stale_tool_outputs,
+        prune_stale_tool_outputs_in_place, soft_trim_tool_output, stream_with_tools,
+        total_image_bytes, ToolCallAccumulator, DOOM_LOOP_REMINDER, HARD_CLEAR_AGE_TURNS,
         IMAGE_COMPACT_PLACEHOLDER, IMAGE_COMPACT_RECLAIM_TARGET_BYTES, IMAGE_COMPACT_TRIGGER_BYTES,
-        KEEP_RECENT_TOOL_OUTPUTS, PRUNED_TOOL_OUTPUT_PLACEHOLDER, TOOL_OUTPUT_SOFT_TRIM_CHARS,
+        KEEP_RECENT_USER_TURNS, PRUNED_TOOL_OUTPUT_PLACEHOLDER, TOOL_OUTPUT_SOFT_TRIM_CHARS,
     };
     use crate::chunk::{ChunkType, FinishReason, MessagePhase, ReasoningReplayItem};
     use crate::message::Message;
@@ -1658,6 +1733,30 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
+    fn doom_loop_trigger_threshold_matches_grok_build() {
+        // Grok Build `DoomLoopRecoveryPolicy::is_confident` (default max_threshold 64).
+        assert!(doom_loop_trigger_is_confident("tail_repetition:2@thinking"));
+        assert!(doom_loop_trigger_is_confident("tail_repetition:4@thinking"));
+        assert!(doom_loop_trigger_is_confident("tail_repetition:8@thinking"));
+        assert!(doom_loop_trigger_is_confident(
+            "tail_repetition:64@thinking"
+        ));
+        assert!(!doom_loop_trigger_is_confident(
+            "tail_repetition:65@thinking"
+        ));
+        assert!(!doom_loop_trigger_is_confident(
+            "tail_repetition:2@response"
+        ));
+        assert!(!doom_loop_trigger_is_confident("low_logprob@thinking"));
+        assert!(doom_loop_metadata_is_confident(
+            "doom_loop_check triggers=tail_repetition:8@thinking,tail_repetition:2@response"
+        ));
+        assert!(!doom_loop_metadata_is_confident(
+            "provider_step_start step=1"
+        ));
+    }
+
+    #[test]
     fn soft_trim_tool_output_keeps_short_text() {
         assert_eq!(soft_trim_tool_output("short"), "short");
     }
@@ -1672,13 +1771,52 @@ mod tests {
         assert!(trimmed.contains("chars truncated"));
     }
 
+    fn tool_output_text<'a>(messages: &'a [Message], call_id: &str) -> &'a str {
+        messages
+            .iter()
+            .find_map(|message| match message {
+                Message::ToolOutput(output) if output.call_id == call_id => {
+                    Some(output.output.as_str())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing tool output {call_id}"))
+    }
+
     #[test]
-    fn prune_stale_tool_outputs_clears_oldest_and_keeps_recent() {
-        let mut messages = Vec::new();
-        let total = KEEP_RECENT_TOOL_OUTPUTS * 2 + 2;
-        for i in 0..total {
+    fn prune_stale_tool_outputs_keeps_current_user_turn() {
+        // A long implement turn (many tool results, one user message) must
+        // stay intact — this is the grok-build keep_last_n_turns contract.
+        let mut messages = vec![Message::user("implement")];
+        for i in 0..20 {
             messages.push(Message::tool_output(
                 format!("call_{i}"),
+                "read",
+                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 200),
+                false,
+            ));
+        }
+
+        let pruned = prune_stale_tool_outputs_in_place(&mut messages);
+        assert_eq!(pruned, 0);
+        for message in &messages {
+            if let Message::ToolOutput(output) = message {
+                assert_eq!(output.output.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 200);
+                assert_ne!(output.output, PRUNED_TOOL_OUTPUT_PLACEHOLDER);
+            }
+        }
+    }
+
+    #[test]
+    fn prune_stale_tool_outputs_soft_trims_outside_keep_window() {
+        // Grok Build ages a tool as (users after it) - 1, so KEEP+2 user
+        // turns are needed before the oldest result leaves the keep window.
+        let last = KEEP_RECENT_USER_TURNS + 1;
+        let mut messages = Vec::new();
+        for i in 0..=last {
+            messages.push(Message::user(format!("u{i}")));
+            messages.push(Message::tool_output(
+                format!("c{i}"),
                 "bash",
                 "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 200),
                 false,
@@ -1688,74 +1826,77 @@ mod tests {
         let pruned = prune_stale_tool_outputs_in_place(&mut messages);
         assert!(pruned > 0);
 
-        let outputs: Vec<_> = messages
-            .iter()
-            .filter_map(|message| match message {
-                Message::ToolOutput(output) => Some(output.output.as_str()),
-                _ => None,
-            })
-            .collect();
+        let oldest = tool_output_text(&messages, "c0");
+        assert_ne!(oldest, PRUNED_TOOL_OUTPUT_PLACEHOLDER);
+        assert!(oldest.len() < TOOL_OUTPUT_SOFT_TRIM_CHARS + 200);
+        assert!(oldest.contains("chars truncated"));
 
-        assert_eq!(outputs[0], PRUNED_TOOL_OUTPUT_PLACEHOLDER);
-        let last = outputs.last().expect("output");
-        assert_eq!(last.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 200);
+        let newest = tool_output_text(&messages, &format!("c{last}"));
+        assert_eq!(newest.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 200);
     }
 
     #[test]
     fn prune_stale_tool_outputs_hard_clears_by_user_turn_age() {
-        // Few tools overall (would stay inside rank keep window) but spanning
-        // many user turns — turn-age gate should still hard-clear the oldest.
-        let mut messages = vec![
-            Message::user("u0"),
-            Message::tool_output(
-                "c0",
+        let last = HARD_CLEAR_AGE_TURNS + 1;
+        let mut messages = Vec::new();
+        for i in 0..=last {
+            messages.push(Message::user(format!("u{i}")));
+            messages.push(Message::tool_output(
+                format!("c{i}"),
                 "bash",
                 "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
                 false,
-            ),
-            Message::user("u1"),
-            Message::tool_output(
-                "c1",
-                "bash",
-                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
-                false,
-            ),
-            Message::user("u2"),
-            Message::tool_output(
-                "c2",
-                "bash",
-                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
-                false,
-            ),
-            Message::user("u3"),
-            Message::tool_output(
-                "c3",
-                "bash",
-                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
-                false,
-            ),
-        ];
+            ));
+        }
 
         let pruned = prune_stale_tool_outputs_in_place(&mut messages);
         assert!(pruned > 0);
 
-        let first_tool = messages
-            .iter()
-            .find_map(|m| match m {
-                Message::ToolOutput(o) if o.call_id == "c0" => Some(o.output.as_str()),
-                _ => None,
-            })
-            .expect("c0");
-        assert_eq!(first_tool, PRUNED_TOOL_OUTPUT_PLACEHOLDER);
+        assert_eq!(
+            tool_output_text(&messages, "c0"),
+            PRUNED_TOOL_OUTPUT_PLACEHOLDER
+        );
 
-        let last_tool = messages
-            .iter()
-            .find_map(|m| match m {
-                Message::ToolOutput(o) if o.call_id == "c3" => Some(o.output.as_str()),
-                _ => None,
-            })
-            .expect("c3");
-        assert_eq!(last_tool.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 50);
+        let newest = tool_output_text(&messages, &format!("c{last}"));
+        assert_eq!(newest.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 50);
+    }
+
+    #[test]
+    fn prune_stale_tool_outputs_ignores_system_reminder_user_turns() {
+        let mut messages = vec![Message::user("implement")];
+        for i in 0..8 {
+            messages.push(Message::tool_output(
+                format!("call_{i}"),
+                "read",
+                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 200),
+                false,
+            ));
+        }
+        messages.push(Message::user(DOOM_LOOP_REMINDER));
+
+        let pruned = prune_stale_tool_outputs_in_place(&mut messages);
+        assert_eq!(pruned, 0);
+    }
+
+    #[test]
+    fn maybe_prune_leaves_small_transcripts_intact() {
+        // Four user turns of large tool results, but nowhere near 50% of a
+        // 500k window — Grok Build would not prune, so we must not either.
+        let mut messages = Vec::new();
+        for i in 0..=HARD_CLEAR_AGE_TURNS {
+            messages.push(Message::user(format!("u{i}")));
+            messages.push(Message::tool_output(
+                format!("c{i}"),
+                "bash",
+                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
+                false,
+            ));
+        }
+        assert_eq!(maybe_prune_stale_tool_outputs(&mut messages), 0);
+        assert_ne!(
+            tool_output_text(&messages, "c0"),
+            PRUNED_TOOL_OUTPUT_PLACEHOLDER
+        );
     }
 
     #[test]
@@ -1933,6 +2074,21 @@ mod tests {
     struct ReasoningReplayProvider {
         requests: Arc<AtomicUsize>,
         second_step_messages: Arc<Mutex<Option<Vec<Message>>>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct RepeatingEnoughProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ServerDoomLoopProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct LoopThenAnswerProvider {
+        requests: Arc<AtomicUsize>,
     }
 
     #[derive(Debug, Clone)]
@@ -2182,6 +2338,119 @@ mod tests {
             };
 
             Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RepeatingEnoughProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let n = self.requests.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ChunkType::Reasoning(format!(
+                    "I have enough. Let me find MergedConfig.images field. pass={n}"
+                ))),
+                Ok(ChunkType::ToolCall(
+                    r#"[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":"{\"file_path\":\"/tmp/configuration.rs\",\"limit\":80}"}}]"#
+                        .to_string(),
+                )),
+                Ok(ChunkType::End {
+                    reason: Some(FinishReason::ToolCalls),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ServerDoomLoopProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ChunkType::Metadata(
+                    "doom_loop_check triggers=tail_repetition:8@thinking".to_string(),
+                )),
+                Ok(ChunkType::ToolCall(
+                    r#"[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":"{\"file_path\":\"/tmp/configuration.rs\"}"}}]"#
+                        .to_string(),
+                )),
+                Ok(ChunkType::End {
+                    reason: Some(FinishReason::ToolCalls),
+                }),
+            ])))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for LoopThenAnswerProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            let reminded = messages.iter().any(|message| match message {
+                Message::User(user) => user.content.contains("flagged as looping"),
+                _ => false,
+            });
+            if reminded {
+                return Ok(Box::pin(futures::stream::iter(vec![
+                    Ok(ChunkType::Text(
+                        "I'll stop searching and implement os.edit as specified.".to_string(),
+                    )),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
+                ])));
+            }
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ChunkType::Metadata(
+                    "doom_loop_check triggers=tail_repetition:8@thinking".to_string(),
+                )),
+                Ok(ChunkType::Reasoning(
+                    "I have enough. Let me find MergedConfig.images field.".to_string(),
+                )),
+                Ok(ChunkType::ToolCall(
+                    r#"[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":"{\"file_path\":\"/tmp/configuration.rs\",\"limit\":80}"}}]"#
+                        .to_string(),
+                )),
+                Ok(ChunkType::End {
+                    reason: Some(FinishReason::ToolCalls),
+                }),
+            ])))
         }
     }
 
@@ -2801,6 +3070,184 @@ mod tests {
 
         assert_eq!(reasoning, Some("inspect the file"));
         assert_eq!(tool_call_reasoning, Some("inspect the file"));
+    }
+
+    #[tokio::test]
+    async fn repeating_file_reads_are_not_client_aborted() {
+        let provider = RepeatingEnoughProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let executions = Arc::new(AtomicUsize::new(0));
+        let tool_executions = executions.clone();
+        let read_tool = Tool::builder()
+            .name("read")
+            .description("read a file")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(move |_input| {
+                let executions = tool_executions.clone();
+                async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok("partial file".to_string())
+                }
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("add editor.openWith")],
+            vec![read_tool],
+            Some(6),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut incomplete = Vec::new();
+        while let Some(chunk) = response.stream.next().await {
+            if let ChunkType::Incomplete(message) = chunk {
+                incomplete.push(message);
+            }
+        }
+
+        assert!(
+            incomplete
+                .iter()
+                .all(|message| !message.contains("repeating the same text pattern")),
+            "client must not abort a tool-repeat, got {incomplete:?}"
+        );
+        assert!(
+            executions.load(Ordering::SeqCst) >= 5,
+            "repeating reads should keep executing, got {}",
+            executions.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn doom_loop_reminder_lets_the_model_answer() {
+        let provider = LoopThenAnswerProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let executions = Arc::new(AtomicUsize::new(0));
+        let tool_executions = executions.clone();
+        let read_tool = Tool::builder()
+            .name("read")
+            .description("read a file")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(move |_input| {
+                let executions = tool_executions.clone();
+                async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok("partial file".to_string())
+                }
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("add editor.openWith")],
+            vec![read_tool],
+            Some(20),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut text = String::new();
+        let mut incomplete = Vec::new();
+        let mut warnings = Vec::new();
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::Text(chunk) => text.push_str(&chunk),
+                ChunkType::Incomplete(message) => incomplete.push(message),
+                ChunkType::Warning(message) => warnings.push(message),
+                _ => {}
+            }
+        }
+
+        assert!(
+            text.contains("implement os.edit"),
+            "recovery reminder should steer into an answer, got {text:?}"
+        );
+        assert!(
+            incomplete.is_empty(),
+            "should not hard-stop after the reminder, got {incomplete:?}"
+        );
+        assert!(
+            warnings.is_empty(),
+            "recovery should not toast the user, got {warnings:?}"
+        );
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+        assert!(
+            executions.load(Ordering::SeqCst) < 8,
+            "should not keep executing the looping read"
+        );
+        let durable = response.messages().await;
+        assert!(
+            durable.iter().all(|message| match message {
+                Message::User(user) => !user.content.starts_with("<system_reminder>"),
+                _ => true,
+            }),
+            "reminder is request-only, not a visible user turn: {durable:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn doom_loop_disarms_after_two_recoveries() {
+        let provider = ServerDoomLoopProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let executions = Arc::new(AtomicUsize::new(0));
+        let tool_executions = executions.clone();
+        let read_tool = Tool::builder()
+            .name("read")
+            .description("read a file")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(move |_input| {
+                let executions = tool_executions.clone();
+                async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok("partial file".to_string())
+                }
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider,
+            vec![Message::user("add editor.openWith")],
+            vec![read_tool],
+            Some(6),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut incomplete = Vec::new();
+        while let Some(chunk) = response.stream.next().await {
+            if let ChunkType::Incomplete(message) = chunk {
+                incomplete.push(message);
+            }
+        }
+
+        assert!(
+            incomplete
+                .iter()
+                .all(|message| !message.contains("repeating the same text pattern")),
+            "spent recovery budget must not hard-stop, got {incomplete:?}"
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            4,
+            "after two resamples the abort is disarmed and tools run"
+        );
     }
 
     #[tokio::test]
