@@ -604,9 +604,12 @@ pub async fn stream_llm_with_cancellation(
         agent_max_steps,
         messages.len()
     );
+    let ui_model = model.clone();
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &sender).await?;
     let mut request_config = request_config;
+    let model_mismatch_warning =
+        ui_vs_request_model_mismatch_warning(&ui_model, &request_config.model_name);
     // Sticky prompt-cache routing: same key for every tool step in this session.
     request_config.openai_options.prompt_cache_key = Some(session_id.clone());
 
@@ -735,6 +738,7 @@ pub async fn stream_llm_with_cancellation(
         &mut token_count,
         &start_time,
         primary_log_context,
+        model_mismatch_warning,
     )
     .await
     .map_err(|err| err.to_string())
@@ -816,6 +820,7 @@ pub async fn stream_llm_with_cancellation(
         &mut token_count,
         &start_time,
         summary_log_context,
+        None,
     )
     .await
     .map_err(|err| err.to_string())
@@ -1490,6 +1495,24 @@ fn send_warning(sender: &crate::llm::ChunkSender, warning: impl Into<String>) {
     let _ = sender.send(crate::llm::ChunkMessage::Warning(warning.into()));
 }
 
+/// Compare the UI picker model to the post-override request `Model:` logged in
+/// `prepare_request_config`. This is the outbound request after client-side
+/// rewrites (e.g. xAI OAuth `x-grok-model-override`), not `response.model`.
+fn ui_vs_request_model_mismatch_warning(ui_model: &str, request_model: &str) -> Option<String> {
+    let ui_id = ui_model.rsplit('/').next().unwrap_or(ui_model).trim();
+    let request_id = request_model
+        .rsplit('/')
+        .next()
+        .unwrap_or(request_model)
+        .trim();
+    if ui_id.is_empty() || request_id.is_empty() || ui_id.eq_ignore_ascii_case(request_id) {
+        return None;
+    }
+    Some(format!(
+        "Warning: {ui_id} in UI, but {request_id} on the wire. It silently changed"
+    ))
+}
+
 /// Stamp sticky Build affinity for a main agent turn (session == conv).
 fn stamp_build_main_turn_affinity(
     request_config: &mut ProviderRequestConfig,
@@ -1782,6 +1805,7 @@ async fn relay_stream_to_sender(
     token_count: &mut usize,
     start_time: &Instant,
     context: StreamLogContext<'_>,
+    mut mismatch_warning: Option<String>,
 ) -> Result<StreamRelayResult, DynError> {
     let mut stats = RelayStats::default();
     crate::emit_log!(
@@ -1809,6 +1833,10 @@ async fn relay_stream_to_sender(
             Some(c) => c,
             None => break,
         };
+
+        if let Some(warning) = mismatch_warning.take() {
+            send_warning(sender, warning);
+        }
 
         match chunk {
             ChunkType::Text(text) => {
@@ -2537,8 +2565,8 @@ mod tests {
         is_openai_oauth_model_allowed, maybe_apply_unauthenticated_free_provider_key,
         model_supports_image_input, openai_oauth_default_originator,
         openai_oauth_model_uses_responses_lite, openai_request_instructions, resolve_api_key,
-        resolve_model_route, vlm_agent_has_model, AisdkMessage, OpenAIRequestOptions, ProviderKind,
-        ProviderRequestConfig,
+        resolve_model_route, ui_vs_request_model_mismatch_warning, vlm_agent_has_model,
+        AisdkMessage, OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
     };
 
     use crate::persistence::AuthConfig;
@@ -3478,6 +3506,25 @@ mod tests {
         ));
         assert!(!model_supports_image_input("mimo v2.5 pro", None));
         assert!(!model_supports_image_input("minimax/mimo-v2.5-pro", None));
+    }
+
+    #[test]
+    fn ui_vs_request_model_mismatch_warns_when_oauth_rewrites_picker() {
+        assert_eq!(
+            ui_vs_request_model_mismatch_warning("xai/grok-4.6", "grok-4.5"),
+            Some(
+                "Warning: grok-4.6 in UI, but grok-4.5 on the wire. It silently changed"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            ui_vs_request_model_mismatch_warning("grok-4.6", "grok-4.6"),
+            None
+        );
+        assert_eq!(
+            ui_vs_request_model_mismatch_warning("xai/grok-4.6", "xai/grok-4.6"),
+            None
+        );
     }
 
     #[test]
