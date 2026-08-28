@@ -290,9 +290,21 @@ fn openai_compatible_messages(
                 }));
                 index += 1;
             }
+            Message::Reasoning(_) => {
+                // Chat Completions has no reasoning item; the following
+                // tool-call group copies summary into `reasoning_content`.
+                index += 1;
+            }
             Message::ToolCall(_) => {
                 let mut tool_calls = Vec::new();
                 let mut reasoning_content = None;
+                if index > 0 {
+                    if let Some(Message::Reasoning(reasoning)) = messages.get(index - 1) {
+                        if !reasoning.summary.is_empty() {
+                            reasoning_content = Some(reasoning.summary.clone());
+                        }
+                    }
+                }
 
                 while let Some(Message::ToolCall(tool)) = messages.get(index) {
                     if reasoning_content.is_none() {
@@ -722,6 +734,25 @@ mod tests {
         assert_eq!(payload[3]["tool_call_id"], "glob:0");
         assert_eq!(payload[4]["role"], "tool");
         assert_eq!(payload[4]["tool_call_id"], "glob:1");
+    }
+
+    #[test]
+    fn reasoning_sibling_becomes_tool_call_reasoning_content() {
+        let messages = vec![
+            Message::user("inspect"),
+            Message::reasoning(Some("rs_1".to_string()), "plan", Some("enc".to_string())),
+            Message::tool_call("call_1", "read", r#"{"file_path":"src/lib.rs"}"#),
+            Message::tool_output("call_1", "read", "ok", false),
+        ];
+
+        let payload = openai_compatible_messages(&messages, false);
+
+        assert_eq!(payload.len(), 3);
+        assert_eq!(payload[0]["role"], "user");
+        assert_eq!(payload[1]["role"], "assistant");
+        assert_eq!(payload[1]["reasoning_content"], "plan");
+        assert_eq!(payload[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(payload[2]["role"], "tool");
     }
 
     #[test]

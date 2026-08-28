@@ -946,6 +946,7 @@ pub async fn summarize_for_compaction(
                 return Err(anyhow::anyhow!("Compaction unsupported: {}", msg).into());
             }
             ChunkType::Reasoning(_)
+            | ChunkType::ReasoningItem(_)
             | ChunkType::ToolCall(_)
             | ChunkType::ProviderToolCall(_)
             | ChunkType::End { .. }
@@ -1004,6 +1005,7 @@ pub async fn generate_session_title(
                 return Err(anyhow::anyhow!("Title generation unsupported: {}", msg).into());
             }
             ChunkType::Reasoning(_)
+            | ChunkType::ReasoningItem(_)
             | ChunkType::ToolCall(_)
             | ChunkType::ProviderToolCall(_)
             | ChunkType::End { .. }
@@ -1858,6 +1860,10 @@ async fn relay_stream_to_sender(
                 crate::emit_log!("[RELAY] Reasoning chunk ({} chars)", reasoning.len());
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
+            ChunkType::ReasoningItem(_) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("ReasoningItem", elapsed_ms);
+            }
             ChunkType::ToolCall(tool_call) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("ToolCall", elapsed_ms);
@@ -1913,7 +1919,7 @@ async fn relay_stream_to_sender(
                     stats,
                 });
             }
-            ChunkType::ResponseCompleted { end_turn } => {
+            ChunkType::ResponseCompleted { end_turn, .. } => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("ResponseCompleted", elapsed_ms);
                 stats.response_completed_chunks += 1;
@@ -3135,6 +3141,7 @@ mod tests {
             .iter()
             .map(|message| match message {
                 AisdkMessage::Assistant(_) => "assistant".to_string(),
+                AisdkMessage::Reasoning(_) => "reasoning".to_string(),
                 AisdkMessage::ToolCall(call) => format!("call:{}", call.call_id),
                 AisdkMessage::ToolOutput(output) => format!("output:{}", output.call_id),
                 other => panic!("unexpected message: {other:?}"),
@@ -3574,7 +3581,9 @@ mod tests {
                 AisdkMessage::User(m) => m.content.clone(),
                 AisdkMessage::Assistant(m) => m.content.clone(),
                 AisdkMessage::System(m) => m.content.clone(),
-                AisdkMessage::ToolCall(_) | AisdkMessage::ToolOutput(_) => String::new(),
+                AisdkMessage::Reasoning(_)
+                | AisdkMessage::ToolCall(_)
+                | AisdkMessage::ToolOutput(_) => String::new(),
             })
             .collect::<Vec<_>>();
 

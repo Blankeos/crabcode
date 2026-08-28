@@ -1,4 +1,4 @@
-use crate::chunk::{ChunkType, FinishReason, MessagePhase};
+use crate::chunk::{ChunkType, FinishReason, MessagePhase, ReasoningReplayItem};
 use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::provider::{Provider, ProviderStream};
@@ -205,6 +205,7 @@ pub async fn stream_with_tools<P: Provider>(
             let mut tool_call_accumulator = ToolCallAccumulator::default();
             let mut accumulated_text = String::new();
             let mut accumulated_reasoning = String::new();
+            let mut reasoning_replay_items: Vec<ReasoningReplayItem> = Vec::new();
             let mut saw_terminal_event = false;
             let mut response_end_turn = None;
             let mut provider_finish_reason = None;
@@ -236,11 +237,30 @@ pub async fn stream_with_tools<P: Provider>(
                             "assistant_message_phase={label}"
                         )));
                     }
-                    Ok(ChunkType::ResponseCompleted { end_turn }) => {
+                    Ok(ChunkType::ResponseCompleted {
+                        end_turn,
+                        reasoning_items,
+                    }) => {
                         saw_terminal_event = true;
                         response_end_turn = end_turn;
+                        for item in reasoning_items {
+                            merge_reasoning_replay_item(&mut reasoning_replay_items, item);
+                        }
                         let _ = tx_loop.send(ChunkType::Metadata(format!(
-                            "response.completed end_turn={end_turn:?}"
+                            "response.completed end_turn={end_turn:?} reasoning_items={}",
+                            reasoning_replay_items.len()
+                        )));
+                    }
+                    Ok(ChunkType::ReasoningItem(item)) => {
+                        let id = item.id.clone().unwrap_or_default();
+                        let encrypted_bytes = item
+                            .encrypted_content
+                            .as_ref()
+                            .map(String::len)
+                            .unwrap_or(0);
+                        merge_reasoning_replay_item(&mut reasoning_replay_items, item);
+                        let _ = tx_loop.send(ChunkType::Metadata(format!(
+                            "reasoning_item id={id} encrypted_bytes={encrypted_bytes}"
                         )));
                     }
                     Ok(ChunkType::Text(text)) => {
@@ -299,6 +319,7 @@ pub async fn stream_with_tools<P: Provider>(
                                 &tx_loop,
                                 &mut accumulated_text,
                                 &mut accumulated_reasoning,
+                                &mut reasoning_replay_items,
                                 &mut has_tool_call,
                                 &mut tool_call_accumulator,
                                 &mut saw_terminal_event,
@@ -375,6 +396,7 @@ pub async fn stream_with_tools<P: Provider>(
                                 &tx_loop,
                                 &mut accumulated_text,
                                 &mut accumulated_reasoning,
+                                &mut reasoning_replay_items,
                                 &mut has_tool_call,
                                 &mut tool_call_accumulator,
                                 &mut saw_terminal_event,
@@ -444,6 +466,7 @@ pub async fn stream_with_tools<P: Provider>(
                                 &tx_loop,
                                 &mut accumulated_text,
                                 &mut accumulated_reasoning,
+                                &mut reasoning_replay_items,
                                 &mut has_tool_call,
                                 &mut tool_call_accumulator,
                                 &mut saw_terminal_event,
@@ -522,7 +545,15 @@ pub async fn stream_with_tools<P: Provider>(
                 return;
             }
 
-            // Build assistant message from accumulated text deltas
+            // Responses order: reasoning siblings, then assistant text (if any),
+            // then the function calls those items bind to.
+            let reasoning_messages =
+                finish_reasoning_messages(&accumulated_reasoning, &reasoning_replay_items);
+            if !reasoning_messages.is_empty() {
+                current_messages.extend(reasoning_messages.clone());
+                messages_arc.lock().await.extend(reasoning_messages);
+            }
+
             let assistant_text = accumulated_text.trim().to_string();
             if !assistant_text.is_empty() {
                 let assistant_msg = Message::assistant(&assistant_text);
@@ -768,6 +799,7 @@ fn rollback_provider_attempt(
     tx: &mpsc::UnboundedSender<ChunkType>,
     accumulated_text: &mut String,
     accumulated_reasoning: &mut String,
+    reasoning_replay_items: &mut Vec<ReasoningReplayItem>,
     has_tool_call: &mut bool,
     tool_call_accumulator: &mut ToolCallAccumulator,
     saw_terminal_event: &mut bool,
@@ -786,6 +818,7 @@ fn rollback_provider_attempt(
         accumulated_text.clear();
         accumulated_reasoning.clear();
     }
+    reasoning_replay_items.clear();
     *has_tool_call = false;
     *tool_call_accumulator = ToolCallAccumulator::default();
     *saw_terminal_event = false;
@@ -1033,7 +1066,7 @@ fn message_log_summary(messages: &[Message]) -> MessageLogSummary {
             Message::System(_) => summary.system_messages += 1,
             Message::User(_) => summary.user_messages += 1,
             Message::Assistant(_) => summary.assistant_messages += 1,
-            Message::ToolCall(_) | Message::ToolOutput(_) => {}
+            Message::Reasoning(_) | Message::ToolCall(_) | Message::ToolOutput(_) => {}
         }
 
         summary.text_bytes += text_bytes;
@@ -1056,6 +1089,7 @@ fn message_role(message: &Message) -> &'static str {
         Message::System(_) => "system",
         Message::User(_) => "user",
         Message::Assistant(_) => "assistant",
+        Message::Reasoning(_) => "reasoning",
         Message::ToolCall(_) => "tool_call",
         Message::ToolOutput(_) => "tool_output",
     }
@@ -1066,6 +1100,15 @@ fn message_size(message: &Message) -> (usize, usize) {
         Message::System(message) => (message.content.len(), 0),
         Message::User(message) => (message.content.len(), message.images.len()),
         Message::Assistant(message) => (message.content.len(), 0),
+        Message::Reasoning(message) => (
+            message.summary.len()
+                + message
+                    .encrypted_content
+                    .as_ref()
+                    .map(String::len)
+                    .unwrap_or(0),
+            0,
+        ),
         Message::ToolCall(message) => (message.arguments.len(), 0),
         Message::ToolOutput(message) => (message.output.len(), message.images.len()),
     }
@@ -1124,6 +1167,61 @@ fn tool_results_log_summary(results: &[ToolExecutionResult]) -> String {
         "output_bytes={} error_results={} max_output[tool={},bytes={}]",
         output_bytes, error_results, max_tool, max_bytes,
     )
+}
+
+fn merge_reasoning_replay_item(
+    items: &mut Vec<ReasoningReplayItem>,
+    incoming: ReasoningReplayItem,
+) {
+    if incoming.is_empty() {
+        return;
+    }
+    if let Some(id) = incoming.id.as_deref() {
+        if let Some(existing) = items.iter_mut().find(|item| item.id.as_deref() == Some(id)) {
+            if existing.summary.is_empty() && !incoming.summary.is_empty() {
+                existing.summary = incoming.summary;
+            }
+            if existing.encrypted_content.is_none() {
+                existing.encrypted_content = incoming.encrypted_content;
+            }
+            return;
+        }
+    }
+    items.push(incoming);
+}
+
+fn finish_reasoning_messages(summary_acc: &str, items: &[ReasoningReplayItem]) -> Vec<Message> {
+    let summary = summary_acc.trim();
+    if items.is_empty() {
+        if summary.is_empty() {
+            return Vec::new();
+        }
+        return vec![Message::reasoning(None, summary, None)];
+    }
+
+    let last = items.len().saturating_sub(1);
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let summary_text = if !item.summary.is_empty() {
+                item.summary.clone()
+            } else if index == last {
+                summary.to_string()
+            } else {
+                String::new()
+            };
+            let message = Message::reasoning(
+                item.id.clone(),
+                summary_text,
+                item.encrypted_content.clone(),
+            );
+            match &message {
+                Message::Reasoning(reasoning) if reasoning.is_empty() => None,
+                _ => Some(message),
+            }
+        })
+        .collect()
 }
 
 fn message_phase_label(phase: Option<MessagePhase>) -> &'static str {
@@ -1541,7 +1639,7 @@ mod tests {
         IMAGE_COMPACT_PLACEHOLDER, IMAGE_COMPACT_RECLAIM_TARGET_BYTES, IMAGE_COMPACT_TRIGGER_BYTES,
         KEEP_RECENT_TOOL_OUTPUTS, PRUNED_TOOL_OUTPUT_PLACEHOLDER, TOOL_OUTPUT_SOFT_TRIM_CHARS,
     };
-    use crate::chunk::{ChunkType, FinishReason, MessagePhase};
+    use crate::chunk::{ChunkType, FinishReason, MessagePhase, ReasoningReplayItem};
     use crate::message::Message;
     use crate::provider::{Provider, ProviderStream};
     use crate::stop::StopReason;
@@ -1832,6 +1930,12 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
+    struct ReasoningReplayProvider {
+        requests: Arc<AtomicUsize>,
+        second_step_messages: Arc<Mutex<Option<Vec<Message>>>>,
+    }
+
+    #[derive(Debug, Clone)]
     struct RepeatingTaskProvider {
         requests: Arc<AtomicUsize>,
     }
@@ -2032,6 +2136,56 @@ mod tests {
     }
 
     #[async_trait]
+    impl Provider for ReasoningReplayProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let chunks = if request == 0 {
+                vec![
+                    Ok(ChunkType::Text(
+                        "I was wrong about (2). Checking the header.".to_string(),
+                    )),
+                    Ok(ChunkType::Reasoning("inspect the file".to_string())),
+                    Ok(ChunkType::ReasoningItem(ReasoningReplayItem {
+                        id: Some("rs_1".to_string()),
+                        summary: "inspect the file".to_string(),
+                        encrypted_content: Some("enc_abc".to_string()),
+                    })),
+                    Ok(ChunkType::ToolCall(
+                        r#"[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":"{\"file_path\":\"src/lib.rs\"}"}}]"#
+                            .to_string(),
+                    )),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::ToolCalls),
+                    }),
+                ]
+            } else {
+                *self.second_step_messages.lock().unwrap() = Some(messages.to_vec());
+                vec![
+                    Ok(ChunkType::Text("done".to_string())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
+                ]
+            };
+
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
     impl Provider for RepeatingTaskProvider {
         fn name(&self) -> &str {
             "test"
@@ -2115,9 +2269,7 @@ mod tests {
                         phase: Some(MessagePhase::Commentary),
                     }),
                     Ok(ChunkType::Text("I'll inspect that next.".to_string())),
-                    Ok(ChunkType::ResponseCompleted {
-                        end_turn: Some(false),
-                    }),
+                    Ok(ChunkType::response_completed(Some(false))),
                 ]
             } else {
                 vec![
@@ -2125,9 +2277,7 @@ mod tests {
                         phase: Some(MessagePhase::FinalAnswer),
                     }),
                     Ok(ChunkType::Text("Done.".to_string())),
-                    Ok(ChunkType::ResponseCompleted {
-                        end_turn: Some(true),
-                    }),
+                    Ok(ChunkType::response_completed(Some(true))),
                 ]
             };
 
@@ -2225,7 +2375,7 @@ mod tests {
             self.requests.fetch_add(1, Ordering::SeqCst);
             Ok(Box::pin(futures::stream::iter(vec![
                 Ok(ChunkType::Text("Done. Build now passes.".to_string())),
-                Ok(ChunkType::ResponseCompleted { end_turn: None }),
+                Ok(ChunkType::response_completed(None)),
             ])))
         }
     }
@@ -2639,15 +2789,86 @@ mod tests {
 
         while response.stream.next().await.is_some() {}
 
-        let tool_call_reasoning = response.messages().await.into_iter().find_map(|message| {
-            if let Message::ToolCall(tool_call) = message {
-                tool_call.reasoning_content
-            } else {
-                None
-            }
+        let messages = response.messages().await;
+        let reasoning = messages.iter().find_map(|message| match message {
+            Message::Reasoning(reasoning) => Some(reasoning.summary.as_str()),
+            _ => None,
+        });
+        let tool_call_reasoning = messages.iter().find_map(|message| match message {
+            Message::ToolCall(tool_call) => tool_call.reasoning_content.as_deref(),
+            _ => None,
         });
 
-        assert_eq!(tool_call_reasoning.as_deref(), Some("inspect the file"));
+        assert_eq!(reasoning, Some("inspect the file"));
+        assert_eq!(tool_call_reasoning, Some("inspect the file"));
+    }
+
+    #[tokio::test]
+    async fn replays_encrypted_reasoning_before_tool_calls() {
+        let second_step_messages = Arc::new(Mutex::new(None));
+        let provider = ReasoningReplayProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+            second_step_messages: second_step_messages.clone(),
+        };
+        let read_tool = Tool::builder()
+            .name("read")
+            .description("read a file")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(|_input| async move {
+                Ok("file contents".to_string())
+            }))
+            .build()
+            .unwrap();
+
+        let mut response = stream_with_tools(
+            provider,
+            vec![Message::user("inspect")],
+            vec![read_tool],
+            Some(3),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        while response.stream.next().await.is_some() {}
+
+        let second = second_step_messages
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("second provider step");
+        let roles: Vec<_> = second
+            .iter()
+            .map(|message| match message {
+                Message::User(_) => "user",
+                Message::Assistant(_) => "assistant",
+                Message::Reasoning(_) => "reasoning",
+                Message::ToolCall(_) => "tool_call",
+                Message::ToolOutput(_) => "tool_output",
+                Message::System(_) => "system",
+            })
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["user", "reasoning", "assistant", "tool_call", "tool_output"]
+        );
+
+        match &second[1] {
+            Message::Reasoning(reasoning) => {
+                assert_eq!(reasoning.id.as_deref(), Some("rs_1"));
+                assert_eq!(reasoning.encrypted_content.as_deref(), Some("enc_abc"));
+                assert_eq!(reasoning.summary, "inspect the file");
+            }
+            other => panic!("expected reasoning sibling, got {other:?}"),
+        }
+        match &second[2] {
+            Message::Assistant(assistant) => {
+                assert!(assistant.content.contains("I was wrong about (2)"));
+            }
+            other => panic!("expected assistant narration after reasoning, got {other:?}"),
+        }
     }
 
     #[tokio::test]

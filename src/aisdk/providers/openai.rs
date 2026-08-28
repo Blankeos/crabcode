@@ -1,4 +1,4 @@
-use crate::chunk::{ChunkType, MessagePhase};
+use crate::chunk::{ChunkType, MessagePhase, ReasoningReplayItem};
 use crate::error::{Error, Result};
 use crate::message::{is_prefixed_response_item_id, Message};
 use crate::provider::{Provider, ProviderStream};
@@ -300,7 +300,10 @@ impl WebsocketStreamProgress {
     fn record_chunk(&mut self, chunk: &ChunkType) {
         if matches!(
             chunk,
-            ChunkType::Text(_) | ChunkType::Reasoning(_) | ChunkType::ToolCall(_)
+            ChunkType::Text(_)
+                | ChunkType::Reasoning(_)
+                | ChunkType::ReasoningItem(_)
+                | ChunkType::ToolCall(_)
         ) {
             self.emitted_non_replayable_output = true;
         }
@@ -652,11 +655,8 @@ impl OpenAI {
             "model": self.model_name,
             "input": input,
             "stream": true,
-            "include": if self.responses_lite {
-                serde_json::json!(["reasoning.encrypted_content"])
-            } else {
-                serde_json::json!([])
-            },
+            // Responses only returns `encrypted_content` when this include is set.
+            "include": serde_json::json!(["reasoning.encrypted_content"]),
         });
 
         if self.responses_lite {
@@ -1550,6 +1550,7 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
             }
             Some(Ok(ChunkType::ResponseCompleted {
                 end_turn: resp.get("end_turn").and_then(|value| value.as_bool()),
+                reasoning_items: reasoning_items_from_response_output(resp),
             }))
         }
         "response.incomplete" => Some(Ok(ChunkType::RetryableFailure(RetryError::from_message(
@@ -1557,7 +1558,9 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
         )))),
         "response.failed" | "error" => Some(Ok(responses_error_chunk(&value, event_type))),
         _ => {
-            if let Some(message_phase) = responses_assistant_message_phase_chunk(&value) {
+            if let Some(reasoning_item) = responses_reasoning_item_chunk(&value) {
+                Some(Ok(ChunkType::ReasoningItem(reasoning_item)))
+            } else if let Some(message_phase) = responses_assistant_message_phase_chunk(&value) {
                 Some(Ok(message_phase))
             } else if let Some(payload) = responses_hosted_search_chunk(&value) {
                 // Provider-executed hosted search — UI only, never client execute.
@@ -1779,6 +1782,114 @@ fn parse_message_phase(phase: &str) -> Option<MessagePhase> {
         "final_answer" => Some(MessagePhase::FinalAnswer),
         _ => None,
     }
+}
+
+fn responses_reasoning_item_chunk(value: &serde_json::Value) -> Option<ReasoningReplayItem> {
+    let event_type = value.get("type").and_then(|v| v.as_str())?;
+    if !matches!(
+        event_type,
+        "response.output_item.added" | "response.output_item.done"
+    ) {
+        return None;
+    }
+    reasoning_replay_from_output_item(value.get("item")?)
+}
+
+fn reasoning_items_from_response_output(response: &serde_json::Value) -> Vec<ReasoningReplayItem> {
+    response
+        .get("output")
+        .and_then(|output| output.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(reasoning_replay_from_output_item)
+        .collect()
+}
+
+fn reasoning_replay_from_output_item(item: &serde_json::Value) -> Option<ReasoningReplayItem> {
+    if item.get("type").and_then(|v| v.as_str()) != Some("reasoning") {
+        return None;
+    }
+    let id = item
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let encrypted_content = item
+        .get("encrypted_content")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(str::to_string);
+    let summary = reasoning_summary_text(item);
+    let item = ReasoningReplayItem {
+        id,
+        summary,
+        encrypted_content,
+    };
+    (!item.is_empty()).then_some(item)
+}
+
+fn reasoning_summary_text(item: &serde_json::Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(summary) = item.get("summary").and_then(|value| value.as_array()) {
+        for part in summary {
+            if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                if !text.is_empty() {
+                    parts.push(text.to_string());
+                }
+            }
+        }
+    }
+    if let Some(content) = item.get("content").and_then(|value| value.as_array()) {
+        for part in content {
+            if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                if !text.is_empty() {
+                    parts.push(text.to_string());
+                }
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+fn responses_reasoning_input_item(
+    reasoning: &crate::message::ReasoningMessage,
+) -> Option<serde_json::Value> {
+    if reasoning.is_empty() {
+        return None;
+    }
+    let mut item = serde_json::json!({
+        "type": "reasoning",
+        "summary": reasoning_summary_parts(&reasoning.summary),
+    });
+    if let Some(id) = reasoning
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        item["id"] = serde_json::Value::String(id.to_string());
+    }
+    if let Some(encrypted) = reasoning
+        .encrypted_content
+        .as_deref()
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+    {
+        item["encrypted_content"] = serde_json::Value::String(encrypted.to_string());
+    }
+    Some(item)
+}
+
+fn reasoning_summary_parts(summary: &str) -> serde_json::Value {
+    if summary.is_empty() {
+        return serde_json::json!([]);
+    }
+    serde_json::json!([{
+        "type": "summary_text",
+        "text": summary,
+    }])
 }
 
 /// True when an SSE event type is a provider-hosted search lifecycle event.
@@ -2120,6 +2231,7 @@ fn build_openai_messages(
                         "content": a.content,
                     })
                 }),
+                Message::Reasoning(r) => responses_reasoning_input_item(r),
                 Message::ToolCall(t) => {
                     let mut item = serde_json::json!({
                         "type": "function_call",
@@ -2301,7 +2413,8 @@ mod tests {
         assert!(matches!(
             chunk,
             Ok(ChunkType::ResponseCompleted {
-                end_turn: Some(false)
+                end_turn: Some(false),
+                ..
             })
         ));
     }
@@ -2718,6 +2831,86 @@ mod tests {
 
         assert_eq!(body["prompt_cache_key"], "session-abc");
         assert_eq!(body["store"], false);
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn responses_body_always_includes_encrypted_reasoning() {
+        let provider = OpenAI::builder()
+            .base_url("https://api.openai.com")
+            .api_key("test-key")
+            .model_name("gpt-test")
+            .build()
+            .unwrap();
+
+        let body = provider.build_responses_body(
+            vec![serde_json::json!({"role": "user", "content": "hi"})],
+            &[],
+        );
+
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn responses_input_replays_reasoning_item_with_encrypted_content() {
+        let input = build_openai_messages(
+            &[
+                Message::user("inspect"),
+                Message::reasoning(
+                    Some("rs_1".to_string()),
+                    "inspect the file",
+                    Some("enc_abc".to_string()),
+                ),
+                Message::tool_call("call_1", "read", r#"{"file_path":"src/lib.rs"}"#),
+            ],
+            false,
+            false,
+        );
+
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_1");
+        assert_eq!(input[1]["encrypted_content"], "enc_abc");
+        assert_eq!(input[1]["summary"][0]["text"], "inspect the file");
+        assert_eq!(input[2]["type"], "function_call");
+    }
+
+    #[test]
+    fn response_completed_captures_encrypted_reasoning_items() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.completed","response":{"output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"plan"}],"encrypted_content":"enc_abc"},{"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"}]}}"#,
+        )
+        .expect("expected terminal chunk");
+
+        match chunk {
+            Ok(ChunkType::ResponseCompleted {
+                reasoning_items, ..
+            }) => {
+                assert_eq!(reasoning_items.len(), 1);
+                assert_eq!(reasoning_items[0].id.as_deref(), Some("rs_1"));
+                assert_eq!(
+                    reasoning_items[0].encrypted_content.as_deref(),
+                    Some("enc_abc")
+                );
+                assert_eq!(reasoning_items[0].summary, "plan");
+            }
+            other => panic!("expected ResponseCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_item_done_emits_reasoning_item_chunk() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","encrypted_content":"enc_abc"}}"#,
+        )
+        .expect("expected reasoning item chunk");
+
+        match chunk {
+            Ok(ChunkType::ReasoningItem(item)) => {
+                assert_eq!(item.id.as_deref(), Some("rs_1"));
+                assert_eq!(item.encrypted_content.as_deref(), Some("enc_abc"));
+            }
+            other => panic!("expected ReasoningItem, got {other:?}"),
+        }
     }
 
     #[test]

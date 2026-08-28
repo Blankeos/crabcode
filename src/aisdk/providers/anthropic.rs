@@ -719,6 +719,7 @@ fn anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                     "is_error": t.is_error,
                 }));
             }
+            Message::Reasoning(_) => {}
             Message::System(_) => {}
         }
     }
