@@ -346,6 +346,16 @@ impl Default for ImagesConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EditorConfig {
+    /// Shell template used when a file path is clicked. Placeholders:
+    /// `{pathname}` / `{path}` / `{filename}` (shell-quoted), `{pathname_raw}`,
+    /// `{line}`, `{column}` / `{col}`, `{location}` (quoted `path:line:column`).
+    pub open: Option<String>,
+    /// Leave the TUI, run `open` with the terminal, then restore crabcode.
+    pub suspend: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebsearchProvider {
     ExaHostedMcp,
@@ -555,6 +565,7 @@ pub struct MergedConfig {
     pub custom_providers: HashMap<String, CustomProviderConfig>,
     pub notifications: NotificationsConfig,
     pub images: ImagesConfig,
+    pub editor: EditorConfig,
     pub websearch: WebsearchConfig,
     pub mcp: McpConfig,
     pub instructions: Vec<String>,
@@ -1142,6 +1153,7 @@ fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     out.insert("theme");
     out.insert("notifications");
     out.insert("images");
+    out.insert("editor");
     out.insert("websearch");
     out.insert("tui");
     out
@@ -1451,6 +1463,7 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     apply_notifications(obj.get("notifications"), &mut notifications, diagnostics);
     out.notifications = notifications;
     out.images = parse_images(obj.get("images"), diagnostics);
+    out.editor = parse_editor(obj.get("editor"), diagnostics);
     out.websearch = parse_websearch(obj.get("websearch"), diagnostics);
     out.mcp = parse_mcp(obj.get("mcp"), diagnostics);
     out.instructions = obj
@@ -2395,6 +2408,55 @@ fn parse_image_open_with(
     }
 }
 
+fn parse_editor(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> EditorConfig {
+    let mut editor = EditorConfig::default();
+    let Some(value) = value else {
+        return editor;
+    };
+    if value.is_null() {
+        return editor;
+    }
+
+    match value {
+        Value::String(open) => {
+            let open = open.trim();
+            if !open.is_empty() {
+                editor.open = Some(open.to_string());
+            }
+        }
+        Value::Object(map) => {
+            if let Some(open) = map.get("open") {
+                match open {
+                    Value::String(open) => {
+                        let open = open.trim();
+                        if !open.is_empty() {
+                            editor.open = Some(open.to_string());
+                        }
+                    }
+                    Value::Null => {}
+                    _ => diagnostics
+                        .warnings
+                        .push("editor.open must be a string".to_string()),
+                }
+            }
+
+            if let Some(suspend) = map.get("suspend") {
+                match suspend {
+                    Value::Bool(suspend) => editor.suspend = *suspend,
+                    _ => diagnostics
+                        .warnings
+                        .push("editor.suspend must be a boolean".to_string()),
+                }
+            }
+        }
+        _ => diagnostics
+            .warnings
+            .push("editor must be a string or object".to_string()),
+    }
+
+    editor
+}
+
 fn apply_notifications(
     value: Option<&Value>,
     notifications: &mut NotificationsConfig,
@@ -2711,6 +2773,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "enabledProviders",
         "notifications",
         "images",
+        "editor",
         "websearch",
         "tui",
         "instructions",
@@ -3227,6 +3290,43 @@ mod tests {
         let config = parse_merged_config(&json!({}), &mut diagnostics);
 
         assert_eq!(config.images.open_with, ImageOpenWith::Auto);
+        assert_eq!(config.editor, EditorConfig::default());
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_editor_open_string() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "editor": "hx -- {pathname}:{line}:{column}"
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.editor.open.as_deref(),
+            Some("hx -- {pathname}:{line}:{column}")
+        );
+        assert!(!config.editor.suspend);
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_editor_open_object() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "editor": {
+                    "open": "hx -- {location}",
+                    "suspend": true
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.editor.open.as_deref(), Some("hx -- {location}"));
+        assert!(config.editor.suspend);
         assert!(diagnostics.warnings.is_empty());
     }
 

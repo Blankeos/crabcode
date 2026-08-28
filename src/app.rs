@@ -899,6 +899,8 @@ pub struct App {
     pub sounds: crate::sound::ResolvedSoundsConfig,
     pub notifications: crate::config::NotificationsConfig,
     pub images: crate::config::ImagesConfig,
+    pub editor: crate::config::EditorConfig,
+    pending_editor_suspend: Option<String>,
     pub websearch: crate::config::configuration::WebsearchConfig,
     pub mcp: crate::config::configuration::McpConfig,
     pub config_raw_merged: serde_json::Value,
@@ -1146,6 +1148,8 @@ impl App {
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
             images: crate::config::ImagesConfig::default(),
+            editor: crate::config::EditorConfig::default(),
+            pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             config_raw_merged: serde_json::json!({}),
@@ -1385,6 +1389,7 @@ impl App {
         self.sounds = resolved_sounds;
         self.notifications = loaded_config.merged_config.notifications.clone();
         self.images = loaded_config.merged_config.images.clone();
+        self.editor = loaded_config.merged_config.editor.clone();
         self.websearch = loaded_config.merged_config.websearch.clone();
         self.mcp = mcp_config;
         self.config_raw_merged = loaded_config.raw_merged;
@@ -1820,8 +1825,9 @@ impl App {
             &location.path,
             location.line,
             location.column,
+            &self.editor,
         ) {
-            Ok(()) => {
+            Ok(crate::utils::image_attachment::OpenOutcome::Spawned) => {
                 push_toast(Toast::new(
                     format!(
                         "Opened {}:{}:{}",
@@ -1832,6 +1838,18 @@ impl App {
                     ToastLevel::Info,
                     None,
                 ));
+                self.dismiss_selection_actions();
+            }
+            Ok(crate::utils::image_attachment::OpenOutcome::Copied(text)) => {
+                push_toast(Toast::new(
+                    format!("Copied {}", text),
+                    ToastLevel::Info,
+                    None,
+                ));
+                self.dismiss_selection_actions();
+            }
+            Ok(crate::utils::image_attachment::OpenOutcome::Suspend(command)) => {
+                self.pending_editor_suspend = Some(command);
                 self.dismiss_selection_actions();
             }
             Err(err) => push_toast(Toast::new(
@@ -4711,7 +4729,7 @@ impl App {
         }
     }
 
-    fn open_chat_hyperlink_target(&self, target: &HyperlinkTarget) {
+    fn open_chat_hyperlink_target(&mut self, target: &HyperlinkTarget) {
         match target {
             HyperlinkTarget::File(target) => {
                 let result = if let Some(line) = target.line {
@@ -4719,16 +4737,25 @@ impl App {
                         &target.path,
                         line,
                         target.column.unwrap_or(1),
+                        &self.editor,
                     )
                 } else {
-                    crate::utils::image_attachment::open_file_path(&target.path)
+                    crate::utils::image_attachment::open_file_path(&target.path, &self.editor)
                 };
                 match result {
-                    Ok(()) => push_toast(Toast::new(
-                        format!("Opened {}", target.path.display()),
-                        ToastLevel::Info,
-                        None,
-                    )),
+                    Ok(crate::utils::image_attachment::OpenOutcome::Spawned) => {
+                        push_toast(Toast::new(
+                            format!("Opened {}", target.path.display()),
+                            ToastLevel::Info,
+                            None,
+                        ))
+                    }
+                    Ok(crate::utils::image_attachment::OpenOutcome::Copied(text)) => push_toast(
+                        Toast::new(format!("Copied {}", text), ToastLevel::Info, None),
+                    ),
+                    Ok(crate::utils::image_attachment::OpenOutcome::Suspend(command)) => {
+                        self.pending_editor_suspend = Some(command);
+                    }
                     Err(err) => push_toast(Toast::new(
                         format!("Failed to open file: {}", err),
                         ToastLevel::Error,
@@ -7389,6 +7416,10 @@ impl App {
 
     pub fn take_remote_launch_request(&mut self) -> Option<RemoteLaunchRequest> {
         self.remote_launch_request.take()
+    }
+
+    pub fn take_editor_suspend(&mut self) -> Option<String> {
+        self.pending_editor_suspend.take()
     }
 
     fn open_remote_dialog(&mut self) {
@@ -11924,6 +11955,8 @@ mod tests {
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
             images: crate::config::ImagesConfig::default(),
+            editor: crate::config::EditorConfig::default(),
+            pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             config_raw_merged: serde_json::json!({}),

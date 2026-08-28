@@ -1,0 +1,50 @@
+---
+title: Editor
+description: Configure the shell command crabcode runs when you click a file path.
+---
+
+# Open files from the TUI
+
+Clicked file paths, line numbers, and "open in editor" actions copy `path:line:column` unless you set `editor.open` or crabcode detects a Zed, VS Code, or Cursor terminal.
+
+Set `editor.open` to a shell template when you want clicks to jump into an editor pane. Crabcode does not hardcode Helix or Neovim.
+
+```jsonc title="crabcode.jsonc"
+{
+  "editor": {
+    "open": "herdr pane run \"$(herdr tab create --focus --label hx | jq -r .result.root_pane.pane_id)\" hx -- {pathname}:{line}:{column}",
+  },
+}
+```
+
+A string is the same as `{ "open": "..." }`:
+
+```jsonc title="crabcode.jsonc"
+{
+  "editor": "zed -- {location}",
+}
+```
+
+## Placeholders
+
+`editor.open` is expanded, then passed to `sh -c` (or `cmd /C` on Windows).
+
+| Token | Value |
+| --- | --- |
+| `{pathname}`, `{path}`, `{filename}` | Shell-quoted file path |
+| `{pathname_raw}`, `{path_raw}` | Unquoted file path |
+| `{line}` | Line number, `1` if unknown |
+| `{column}`, `{col}` | Column number, `1` if unknown |
+| `{location}` | Shell-quoted `path:line:column` |
+
+`{pathname}` is quoted so paths with spaces stay one argument when concatenated as `{pathname}:{line}:{column}`. Use `{pathname_raw}` when the path sits inside quotes you already wrote.
+
+If the template has no path token, crabcode appends the quoted path.
+
+## Suspend
+
+`editor.suspend` (default `false`) leaves the TUI, runs the command with the real terminal, waits for it to exit, then restores crabcode.
+
+Leave it off for GUI editors and multiplexer `send-text` commands.
+
+Recipes for Helix, Neovim, Herdr, Zed, VS Code, and Cursor live in [Editor Integration](/editors).

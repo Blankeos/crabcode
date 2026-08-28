@@ -130,6 +130,34 @@ fn mouse_scroll_kind(kind: MouseEventKind) -> bool {
     matches!(kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp)
 }
 
+fn apply_terminal_enter_modes<W: std::io::Write>(
+    writer: &mut W,
+    keyboard_enhancement: bool,
+) -> Result<()> {
+    if keyboard_enhancement {
+        execute!(
+            writer,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableFocusChange,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+            ),
+            EnableBracketedPaste
+        )?;
+    } else {
+        execute!(
+            writer,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableFocusChange,
+            EnableBracketedPaste
+        )?;
+    }
+    Ok(())
+}
+
 fn restore_terminal_modes(
     backend: &mut CrosstermBackend<io::Stdout>,
     keyboard_enhancement: bool,
@@ -163,6 +191,47 @@ fn restore_terminal_modes(
     flush_result.context("failed to flush terminal restore commands")?;
     raw_mode_result.context("failed to disable raw mode")?;
 
+    Ok(())
+}
+
+fn run_shell_command_blocking(command: &str) -> io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "windows")]
+    {
+        ProcessCommand::new("cmd").args(["/C", command]).status()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ProcessCommand::new("sh").args(["-c", command]).status()
+    }
+}
+
+fn suspend_and_run_editor(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    keyboard_enhancement: bool,
+    command: &str,
+) -> Result<()> {
+    restore_terminal_modes(terminal.backend_mut(), keyboard_enhancement)?;
+    let _ = terminal.show_cursor();
+    let status = run_shell_command_blocking(command);
+    enable_raw_mode()?;
+    apply_terminal_enter_modes(terminal.backend_mut(), keyboard_enhancement)?;
+    let _ = terminal.hide_cursor();
+    let _ = terminal.clear();
+    drain_pending_terminal_events(Duration::from_millis(0));
+
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => push_toast(Toast::new(
+            format!("Editor command exited with {}", status),
+            crate::toast::ToastLevel::Error,
+            None,
+        )),
+        Err(err) => push_toast(Toast::new(
+            format!("Failed to run editor: {}", err),
+            crate::toast::ToastLevel::Error,
+            None,
+        )),
+    }
     Ok(())
 }
 
@@ -1055,27 +1124,7 @@ async fn main() -> Result<()> {
     // Skip blocking supports_keyboard_enhancement() CSI probe (Codex pattern).
     // Always push flags; terminals that ignore them are fine. Opt out via env.
     let keyboard_enhancement = std::env::var_os("CRABCODE_DISABLE_KEYBOARD_ENHANCEMENT").is_none();
-    if keyboard_enhancement {
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableFocusChange,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
-            ),
-            EnableBracketedPaste
-        )?;
-    } else {
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableFocusChange,
-            EnableBracketedPaste
-        )?;
-    }
+    apply_terminal_enter_modes(&mut stdout, keyboard_enhancement)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -1086,6 +1135,7 @@ async fn main() -> Result<()> {
         &mut app,
         session_history_loaded,
         startup_hydrated,
+        keyboard_enhancement,
     )
     .await;
     let remote_launch_request = app.take_remote_launch_request();
@@ -1423,6 +1473,7 @@ async fn run_event_loop(
     app: &mut App,
     mut session_history_loaded: bool,
     mut startup_hydrated: bool,
+    keyboard_enhancement: bool,
 ) -> Result<()> {
     // Adaptive poll: fast for home blink / streaming, park nearly forever when idle.
     // A short "idle" poll still burns needless redraws/sec; block until input instead.
@@ -1574,6 +1625,11 @@ async fn run_event_loop(
                     needs_redraw = true;
                 }
             }
+        }
+
+        if let Some(command) = app.take_editor_suspend() {
+            suspend_and_run_editor(terminal, keyboard_enhancement, &command)?;
+            needs_redraw = true;
         }
 
         app.process_streaming_chunks();

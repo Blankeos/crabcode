@@ -50,6 +50,29 @@
       },
       "type": "object"
     },
+    "EditorConfigFile": {
+      "anyOf": [
+        {
+          "type": "string",
+          "description": "Shell template run when a file path is clicked. Placeholders: {pathname}, {path}, {filename}, {pathname_raw}, {line}, {column}, {col}, {location}."
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "open": {
+              "type": "string",
+              "description": "Shell template run when a file path is clicked. Placeholders: {pathname}, {path}, {filename}, {pathname_raw}, {line}, {column}, {col}, {location}."
+            },
+            "suspend": {
+              "type": "boolean",
+              "default": false,
+              "description": "Leave the TUI, run `open` in the terminal, then restore crabcode. Use this for Helix and Neovim without a multiplexer."
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
     "ReasoningEffort": {
       "enum": [
         "none",
@@ -338,6 +361,16 @@
       "anyOf": [
         {
           "$ref": "#/$defs/ImagesConfigFile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "editor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EditorConfigFile"
         },
         {
           "type": "null"
