@@ -1818,6 +1818,21 @@ fn hosted_search_status_from_event(event_type: &str) -> &'static str {
     }
 }
 
+/// Collapse xAI dual SSE id namespaces onto one tool-call id.
+///
+/// `x_search` emits both:
+/// - `response.output_item.*` with `item.id` like `xs_call-<uuid>-N`
+/// - `response.custom_tool_call_input.*` with `item_id` like `ctc_<uuid>_call-<uuid>-N`
+///
+/// Those share the `call-<uuid>-N` suffix; without normalizing, the UI paints
+/// two cards for one provider-executed search.
+fn normalize_hosted_search_tool_id(id: &str) -> String {
+    if let Some(idx) = id.find("call-") {
+        return id[idx..].to_string();
+    }
+    id.to_string()
+}
+
 /// Build a display-only ProviderToolCall payload from hosted-search SSE.
 fn responses_hosted_search_chunk(value: &serde_json::Value) -> Option<String> {
     let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -1869,14 +1884,17 @@ fn responses_hosted_search_chunk(value: &serde_json::Value) -> Option<String> {
         return None;
     }
 
+    // Prefer call_id (shared across event families) over item_id / item.id
+    // (`ctc_*` vs `xs_*` namespaces), then strip prefixes to the shared suffix.
     let id = item
         .get("call_id")
+        .or_else(|| value.get("call_id"))
         .or_else(|| item.get("id"))
         .or_else(|| value.get("item_id"))
         .or_else(|| value.get("id"))
         .and_then(|v| v.as_str())
-        .unwrap_or("hosted_search")
-        .to_string();
+        .map(normalize_hosted_search_tool_id)
+        .unwrap_or_else(|| "hosted_search".to_string());
 
     let status = if event_type == "response.output_item.done" {
         "completed"
@@ -2477,6 +2495,55 @@ mod tests {
             "response.function_call_arguments.delta"
         ));
         assert!(is_client_tool_call_event("chat.completion.tool_call.delta"));
+    }
+
+    #[test]
+    fn collapses_x_search_dual_sse_id_namespaces() {
+        // xAI emits both output_item (xs_*) and custom_tool_call_input (ctc_*).
+        // They must share one tool id so the UI paints a single card.
+        let shared = "call-aadee343-63eb-9a1b-8000-0b77246e7421-21";
+        let output_item = response_sse_data_to_chunk(
+            &serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": format!("xs_{shared}"),
+                    "type": "custom_tool_call",
+                    "name": "x_search",
+                    "status": "in_progress",
+                    "arguments": {"post_id": "2093050916953903451"}
+                }
+            })
+            .to_string(),
+        );
+        let custom_input = response_sse_data_to_chunk(
+            &serde_json::json!({
+                "type": "response.custom_tool_call_input.done",
+                "item_id": format!("ctc_f47ac10b-58cc-4372-a567-0e02b2c3d479_{shared}"),
+                "delta": "{\"post_id\":\"2093050916953903451\"}"
+            })
+            .to_string(),
+        );
+
+        let id_from = |chunk: Option<Result<ChunkType, _>>| -> String {
+            match chunk {
+                Some(Ok(ChunkType::ProviderToolCall(payload))) => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&payload).expect("valid payload");
+                    parsed["id"].as_str().unwrap().to_string()
+                }
+                other => panic!("expected ProviderToolCall, got {other:?}"),
+            }
+        };
+
+        let a = id_from(output_item);
+        let b = id_from(custom_input);
+        assert_eq!(a, shared);
+        assert_eq!(b, shared);
+        assert_eq!(
+            super::normalize_hosted_search_tool_id("ws_1"),
+            "ws_1",
+            "ids without call- suffix stay unchanged"
+        );
     }
 
     #[test]
