@@ -5,7 +5,7 @@ summary: Local search backends and provider-native search tools
 
 Configure web search for agents. Crabcode supports two complementary paths:
 
-1. **Local adapters** (`websearch.provider`) — crabcode runs a `websearch` tool against Exa, Tavily, Brave, Ollama Cloud, etc.
+1. **Local adapters** (`websearch.provider`) — crabcode runs a `websearch` tool against Exa, Tavily, Brave, TinyFish, Monid, Ollama Cloud, etc.
 2. **Native tools** (`websearch.native`) — the active LLM provider executes search server-side (`web_search`, `x_search`, …). These are normal aisdk tools composed into the tools list.
 
 ```jsonc
@@ -75,7 +75,7 @@ These fees apply on **API-key** auth. Models often invoke search multiple times 
 
 **Subscription / OAuth** logins (ChatGPT, Claude, SuperGrok, …) use the provider’s subscription transport instead — native search is included in plan quota / rate limits, not billed as the API tool fees above.
 
-**Local adapters** bill (or rate-limit) through their own APIs — `exa-hosted-mcp` and `firecrawl-hosted-mcp` are keyless/rate-limited; Exa/Tavily/Brave/Ollama Cloud/etc. use your key.
+**Local adapters** bill (or rate-limit) through their own APIs — `exa-hosted-mcp` and `firecrawl-hosted-mcp` are keyless/rate-limited; Exa/Tavily/Brave/TinyFish/Monid/Ollama Cloud/etc. use your key (TinyFish Search and Monid→TinyFish Search are free usage).
 
 Default is local websearch + `native.x` on xAI. Set `native.web: true` to use provider-hosted web search instead (API tool fees may apply).
 
@@ -94,3 +94,5 @@ Default is local websearch + `native.x` on xAI. Set `native.web: true` to use pr
 | `keiro` | `KEIRO_API_KEY` | Keiro search API |
 | `parallel` | `PARALLEL_API_KEY` | Parallel search API |
 | `tako` | `TAKO_API_KEY` | Tako search API |
+| `tinyfish` | `TINYFISH_API_KEY` | TinyFish Search API (`api.search.tinyfish.ai`) — free with a TinyFish account |
+| `monid` | `MONID_API_KEY` | Monid catalog → TinyFish `/search` (no TinyFish key; uses your Monid API key) |

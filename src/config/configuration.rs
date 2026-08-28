@@ -359,6 +359,8 @@ pub enum WebsearchProvider {
     Keiro,
     Parallel,
     Tako,
+    Tinyfish,
+    Monid,
 }
 
 impl WebsearchProvider {
@@ -375,6 +377,8 @@ impl WebsearchProvider {
             Self::Keiro => "keiro",
             Self::Parallel => "parallel",
             Self::Tako => "tako",
+            Self::Tinyfish => "tinyfish",
+            Self::Monid => "monid",
         }
     }
 }
@@ -1782,7 +1786,7 @@ fn parse_websearch(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -
                     match parse_websearch_provider(raw) {
                         Some(provider) => websearch.provider = provider,
                         _ => diagnostics.warnings.push(format!(
-                            "websearch.provider must be one of: exa-hosted-mcp, firecrawl-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro, parallel, tako; got {}",
+                            "websearch.provider must be one of: exa-hosted-mcp, firecrawl-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro, parallel, tako, tinyfish, monid; got {}",
                             raw
                         )),
                     }
@@ -1851,6 +1855,8 @@ fn parse_websearch_provider(raw: &str) -> Option<WebsearchProvider> {
         "keiro" => Some(WebsearchProvider::Keiro),
         "parallel" => Some(WebsearchProvider::Parallel),
         "tako" => Some(WebsearchProvider::Tako),
+        "tinyfish" => Some(WebsearchProvider::Tinyfish),
+        "monid" => Some(WebsearchProvider::Monid),
         _ => None,
     }
 }
@@ -3077,6 +3083,14 @@ mod tests {
         assert_eq!(
             parse_websearch_provider("tako"),
             Some(WebsearchProvider::Tako)
+        );
+        assert_eq!(
+            parse_websearch_provider("tinyfish"),
+            Some(WebsearchProvider::Tinyfish)
+        );
+        assert_eq!(
+            parse_websearch_provider("monid"),
+            Some(WebsearchProvider::Monid)
         );
         assert_eq!(parse_websearch_provider("ollama"), None);
         assert_eq!(parse_websearch_provider("keiro-labs"), None);
