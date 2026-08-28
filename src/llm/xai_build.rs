@@ -231,6 +231,47 @@ pub(crate) fn new_req_id() -> String {
     format!("crabcode-{}", cuid2::create_id())
 }
 
+/// grok-4.5 / grok-4.6 catalog: `compaction_at_tokens: true` with 500k × 80%.
+const COMPACTION_HINT_CONTEXT_WINDOW: u64 = 500_000;
+const COMPACTION_HINT_THRESHOLD_PERCENT: u8 = 80;
+
+pub(crate) const COMPACTION_AT_HEADER: &str = "x-compaction-at";
+pub(crate) const COMPACTIONS_REMAINING_HEADER: &str = "x-compactions-remaining";
+
+/// grok-4.5 / grok-4.6 default_models.json enable these request hints.
+pub(crate) fn model_sends_compaction_hints(model: &str) -> bool {
+    let id = model.rsplit('/').next().unwrap_or(model).trim();
+    id == "grok-4.5"
+        || id == "grok-4.6"
+        || id.starts_with("grok-4.5-")
+        || id.starts_with("grok-4.6-")
+}
+
+/// Client-side compact hints for cli-chat-proxy (`x-compaction-at`,
+/// `x-compactions-remaining`).
+///
+/// Matches grok-4.5/4.6 catalog: remaining is a fixed `1`; `x-compaction-at`
+/// is `context_window * 80 / 100` until the session has compacted, then omitted.
+pub(crate) fn inject_compaction_hint_headers(
+    headers: &mut std::collections::HashMap<String, String>,
+    model: &str,
+    has_compaction_summary: bool,
+) {
+    headers.remove(COMPACTION_AT_HEADER);
+    headers.remove(COMPACTIONS_REMAINING_HEADER);
+    if !model_sends_compaction_hints(model) {
+        return;
+    }
+
+    // Catalog `compactions_remaining: 1` is Fixed(1) — does not flip after compact.
+    headers.insert(COMPACTIONS_REMAINING_HEADER.to_string(), "1".to_string());
+    if !has_compaction_summary {
+        let at =
+            COMPACTION_HINT_CONTEXT_WINDOW * u64::from(COMPACTION_HINT_THRESHOLD_PERCENT) / 100;
+        headers.insert(COMPACTION_AT_HEADER.to_string(), at.to_string());
+    }
+}
+
 /// Process-stable agent id (Grok Build `x-grok-agent-id` counterpart).
 ///
 /// Not persisted across restarts — good enough for proxy affinity within a run.
@@ -477,6 +518,44 @@ mod tests {
         assert!(headers
             .get("x-grok-req-id")
             .is_some_and(|id| id.starts_with("crabcode-")));
+    }
+
+    #[test]
+    fn grok_46_sends_compaction_at_until_compacted() {
+        let mut headers = HashMap::new();
+        super::inject_compaction_hint_headers(&mut headers, "xai/grok-4.6", false);
+        assert_eq!(
+            headers
+                .get(super::COMPACTIONS_REMAINING_HEADER)
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            headers.get(super::COMPACTION_AT_HEADER).map(String::as_str),
+            Some("400000")
+        );
+
+        super::inject_compaction_hint_headers(&mut headers, "grok-4.6", true);
+        assert_eq!(
+            headers
+                .get(super::COMPACTIONS_REMAINING_HEADER)
+                .map(String::as_str),
+            Some("1"),
+            "grok-4.6 catalog uses Fixed(1); remaining does not flip"
+        );
+        assert!(
+            headers.get(super::COMPACTION_AT_HEADER).is_none(),
+            "x-compaction-at is omitted after the session has compacted"
+        );
+    }
+
+    #[test]
+    fn composer_does_not_send_compaction_hints() {
+        let mut headers = HashMap::new();
+        headers.insert(super::COMPACTION_AT_HEADER.to_string(), "stale".to_string());
+        super::inject_compaction_hint_headers(&mut headers, "grok-composer-2.5-fast", false);
+        assert!(headers.get(super::COMPACTION_AT_HEADER).is_none());
+        assert!(headers.get(super::COMPACTIONS_REMAINING_HEADER).is_none());
     }
 
     #[test]

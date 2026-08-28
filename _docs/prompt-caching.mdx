@@ -52,6 +52,8 @@ In addition to sticky `prompt_cache_key = session_id`, crabcode stamps Grok Buil
 | `x-grok-req-id` | Unique per model invocation |
 | `x-grok-turn-idx` | 0-based user-turn index |
 | `x-grok-agent-id` | Process-stable agent id |
+| `x-compaction-at` | grok-4.5/4.6: `400000` (500k × 80%) until the session has compacted, then omitted |
+| `x-compactions-remaining` | grok-4.5/4.6: always `1` (catalog fixed value) |
 
 **Parent-cached aux** (e.g. max-steps text-only summary): keeps parent `prompt_cache_key` + session/conv so the conversation prefix can reuse the main turn's KV cache; assigns a fresh `aux-…` req id.
 

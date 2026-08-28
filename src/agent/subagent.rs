@@ -60,6 +60,11 @@ pub async fn run_subagent(
             &mut session.openai_options.additional_headers,
             &affinity,
         );
+        crate::llm::xai_build::inject_compaction_hint_headers(
+            &mut session.openai_options.additional_headers,
+            &session.model,
+            false,
+        );
         crate::emit_log!(
             "[prompt-cache] xai-build affinity kind=child session_id={} req_id={}",
             affinity.session_id,

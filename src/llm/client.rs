@@ -678,7 +678,14 @@ pub async fn stream_llm_with_cancellation(
         show_vlm_agent_hint,
     );
     // Stamp Build affinity *after* message conversion so turn_idx matches wire content.
-    stamp_build_main_turn_affinity(&mut request_config, &session_id, &aisdk_messages);
+    stamp_build_main_turn_affinity(
+        &mut request_config,
+        &session_id,
+        &aisdk_messages,
+        messages
+            .iter()
+            .any(crate::session::compaction::is_compaction_summary),
+    );
 
     let mut aisdk_tools = convert_to_aisdk_tools(
         &tool_registry,
@@ -794,7 +801,14 @@ pub async fn stream_llm_with_cancellation(
     // Parent-cached aux: same conversation prefix + sticky session key, fresh req id.
     // Tools are empty (text-only summary) so tool-schema cache may miss; system+history still hit.
     let mut summary_config = request_config.clone();
-    stamp_build_parent_cached_aux(&mut summary_config, &session_id, &follow_up_messages);
+    stamp_build_parent_cached_aux(
+        &mut summary_config,
+        &session_id,
+        &follow_up_messages,
+        messages
+            .iter()
+            .any(crate::session::compaction::is_compaction_summary),
+    );
     let summary_log_context = StreamLogContext::new(
         "max_steps_summary",
         &summary_config,
@@ -1520,6 +1534,7 @@ fn stamp_build_main_turn_affinity(
     request_config: &mut ProviderRequestConfig,
     session_id: &str,
     messages: &[AisdkMessage],
+    has_compaction_summary: bool,
 ) {
     if !super::xai_build::is_build_transport(&request_config.openai_options.additional_headers) {
         return;
@@ -1530,13 +1545,19 @@ fn stamp_build_main_turn_affinity(
         &mut request_config.openai_options.additional_headers,
         &affinity,
     );
+    super::xai_build::inject_compaction_hint_headers(
+        &mut request_config.openai_options.additional_headers,
+        &request_config.model_name,
+        has_compaction_summary,
+    );
     crate::emit_log!(
-        "[prompt-cache] xai-build affinity kind=main session_id={} conv_id={} req_id={} turn_idx={} agent_id={}",
+        "[prompt-cache] xai-build affinity kind=main session_id={} conv_id={} req_id={} turn_idx={} agent_id={} compacted={}",
         affinity.session_id,
         affinity.conv_id,
         affinity.req_id,
         turn_idx,
-        affinity.agent_id.as_deref().unwrap_or("-")
+        affinity.agent_id.as_deref().unwrap_or("-"),
+        has_compaction_summary
     );
 }
 
@@ -1548,6 +1569,7 @@ fn stamp_build_parent_cached_aux(
     request_config: &mut ProviderRequestConfig,
     parent_session_id: &str,
     messages: &[AisdkMessage],
+    has_compaction_summary: bool,
 ) {
     request_config.openai_options.prompt_cache_key = Some(parent_session_id.to_string());
     if !super::xai_build::is_build_transport(&request_config.openai_options.additional_headers) {
@@ -1560,12 +1582,18 @@ fn stamp_build_parent_cached_aux(
         &mut request_config.openai_options.additional_headers,
         &affinity,
     );
+    super::xai_build::inject_compaction_hint_headers(
+        &mut request_config.openai_options.additional_headers,
+        &request_config.model_name,
+        has_compaction_summary,
+    );
     crate::emit_log!(
-        "[prompt-cache] xai-build affinity kind=parent_aux session_id={} conv_id={} req_id={} turn_idx={}",
+        "[prompt-cache] xai-build affinity kind=parent_aux session_id={} conv_id={} req_id={} turn_idx={} compacted={}",
         affinity.session_id,
         affinity.conv_id,
         affinity.req_id,
-        turn_idx
+        turn_idx,
+        has_compaction_summary
     );
 }
 
