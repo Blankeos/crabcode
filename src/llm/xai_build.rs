@@ -33,7 +33,7 @@ pub(crate) struct XaiBuildRetryPolicy;
 pub(crate) struct RequestOverrides {
     pub(crate) api_key: String,
     pub(crate) base_url: &'static str,
-    pub(crate) model: &'static str,
+    pub(crate) model: String,
     pub(crate) headers: std::collections::HashMap<String, String>,
 }
 
@@ -66,22 +66,35 @@ pub(crate) fn retry_policy_for(
     })
 }
 
-pub(crate) async fn request_overrides(oauth_access: String) -> RequestOverrides {
+pub(crate) async fn request_overrides(
+    oauth_access: String,
+    selected_model: Option<&str>,
+) -> RequestOverrides {
     let protocol_version = protocol_version().await;
-    request_overrides_with_version(oauth_access, protocol_version)
+    request_overrides_with_version(oauth_access, protocol_version, selected_model)
 }
 
 fn request_overrides_with_version(
     oauth_access: String,
     protocol_version: String,
+    selected_model: Option<&str>,
 ) -> RequestOverrides {
+    // Honor the user's selected model; only fall back to the Build default when
+    // nothing was picked. Forcing `MODEL` here silently downgraded selections
+    // like `grok-4.6` to `grok-4.5`, whose vision backend currently misreads
+    // attached images (hallucinated descriptions).
+    let model = selected_model
+        .map(str::to_string)
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| MODEL.to_string());
+
     let mut headers = std::collections::HashMap::new();
     headers.insert(
         "User-Agent".to_string(),
         format!("crabcode/{}", env!("CARGO_PKG_VERSION")),
     );
     headers.insert(TOKEN_AUTH_HEADER.to_string(), TOKEN_AUTH_VALUE.to_string());
-    headers.insert("x-grok-model-override".to_string(), MODEL.to_string());
+    headers.insert("x-grok-model-override".to_string(), model.clone());
     headers.insert(
         "x-grok-client-identifier".to_string(),
         "crabcode".to_string(),
@@ -92,7 +105,7 @@ fn request_overrides_with_version(
     RequestOverrides {
         api_key: oauth_access,
         base_url: BASE_URL,
-        model: MODEL,
+        model,
         headers,
     }
 }
@@ -379,7 +392,7 @@ mod tests {
     #[test]
     fn request_overrides_match_proxy_contract() {
         let overrides =
-            request_overrides_with_version("oauth-token".to_string(), "9.8.7".to_string());
+            request_overrides_with_version("oauth-token".to_string(), "9.8.7".to_string(), None);
         assert_eq!(overrides.api_key, "oauth-token");
         assert_eq!(overrides.base_url, BASE_URL);
         assert_eq!(overrides.model, MODEL);
@@ -398,6 +411,30 @@ mod tests {
             overrides.headers.get("User-Agent").map(String::as_str),
             Some(concat!("crabcode/", env!("CARGO_PKG_VERSION")))
         );
+    }
+
+    #[test]
+    fn request_overrides_honor_selected_model() {
+        let overrides = request_overrides_with_version(
+            "oauth-token".to_string(),
+            "9.8.7".to_string(),
+            Some("grok-4.6"),
+        );
+        assert_eq!(overrides.model, "grok-4.6");
+        assert_eq!(
+            overrides
+                .headers
+                .get("x-grok-model-override")
+                .map(String::as_str),
+            Some("grok-4.6")
+        );
+
+        let empty = request_overrides_with_version(
+            "oauth-token".to_string(),
+            "9.8.7".to_string(),
+            Some(""),
+        );
+        assert_eq!(empty.model, MODEL);
     }
 
     #[test]

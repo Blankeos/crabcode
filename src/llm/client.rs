@@ -1471,7 +1471,9 @@ async fn maybe_apply_xai_oauth_overrides(
         }
     }
 
-    let overrides = super::xai_build::request_overrides(oauth_access).await;
+    let overrides =
+        super::xai_build::request_overrides(oauth_access, Some(request_config.model_name.as_str()))
+            .await;
     request_config.api_key = Some(overrides.api_key);
     request_config.base_url = overrides.base_url.to_string();
     request_config.model_name = overrides.model.to_string();

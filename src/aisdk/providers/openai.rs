@@ -425,6 +425,19 @@ impl Provider for OpenAI {
         let request_diagnostics =
             openai_request_diagnostics(self, &input, tools, &body, &request_headers);
 
+        if let Ok(dir) = std::env::var("CRABCODE_DUMP_REQUEST_DIR") {
+            let path = std::path::PathBuf::from(dir).join(format!(
+                "openai-responses-{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or_default()
+            ));
+            if let Ok(pretty) = serde_json::to_string_pretty(&body) {
+                let _ = std::fs::write(&path, pretty);
+            }
+        }
+
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(
                 OPENAI_STREAM_CONNECT_TIMEOUT_SECS,
@@ -2171,6 +2184,9 @@ fn openai_responses_user_content(user: &crate::message::UserMessage) -> serde_js
         serde_json::json!({
             "type": "input_image",
             "image_url": image.data_url,
+            // xAI Build / Responses requires `detail`; omitting it can yield
+            // successful responses that ignore the image (hallucinated vision).
+            "detail": "auto",
         })
     }));
     serde_json::Value::Array(parts)
@@ -2192,6 +2208,7 @@ fn openai_tool_output_content(tool: &crate::message::ToolOutputMessage) -> serde
         serde_json::json!({
             "type": "input_image",
             "image_url": image.data_url,
+            "detail": "auto",
         })
     }));
     serde_json::Value::Array(parts)
@@ -2638,6 +2655,29 @@ mod tests {
         assert_eq!(output[0]["type"], "input_text");
         assert_eq!(output[1]["type"], "input_image");
         assert_eq!(output[1]["image_url"], "data:image/png;base64,AAA");
+        assert_eq!(output[1]["detail"], "auto");
+    }
+
+    #[test]
+    fn serializes_user_image_input_with_detail_for_responses() {
+        let input = build_openai_messages(
+            &[Message::user_with_images(
+                "what is this?",
+                vec![crate::message::ImageContent {
+                    data_url: "data:image/png;base64,AAA".to_string(),
+                    media_type: "image/png".to_string(),
+                }],
+            )],
+            false,
+            false,
+        );
+
+        assert_eq!(input[0]["role"], "user");
+        let content = input[0]["content"].as_array().expect("content items");
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/png;base64,AAA");
+        assert_eq!(content[1]["detail"], "auto");
     }
 
     #[test]
