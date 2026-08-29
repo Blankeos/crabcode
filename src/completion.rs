@@ -9,6 +9,34 @@ use std::path::{Path, PathBuf};
 const RC_BEGIN: &str = "# >>> crabcode installer >>>";
 const RC_END: &str = "# <<< crabcode installer <<<";
 
+pub fn default_shell() -> Shell {
+    std::env::var("SHELL")
+        .ok()
+        .as_deref()
+        .map(shell_from_path)
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                Shell::PowerShell
+            } else {
+                Shell::Bash
+            }
+        })
+}
+
+fn shell_from_path(shell: &str) -> Shell {
+    match Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell)
+    {
+        "zsh" => Shell::Zsh,
+        "fish" => Shell::Fish,
+        "elvish" => Shell::Elvish,
+        "pwsh" | "powershell" => Shell::PowerShell,
+        _ => Shell::Bash,
+    }
+}
+
 pub fn generate_script(shell: Shell) -> Vec<u8> {
     let mut command = crate::Args::command();
     let mut output = Vec::new();
@@ -58,13 +86,13 @@ fn install_completion(shell: Shell) -> Result<()> {
 }
 
 fn script_path(shell: Shell) -> Result<PathBuf> {
-    let home = home_dir();
+    let data = data_home();
     Ok(match shell {
-        Shell::Bash => home.join(".local/share/bash-completion/completions/crabcode"),
-        Shell::Zsh => home.join(".local/share/zsh/site-functions/_crabcode"),
+        Shell::Bash => data.join("bash-completion/completions/crabcode"),
+        Shell::Zsh => data.join("zsh/site-functions/_crabcode"),
         Shell::Fish => fish_config_dir().join("completions/crabcode.fish"),
-        Shell::Elvish => home.join(".config/elvish/lib/crabcode.elv"),
-        Shell::PowerShell => home.join(".local/share/powershell/Completions/crabcode.ps1"),
+        Shell::Elvish => config_home().join("elvish/lib/crabcode.elv"),
+        Shell::PowerShell => data.join("powershell/Completions/crabcode.ps1"),
         _ => anyhow::bail!("unsupported shell {shell}"),
     })
 }
@@ -77,7 +105,7 @@ fn ensure_shell_hook(shell: Shell, script: &Path, aliases: &[String]) -> Result<
             Ok(Some(path))
         }
         Shell::Bash => {
-            let path = resolve_existing_path(&home_dir().join(".bashrc"));
+            let path = resolve_existing_path(&bash_rc_path());
             upsert_rc(
                 &path,
                 &format!(
@@ -89,7 +117,7 @@ fn ensure_shell_hook(shell: Shell, script: &Path, aliases: &[String]) -> Result<
         }
         Shell::Fish => Ok(None),
         Shell::Elvish => {
-            let path = home_dir().join(".config/elvish/rc.elv");
+            let path = config_home().join("elvish/rc.elv");
             upsert_rc(
                 &path,
                 &format!(
@@ -101,22 +129,29 @@ fn ensure_shell_hook(shell: Shell, script: &Path, aliases: &[String]) -> Result<
         }
         Shell::PowerShell => {
             let path = powershell_profile_path();
-            upsert_rc(
-                &path,
-                &format!(
-                    "{RC_BEGIN}\n. {script}\n{RC_END}\n",
-                    script = display_home_path(script)
-                ),
-            )?;
+            upsert_rc(&path, &powershell_installer_block(script))?;
             Ok(Some(path))
         }
         _ => Ok(None),
     }
 }
 
+fn powershell_installer_block(script: &Path) -> String {
+    format!("{RC_BEGIN}\n{}\n{RC_END}\n", powershell_source_line(script))
+}
+
+fn powershell_source_line(script: &Path) -> String {
+    let rendered = display_home_path(script);
+    if let Some(rest) = rendered.strip_prefix("~/") {
+        format!(". \"$HOME/{rest}\"")
+    } else {
+        format!(". \"{}\"", rendered.replace('"', "`\""))
+    }
+}
+
 fn zsh_installer_block(script: &Path, aliases: &[String]) -> String {
     let dir = script.parent().map_or_else(
-        || "~/.local/share/zsh/site-functions".to_string(),
+        || display_home_path(&data_home().join("zsh/site-functions")),
         display_home_path,
     );
     let mut names = vec!["crabcode".to_string()];
@@ -294,6 +329,21 @@ fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn xdg_dir(var: &str, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(fallback)
+}
+
+fn data_home() -> PathBuf {
+    xdg_dir("XDG_DATA_HOME", || home_dir().join(".local/share"))
+}
+
+fn config_home() -> PathBuf {
+    xdg_dir("XDG_CONFIG_HOME", || home_dir().join(".config"))
+}
+
 fn display_home_path(path: &Path) -> String {
     path.strip_prefix(home_dir())
         .map(|rest| format!("~/{}", rest.display()))
@@ -307,18 +357,26 @@ fn zshrc_path() -> PathBuf {
         .join(".zshrc")
 }
 
+fn bash_rc_path() -> PathBuf {
+    let home = home_dir();
+    let bashrc = home.join(".bashrc");
+    let profile = home.join(".bash_profile");
+    if bashrc.exists() || !profile.exists() {
+        bashrc
+    } else {
+        profile
+    }
+}
+
 fn fish_config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".config"))
-        .join("fish")
+    config_home().join("fish")
 }
 
 fn powershell_profile_path() -> PathBuf {
     if cfg!(windows) {
         home_dir().join("Documents/PowerShell/Microsoft.PowerShell_profile.ps1")
     } else {
-        home_dir().join(".config/powershell/Microsoft.PowerShell_profile.ps1")
+        config_home().join("powershell/Microsoft.PowerShell_profile.ps1")
     }
 }
 
@@ -376,22 +434,200 @@ mod tests {
 
     #[test]
     fn zsh_hook_appends_after_grok_and_is_idempotent() {
-        let script = Path::new("/Users/carlo/.local/share/zsh/site-functions/_crabcode");
+        let script = home_dir().join(".local/share/zsh/site-functions/_crabcode");
+        let dir = display_home_path(script.parent().unwrap());
         let rc = "alias cc=crabcode\n# >>> grok installer >>>\nfpath=(~/.grok/completions/zsh $fpath)\nautoload -Uz compinit && compinit -C\n# <<< grok installer <<<\n";
         let aliases = crabcode_aliases_from_rc(rc);
-        let once = upsert_marked_block(rc, &zsh_installer_block(script, &aliases));
+        let once = upsert_marked_block(rc, &zsh_installer_block(&script, &aliases));
         let grok_end = once.find("# <<< grok installer <<<").unwrap();
         let crab = once.find(RC_BEGIN).unwrap();
         assert!(crab > grok_end, "append after grok; do not nest");
-        assert!(once.contains("fpath=(~/.local/share/zsh/site-functions $fpath)"));
+        assert!(once.contains(&format!("fpath=({dir} $fpath)")));
         assert!(once.contains("autoload -Uz _crabcode"));
         assert!(once.contains("compdef _crabcode crabcode cc"));
         assert!(!once.contains("source "));
         assert_eq!(
             once,
-            upsert_marked_block(&once, &zsh_installer_block(script, &aliases))
+            upsert_marked_block(&once, &zsh_installer_block(&script, &aliases))
         );
         assert_eq!(once.matches("autoload -Uz compinit").count(), 1);
+    }
+
+    fn old_inline_dump() -> String {
+        concat!(
+            "#compdef crabcode\n",
+            "\n",
+            "_crabcode() {\n",
+            "    echo dummy\n",
+            "}\n",
+            "\n",
+            "if [ \"$funcstack[1]\" = \"_crabcode\" ]; then\n",
+            "    _crabcode \"$@\"\n",
+            "else\n",
+            "    compdef _crabcode crabcode\n",
+            "fi\n",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn strip_inline_usage_completion_removes_old_zshrc_dump() {
+        let rc = format!(
+            "export KEEP_BEFORE=1\n\n{}\nexport KEEP_AFTER=1\n",
+            old_inline_dump()
+        );
+        let stripped = strip_inline_usage_completion(&rc);
+        assert!(stripped.contains("export KEEP_BEFORE=1"));
+        assert!(stripped.contains("export KEEP_AFTER=1"));
+        assert!(!stripped.contains("#compdef crabcode"));
+        assert!(!stripped.contains("compdef _crabcode"));
+        assert!(!stripped.contains("_crabcode()"));
+    }
+
+    #[test]
+    fn strip_inline_usage_completion_removes_usage_argv_header() {
+        let rc = concat!(
+            "export KEEP=1\n",
+            "# @generated by usage-argv for `crabcode`.\n",
+            "_crabcode() { : }\n",
+            "compdef _crabcode crabcode\n",
+            "export AFTER=1\n",
+        );
+        let stripped = strip_inline_usage_completion(rc);
+        assert!(stripped.contains("export KEEP=1"));
+        assert!(stripped.contains("export AFTER=1"));
+        assert!(!stripped.contains("usage-argv"));
+        assert!(!stripped.contains("compdef _crabcode"));
+    }
+
+    #[test]
+    fn strip_inline_usage_completion_is_noop_without_end_marker() {
+        let rc = "export FOO=1\n#compdef crabcode\nexport BAR=2\ncompdef _git git\n";
+        assert_eq!(strip_inline_usage_completion(rc), rc);
+    }
+
+    #[test]
+    fn strip_inline_usage_completion_does_not_match_installer_hook() {
+        let rc = concat!(
+            "alias cc=crabcode\n",
+            "# >>> crabcode installer >>>\n",
+            "fpath=(~/.local/share/zsh/site-functions $fpath)\n",
+            "(( $+functions[compdef] )) && autoload -Uz _crabcode && compdef _crabcode crabcode cc\n",
+            "# <<< crabcode installer <<<\n",
+        );
+        assert_eq!(strip_inline_usage_completion(rc), rc);
+    }
+
+    #[test]
+    fn upsert_strips_old_dump_then_appends_after_grok() {
+        let script = home_dir().join(".local/share/zsh/site-functions/_crabcode");
+        let rc = format!(
+            "export PATH=/usr/bin\n{}# >>> grok installer >>>\ncompinit\n# <<< grok installer <<<\n",
+            old_inline_dump()
+        );
+        let once = upsert_marked_block(&rc, &zsh_installer_block(&script, &[]));
+        assert!(once.contains("export PATH=/usr/bin"));
+        assert!(once.contains("# >>> grok installer >>>"));
+        assert!(!once.contains("#compdef crabcode"));
+        let grok_end = once.find("# <<< grok installer <<<").unwrap();
+        assert!(once.find(RC_BEGIN).unwrap() > grok_end);
+    }
+
+    #[test]
+    fn powershell_hook_dotsources_home() {
+        let script = home_dir().join(".local/share/powershell/Completions/crabcode.ps1");
+        let line = powershell_source_line(&script);
+        assert!(
+            line.starts_with(". \"$HOME/"),
+            "pwsh does not expand ~: {line}"
+        );
+        assert!(line.contains("powershell/Completions/crabcode.ps1"));
+        let block = powershell_installer_block(&script);
+        assert!(block.contains(RC_BEGIN));
+        assert!(block.contains(&line));
+    }
+
+    #[test]
+    fn default_shell_from_path() {
+        assert_eq!(shell_from_path("/bin/zsh"), Shell::Zsh);
+        assert_eq!(shell_from_path("/usr/bin/fish"), Shell::Fish);
+        assert_eq!(shell_from_path("/opt/homebrew/bin/elvish"), Shell::Elvish);
+        assert_eq!(shell_from_path("/usr/local/bin/pwsh"), Shell::PowerShell);
+        assert_eq!(shell_from_path("powershell"), Shell::PowerShell);
+        assert_eq!(shell_from_path("/bin/bash"), Shell::Bash);
+        assert_eq!(shell_from_path("/bin/sh"), Shell::Bash);
+        assert_eq!(shell_from_path(""), Shell::Bash);
+    }
+
+    #[test]
+    fn zsh_completion_subcommand_offers_shells_after_flags() {
+        let script = String::from_utf8(generate_script(Shell::Zsh)).unwrap();
+        let start = script
+            .find("(completion)\n")
+            .expect("completion subcommand case");
+        let body = &script[start..];
+        let end = body.find("\n;;").expect("end of completion case");
+        let spec = &body[..end];
+        let install = spec.find("'--install[").expect("--install flag");
+        let shells = spec
+            .find("bash elvish fish powershell zsh")
+            .expect("shell values");
+        assert!(
+            install < shells,
+            "empty Tab should offer flags before the shell positional"
+        );
+        assert!(script.contains("'completion:Generate or install shell completions'"));
+    }
+
+    #[test]
+    fn zsh_tab_smoke_lists_completion_and_parses() {
+        let Ok(which) = std::process::Command::new("zsh")
+            .args(["-c", "echo ok"])
+            .output()
+        else {
+            return;
+        };
+        if !which.status.success() {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("crabcode-comp-smoke-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("_crabcode");
+        std::fs::write(&path, generate_script(Shell::Zsh)).unwrap();
+
+        let parse = std::process::Command::new("zsh")
+            .args(["-n", "--", path.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(parse.success(), "generated zsh script failed zsh -n");
+
+        let quoted = path.display().to_string().replace('\'', "'\\''");
+        let output = std::process::Command::new("zsh")
+            .args([
+                "--no-rcs",
+                "-c",
+                &format!(
+                    "compdef() {{ : }}\nsource '{quoted}'\n_describe() {{ print -l -- \"${{commands[@]}}\" }}\n_crabcode_commands\n"
+                ),
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "zsh smoke failed: {}\n{stdout}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("completion:Generate or install shell completions"),
+            "Tab command list missing completion: {stdout}"
+        );
+        assert!(
+            stdout.contains("models:List available models"),
+            "Tab command list missing models: {stdout}"
+        );
     }
 
     #[test]

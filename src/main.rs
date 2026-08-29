@@ -755,9 +755,9 @@ enum Command {
 
     /// Generate or install shell completions
     Completion {
-        /// Target shell
+        /// Target shell. Defaults from `$SHELL`.
         #[arg(value_enum)]
-        shell: Shell,
+        shell: Option<Shell>,
         /// Write the script where the shell autoloads it
         #[arg(long)]
         install: bool,
@@ -982,7 +982,10 @@ async fn main() -> Result<()> {
             return crate::acp::run(cwd.clone()).await;
         }
         Some(Command::Completion { shell, install }) => {
-            crate::completion::run(*shell, *install)?;
+            crate::completion::run(
+                shell.unwrap_or_else(crate::completion::default_shell),
+                *install,
+            )?;
             return Ok(());
         }
         Some(Command::Serve { bind, pair_code }) => {
@@ -1323,8 +1326,20 @@ mod tests {
         let args = Args::try_parse_from(["crabcode", "completion", "zsh", "--install"]).unwrap();
         match args.command {
             Some(Command::Completion { shell, install }) => {
-                assert_eq!(shell, Shell::Zsh);
+                assert_eq!(shell, Some(Shell::Zsh));
                 assert!(install);
+            }
+            other => panic!("expected completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_completion_without_shell() {
+        let args = Args::try_parse_from(["crabcode", "completion"]).unwrap();
+        match args.command {
+            Some(Command::Completion { shell, install }) => {
+                assert_eq!(shell, None);
+                assert!(!install);
             }
             other => panic!("expected completion, got {other:?}"),
         }
