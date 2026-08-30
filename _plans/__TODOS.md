@@ -494,3 +494,5 @@ I think this is how the TUI works already anyway right?
 - [ ] /btw command
 
 - [x] wanna add tinyfish and monid (free search apis)
+
+- [x] Bug: Fix the questions.. There's too much gap between 1-3 choices and the "Type your own answer". Because we always want type your own to be visible. Just amke them in the same container, no justification in the middle and if overflowing, just make it scroll the entire question dialog.
