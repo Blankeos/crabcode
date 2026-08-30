@@ -221,324 +221,196 @@ pub async fn stream_with_tools<P: Provider>(
             let mut accumulated_text = String::new();
             let mut accumulated_reasoning = String::new();
             let mut reasoning_replay_items: Vec<ReasoningReplayItem> = Vec::new();
-            let mut server_doom_loop = false;
+            let mut server_doom_loop;
             let mut saw_terminal_event = false;
             let mut response_end_turn = None;
             let mut provider_finish_reason = None;
             let mut last_assistant_message_phase = None;
             let mut current_assistant_message_phase = None;
             let mut emitted_non_replayable_output = false;
+            let mut had_provider_tool_call = false;
 
-            loop {
-                let next_chunk = if let Some(token) = cancel_token.as_ref() {
-                    tokio::select! {
-                        _ = token.cancelled() => {
-                            let err = "Streaming cancelled by user".to_string();
-                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                            *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                            return;
+            'resample: loop {
+                server_doom_loop = false;
+                loop {
+                    let next_chunk = if let Some(token) = cancel_token.as_ref() {
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                let err = "Streaming cancelled by user".to_string();
+                                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                return;
+                            }
+                            chunk = stream.next() => chunk,
                         }
-                        chunk = stream.next() => chunk,
-                    }
-                } else {
-                    stream.next().await
-                };
-                let Some(chunk) = next_chunk else { break };
-                match chunk {
-                    Ok(ChunkType::AssistantMessagePhase { phase }) => {
-                        current_assistant_message_phase = phase;
-                        last_assistant_message_phase = phase;
-                        let label = message_phase_label(phase);
-                        let _ = tx_loop.send(ChunkType::Metadata(format!(
-                            "assistant_message_phase={label}"
-                        )));
-                    }
-                    Ok(ChunkType::ResponseCompleted {
-                        end_turn,
-                        reasoning_items,
-                    }) => {
-                        saw_terminal_event = true;
-                        response_end_turn = end_turn;
-                        for item in reasoning_items {
-                            merge_reasoning_replay_item(&mut reasoning_replay_items, item);
-                        }
-                        let _ = tx_loop.send(ChunkType::Metadata(format!(
-                            "response.completed end_turn={end_turn:?} reasoning_items={}",
-                            reasoning_replay_items.len()
-                        )));
-                    }
-                    Ok(ChunkType::ReasoningItem(item)) => {
-                        let id = item.id.clone().unwrap_or_default();
-                        let encrypted_bytes = item
-                            .encrypted_content
-                            .as_ref()
-                            .map(String::len)
-                            .unwrap_or(0);
-                        merge_reasoning_replay_item(&mut reasoning_replay_items, item);
-                        let _ = tx_loop.send(ChunkType::Metadata(format!(
-                            "reasoning_item id={id} encrypted_bytes={encrypted_bytes}"
-                        )));
-                    }
-                    Ok(ChunkType::Text(text)) => {
-                        emitted_non_replayable_output = true;
-                        last_assistant_message_phase = current_assistant_message_phase;
-                        accumulated_text.push_str(&text);
-                        let _ = tx_loop.send(ChunkType::Text(text));
-                    }
-                    Ok(ChunkType::Reasoning(reasoning)) => {
-                        emitted_non_replayable_output = true;
-                        accumulated_reasoning.push_str(&reasoning);
-                        let _ = tx_loop.send(ChunkType::Reasoning(reasoning));
-                    }
-                    Ok(ChunkType::ToolCall(json_str)) => {
-                        emitted_non_replayable_output = true;
-                        has_tool_call = true;
-                        let _ = tx_loop.send(ChunkType::ToolCall(json_str.clone()));
-                        if let Err(err) = tool_call_accumulator.ingest(&json_str) {
-                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                            *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                            return;
-                        }
-                    }
-                    Ok(ChunkType::ProviderToolCall(payload)) => {
-                        // Hosted / server-side tools: forward for UI only.
-                        emitted_non_replayable_output = true;
-                        let _ = tx_loop.send(ChunkType::ProviderToolCall(payload));
-                    }
-                    Ok(ChunkType::End { reason }) => {
-                        // Processed internally — NOT forwarded to tx_loop.
-                        // Forwarding End would cause relay_stream_to_sender
-                        // to return Ended prematurely, dropping the channel
-                        // before tool execution / subsequent steps.
-                        saw_terminal_event = true;
-                        if let Some(reason) = reason {
-                            let label = reason.label().to_string();
-                            provider_finish_reason = Some(reason);
+                    } else {
+                        stream.next().await
+                    };
+                    let Some(chunk) = next_chunk else { break };
+                    match chunk {
+                        Ok(ChunkType::AssistantMessagePhase { phase }) => {
+                            current_assistant_message_phase = phase;
+                            last_assistant_message_phase = phase;
+                            let label = message_phase_label(phase);
                             let _ = tx_loop.send(ChunkType::Metadata(format!(
-                                "provider_finish_reason={label}"
+                                "assistant_message_phase={label}"
                             )));
                         }
-                    }
-                    Ok(ChunkType::Metadata(msg)) => {
-                        if doom_loop_metadata_is_confident(&msg) {
-                            server_doom_loop = true;
+                        Ok(ChunkType::ResponseCompleted {
+                            end_turn,
+                            reasoning_items,
+                            doom_loop_triggers,
+                        }) => {
+                            saw_terminal_event = true;
+                            response_end_turn = end_turn;
+                            for item in reasoning_items {
+                                merge_reasoning_replay_item(&mut reasoning_replay_items, item);
+                            }
+                            if !doom_loop_triggers.is_empty() {
+                                if doom_loop_triggers
+                                    .iter()
+                                    .any(|trigger| doom_loop_trigger_is_confident(trigger))
+                                {
+                                    server_doom_loop = true;
+                                }
+                                let _ = tx_loop.send(ChunkType::Metadata(format!(
+                                    "doom_loop_check triggers={}",
+                                    doom_loop_triggers.join(",")
+                                )));
+                            }
+                            let _ = tx_loop.send(ChunkType::Metadata(format!(
+                                "response.completed end_turn={end_turn:?} reasoning_items={}",
+                                reasoning_replay_items.len()
+                            )));
                         }
-                        let _ = tx_loop.send(ChunkType::Metadata(msg));
-                    }
-                    Ok(ChunkType::Warning(msg)) => {
-                        let _ = tx_loop.send(ChunkType::Warning(msg));
-                    }
-                    Ok(ChunkType::Retry(status)) => {
-                        let _ = tx_loop.send(ChunkType::Retry(status));
-                    }
-                    Ok(ChunkType::StreamRollback { .. }) => {}
-                    Ok(ChunkType::RetryableFailure(retry_error)) => {
-                        if attempt <= PROVIDER_STEP_MAX_RETRIES {
-                            rollback_provider_attempt(
-                                &tx_loop,
-                                &mut accumulated_text,
-                                &mut accumulated_reasoning,
-                                &mut reasoning_replay_items,
-                                &mut has_tool_call,
-                                &mut tool_call_accumulator,
-                                &mut saw_terminal_event,
-                                &mut response_end_turn,
-                                &mut provider_finish_reason,
-                                &mut last_assistant_message_phase,
-                                &mut current_assistant_message_phase,
-                                &mut emitted_non_replayable_output,
-                            );
-                            if !emit_retry_and_sleep(
-                                &tx_loop,
-                                step_idx,
-                                attempt,
-                                &retry_error,
-                                cancel_token.as_ref(),
-                            )
-                            .await
-                            {
-                                let err = "Streaming cancelled by user".to_string();
+                        Ok(ChunkType::ReasoningItem(item)) => {
+                            let id = item.id.clone().unwrap_or_default();
+                            let encrypted_bytes = item
+                                .encrypted_content
+                                .as_ref()
+                                .map(String::len)
+                                .unwrap_or(0);
+                            merge_reasoning_replay_item(&mut reasoning_replay_items, item);
+                            let _ = tx_loop.send(ChunkType::Metadata(format!(
+                                "reasoning_item id={id} encrypted_bytes={encrypted_bytes}"
+                            )));
+                        }
+                        Ok(ChunkType::Text(text)) => {
+                            emitted_non_replayable_output = true;
+                            last_assistant_message_phase = current_assistant_message_phase;
+                            accumulated_text.push_str(&text);
+                            let _ = tx_loop.send(ChunkType::Text(text));
+                        }
+                        Ok(ChunkType::Reasoning(reasoning)) => {
+                            emitted_non_replayable_output = true;
+                            accumulated_reasoning.push_str(&reasoning);
+                            let _ = tx_loop.send(ChunkType::Reasoning(reasoning));
+                        }
+                        Ok(ChunkType::ToolCall(json_str)) => {
+                            emitted_non_replayable_output = true;
+                            has_tool_call = true;
+                            let _ = tx_loop.send(ChunkType::ToolCall(json_str.clone()));
+                            if let Err(err) = tool_call_accumulator.ingest(&json_str) {
                                 let _ = tx_loop.send(ChunkType::Failed(err.clone()));
                                 *stop_reason_arc.lock().await = Some(StopReason::Error(err));
                                 return;
                             }
-                            attempt += 1;
-                            stream = match open_provider_stream_with_retries(
-                                &provider_clone,
-                                &current_messages,
-                                &tools,
-                                &headers,
-                                &tx_loop,
-                                step_idx,
-                                &mut attempt,
-                                cancel_token.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok(stream) => stream,
-                                Err(error) => {
-                                    let err = provider_step_error_message(
-                                        step_idx,
-                                        current_messages.len(),
-                                        tools.len(),
-                                        &step_summary,
-                                        error,
-                                    );
+                        }
+                        Ok(ChunkType::ProviderToolCall(payload)) => {
+                            // Hosted / server-side tools: forward for UI only.
+                            emitted_non_replayable_output = true;
+                            had_provider_tool_call = true;
+                            let _ = tx_loop.send(ChunkType::ProviderToolCall(payload));
+                        }
+                        Ok(ChunkType::End { reason }) => {
+                            // Processed internally — NOT forwarded to tx_loop.
+                            // Forwarding End would cause relay_stream_to_sender
+                            // to return Ended prematurely, dropping the channel
+                            // before tool execution / subsequent steps.
+                            saw_terminal_event = true;
+                            if let Some(reason) = reason {
+                                let label = reason.label().to_string();
+                                provider_finish_reason = Some(reason);
+                                let _ = tx_loop.send(ChunkType::Metadata(format!(
+                                    "provider_finish_reason={label}"
+                                )));
+                            }
+                        }
+                        Ok(ChunkType::Metadata(msg)) => {
+                            if doom_loop_metadata_is_confident(&msg) {
+                                server_doom_loop = true;
+                            }
+                            let _ = tx_loop.send(ChunkType::Metadata(msg));
+                        }
+                        Ok(ChunkType::Warning(msg)) => {
+                            let _ = tx_loop.send(ChunkType::Warning(msg));
+                        }
+                        Ok(ChunkType::Retry(status)) => {
+                            let _ = tx_loop.send(ChunkType::Retry(status));
+                        }
+                        Ok(ChunkType::StreamRollback { .. }) => {}
+                        Ok(ChunkType::RetryableFailure(retry_error)) => {
+                            if attempt <= PROVIDER_STEP_MAX_RETRIES {
+                                rollback_provider_attempt(
+                                    &tx_loop,
+                                    &mut accumulated_text,
+                                    &mut accumulated_reasoning,
+                                    &mut reasoning_replay_items,
+                                    &mut has_tool_call,
+                                    &mut tool_call_accumulator,
+                                    &mut saw_terminal_event,
+                                    &mut response_end_turn,
+                                    &mut provider_finish_reason,
+                                    &mut last_assistant_message_phase,
+                                    &mut current_assistant_message_phase,
+                                    &mut emitted_non_replayable_output,
+                                    &mut had_provider_tool_call,
+                                );
+                                if !emit_retry_and_sleep(
+                                    &tx_loop,
+                                    step_idx,
+                                    attempt,
+                                    &retry_error,
+                                    cancel_token.as_ref(),
+                                )
+                                .await
+                                {
+                                    let err = "Streaming cancelled by user".to_string();
                                     let _ = tx_loop.send(ChunkType::Failed(err.clone()));
                                     *stop_reason_arc.lock().await = Some(StopReason::Error(err));
                                     return;
                                 }
-                            };
-                            continue;
-                        }
+                                attempt += 1;
+                                stream = match open_provider_stream_with_retries(
+                                    &provider_clone,
+                                    &current_messages,
+                                    &tools,
+                                    &headers,
+                                    &tx_loop,
+                                    step_idx,
+                                    &mut attempt,
+                                    cancel_token.as_ref(),
+                                )
+                                .await
+                                {
+                                    Ok(stream) => stream,
+                                    Err(error) => {
+                                        let err = provider_step_error_message(
+                                            step_idx,
+                                            current_messages.len(),
+                                            tools.len(),
+                                            &step_summary,
+                                            error,
+                                        );
+                                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                        *stop_reason_arc.lock().await =
+                                            Some(StopReason::Error(err));
+                                        return;
+                                    }
+                                };
+                                continue;
+                            }
 
-                        let err = format!(
-                            "Provider stream failed after {} retries: {}",
-                            PROVIDER_STEP_MAX_RETRIES, retry_error.message
-                        );
-                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                        *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                        return;
-                    }
-                    Ok(ChunkType::Incomplete(msg)) => {
-                        let err = format!("Provider response incomplete: {}", msg);
-                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                        *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                        return;
-                    }
-                    Ok(ChunkType::Failed(err)) => {
-                        let retry_error = RetryError::from_message(err.clone());
-                        if crate::retry::retryable(&retry_error)
-                            && attempt <= PROVIDER_STEP_MAX_RETRIES
-                        {
-                            rollback_provider_attempt(
-                                &tx_loop,
-                                &mut accumulated_text,
-                                &mut accumulated_reasoning,
-                                &mut reasoning_replay_items,
-                                &mut has_tool_call,
-                                &mut tool_call_accumulator,
-                                &mut saw_terminal_event,
-                                &mut response_end_turn,
-                                &mut provider_finish_reason,
-                                &mut last_assistant_message_phase,
-                                &mut current_assistant_message_phase,
-                                &mut emitted_non_replayable_output,
-                            );
-                            if !emit_retry_and_sleep(
-                                &tx_loop,
-                                step_idx,
-                                attempt,
-                                &retry_error,
-                                cancel_token.as_ref(),
-                            )
-                            .await
-                            {
-                                let err = "Streaming cancelled by user".to_string();
-                                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                                return;
-                            }
-                            attempt += 1;
-                            stream = match open_provider_stream_with_retries(
-                                &provider_clone,
-                                &current_messages,
-                                &tools,
-                                &headers,
-                                &tx_loop,
-                                step_idx,
-                                &mut attempt,
-                                cancel_token.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok(stream) => stream,
-                                Err(error) => {
-                                    let err = provider_step_error_message(
-                                        step_idx,
-                                        current_messages.len(),
-                                        tools.len(),
-                                        &step_summary,
-                                        error,
-                                    );
-                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                                    return;
-                                }
-                            };
-                            continue;
-                        }
-
-                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                        *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                        return;
-                    }
-                    Ok(ChunkType::Start) => {
-                        let _ = tx_loop.send(ChunkType::Start);
-                    }
-                    Ok(ChunkType::NotSupported(msg)) => {
-                        let _ = tx_loop.send(ChunkType::NotSupported(msg));
-                    }
-                    Err(e) => match retry_error_from_provider_error(e) {
-                        Ok(retry_error) if attempt <= PROVIDER_STEP_MAX_RETRIES => {
-                            rollback_provider_attempt(
-                                &tx_loop,
-                                &mut accumulated_text,
-                                &mut accumulated_reasoning,
-                                &mut reasoning_replay_items,
-                                &mut has_tool_call,
-                                &mut tool_call_accumulator,
-                                &mut saw_terminal_event,
-                                &mut response_end_turn,
-                                &mut provider_finish_reason,
-                                &mut last_assistant_message_phase,
-                                &mut current_assistant_message_phase,
-                                &mut emitted_non_replayable_output,
-                            );
-                            if !emit_retry_and_sleep(
-                                &tx_loop,
-                                step_idx,
-                                attempt,
-                                &retry_error,
-                                cancel_token.as_ref(),
-                            )
-                            .await
-                            {
-                                let err = "Streaming cancelled by user".to_string();
-                                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                                return;
-                            }
-                            attempt += 1;
-                            stream = match open_provider_stream_with_retries(
-                                &provider_clone,
-                                &current_messages,
-                                &tools,
-                                &headers,
-                                &tx_loop,
-                                step_idx,
-                                &mut attempt,
-                                cancel_token.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok(stream) => stream,
-                                Err(error) => {
-                                    let err = provider_step_error_message(
-                                        step_idx,
-                                        current_messages.len(),
-                                        tools.len(),
-                                        &step_summary,
-                                        error,
-                                    );
-                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                                    return;
-                                }
-                            };
-                            continue;
-                        }
-                        Ok(retry_error) => {
                             let err = format!(
                                 "Provider stream failed after {} retries: {}",
                                 PROVIDER_STEP_MAX_RETRIES, retry_error.message
@@ -547,21 +419,329 @@ pub async fn stream_with_tools<P: Provider>(
                             *stop_reason_arc.lock().await = Some(StopReason::Error(err));
                             return;
                         }
-                        Err(error) => {
-                            let err = error.to_string();
+                        Ok(ChunkType::Incomplete(msg)) => {
+                            let err = format!("Provider response incomplete: {}", msg);
                             let _ = tx_loop.send(ChunkType::Failed(err.clone()));
                             *stop_reason_arc.lock().await = Some(StopReason::Error(err));
                             return;
                         }
-                    },
-                }
-            }
+                        Ok(ChunkType::Failed(err)) => {
+                            let retry_error = RetryError::from_message(err.clone());
+                            if crate::retry::retryable(&retry_error)
+                                && attempt <= PROVIDER_STEP_MAX_RETRIES
+                            {
+                                rollback_provider_attempt(
+                                    &tx_loop,
+                                    &mut accumulated_text,
+                                    &mut accumulated_reasoning,
+                                    &mut reasoning_replay_items,
+                                    &mut has_tool_call,
+                                    &mut tool_call_accumulator,
+                                    &mut saw_terminal_event,
+                                    &mut response_end_turn,
+                                    &mut provider_finish_reason,
+                                    &mut last_assistant_message_phase,
+                                    &mut current_assistant_message_phase,
+                                    &mut emitted_non_replayable_output,
+                                    &mut had_provider_tool_call,
+                                );
+                                if !emit_retry_and_sleep(
+                                    &tx_loop,
+                                    step_idx,
+                                    attempt,
+                                    &retry_error,
+                                    cancel_token.as_ref(),
+                                )
+                                .await
+                                {
+                                    let err = "Streaming cancelled by user".to_string();
+                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                    return;
+                                }
+                                attempt += 1;
+                                stream = match open_provider_stream_with_retries(
+                                    &provider_clone,
+                                    &current_messages,
+                                    &tools,
+                                    &headers,
+                                    &tx_loop,
+                                    step_idx,
+                                    &mut attempt,
+                                    cancel_token.as_ref(),
+                                )
+                                .await
+                                {
+                                    Ok(stream) => stream,
+                                    Err(error) => {
+                                        let err = provider_step_error_message(
+                                            step_idx,
+                                            current_messages.len(),
+                                            tools.len(),
+                                            &step_summary,
+                                            error,
+                                        );
+                                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                        *stop_reason_arc.lock().await =
+                                            Some(StopReason::Error(err));
+                                        return;
+                                    }
+                                };
+                                continue;
+                            }
 
-            if !saw_terminal_event {
-                let err = "Provider stream ended without a terminal completion event".to_string();
-                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
-                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
-                return;
+                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                            *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                            return;
+                        }
+                        Ok(ChunkType::Start) => {
+                            let _ = tx_loop.send(ChunkType::Start);
+                        }
+                        Ok(ChunkType::NotSupported(msg)) => {
+                            let _ = tx_loop.send(ChunkType::NotSupported(msg));
+                        }
+                        Err(e) => match retry_error_from_provider_error(e) {
+                            Ok(retry_error) if attempt <= PROVIDER_STEP_MAX_RETRIES => {
+                                rollback_provider_attempt(
+                                    &tx_loop,
+                                    &mut accumulated_text,
+                                    &mut accumulated_reasoning,
+                                    &mut reasoning_replay_items,
+                                    &mut has_tool_call,
+                                    &mut tool_call_accumulator,
+                                    &mut saw_terminal_event,
+                                    &mut response_end_turn,
+                                    &mut provider_finish_reason,
+                                    &mut last_assistant_message_phase,
+                                    &mut current_assistant_message_phase,
+                                    &mut emitted_non_replayable_output,
+                                    &mut had_provider_tool_call,
+                                );
+                                if !emit_retry_and_sleep(
+                                    &tx_loop,
+                                    step_idx,
+                                    attempt,
+                                    &retry_error,
+                                    cancel_token.as_ref(),
+                                )
+                                .await
+                                {
+                                    let err = "Streaming cancelled by user".to_string();
+                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                    return;
+                                }
+                                attempt += 1;
+                                stream = match open_provider_stream_with_retries(
+                                    &provider_clone,
+                                    &current_messages,
+                                    &tools,
+                                    &headers,
+                                    &tx_loop,
+                                    step_idx,
+                                    &mut attempt,
+                                    cancel_token.as_ref(),
+                                )
+                                .await
+                                {
+                                    Ok(stream) => stream,
+                                    Err(error) => {
+                                        let err = provider_step_error_message(
+                                            step_idx,
+                                            current_messages.len(),
+                                            tools.len(),
+                                            &step_summary,
+                                            error,
+                                        );
+                                        let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                        *stop_reason_arc.lock().await =
+                                            Some(StopReason::Error(err));
+                                        return;
+                                    }
+                                };
+                                continue;
+                            }
+                            Ok(retry_error) => {
+                                let err = format!(
+                                    "Provider stream failed after {} retries: {}",
+                                    PROVIDER_STEP_MAX_RETRIES, retry_error.message
+                                );
+                                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                return;
+                            }
+                            Err(error) => {
+                                let err = error.to_string();
+                                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                return;
+                            }
+                        },
+                    }
+                }
+
+                if !saw_terminal_event {
+                    let err =
+                        "Provider stream ended without a terminal completion event".to_string();
+                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                    return;
+                }
+
+                // Grok Build sampler: a completed response with no visible
+                // content and no tool calls is Empty (reasoning-only or
+                // no_visible_content). Retry the same request; do not accept
+                // it as a finished turn or append it to the conversation.
+                // `.devrefs/.../xai-grok-sampler/src/actor/request_task.rs`
+                // `AttemptOutcome::Empty` + `ConversationResponse::empty_reason`.
+                // Content-filter empties are deterministic and must not retry.
+                if !has_tool_call
+                    && !had_provider_tool_call
+                    && accumulated_text.trim().is_empty()
+                    && !matches!(provider_finish_reason, Some(FinishReason::ContentFilter))
+                {
+                    let had_reasoning = !accumulated_reasoning.is_empty()
+                        || reasoning_replay_items.iter().any(|item| !item.is_empty());
+                    let empty_reason = if had_reasoning {
+                        "reasoning_only"
+                    } else {
+                        "no_visible_content"
+                    };
+                    let _ = tx_loop.send(ChunkType::Metadata(format!(
+                    "empty_response reason={empty_reason} had_reasoning={had_reasoning} content_len=0 tool_call_count=0 attempt={attempt}"
+                )));
+                    // Grok Build: doom outranks empty. A reasoning-only
+                    // sample with tail_repetition@thinking is resampled
+                    // with the recovery reminder, not the same request.
+                    if server_doom_loop {
+                        if let Some(reminder_text) = doom_loop.begin_recovery() {
+                            let _ = tx_loop.send(ChunkType::Metadata(format!(
+                                "doom_loop_detected step={} recoveries={} empty_reason={empty_reason}",
+                                step_idx, doom_loop.recoveries,
+                            )));
+                            rollback_provider_attempt(
+                                &tx_loop,
+                                &mut accumulated_text,
+                                &mut accumulated_reasoning,
+                                &mut reasoning_replay_items,
+                                &mut has_tool_call,
+                                &mut tool_call_accumulator,
+                                &mut saw_terminal_event,
+                                &mut response_end_turn,
+                                &mut provider_finish_reason,
+                                &mut last_assistant_message_phase,
+                                &mut current_assistant_message_phase,
+                                &mut emitted_non_replayable_output,
+                                &mut had_provider_tool_call,
+                            );
+                            if current_messages
+                                .last()
+                                .is_some_and(is_injected_system_reminder)
+                            {
+                                current_messages.pop();
+                            }
+                            current_messages.push(Message::user(reminder_text));
+                            attempt += 1;
+                            stream = match open_provider_stream_with_retries(
+                                &provider_clone,
+                                &current_messages,
+                                &tools,
+                                &headers,
+                                &tx_loop,
+                                step_idx,
+                                &mut attempt,
+                                cancel_token.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(stream) => stream,
+                                Err(error) => {
+                                    let err = provider_step_error_message(
+                                        step_idx,
+                                        current_messages.len(),
+                                        tools.len(),
+                                        &step_summary,
+                                        error,
+                                    );
+                                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                    return;
+                                }
+                            };
+                            continue 'resample;
+                        }
+                    }
+                    if attempt <= PROVIDER_STEP_MAX_RETRIES {
+                        let retry_error =
+                            RetryError::from_message(format!("empty response: {empty_reason}"));
+                        rollback_provider_attempt(
+                            &tx_loop,
+                            &mut accumulated_text,
+                            &mut accumulated_reasoning,
+                            &mut reasoning_replay_items,
+                            &mut has_tool_call,
+                            &mut tool_call_accumulator,
+                            &mut saw_terminal_event,
+                            &mut response_end_turn,
+                            &mut provider_finish_reason,
+                            &mut last_assistant_message_phase,
+                            &mut current_assistant_message_phase,
+                            &mut emitted_non_replayable_output,
+                            &mut had_provider_tool_call,
+                        );
+                        if !emit_retry_and_sleep(
+                            &tx_loop,
+                            step_idx,
+                            attempt,
+                            &retry_error,
+                            cancel_token.as_ref(),
+                        )
+                        .await
+                        {
+                            let err = "Streaming cancelled by user".to_string();
+                            let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                            *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                            return;
+                        }
+                        attempt += 1;
+                        stream = match open_provider_stream_with_retries(
+                            &provider_clone,
+                            &current_messages,
+                            &tools,
+                            &headers,
+                            &tx_loop,
+                            step_idx,
+                            &mut attempt,
+                            cancel_token.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(stream) => stream,
+                            Err(error) => {
+                                let err = provider_step_error_message(
+                                    step_idx,
+                                    current_messages.len(),
+                                    tools.len(),
+                                    &step_summary,
+                                    error,
+                                );
+                                let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                                *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                                return;
+                            }
+                        };
+                        continue 'resample;
+                    }
+                    let err = format!(
+                        "Provider stream failed after {} retries: empty response: {empty_reason}",
+                        PROVIDER_STEP_MAX_RETRIES
+                    );
+                    let _ = tx_loop.send(ChunkType::Failed(err.clone()));
+                    *stop_reason_arc.lock().await = Some(StopReason::Error(err));
+                    return;
+                }
+
+                break 'resample;
             }
 
             // Responses order: reasoning siblings, then assistant text (if any),
@@ -840,6 +1020,7 @@ fn rollback_provider_attempt(
     last_assistant_message_phase: &mut Option<MessagePhase>,
     current_assistant_message_phase: &mut Option<MessagePhase>,
     emitted_non_replayable_output: &mut bool,
+    had_provider_tool_call: &mut bool,
 ) {
     if !accumulated_text.is_empty() || !accumulated_reasoning.is_empty() {
         let _ = tx.send(ChunkType::StreamRollback {
@@ -859,6 +1040,7 @@ fn rollback_provider_attempt(
     *last_assistant_message_phase = None;
     *current_assistant_message_phase = None;
     *emitted_non_replayable_output = false;
+    *had_provider_tool_call = false;
 }
 
 /// Prune older tool outputs in the live multi-step transcript before each
@@ -2120,6 +2302,37 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
+    struct ReasoningOnlyCompletedProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ReasoningOnlyDoomLoopProvider {
+        requests: Arc<AtomicUsize>,
+        saw_reminder: Arc<AtomicBool>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct NoVisibleContentCompletedProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct AlwaysEmptyCompletedProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ContentFilterEmptyProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct HostedToolOnlyCompletedProvider {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone)]
     struct RecoveringToolFailureProvider {
         requests: Arc<AtomicUsize>,
         observed_follow_up: Arc<Mutex<Option<String>>>,
@@ -2644,6 +2857,209 @@ mod tests {
             self.requests.fetch_add(1, Ordering::SeqCst);
             Ok(Box::pin(futures::stream::iter(vec![
                 Ok(ChunkType::Text("Done. Build now passes.".to_string())),
+                Ok(ChunkType::response_completed(None)),
+            ])))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ReasoningOnlyCompletedProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let chunks = match request {
+                0 => vec![
+                    Ok(ChunkType::Reasoning(
+                        "Let me view the screenshots.".to_string(),
+                    )),
+                    Ok(ChunkType::response_completed(None)),
+                ],
+                1 => vec![
+                    Ok(ChunkType::ToolCall(
+                        r#"[{"index":0,"id":"call_list","type":"function","function":{"name":"list","arguments":"{\"path\":\".\"}"}}]"#
+                            .to_string(),
+                    )),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::ToolCalls),
+                    }),
+                ],
+                _ => vec![
+                    Ok(ChunkType::Text("Done.".to_string())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
+                ],
+            };
+
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ReasoningOnlyDoomLoopProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            if messages.iter().any(|message| {
+                matches!(
+                    message,
+                    Message::User(user) if user.content.starts_with("<system_reminder>")
+                )
+            }) {
+                self.saw_reminder.store(true, Ordering::SeqCst);
+            }
+            let chunks = match request {
+                0 => vec![
+                    Ok(ChunkType::Reasoning("looping thought".to_string())),
+                    Ok(ChunkType::ResponseCompleted {
+                        end_turn: None,
+                        reasoning_items: Vec::new(),
+                        doom_loop_triggers: vec!["tail_repetition:8@thinking".to_string()],
+                    }),
+                ],
+                1 => vec![
+                    Ok(ChunkType::ToolCall(
+                        r#"[{"index":0,"id":"call_list","type":"function","function":{"name":"list","arguments":"{\"path\":\".\"}"}}]"#
+                            .to_string(),
+                    )),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::ToolCalls),
+                    }),
+                ],
+                _ => vec![
+                    Ok(ChunkType::Text("Done.".to_string())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
+                ],
+            };
+
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for NoVisibleContentCompletedProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let chunks = if request == 0 {
+                vec![Ok(ChunkType::response_completed(None))]
+            } else {
+                vec![
+                    Ok(ChunkType::Text("Done.".to_string())),
+                    Ok(ChunkType::End {
+                        reason: Some(FinishReason::Stop),
+                    }),
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for AlwaysEmptyCompletedProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![Ok(
+                ChunkType::response_completed(None),
+            )])))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ContentFilterEmptyProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![Ok(ChunkType::End {
+                reason: Some(FinishReason::ContentFilter),
+            })])))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for HostedToolOnlyCompletedProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            _tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ChunkType::ProviderToolCall(
+                    r#"{"id":"hs_1","name":"web_search","status":"completed"}"#.to_string(),
+                )),
                 Ok(ChunkType::response_completed(None)),
             ])))
         }
@@ -3477,6 +3893,280 @@ mod tests {
         assert_eq!(text, "Done. Build now passes.");
         assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
         assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+    }
+
+    fn list_tool(executions: Arc<AtomicUsize>) -> Tool {
+        Tool::builder()
+            .name("list")
+            .description("list files")
+            .input_schema(Schema::from(true))
+            .execute(ToolExecute::new(move |_input| {
+                let executions = executions.clone();
+                async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok("package.json".to_string())
+                }
+            }))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resamples_reasoning_only_completed_response_like_grok_build() {
+        let provider = ReasoningOnlyCompletedProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let executions = Arc::new(AtomicUsize::new(0));
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("continue")],
+            vec![list_tool(executions.clone())],
+            Some(5),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut text = String::new();
+        let mut visible_reasoning = String::new();
+        let mut empty_logged = false;
+        let mut saw_rollback = false;
+        let mut saw_retry = false;
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::Text(delta) => text.push_str(&delta),
+                ChunkType::Reasoning(reasoning) => visible_reasoning.push_str(&reasoning),
+                ChunkType::StreamRollback { reasoning, .. } => {
+                    saw_rollback = true;
+                    if visible_reasoning.ends_with(&reasoning) {
+                        visible_reasoning.truncate(visible_reasoning.len() - reasoning.len());
+                    }
+                }
+                ChunkType::Retry(_) => saw_retry = true,
+                ChunkType::Metadata(message)
+                    if message.contains("empty_response reason=reasoning_only") =>
+                {
+                    empty_logged = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(text, "Done.");
+        assert!(empty_logged);
+        assert!(saw_rollback);
+        assert!(saw_retry);
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 3);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+        let durable = response.messages().await;
+        assert!(
+            durable.iter().all(|message| match message {
+                Message::User(user) => !user.content.starts_with("<system_reminder>"),
+                _ => true,
+            }),
+            "empty resample must not inject a user reminder: {durable:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resamples_no_visible_content_completed_response() {
+        let provider = NoVisibleContentCompletedProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("continue")],
+            vec![list_tool(Arc::new(AtomicUsize::new(0)))],
+            Some(5),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut text = String::new();
+        let mut empty_logged = false;
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::Text(delta) => text.push_str(&delta),
+                ChunkType::Metadata(message)
+                    if message.contains("empty_response reason=no_visible_content") =>
+                {
+                    empty_logged = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(text, "Done.");
+        assert!(empty_logged);
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_response_exhaustion_fails_instead_of_finish() {
+        let provider = AlwaysEmptyCompletedProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("continue")],
+            Vec::new(),
+            Some(5),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut failed = Vec::new();
+        while let Some(chunk) = response.stream.next().await {
+            if let ChunkType::Failed(message) = chunk {
+                failed.push(message);
+            }
+        }
+
+        assert!(
+            failed.iter().any(|message| {
+                message.contains("empty response: no_visible_content")
+                    && message.contains("after 10 retries")
+            }),
+            "expected empty-response exhaustion, got {failed:?}"
+        );
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 11);
+        assert!(matches!(
+            response.stop_reason().await,
+            Some(StopReason::Error(message))
+                if message.contains("empty response: no_visible_content")
+        ));
+    }
+
+    #[tokio::test]
+    async fn content_filter_empty_does_not_resample() {
+        let provider = ContentFilterEmptyProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("continue")],
+            Vec::new(),
+            Some(5),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut retries = 0usize;
+        let mut empty_logged = false;
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::Retry(_) => retries += 1,
+                ChunkType::Metadata(message) if message.contains("empty_response") => {
+                    empty_logged = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(!empty_logged);
+        assert_eq!(retries, 0);
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+    }
+
+    #[tokio::test]
+    async fn hosted_tool_only_completed_response_is_not_empty() {
+        let provider = HostedToolOnlyCompletedProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("search the web")],
+            Vec::new(),
+            Some(5),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut hosted = 0usize;
+        let mut retries = 0usize;
+        let mut empty_logged = false;
+        while let Some(chunk) = response.stream.next().await {
+            match chunk {
+                ChunkType::ProviderToolCall(_) => hosted += 1,
+                ChunkType::Retry(_) => retries += 1,
+                ChunkType::Metadata(message) if message.contains("empty_response") => {
+                    empty_logged = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(hosted, 1);
+        assert!(!empty_logged);
+        assert_eq!(retries, 0);
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_with_thinking_doom_loop_resamples_with_reminder() {
+        let saw_reminder = Arc::new(AtomicBool::new(false));
+        let provider = ReasoningOnlyDoomLoopProvider {
+            requests: Arc::new(AtomicUsize::new(0)),
+            saw_reminder: saw_reminder.clone(),
+        };
+        let executions = Arc::new(AtomicUsize::new(0));
+
+        let mut response = stream_with_tools(
+            provider.clone(),
+            vec![Message::user("continue")],
+            vec![list_tool(executions.clone())],
+            Some(5),
+            None,
+            HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut doom_logged = false;
+        while let Some(chunk) = response.stream.next().await {
+            if let ChunkType::Metadata(message) = chunk {
+                if message.contains("doom_loop_detected") && message.contains("empty_reason=") {
+                    doom_logged = true;
+                }
+            }
+        }
+
+        assert!(doom_logged);
+        assert!(saw_reminder.load(Ordering::SeqCst));
+        assert!(executions.load(Ordering::SeqCst) >= 1);
+        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+        let durable = response.messages().await;
+        assert!(
+            durable.iter().all(|message| match message {
+                Message::User(user) => !user.content.starts_with("<system_reminder>"),
+                _ => true,
+            }),
+            "doom reminder is request-only: {durable:?}"
+        );
     }
 
     #[tokio::test]

@@ -531,3 +531,69 @@ Codex avoids this class when using Responses because completion is anchored on `
 - `cargo check`
 - `cargo fmt --check`
 - `git diff --check`
+
+## 2026-08-31 Session Recurrence
+
+### User-Visible Symptom
+
+Session `bgwb0odvgy97qsr1joml2sc3` kept finishing with no error after the user said `continue`. The last visible assistant text was a preamble, then four `read`s of a local Expo project, then a reasoning-only step, then idle.
+
+### `app.log` Evidence
+
+Primary session id: `bgwb0odvgy97qsr1joml2sc3`. Model: `grok-4.6` via `https://cli-chat-proxy.grok.com` (`provider_kind=OpenAI`).
+
+Relevant sequence:
+
+- `02:29:50`: stream started (`turn_idx=5`, `input_messages=13`, `messages=179`, `agent_max_steps=None`).
+- `02:30:03-02:30:06`: step 1 streamed unphased preamble text + four `read` tool calls. `assistant_message_phase=unknown`.
+- `02:30:07`: `response.completed end_turn=None reasoning_items=1`. Tools executed successfully (`error_results=0`).
+- `02:30:10`: step 2 started after tool results (`messages=189`).
+- `02:30:13`: step 2 streamed reasoning only (`"Let me view the screenshots..."` in the persisted message). No text, no tool-call chunks.
+- `02:30:14`: `response.completed end_turn=None reasoning_items=1`. Usage `output=137` (reasoning-sized; no leftover function-call budget).
+- `02:30:14`: AISDK logged `provider_step_finish step=2 has_tool_call=false end_turn=None provider_finish_reason=unknown last_phase=unknown assistant_text_chars=0 action=finish preview=""`.
+- `02:30:14`: crabcode marked the stream complete: `outcome=Exhausted`, `effective_outcome=Finished`, `stop_reason=Some(Finish)`. No Failed/Incomplete/Cancelled.
+
+An earlier continue turn in the same session (`tq36osvr1zxhibna28rqeb3i`) finished even earlier: reasoning + preamble text, zero tools.
+
+### Root Cause
+
+Same finish gate as the 2026-05-28 phase-less incident, but on the xAI Responses transport:
+
+1. `response.completed` is the terminal event. xAI/OpenAI Responses does not emit `ChunkType::End { reason }`, so `provider_finish_reason` stays `None` (logged `unknown`).
+2. Message phases are also absent (`last_phase=unknown`).
+3. `phase_less_ambiguous_requires_follow_up` only continues when `provider_finish_reason.is_some_and(|reason| !reason.is_final_assistant_stop())`. That path exists for Anthropic `end_turn`. For Responses, `None` fails `is_some_and`, so the step finishes.
+4. Step 2 is stronger than the preamble case: tools were available, assistant text was empty, only reasoning arrived, `end_turn` was not `true`. AISDK still treated that as a real finish.
+
+Not a dropped-tool-call proof for this run: step 1 streamed function calls live, and step 2's `output=137` matches reasoning-only. `response.completed` still does not log/apply `output[].type` besides reasoning items, so the next recurrence should capture `output_types`.
+
+### Diagnostics Added
+
+- `src/aisdk/providers/openai.rs`
+  - Log `openai-responses completed status=... end_turn=... incomplete_reason=... output_count=... output_types=[...]`.
+- `src/aisdk/response.rs`
+  - `provider_step_finish` now includes `reasoning_chars`, `tools`, and `follow_up[end_turn= commentary= phase_less= empty_output=]`.
+
+### Runtime Fix Applied 2026-08-31 (Grok Build empty resample)
+
+Reverted the agent-loop reminder / preamble-continue hacks. Grok Build does not keep the turn alive by inspecting assistant prose or injecting a "please continue" user message.
+
+Reference: `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/actor/request_task.rs`
+
+- `ConversationResponse::empty_reason()` is `ReasoningOnly` or `NoVisibleContent` when there is no assistant text and no tool calls.
+- That completed payload is `AttemptOutcome::Empty`: retry the **same sampling request**, do not accept it as a finished turn, do not append it to the conversation.
+- Content-filter empties are not retried.
+- After the retry budget, the request fails (`SamplingError::EmptyResponse`); it is not `Finish`.
+- Reminders are only for doom-loop recovery.
+
+Crabcode now resamples the same provider step (rollback streamed reasoning) when a terminal response has no text and no tool calls.
+
+Preamble text with no tools (`I'll pull the screenshot language next…`) is still a completed assistant message, same as Grok Build: `empty_reason` is None when content is non-empty. That is prompt/model behavior, not a sampler retry.
+
+Validation:
+
+- `cargo test resamples_reasoning_only_completed_response_like_grok_build`
+- `cargo test resamples_no_visible_content_completed_response`
+- `cargo test empty_response_exhaustion_fails_instead_of_finish`
+- `cargo test content_filter_empty_does_not_resample`
+- `cargo test hosted_tool_only_completed_response_is_not_empty`
+- `cargo test phase_less_text_without_finish_metadata_still_finishes`

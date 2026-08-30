@@ -19,6 +19,7 @@ pub enum ChunkType {
     ResponseCompleted {
         end_turn: Option<bool>,
         reasoning_items: Vec<ReasoningReplayItem>,
+        doom_loop_triggers: Vec<String>,
     },
     Retry(crate::retry::RetryStatus),
     StreamRollback {
@@ -56,6 +57,7 @@ impl ChunkType {
         Self::ResponseCompleted {
             end_turn,
             reasoning_items: Vec::new(),
+            doom_loop_triggers: Vec::new(),
         }
     }
 }
