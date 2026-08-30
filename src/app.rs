@@ -274,6 +274,12 @@ enum ProviderOAuthTaskMessage {
     },
 }
 
+#[derive(Debug)]
+enum McpOAuthTaskMessage {
+    Success { name: String },
+    Failed { name: String, error: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OAuthProvider {
     OpenAI,
@@ -866,6 +872,8 @@ pub struct App {
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     provider_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<ProviderOAuthTaskMessage>>,
     provider_oauth_in_progress: Option<OAuthProvider>,
+    mcp_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<McpOAuthTaskMessage>>,
+    mcp_oauth_in_progress: Option<String>,
     compaction_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<CompactionTaskMessage>>,
     compaction_pending: Option<CompactionPending>,
     storage_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<StorageTaskMessage>>,
@@ -1119,6 +1127,8 @@ impl App {
             api_key_input,
             provider_oauth_receiver: None,
             provider_oauth_in_progress: None,
+            mcp_oauth_receiver: None,
+            mcp_oauth_in_progress: None,
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,
@@ -6502,7 +6512,7 @@ impl App {
                     return;
                 }
                 if parsed.name == "mcp" {
-                    self.show_mcp_dialog();
+                    self.handle_mcp_slash(&parsed.args);
                     return;
                 }
                 if parsed.name == "title" {
@@ -6742,7 +6752,7 @@ impl App {
             return;
         }
         if parsed.name == "mcp" {
-            self.show_mcp_dialog();
+            self.handle_mcp_slash(&parsed.args);
             return;
         }
         if parsed.name == "title" {
@@ -8154,6 +8164,17 @@ impl App {
         self.overlay_focus = OverlayFocus::SkillsDialog;
     }
 
+    fn handle_mcp_slash(&mut self, args: &[String]) {
+        if args.first().map(|s| s.as_str()) == Some("auth") {
+            match args.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                Some(name) => self.begin_mcp_oauth(name),
+                None => self.show_mcp_dialog(),
+            }
+            return;
+        }
+        self.show_mcp_dialog();
+    }
+
     fn show_mcp_dialog(&mut self) {
         let selected = self
             .mcp_dialog_state
@@ -8173,50 +8194,172 @@ impl App {
     fn refresh_mcp_dialog_items(&mut self) {
         use crate::ui::components::dialog::DialogItem;
 
+        let live = self.live_mcp_views();
         let mut items = self
             .remote_mcp_servers()
             .into_iter()
-            .map(|server| DialogItem {
-                id: server.name.clone(),
-                name: server.name,
-                group: "MCP".to_string(),
-                description: String::new(),
-                tip: Some(
-                    if server.enabled {
+            .map(|server| {
+                let live = live.iter().find(|view| view.name == server.name);
+                let status = live
+                    .map(|view| view.status.as_str())
+                    .unwrap_or(if server.enabled {
                         "enabled"
                     } else {
                         "disabled"
-                    }
-                    .to_string(),
-                ),
-                provider_id: String::new(),
-                active: server.enabled,
+                    });
+                let detail = live.and_then(|view| view.detail.as_deref()).unwrap_or("");
+                let tip = if detail.is_empty() {
+                    status.to_string()
+                } else {
+                    format!("{status}: {detail}")
+                };
+                DialogItem {
+                    id: server.name.clone(),
+                    name: server.name,
+                    group: "MCP".to_string(),
+                    description: String::new(),
+                    tip: Some(tip),
+                    provider_id: String::new(),
+                    active: server.enabled,
+                }
             })
             .collect::<Vec<_>>();
         items.sort_by(|a, b| a.id.cmp(&b.id));
         self.mcp_dialog_state = init_mcp_dialog("MCP", items);
     }
 
+    fn live_mcp_views(&self) -> Vec<crate::mcp::McpServerView> {
+        let manager =
+            crate::mcp::McpManager::ensure(self.mcp.clone(), std::path::PathBuf::from(&self.cwd));
+        manager
+            .try_lock()
+            .map(|guard| guard.views())
+            .unwrap_or_default()
+    }
+
     fn handle_mcp_dialog_action(&mut self, action: McpDialogAction) {
-        let McpDialogAction::Toggle { server_id } = action else {
+        match action {
+            McpDialogAction::None => {}
+            McpDialogAction::Toggle { server_id } => {
+                let selected = server_id.clone();
+                match self.remote_toggle_mcp_server(&server_id) {
+                    Ok(_) => {
+                        self.refresh_mcp_dialog_items();
+                        self.mcp_dialog_state
+                            .dialog
+                            .select_item_by_key(&selected, "");
+                        self.mcp_dialog_state.dialog.show();
+                    }
+                    Err(err) => {
+                        self.play_sound_event(crate::sound::SoundEvent::Error);
+                        push_toast(Toast::new(
+                            format!("Failed to toggle MCP server: {err}"),
+                            ToastLevel::Error,
+                            Some(std::time::Duration::from_secs(3)),
+                        ));
+                    }
+                }
+            }
+            McpDialogAction::Auth { server_id } => self.begin_mcp_oauth(&server_id),
+        }
+    }
+
+    fn begin_mcp_oauth(&mut self, name: &str) {
+        if self.mcp_oauth_in_progress.is_some() || self.provider_oauth_in_progress.is_some() {
+            push_toast(Toast::new(
+                "An OAuth flow is already in progress",
+                ToastLevel::Info,
+                None,
+            ));
+            return;
+        }
+        let Some(crate::config::McpServerConfig::Remote(remote)) = self.mcp.get(name).cloned()
+        else {
+            push_toast(Toast::new(
+                format!("MCP server '{name}' is not a remote server"),
+                ToastLevel::Error,
+                None,
+            ));
             return;
         };
-        let selected = server_id.clone();
-        match self.remote_toggle_mcp_server(&server_id) {
-            Ok(_) => {
-                self.refresh_mcp_dialog_items();
-                self.mcp_dialog_state
-                    .dialog
-                    .select_item_by_key(&selected, "");
-                self.mcp_dialog_state.dialog.show();
+        if !remote.oauth_enabled {
+            push_toast(Toast::new(
+                format!("OAuth is disabled for MCP server '{name}'"),
+                ToastLevel::Info,
+                None,
+            ));
+            return;
+        }
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<McpOAuthTaskMessage>();
+        self.mcp_oauth_receiver = Some(receiver);
+        self.mcp_oauth_in_progress = Some(name.to_string());
+        self.provider_oauth_flow_state
+            .show_browser_waiting_for(format!("MCP {name}"));
+        self.mcp_dialog_state.dialog.hide();
+        self.overlay_focus = OverlayFocus::ProviderOAuthFlow;
+
+        let server_name = name.to_string();
+        let mcp_config = self.mcp.clone();
+        let workspace = std::path::PathBuf::from(&self.cwd);
+        tokio::spawn(async move {
+            let auth =
+                crate::mcp::oauth::authenticate_with_url_callback(&server_name, &remote, |url| {
+                    let _ = crate::utils::image_attachment::open_url(url);
+                })
+                .await;
+            let result = match auth {
+                Ok(()) => {
+                    let manager = crate::mcp::McpManager::ensure(mcp_config, workspace);
+                    let mut guard = manager.lock().await;
+                    guard.reconnect(&server_name).await
+                }
+                Err(err) => Err(err),
+            };
+            let _ = match result {
+                Ok(()) => sender.send(McpOAuthTaskMessage::Success { name: server_name }),
+                Err(err) => sender.send(McpOAuthTaskMessage::Failed {
+                    name: server_name,
+                    error: err.to_string(),
+                }),
+            };
+        });
+    }
+
+    fn process_mcp_oauth_events(&mut self) {
+        let mut events = Vec::new();
+        if let Some(receiver) = &mut self.mcp_oauth_receiver {
+            while let Ok(event) = receiver.try_recv() {
+                events.push(event);
             }
-            Err(err) => {
-                self.play_sound_event(crate::sound::SoundEvent::Error);
-                push_toast(Toast::new(
-                    format!("Failed to toggle MCP server: {err}"),
-                    ToastLevel::Error,
-                    Some(std::time::Duration::from_secs(3)),
-                ));
+        }
+        for event in events {
+            match event {
+                McpOAuthTaskMessage::Success { name } => {
+                    self.mcp_oauth_in_progress = None;
+                    self.mcp_oauth_receiver = None;
+                    self.provider_oauth_flow_state.hide();
+                    push_toast(Toast::new(
+                        format!("Authenticated MCP server \"{name}\""),
+                        ToastLevel::Success,
+                        None,
+                    ));
+                    self.show_mcp_dialog();
+                }
+                McpOAuthTaskMessage::Failed { name, error } => {
+                    self.mcp_oauth_in_progress = None;
+                    self.mcp_oauth_receiver = None;
+                    self.provider_oauth_flow_state.hide();
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
+                    push_toast(Toast::new(
+                        format!("MCP \"{name}\" auth failed: {error}"),
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(6)),
+                    ));
+                    if self.overlay_focus == OverlayFocus::ProviderOAuthFlow {
+                        self.show_mcp_dialog();
+                    }
+                }
             }
         }
     }
@@ -9286,6 +9429,7 @@ impl App {
 
     pub fn process_streaming_chunks(&mut self) {
         self.process_provider_oauth_events();
+        self.process_mcp_oauth_events();
         self.process_compaction_events();
         self.process_storage_events();
         self.process_models_events();
@@ -11926,6 +12070,8 @@ mod tests {
             api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
             provider_oauth_receiver: None,
             provider_oauth_in_progress: None,
+            mcp_oauth_receiver: None,
+            mcp_oauth_in_progress: None,
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,

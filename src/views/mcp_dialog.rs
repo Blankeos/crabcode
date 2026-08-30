@@ -7,6 +7,7 @@ use crate::ui::components::dialog::{Dialog, DialogAction, DialogItem};
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpDialogAction {
     Toggle { server_id: String },
+    Auth { server_id: String },
     None,
 }
 
@@ -18,10 +19,16 @@ pub struct McpDialogState {
 impl McpDialogState {
     pub fn with_items(title: impl Into<String>, items: Vec<DialogItem>) -> Self {
         Self {
-            dialog: Dialog::with_items(title, items).with_actions(vec![DialogAction {
-                label: "toggle".to_string(),
-                key: "space".to_string(),
-            }]),
+            dialog: Dialog::with_items(title, items).with_actions(vec![
+                DialogAction {
+                    label: "toggle".to_string(),
+                    key: "space".to_string(),
+                },
+                DialogAction {
+                    label: "auth".to_string(),
+                    key: "a".to_string(),
+                },
+            ]),
         }
     }
 }
@@ -48,6 +55,13 @@ pub fn handle_mcp_dialog_key_event(
     }
 
     match event.code {
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            if let Some(selected) = dialog_state.dialog.get_selected() {
+                return McpDialogAction::Auth {
+                    server_id: selected.id.clone(),
+                };
+            }
+        }
         KeyCode::Enter | KeyCode::Char(' ') => {
             if let Some(selected) = dialog_state.dialog.get_selected() {
                 return McpDialogAction::Toggle {

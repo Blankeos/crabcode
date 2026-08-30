@@ -43,6 +43,17 @@ Always run fmt at the end of changes.
   }
   ```
 
+### MCP OAuth Credentials
+
+- **Location**:
+  - Default: `~/.local/state/crabcode/mcp-auth.json`
+  - With `XDG_STATE_HOME`: `$XDG_STATE_HOME/crabcode/mcp-auth.json`
+  - Test mode: `/tmp/crabcode_test_data/mcp-auth.json`
+- **Implementation**: `src/mcp/credentials.rs`
+- **Format**: JSON keyed by `"{server_name}:{server_url}"`
+- **Contents**: rmcp `StoredCredentials` (access/refresh tokens) for remote MCP OAuth
+- **CLI**: `crabcode mcp auth <name>`, `crabcode mcp logout <name>`, `crabcode mcp list`
+
 ### Models.dev API Cache
 
 - **Location**:

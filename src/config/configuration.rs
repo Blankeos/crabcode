@@ -1686,8 +1686,9 @@ fn parse_mcp_oauth(
     };
     (
         true,
-        optional_string(map.get("clientId")),
-        optional_string(map.get("clientSecret")),
+        optional_string(map.get("clientId")).or_else(|| optional_string(map.get("client_id"))),
+        optional_string(map.get("clientSecret"))
+            .or_else(|| optional_string(map.get("client_secret"))),
         optional_string(map.get("scope")),
     )
 }
@@ -3569,5 +3570,56 @@ mod tests {
             resolve_api_key_value(Some("{env:MISSING_KEY}"), |_| None),
             None
         );
+    }
+
+    #[test]
+    fn parses_remote_mcp_oauth_camel_and_snake_case() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "mcp": {
+                    "doop": {
+                        "type": "remote",
+                        "url": "https://doop.design/mcp",
+                        "oauth": {
+                            "clientId": "camel",
+                            "client_secret": "snake",
+                            "scope": "openid"
+                        }
+                    },
+                    "plain": {
+                        "url": "https://mcp.grep.app"
+                    },
+                    "disabled": {
+                        "url": "https://example.com/mcp",
+                        "oauth": false
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        let doop = match config.mcp.get("doop") {
+            Some(McpServerConfig::Remote(remote)) => remote,
+            other => panic!("expected remote doop, got {other:?}"),
+        };
+        assert!(doop.oauth_enabled);
+        assert_eq!(doop.oauth_client_id.as_deref(), Some("camel"));
+        assert_eq!(doop.oauth_client_secret.as_deref(), Some("snake"));
+        assert_eq!(doop.oauth_scope.as_deref(), Some("openid"));
+
+        let plain = match config.mcp.get("plain") {
+            Some(McpServerConfig::Remote(remote)) => remote,
+            other => panic!("expected remote plain, got {other:?}"),
+        };
+        assert!(plain.oauth_enabled);
+        assert!(plain.oauth_client_id.is_none());
+
+        let disabled = match config.mcp.get("disabled") {
+            Some(McpServerConfig::Remote(remote)) => remote,
+            other => panic!("expected remote disabled, got {other:?}"),
+        };
+        assert!(!disabled.oauth_enabled);
+        assert!(diagnostics.warnings.is_empty());
     }
 }

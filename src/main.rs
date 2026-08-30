@@ -792,6 +792,12 @@ enum Command {
         #[command(subcommand)]
         command: MaintenanceCommand,
     },
+
+    /// Manage MCP servers (list / auth / logout)
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -848,6 +854,22 @@ enum JobsCommand {
         /// Report what would be removed without deleting
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum McpCommand {
+    /// List configured MCP servers
+    List,
+    /// Authenticate a remote MCP server (browser OAuth)
+    Auth {
+        /// Server name from config, e.g. doop
+        name: String,
+    },
+    /// Forget stored OAuth credentials for a remote MCP server
+    Logout {
+        /// Server name from config
+        name: String,
     },
 }
 
@@ -1050,6 +1072,18 @@ async fn main() -> Result<()> {
                 }
             }
             return Ok(());
+        }
+        Some(Command::Mcp { command }) => {
+            let cli = match command {
+                McpCommand::List => crate::mcp::cli::McpCliCommand::List,
+                McpCommand::Auth { name } => {
+                    crate::mcp::cli::McpCliCommand::Auth { name: name.clone() }
+                }
+                McpCommand::Logout { name } => {
+                    crate::mcp::cli::McpCliCommand::Logout { name: name.clone() }
+                }
+            };
+            return crate::mcp::cli::run(cli).await;
         }
         None => {}
     }
