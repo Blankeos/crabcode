@@ -248,6 +248,21 @@ pub fn handle_models<'a>(
     Box::pin(async move { load_models(parsed).await })
 }
 
+pub fn handle_variants<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let args = parsed.args.clone();
+    Box::pin(async move {
+        if !args.is_empty() {
+            return CommandResult::Error(
+                "This command only opens the variants dialog. Usage: /variants".to_string(),
+            );
+        }
+        CommandResult::Success(String::new())
+    })
+}
+
 pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
     use crate::command::registry::DialogItem;
     use crate::model::discovery::Discovery;
@@ -937,6 +952,14 @@ pub fn register_all_commands(registry: &mut Registry) {
     });
 
     registry.register(Command {
+        name: "variants".to_string(),
+        description: "Switch model variant".to_string(),
+        handler: handle_variants,
+        hidden_tokens: vec![],
+        chat_only: false,
+    });
+
+    registry.register(Command {
         name: "agents".to_string(),
         description: "Switch agent".to_string(),
         handler: handle_agents,
@@ -1427,6 +1450,24 @@ mod tests {
         let mut session_manager = SessionManager::new();
         let result = registry.execute(&parsed, &mut session_manager).await;
         assert_eq!(result, CommandResult::Success("Exiting...".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_handle_variants() {
+        let registry = create_registry();
+        let parsed = ParsedCommand {
+            name: "variants".to_string(),
+            args: vec![],
+            raw: "/variants".to_string(),
+            prefs_data: None,
+            active_model_id: None,
+        };
+        let mut session_manager = SessionManager::new();
+
+        assert!(matches!(
+            registry.execute(&parsed, &mut session_manager).await,
+            CommandResult::Success(message) if message.is_empty()
+        ));
     }
 
     #[tokio::test]

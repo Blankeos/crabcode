@@ -1,3 +1,4 @@
+use crate::views::variants_dialog::render_variants_dialog;
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -110,7 +111,7 @@ use crate::views::{
     ModelsDialogState, MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState,
     QuestionDialogState, RemoteDialogState, SessionRenameDialogState, SessionsDialogState,
     StorageDialogState, SuggestionsPopupState, TerminalSessionDialogState, ThemesDialogState,
-    TitleDialogState,
+    TitleDialogState, VariantsDialogState,
 };
 
 use crate::{
@@ -225,6 +226,7 @@ pub enum OverlayFocus {
     None,
     AgentsDialog,
     ModelsDialog,
+    VariantsDialog,
     RefreshModelsDialog,
     ThemesDialog,
     ConnectDialog,
@@ -835,6 +837,7 @@ pub struct App {
     pub suggestions_popup_state: SuggestionsPopupState,
     pub agents_dialog_state: AgentsDialogState,
     pub models_dialog_state: ModelsDialogState,
+    pub variants_dialog_state: VariantsDialogState,
     pub themes_dialog_state: ThemesDialogState,
     themes_dialog_original_theme_index: usize,
     themes_dialog_original_dark_mode: bool,
@@ -1023,6 +1026,7 @@ impl App {
         let suggestions_popup_state = init_suggestions_popup(popup);
         let agents_dialog_state = init_agents_dialog("Select agent", vec![]);
         let models_dialog_state = init_models_dialog("Models", vec![]);
+        let variants_dialog_state = VariantsDialogState::new();
         let themes_dialog_state = init_themes_dialog("Themes", vec![], false);
         let connect_dialog_state = init_connect_dialog();
         let provider_oauth_flow_state = init_provider_oauth_flow();
@@ -1095,6 +1099,7 @@ impl App {
             suggestions_popup_state,
             agents_dialog_state,
             models_dialog_state,
+            variants_dialog_state,
             themes_dialog_state,
             themes_dialog_original_theme_index: 0,
             themes_dialog_original_dark_mode: true,
@@ -1413,6 +1418,56 @@ impl App {
         self.pending_model_override = None;
         self.pending_cli_agent = None;
         Ok(())
+    }
+
+    fn open_variants_dialog(&mut self, args: &[String]) {
+        if !args.is_empty() {
+            push_toast(Toast::new(
+                "Usage: /variants",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        let Some(capability) =
+            self.reasoning_capability_for_model(&self.provider_name, &self.model)
+        else {
+            push_toast(Toast::new(
+                "The active model has no variants",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        };
+        if capability.values().is_empty() {
+            push_toast(Toast::new(
+                "The active model has no variants",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        let selected = self.reasoning_effort_override_for_model(&self.provider_name, &self.model);
+        self.variants_dialog_state.show(&capability, selected);
+        self.overlay_focus = OverlayFocus::VariantsDialog;
+    }
+
+    fn select_variant(&mut self) {
+        let Some(effort) = self.variants_dialog_state.selected_effort() else {
+            return;
+        };
+        let provider_id = self.provider_name.clone();
+        let model_id = self.model.clone();
+        match self.set_reasoning_effort_override_for_model(provider_id, model_id, effort) {
+            Ok(()) => self.variants_dialog_state.dialog.hide(),
+            Err(error) => push_toast(Toast::new(
+                format!("Failed to save variant: {error}"),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            )),
+        }
     }
 
     fn play_sound_event(&self, event: crate::sound::SoundEvent) {
@@ -4127,6 +4182,15 @@ impl App {
                 }
                 true
             }
+            OverlayFocus::VariantsDialog => {
+                if self.variants_dialog_state.handle_key_event(key) {
+                    self.select_variant();
+                }
+                if !self.variants_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
             OverlayFocus::StorageDialog => {
                 let action = handle_storage_dialog_key_event(&mut self.storage_dialog_state, key);
                 self.handle_storage_dialog_action(action);
@@ -4979,6 +5043,13 @@ impl App {
             if !self.models_dialog_state.dialog.is_visible() {
                 self.overlay_focus = OverlayFocus::None;
             }
+        } else if self.overlay_focus == OverlayFocus::VariantsDialog {
+            if self.variants_dialog_state.dialog.handle_mouse_event(mouse) {
+                self.select_variant();
+            }
+            if !self.variants_dialog_state.dialog.is_visible() {
+                self.overlay_focus = OverlayFocus::None;
+            }
         } else if self.overlay_focus == OverlayFocus::PermissionDialog {
             let action =
                 handle_permission_dialog_mouse_event(&mut self.permission_dialog_state, mouse);
@@ -5571,6 +5642,19 @@ impl App {
                     .insert_str(&text);
                 self.models_dialog_state.dialog.set_search_query(
                     self.models_dialog_state
+                        .dialog
+                        .search_textarea
+                        .lines()
+                        .join(""),
+                );
+            }
+            (_, OverlayFocus::VariantsDialog) => {
+                self.variants_dialog_state
+                    .dialog
+                    .search_textarea
+                    .insert_str(&text);
+                self.variants_dialog_state.dialog.set_search_query(
+                    self.variants_dialog_state
                         .dialog
                         .search_textarea
                         .lines()
@@ -6517,6 +6601,10 @@ impl App {
                     return;
                 }
                 if self.start_models_command(&mut parsed) {
+                    return;
+                }
+                if parsed.name == "variants" {
+                    self.open_variants_dialog(&parsed.args);
                     return;
                 }
                 if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
@@ -11498,6 +11586,12 @@ impl App {
             );
         }
 
+        if self.overlay_focus == OverlayFocus::VariantsDialog
+            && self.variants_dialog_state.dialog.is_visible()
+        {
+            render_variants_dialog(f, &mut self.variants_dialog_state, size, colors);
+        }
+
         if self.overlay_focus == OverlayFocus::RefreshModelsDialog {
             crate::views::models_dialog::render_refresh_models_dialog(
                 f,
@@ -12082,6 +12176,7 @@ mod tests {
             suggestions_popup_state: init_suggestions_popup(Popup::new()),
             agents_dialog_state: init_agents_dialog("Select agent", vec![]),
             models_dialog_state: init_models_dialog("Models", vec![]),
+            variants_dialog_state: VariantsDialogState::new(),
             themes_dialog_state: init_themes_dialog("Themes", vec![], false),
             themes_dialog_original_theme_index: 0,
             themes_dialog_original_dark_mode: true,

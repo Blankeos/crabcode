@@ -20,6 +20,7 @@ pub mod terminal_session_dialog;
 pub mod themes_dialog;
 pub mod timeline_dialog;
 pub mod title_dialog;
+pub mod variants_dialog;
 pub mod which_key;
 
 pub use agents_dialog::AgentsDialogState;
@@ -42,5 +43,6 @@ pub use suggestions_popup::SuggestionsPopupState;
 pub use terminal_session_dialog::TerminalSessionDialogState;
 pub use themes_dialog::ThemesDialogState;
 pub use title_dialog::TitleDialogState;
+pub use variants_dialog::VariantsDialogState;
 #[allow(unused_imports)]
 pub use which_key::WhichKeyAction;
