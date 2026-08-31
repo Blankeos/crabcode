@@ -785,10 +785,37 @@ impl Discovery {
     }
 
     pub fn get_model_name(&self, provider_id: &str, model_id: &str) -> Option<String> {
+        if let Some(name) = self
+            .custom_providers
+            .as_ref()
+            .and_then(|providers| providers.get(&provider_id.trim().to_ascii_lowercase()))
+            .and_then(|provider| provider.models.get(model_id))
+            .and_then(|model| model.name.clone())
+        {
+            return Some(name);
+        }
+
         let entry = self.load_cache_entry().ok()??;
         let provider = entry.data.get(provider_id)?;
         let model = provider.models.get(model_id)?;
         Some(model.name.clone())
+    }
+
+    pub fn get_provider_name(&self, provider_id: &str) -> Option<String> {
+        if let Some(name) = self
+            .custom_providers
+            .as_ref()
+            .and_then(|providers| providers.get(&provider_id.trim().to_ascii_lowercase()))
+            .and_then(|provider| provider.name.clone())
+        {
+            return Some(name);
+        }
+
+        let entry = self.load_cache_entry().ok()??;
+        entry
+            .data
+            .get(provider_id)
+            .map(|provider| provider.name.clone())
     }
 
     pub fn get_model_reasoning_capability(
@@ -998,6 +1025,14 @@ mod tests {
         assert_eq!(models[0].id, "configured-model");
         assert_eq!(models[0].name, "Configured Model");
         assert!(models[0].attachment);
+        assert_eq!(
+            discovery.get_model_name("mygateway", "configured-model"),
+            Some("Configured Model".to_string())
+        );
+        assert_eq!(
+            discovery.get_provider_name("mygateway"),
+            Some("My Gateway".to_string())
+        );
     }
 
     #[test]

@@ -2768,6 +2768,13 @@ impl App {
             .unwrap_or_else(|| model_id.to_string())
     }
 
+    fn provider_name_for_display(&self, provider_id: &str) -> String {
+        self.discovery
+            .as_ref()
+            .and_then(|discovery| discovery.get_provider_name(provider_id))
+            .unwrap_or_else(|| provider_id.to_string())
+    }
+
     fn refresh_mcp_summary(&mut self) {
         let enabled = self.mcp.values().filter(|server| server.enabled()).count();
         let Some(manager) = self.mcp_manager.as_ref() else {
@@ -11366,6 +11373,7 @@ impl App {
         self.refresh_mcp_summary();
         let mcp_summary = self.mcp_summary;
         let model_name = self.model_name_for_display(&self.provider_name, &self.model);
+        let provider_name = self.provider_name_for_display(&self.provider_name);
         let usage_text = &self.cached_usage_text;
 
         match self.base_focus {
@@ -11379,7 +11387,7 @@ impl App {
                     branch.clone(),
                     self.agent.clone(),
                     model_name,
-                    self.provider_name.clone(),
+                    provider_name,
                     reasoning_effort.clone(),
                     mcp_summary,
                     &colors,
