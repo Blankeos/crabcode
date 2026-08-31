@@ -120,6 +120,7 @@ impl BashTool {
             .spawn()
             .map_err(|e| ToolError::Execution(format!("Failed to spawn process: {}", e)))?;
         let process_group_id = child.id();
+        let mut process_group_guard = ProcessGroupGuard::new(process_group_id);
 
         let stdout = child.stdout.take().expect("stdout should be piped");
         let stderr = child.stderr.take().expect("stderr should be piped");
@@ -153,7 +154,7 @@ impl BashTool {
                     } else {
                         match child.wait().await {
                             Ok(exit_status) => {
-                                kill_process_group(process_group_id);
+                                process_group_guard.kill();
                                 Ok(exit_status)
                             }
                             Err(e) => Err(ToolError::Execution(format!("Process error: {}", e))),
@@ -183,7 +184,7 @@ impl BashTool {
                                 // A shell can exit successfully while background descendants
                                 // keep running and retain the output pipes. Kill the process group
                                 // so those descendants cannot leak beyond this tool invocation.
-                                kill_process_group(process_group_id);
+                                process_group_guard.kill();
                             }
                             Err(e) => return Err(ToolError::Execution(format!("Process error: {}", e))),
                         }
@@ -388,6 +389,26 @@ fn kill_process_group(pid: Option<u32>) {
         unsafe {
             let _ = libc::killpg(pid as i32, libc::SIGKILL);
         }
+    }
+}
+
+struct ProcessGroupGuard {
+    pid: Option<u32>,
+}
+
+impl ProcessGroupGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    fn kill(&mut self) {
+        kill_process_group(self.pid.take());
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -638,5 +659,68 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(!still_running, "background process {pid} was not killed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborted_tool_future_kills_node_descendants() {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        let pid_file = temp_dir.path().join("node.pid");
+        let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "'\\''");
+        let command = format!(
+            "node -e 'setInterval(() => {{}}, 1000)' & echo $! > '{escaped_pid_file}'; wait"
+        );
+
+        let handle = tokio::spawn(async move {
+            let ctx = ToolContext::from_cancel_token(
+                "session",
+                "message",
+                "Build",
+                CancellationToken::new(),
+            );
+            BashTool::new()
+                .execute(
+                    serde_json::json!({
+                        "command": command,
+                        "timeout": 30
+                    }),
+                    &ctx,
+                )
+                .await
+        });
+
+        let pid = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = contents.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("node pid should be written");
+
+        handle.abort();
+        let _ = handle.await;
+
+        let mut still_running = true;
+        for _ in 0..40 {
+            still_running = unsafe { libc::kill(pid, 0) == 0 };
+            if !still_running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!still_running, "node descendant {pid} survived tool abort");
     }
 }
