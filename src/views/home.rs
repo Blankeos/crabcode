@@ -15,6 +15,32 @@ use crate::ui::components::status_bar::StatusBar;
 const LOGO: &str = include_str!("../../crabcode-logo.txt");
 const MASCOT: &str = include_str!("../../mascot.txt");
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McpSummary {
+    pub connected: usize,
+    pub enabled: usize,
+    pub has_error: bool,
+}
+
+fn mcp_status(summary: McpSummary) -> Option<(&'static str, String)> {
+    if summary.enabled == 0 {
+        return None;
+    }
+    let indicator = if summary.has_error {
+        "●"
+    } else if summary.connected == summary.enabled {
+        "●"
+    } else {
+        "◐"
+    };
+    let count = if summary.connected == summary.enabled {
+        summary.connected.to_string()
+    } else {
+        format!("{}/{}", summary.connected, summary.enabled)
+    };
+    Some((indicator, format!(" {count} MCP")))
+}
+
 #[derive(Debug, Clone)]
 pub struct HomeState {
     phase: u8,
@@ -60,6 +86,7 @@ pub fn render_home(
     model: String,
     provider_name: String,
     reasoning_effort: Option<String>,
+    mcp_summary: McpSummary,
     colors: &ThemeColors,
     usage_text: &str,
 ) {
@@ -214,6 +241,8 @@ pub fn render_home(
     );
 
     let help_text = vec![
+        Span::styled("tab", Style::default().fg(colors.info)),
+        Span::raw(" agents  "),
         Span::styled("ctrl+p", Style::default().fg(colors.info)),
         Span::raw(" commands"),
     ];
@@ -222,29 +251,43 @@ pub fn render_home(
     let available_width = home_chunks[2].width;
     let help_width = help_width.min(available_width);
 
-    let usage_width = if !usage_text.is_empty() {
-        (usage_text.len() as u16 + 2).min(available_width.saturating_sub(help_width))
-    } else {
-        0
-    };
+    let mut status_spans = Vec::new();
+    if !usage_text.is_empty() {
+        status_spans.push(Span::styled(
+            usage_text.to_string(),
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    if let Some((indicator, label)) = mcp_status(mcp_summary) {
+        if !status_spans.is_empty() {
+            status_spans.push(Span::raw("  "));
+        }
+        let color = if mcp_summary.has_error {
+            colors.error
+        } else if mcp_summary.connected == mcp_summary.enabled {
+            colors.success
+        } else {
+            colors.warning
+        };
+        status_spans.push(Span::styled(indicator, Style::default().fg(color)));
+        status_spans.push(Span::styled(label, Style::default().fg(colors.text)));
+    }
+    let status_line = Line::from(status_spans);
+    let status_width = (status_line.width() as u16).min(available_width.saturating_sub(help_width));
 
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(usage_width),
+            Constraint::Length(status_width),
             Constraint::Min(0),
             Constraint::Length(help_width),
         ])
         .split(home_chunks[2]);
 
-    if !usage_text.is_empty() {
-        let usage = Paragraph::new(Line::from(vec![Span::styled(
-            usage_text,
-            Style::default()
-                .fg(colors.text_weak)
-                .add_modifier(Modifier::DIM),
-        )]));
-        f.render_widget(usage, status_chunks[0]);
+    if status_width > 0 {
+        f.render_widget(Paragraph::new(status_line), status_chunks[0]);
     }
 
     let help = Paragraph::new(help_line).alignment(Alignment::Right);
@@ -258,4 +301,34 @@ pub fn render_home(
 
     let status_bar = StatusBar::new(version, cwd, branch, agent, model);
     status_bar.render(f, main_chunks[1], colors);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mcp_status, McpSummary};
+
+    #[test]
+    fn mcp_status_hides_when_no_servers_are_enabled() {
+        assert_eq!(mcp_status(McpSummary::default()), None);
+    }
+
+    #[test]
+    fn mcp_status_shows_connected_and_total_counts() {
+        assert_eq!(
+            mcp_status(McpSummary {
+                connected: 1,
+                enabled: 2,
+                has_error: false,
+            }),
+            Some(("◐", " 1/2 MCP".to_string()))
+        );
+        assert_eq!(
+            mcp_status(McpSummary {
+                connected: 2,
+                enabled: 2,
+                has_error: false,
+            }),
+            Some(("●", " 2 MCP".to_string()))
+        );
+    }
 }

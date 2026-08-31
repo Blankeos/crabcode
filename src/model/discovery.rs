@@ -784,6 +784,13 @@ impl Discovery {
         model.limit.as_ref().map(|l| l.context)
     }
 
+    pub fn get_model_name(&self, provider_id: &str, model_id: &str) -> Option<String> {
+        let entry = self.load_cache_entry().ok()??;
+        let provider = entry.data.get(provider_id)?;
+        let model = provider.models.get(model_id)?;
+        Some(model.name.clone())
+    }
+
     pub fn get_model_reasoning_capability(
         &self,
         provider_id: &str,

@@ -911,6 +911,8 @@ pub struct App {
     pending_editor_suspend: Option<String>,
     pub websearch: crate::config::configuration::WebsearchConfig,
     pub mcp: crate::config::configuration::McpConfig,
+    mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
+    mcp_summary: crate::views::home::McpSummary,
     pub config_raw_merged: serde_json::Value,
     custom_instructions: String,
     terminal_focused: bool,
@@ -1162,6 +1164,8 @@ impl App {
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
+            mcp_manager: None,
+            mcp_summary: crate::views::home::McpSummary::default(),
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
@@ -1225,12 +1229,9 @@ impl App {
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
         if !mcp_config.is_empty() {
-            let warm_cfg = mcp_config.clone();
             let warm_cwd =
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let _ = tokio::spawn(async move {
-                let _ = crate::mcp::McpManager::ensure(warm_cfg, warm_cwd);
-            });
+            self.mcp_manager = Some(crate::mcp::McpManager::ensure(mcp_config.clone(), warm_cwd));
         }
         self.input
             .set_image_open_config(loaded_config.merged_config.images.clone());
@@ -2721,8 +2722,8 @@ impl App {
         model_id: &str,
     ) -> Option<crate::model::reasoning::ReasoningEffort> {
         let capability = self.reasoning_capability_for_model(provider_id, model_id)?;
-        let requested = self.reasoning_effort_override_for_model(provider_id, model_id)?;
-        let resolved = capability.resolve(Some(requested))?;
+        let requested = self.reasoning_effort_override_for_model(provider_id, model_id);
+        let resolved = capability.resolve(requested)?;
         if resolved == crate::model::reasoning::ReasoningEffort::None {
             return None;
         }
@@ -2758,6 +2759,39 @@ impl App {
     fn active_reasoning_effort_label(&self) -> Option<String> {
         self.active_reasoning_effort()
             .map(|effort| effort.as_str().to_string())
+    }
+
+    fn model_name_for_display(&self, provider_id: &str, model_id: &str) -> String {
+        self.discovery
+            .as_ref()
+            .and_then(|discovery| discovery.get_model_name(provider_id, model_id))
+            .unwrap_or_else(|| model_id.to_string())
+    }
+
+    fn refresh_mcp_summary(&mut self) {
+        let enabled = self.mcp.values().filter(|server| server.enabled()).count();
+        let Some(manager) = self.mcp_manager.as_ref() else {
+            self.mcp_summary = crate::views::home::McpSummary {
+                connected: 0,
+                enabled,
+                has_error: false,
+            };
+            return;
+        };
+        let Ok(manager) = manager.try_lock() else {
+            return;
+        };
+        let views = manager.views();
+        self.mcp_summary = crate::views::home::McpSummary {
+            connected: views
+                .iter()
+                .filter(|server| server.enabled && server.status == "connected")
+                .count(),
+            enabled,
+            has_error: views
+                .iter()
+                .any(|server| server.enabled && server.status == "failed"),
+        };
     }
 
     fn cycle_reasoning_effort_for_model(
@@ -11328,8 +11362,11 @@ impl App {
         }
         let status_cwd = self.active_workspace_path();
         let branch = self.current_git_branch(&status_cwd);
-        let usage_text = &self.cached_usage_text;
         let reasoning_effort = self.active_reasoning_effort_label();
+        self.refresh_mcp_summary();
+        let mcp_summary = self.mcp_summary;
+        let model_name = self.model_name_for_display(&self.provider_name, &self.model);
+        let usage_text = &self.cached_usage_text;
 
         match self.base_focus {
             BaseFocus::Home => {
@@ -11341,11 +11378,12 @@ impl App {
                     status_cwd.clone(),
                     branch.clone(),
                     self.agent.clone(),
-                    self.model.clone(),
+                    model_name,
                     self.provider_name.clone(),
                     reasoning_effort.clone(),
+                    mcp_summary,
                     &colors,
-                    &usage_text,
+                    usage_text,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -11404,7 +11442,7 @@ impl App {
                     is_compacting,
                     esc_cancel_primed,
                     retry_status.as_ref(),
-                    &usage_text,
+                    usage_text,
                     subagent_tabs,
                     &queued_messages,
                     &mut self.find_bar,
@@ -12105,6 +12143,8 @@ mod tests {
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
+            mcp_manager: None,
+            mcp_summary: crate::views::home::McpSummary::default(),
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
