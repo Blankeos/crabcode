@@ -151,11 +151,7 @@ impl Provider for OpenAICompatible {
             }
         }
 
-        let mut body = serde_json::json!({
-            "model": self.model_name,
-            "messages": chat_messages,
-            "stream": true,
-        });
+        let mut body = openai_compatible_request_body(&self.model_name, chat_messages);
 
         if !tool_params.is_empty() {
             body["tools"] = serde_json::Value::Array(tool_params);
@@ -235,6 +231,20 @@ impl Provider for OpenAICompatible {
 
         Ok(stream)
     }
+}
+
+fn openai_compatible_request_body(
+    model_name: &str,
+    messages: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "model": model_name,
+        "messages": messages,
+        "stream": true,
+        "stream_options": {
+            "include_usage": true
+        }
+    })
 }
 
 fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
@@ -660,6 +670,14 @@ mod tests {
             .expect("api key should be optional");
 
         assert!(provider.api_key.is_empty());
+    }
+
+    #[test]
+    fn request_asks_streaming_gateways_for_token_usage() {
+        let body = openai_compatible_request_body("test-model", Vec::new());
+
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
     #[test]
