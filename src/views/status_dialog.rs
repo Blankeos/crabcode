@@ -1,6 +1,6 @@
 use crate::mcp::McpServerView;
 use crate::theme::ThemeColors;
-use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
@@ -48,22 +48,46 @@ pub fn render_status_dialog(
 
     frame.render_widget(Clear, dialog_area);
 
-    let title = Line::from(vec![
-        Span::styled(
-            "Status",
-            Style::default()
-                .fg(colors.text_strong)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled("esc", Style::default().fg(colors.text_weak)),
-    ]);
     let block = Block::default()
         .borders(Borders::NONE)
-        .title(title)
-        .title_alignment(Alignment::Left)
         .padding(Padding::new(2, 2, 1, 1))
         .style(Style::default().bg(colors.dialog_background));
+    let content_area = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(content_area);
+    let header_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(4)])
+        .split(chunks[0]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Status",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Left),
+        header_chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "esc",
+            Style::default()
+                .fg(colors.primary)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Right),
+        header_chunks[1],
+    );
 
     let mut lines = vec![Line::from(Span::styled(
         format!("{} MCP Servers", state.servers.len()),
@@ -111,5 +135,5 @@ pub fn render_status_dialog(
         }
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), dialog_area);
+    frame.render_widget(Paragraph::new(Text::from(lines)), chunks[2]);
 }
