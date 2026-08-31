@@ -1,3 +1,4 @@
+use crate::views::status_dialog::render_status_dialog;
 use crate::views::variants_dialog::render_variants_dialog;
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -110,8 +111,8 @@ use crate::views::{
     AgentsDialogState, ChatState, ConnectDialogState, HomeState, JobsDialogState, McpDialogState,
     ModelsDialogState, MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState,
     QuestionDialogState, RemoteDialogState, SessionRenameDialogState, SessionsDialogState,
-    StorageDialogState, SuggestionsPopupState, TerminalSessionDialogState, ThemesDialogState,
-    TitleDialogState, VariantsDialogState,
+    StatusDialogState, StorageDialogState, SuggestionsPopupState, TerminalSessionDialogState,
+    ThemesDialogState, TitleDialogState, VariantsDialogState,
 };
 
 use crate::{
@@ -227,6 +228,7 @@ pub enum OverlayFocus {
     AgentsDialog,
     ModelsDialog,
     VariantsDialog,
+    StatusDialog,
     RefreshModelsDialog,
     ThemesDialog,
     ConnectDialog,
@@ -838,6 +840,7 @@ pub struct App {
     pub agents_dialog_state: AgentsDialogState,
     pub models_dialog_state: ModelsDialogState,
     pub variants_dialog_state: VariantsDialogState,
+    pub status_dialog_state: StatusDialogState,
     pub themes_dialog_state: ThemesDialogState,
     themes_dialog_original_theme_index: usize,
     themes_dialog_original_dark_mode: bool,
@@ -916,6 +919,7 @@ pub struct App {
     pub mcp: crate::config::configuration::McpConfig,
     mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
     mcp_summary: crate::views::home::McpSummary,
+    mcp_server_views: Vec<crate::mcp::McpServerView>,
     pub config_raw_merged: serde_json::Value,
     custom_instructions: String,
     terminal_focused: bool,
@@ -1027,6 +1031,7 @@ impl App {
         let agents_dialog_state = init_agents_dialog("Select agent", vec![]);
         let models_dialog_state = init_models_dialog("Models", vec![]);
         let variants_dialog_state = VariantsDialogState::new();
+        let status_dialog_state = StatusDialogState::default();
         let themes_dialog_state = init_themes_dialog("Themes", vec![], false);
         let connect_dialog_state = init_connect_dialog();
         let provider_oauth_flow_state = init_provider_oauth_flow();
@@ -1100,6 +1105,7 @@ impl App {
             agents_dialog_state,
             models_dialog_state,
             variants_dialog_state,
+            status_dialog_state,
             themes_dialog_state,
             themes_dialog_original_theme_index: 0,
             themes_dialog_original_dark_mode: true,
@@ -1171,6 +1177,7 @@ impl App {
             mcp: crate::config::configuration::McpConfig::default(),
             mcp_manager: None,
             mcp_summary: crate::views::home::McpSummary::default(),
+            mcp_server_views: Vec::new(),
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
@@ -2854,6 +2861,17 @@ impl App {
                 .iter()
                 .any(|server| server.enabled && server.status == "failed"),
         };
+        self.mcp_server_views = views;
+    }
+
+    fn open_status_dialog(&mut self, args: &[String]) {
+        if !args.is_empty() {
+            push_toast(Toast::new("Usage: /status", ToastLevel::Warning, None));
+            return;
+        }
+        self.refresh_mcp_summary();
+        self.status_dialog_state.show(self.mcp_server_views.clone());
+        self.overlay_focus = OverlayFocus::StatusDialog;
     }
 
     fn cycle_reasoning_effort_for_model(
@@ -4187,6 +4205,13 @@ impl App {
                     self.select_variant();
                 }
                 if !self.variants_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
+            OverlayFocus::StatusDialog => {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                    self.status_dialog_state.hide();
                     self.overlay_focus = OverlayFocus::None;
                 }
                 true
@@ -6605,6 +6630,10 @@ impl App {
                 }
                 if parsed.name == "variants" {
                     self.open_variants_dialog(&parsed.args);
+                    return;
+                }
+                if parsed.name == "status" {
+                    self.open_status_dialog(&parsed.args);
                     return;
                 }
                 if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
@@ -11592,6 +11621,11 @@ impl App {
             render_variants_dialog(f, &mut self.variants_dialog_state, size, colors);
         }
 
+        if self.overlay_focus == OverlayFocus::StatusDialog && self.status_dialog_state.is_visible()
+        {
+            render_status_dialog(f, &self.status_dialog_state, size, &colors);
+        }
+
         if self.overlay_focus == OverlayFocus::RefreshModelsDialog {
             crate::views::models_dialog::render_refresh_models_dialog(
                 f,
@@ -12177,6 +12211,7 @@ mod tests {
             agents_dialog_state: init_agents_dialog("Select agent", vec![]),
             models_dialog_state: init_models_dialog("Models", vec![]),
             variants_dialog_state: VariantsDialogState::new(),
+            status_dialog_state: StatusDialogState::default(),
             themes_dialog_state: init_themes_dialog("Themes", vec![], false),
             themes_dialog_original_theme_index: 0,
             themes_dialog_original_dark_mode: true,
@@ -12248,6 +12283,7 @@ mod tests {
             mcp: crate::config::configuration::McpConfig::default(),
             mcp_manager: None,
             mcp_summary: crate::views::home::McpSummary::default(),
+            mcp_server_views: Vec::new(),
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
