@@ -1,4 +1,8 @@
-use crate::config::configuration::{McpConfig, McpServerConfig};
+pub mod cli;
+mod credentials;
+pub mod oauth;
+
+use crate::config::configuration::{McpConfig, McpRemoteConfig, McpServerConfig};
 use crate::tools::{
     ParameterSchema, ParameterType, Tool, ToolContext, ToolError, ToolHandler, ToolResult,
 };
@@ -6,13 +10,14 @@ use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{CallToolRequestParams, ContentBlock, JsonObject};
 use rmcp::service::{RoleClient, RunningService};
+use rmcp::transport::auth::AuthorizationManager;
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::ServiceExt;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -29,6 +34,7 @@ pub struct McpServerView {
     pub enabled: bool,
     pub status: String,
     pub kind: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +75,14 @@ impl McpStatus {
             Self::Connected => "connected",
             Self::Failed(_) => "failed",
             Self::NeedsAuth => "needs_auth",
+        }
+    }
+
+    fn detail(&self) -> Option<String> {
+        match self {
+            Self::Failed(msg) => Some(msg.clone()),
+            Self::NeedsAuth => Some("authentication required".to_string()),
+            _ => None,
         }
     }
 }
@@ -141,6 +155,7 @@ impl McpManager {
                 enabled: state.config.enabled(),
                 status: state.status.as_str().to_string(),
                 kind: state.config.kind().to_string(),
+                detail: state.status.detail(),
             })
             .collect()
     }
@@ -211,6 +226,34 @@ impl McpManager {
         }
         self.servers.insert(name.to_string(), state);
         Ok(())
+    }
+
+    pub async fn reconnect(&mut self, name: &str) -> anyhow::Result<()> {
+        let Some(mut state) = self.servers.remove(name) else {
+            anyhow::bail!("mcp server not found");
+        };
+        if !state.config.enabled() {
+            self.servers.insert(name.to_string(), state);
+            anyhow::bail!("mcp server is disabled");
+        }
+        state.client = None;
+        state.tools.clear();
+        state.status = McpStatus::Connecting;
+        let result = open_and_list_tools(&self.workspace, name, &state.config).await;
+        apply_connect_result(&mut state, result);
+        self.servers.insert(name.to_string(), state);
+        Ok(())
+    }
+
+    pub fn remote_config(&self, name: &str) -> Option<McpRemoteConfig> {
+        match self.servers.get(name).map(|state| &state.config) {
+            Some(McpServerConfig::Remote(remote)) => Some(remote.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn status_of(&self, name: &str) -> Option<&'static str> {
+        self.servers.get(name).map(|state| state.status.as_str())
     }
 
     async fn call_tool(
@@ -306,6 +349,9 @@ async fn warm_connections(manager: Arc<Mutex<McpManager>>) {
                 continue;
             }
             apply_connect_result(state, result);
+            if matches!(state.status, McpStatus::NeedsAuth) {
+                toast_needs_auth(&name);
+            }
         }
     }
 }
@@ -331,20 +377,19 @@ async fn open_and_list_tools(
     config: &McpServerConfig,
 ) -> ConnectOutcome {
     let timeout = state_timeout(config);
-    let client = match open_client(workspace, config).await {
+    let client = match open_client(workspace, name, config).await {
         Ok(client) => client,
         Err(err) => {
             let msg = err.to_string();
-            return Err(
-                if msg.to_ascii_lowercase().contains("auth")
-                    || msg.to_ascii_lowercase().contains("401")
-                    || msg.to_ascii_lowercase().contains("unauthorized")
-                {
-                    McpStatus::NeedsAuth
-                } else {
-                    McpStatus::Failed(msg)
-                },
+            let oauth_enabled = matches!(
+                config,
+                McpServerConfig::Remote(remote) if oauth::should_use_oauth(remote)
             );
+            return Err(if oauth_enabled && oauth::is_auth_error_message(&msg) {
+                McpStatus::NeedsAuth
+            } else {
+                McpStatus::Failed(msg)
+            });
         }
     };
 
@@ -372,6 +417,7 @@ async fn open_and_list_tools(
 
 async fn open_client(
     workspace: &Path,
+    name: &str,
     config: &McpServerConfig,
 ) -> anyhow::Result<RunningService<RoleClient, ()>> {
     match config {
@@ -395,22 +441,71 @@ async fn open_client(
             .spawn()?;
             Ok(().serve(transport).await?)
         }
-        McpServerConfig::Remote(remote) => {
-            let mut headers = HashMap::new();
-            for (key, value) in &remote.headers {
-                let name = HeaderName::from_bytes(key.as_bytes())?;
-                let value = HeaderValue::from_str(value)?;
-                headers.insert(name, value);
-            }
-            let transport = StreamableHttpClientTransport::from_config(
-                rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
-                    remote.url.clone(),
-                )
-                .custom_headers(headers),
-            );
-            Ok(().serve(transport).await?)
+        McpServerConfig::Remote(remote) => open_remote_client(name, remote).await,
+    }
+}
+
+async fn open_remote_client(
+    name: &str,
+    remote: &McpRemoteConfig,
+) -> anyhow::Result<RunningService<RoleClient, ()>> {
+    let headers = remote_headers(remote)?;
+    let mut transport_config =
+        rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+            remote.url.clone(),
+        )
+        .custom_headers(headers);
+
+    if oauth::should_use_oauth(remote) && credentials::has_credentials(name, &remote.url) {
+        let mut manager = AuthorizationManager::new(remote.url.as_str())
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to start OAuth client: {e}"))?;
+        manager.set_credential_store(credentials::FileCredentialStore::new(
+            name.to_string(),
+            remote.url.clone(),
+        ));
+        let hydrated = manager
+            .initialize_from_store()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to load MCP OAuth credentials: {e}"))?;
+        if hydrated {
+            let token = manager
+                .get_access_token()
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            transport_config = transport_config.auth_header(token);
         }
     }
+
+    let transport = StreamableHttpClientTransport::from_config(transport_config);
+    Ok(().serve(transport).await?)
+}
+
+fn remote_headers(remote: &McpRemoteConfig) -> anyhow::Result<HashMap<HeaderName, HeaderValue>> {
+    let mut headers = HashMap::new();
+    for (key, value) in &remote.headers {
+        if oauth::should_use_oauth(remote) && key.eq_ignore_ascii_case("authorization") {
+            continue;
+        }
+        let name = HeaderName::from_bytes(key.as_bytes())?;
+        let value = HeaderValue::from_str(value)?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+fn toast_needs_auth(name: &str) {
+    static TOASTED: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+    let toasted = TOASTED.get_or_init(|| std::sync::Mutex::new(HashSet::new()));
+    let mut guard = toasted.lock().unwrap_or_else(|e| e.into_inner());
+    if !guard.insert(name.to_string()) {
+        return;
+    }
+    crate::push_toast(crate::toast::Toast::new(
+        format!("MCP \"{name}\" needs authentication. Run: crabcode mcp auth {name}"),
+        crate::toast::ToastLevel::Warning,
+        Some(Duration::from_secs(8)),
+    ));
 }
 
 fn state_timeout(config: &McpServerConfig) -> Duration {
@@ -550,6 +645,11 @@ impl ToolHandler for McpToolHandler {
 fn normalize_input_schema(schema: &Value) -> Value {
     let mut schema = schema.clone();
     if let Value::Object(map) = &mut schema {
+        // OpenAI/xAI Responses require tool `parameters` to be a plain object schema.
+        // MCP servers (e.g. cua-driver `browser_prepare`) sometimes emit root anyOf/oneOf
+        // with non-object branches; strip those before we send the schema upstream.
+        flatten_root_non_object_unions(map);
+
         map.entry("type".to_string())
             .or_insert_with(|| Value::String("object".to_string()));
         map.entry("properties".to_string())
@@ -558,6 +658,49 @@ fn normalize_input_schema(schema: &Value) -> Value {
             .or_insert_with(|| Value::Bool(false));
     }
     schema
+}
+
+fn branch_is_typed_object(branch: &Value) -> bool {
+    let Some(obj) = branch.as_object() else {
+        return false;
+    };
+    match obj.get("type") {
+        Some(Value::String(t)) => t == "object",
+        Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("object")),
+        _ => false,
+    }
+}
+
+fn flatten_root_non_object_unions(map: &mut serde_json::Map<String, Value>) {
+    for key in ["anyOf", "oneOf"] {
+        let Some(Value::Array(branches)) = map.get(key).cloned() else {
+            continue;
+        };
+        if !branches
+            .iter()
+            .any(|branch| !branch_is_typed_object(branch))
+        {
+            continue;
+        }
+
+        let root_is_object = map
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t == "object")
+            || map.contains_key("properties");
+        if !root_is_object {
+            if let Some(Value::Object(branch)) = branches
+                .into_iter()
+                .find(|branch| branch_is_typed_object(branch))
+            {
+                for (k, v) in branch {
+                    map.entry(k).or_insert(v);
+                }
+            }
+        }
+
+        map.remove(key);
+    }
 }
 
 fn parameters_from_schema(schema: &Value) -> Vec<ParameterSchema> {
@@ -603,5 +746,97 @@ fn parameter_type_from_schema(schema: &Value) -> ParameterType {
         )),
         Some("object") => ParameterType::Object(HashMap::new()),
         _ => ParameterType::String,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_strips_root_anyof_with_non_object_branches() {
+        // Mirrors cua-driver `browser_prepare`: object root + anyOf of required-only
+        // branches that omit `type: object`. xAI Responses rejects that shape.
+        let input = json!({
+            "type": "object",
+            "properties": {
+                "pid": { "type": "integer" },
+                "allow_launch": { "type": "boolean" }
+            },
+            "required": [],
+            "additionalProperties": true,
+            "anyOf": [
+                { "required": ["pid"] },
+                {
+                    "properties": {
+                        "allow_launch": { "const": true }
+                    },
+                    "required": ["allow_launch"]
+                }
+            ]
+        });
+
+        let normalized = normalize_input_schema(&input);
+        assert_eq!(
+            normalized.get("type").and_then(Value::as_str),
+            Some("object")
+        );
+        assert!(normalized.get("anyOf").is_none());
+        assert!(normalized.get("oneOf").is_none());
+        assert!(normalized
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some());
+        assert_eq!(normalized.get("additionalProperties"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn normalize_keeps_object_only_anyof_branches() {
+        let input = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } },
+                    "required": ["a"]
+                },
+                {
+                    "type": "object",
+                    "properties": { "b": { "type": "integer" } },
+                    "required": ["b"]
+                }
+            ]
+        });
+
+        let normalized = normalize_input_schema(&input);
+        assert!(normalized.get("anyOf").is_some());
+        assert_eq!(
+            normalized.get("type").and_then(Value::as_str),
+            Some("object")
+        );
+    }
+
+    #[test]
+    fn normalize_promotes_sole_object_branch_when_root_lacks_object() {
+        let input = json!({
+            "anyOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "properties": { "x": { "type": "string" } },
+                    "required": ["x"]
+                }
+            ]
+        });
+
+        let normalized = normalize_input_schema(&input);
+        assert!(normalized.get("anyOf").is_none());
+        assert_eq!(
+            normalized.get("type").and_then(Value::as_str),
+            Some("object")
+        );
+        assert!(normalized
+            .pointer("/properties/x")
+            .is_some_and(|v| v.get("type").and_then(Value::as_str) == Some("string")));
     }
 }

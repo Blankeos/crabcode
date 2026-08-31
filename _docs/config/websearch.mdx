@@ -1,51 +1,98 @@
 ---
-title: Websearch
-description: Configure the built-in websearch tool and search provider.
+title: websearch
+summary: Local search backends and provider-native search tools
 ---
 
-# Web Search
+Configure web search for agents. Crabcode supports two complementary paths:
 
-crabcode exposes a built-in `websearch` tool by default. Agents use `websearch` for discovery and `webfetch` when they already know the URL. The default provider is Exa's hosted MCP service, which does not require an API key.
+1. **Local adapters** (`websearch.provider`) — crabcode runs a `websearch` tool against Exa, Tavily, Brave, TinyFish, Monid, Ollama Cloud, etc.
+2. **Native tools** (`websearch.native`) — the active LLM provider executes search server-side (`web_search`, `x_search`, …). These are normal aisdk tools composed into the tools list.
 
-```jsonc title="crabcode.jsonc"
+```jsonc
 {
   "websearch": {
     "enabled": true,
-    "provider": "exa-hosted-mcp"
-  },
-  "permission": {
-    "websearch": "allow"
+    "provider": "exa-hosted-mcp",
+    "apiKey": null,
+    "endpoint": null,
+    "native": {
+      "web": false,
+      "x": true
+    }
   }
 }
 ```
 
-Use `websearch: false` to disable the tool.
+`websearch: false` (or `"enabled": false`) disables both local and native search.
 
-## Providers
+## Local vs native
 
-| Provider | API key config |
-| --- | --- |
-| `exa-hosted-mcp` | Optional `apiKey`; works without one |
-| `firecrawl-hosted-mcp` | Optional `apiKey`; works without one (Firecrawl Keyless) |
-| `exa` | `apiKey: "{env:EXA_API_KEY}"` |
-| `tavily` | `apiKey: "{env:TAVILY_API_KEY}"` |
-| `perplexity` | `apiKey: "{env:PERPLEXITY_API_KEY}"` |
-| `brave` | `apiKey: "{env:BRAVE_SEARCH_API_KEY}"` |
-| `ollama-cloud` | `apiKey: "{env:OLLAMA_API_KEY}"` |
-| `serpapi` | `apiKey: "{env:SERPAPI_API_KEY}"` |
-| `keiro` | `apiKey: "{env:KEIRO_API_KEY}"` |
+| Concern | Config | Who runs it |
+|---|---|---|
+| General web search backend | `provider` / `apiKey` / `endpoint` | Local `websearch` tool (crabcode) |
+| Provider web search | `native.web` | LLM provider (`web_search`, Anthropic hosted web, OpenRouter web plugin) |
+| X/Twitter search | `native.x` | xAI only (`x_search`) |
 
-Only the provider names above are accepted.
+`native.web` and the local `websearch` tool are **substitutes**: when `native.web` is on and the active provider supports hosted web search, local websearch is skipped.
 
-## Keyed provider example
+`native.x` is a **complement**: just to make crabcode as capable as grok-build cli.
 
-```jsonc title="crabcode.jsonc"
+```jsonc
+// Local Ollama Cloud web search + xAI x_search
 {
   "websearch": {
-    "provider": "keiro",
-    "apiKey": "{env:KEIRO_API_KEY}"
+    "provider": "ollama-cloud",
+    "apiKey": "{env:OLLAMA_API_KEY}",
+    "native": {
+      "web": false,
+      "x": true
+    }
   }
 }
 ```
 
-`endpoint` can override the default provider URL for testing or proxying.
+## Defaults
+
+| Field | Default |
+|---|---|
+| `enabled` | `true` when unset |
+| `provider` | `exa-hosted-mcp` (keyless, rate-limited) |
+| `native.web` | `false` |
+| `native.x` | `true` |
+
+Unsupported native flags are ignored (e.g. `native.x` on OpenAI). If `native.web` is true but the active provider has no hosted web tool (Ollama, Groq, …), crabcode falls back to the local adapter.
+
+## Native tool costs
+
+| Provider | Tool | API tool fee | Source |
+|---|---|---|---|
+| OpenAI | `web_search` | **$10 / 1k calls** + search-content tokens | [OpenAI](https://developers.openai.com/api/docs/pricing) |
+| Anthropic | hosted web search | **$10 / 1k searches** + tokens | [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing#web-search-tool) |
+| xAI | `web_search` | **$5 / 1k successful calls** + tokens | [xAI](https://docs.x.ai/developers/pricing#tools-pricing) |
+| xAI | `x_search` | **$5 / 1k successful calls** + tokens | [xAI](https://docs.x.ai/developers/pricing#tools-pricing) |
+
+These fees apply on **API-key** auth. Models often invoke search multiple times per turn.
+
+**Subscription / OAuth** logins (ChatGPT, Claude, SuperGrok, …) use the provider’s subscription transport instead — native search is included in plan quota / rate limits, not billed as the API tool fees above.
+
+**Local adapters** bill (or rate-limit) through their own APIs — `exa-hosted-mcp` and `firecrawl-hosted-mcp` are keyless/rate-limited; Exa/Tavily/Brave/TinyFish/Monid/Ollama Cloud/etc. use your key (TinyFish Search and Monid→TinyFish Search are free usage).
+
+Default is local websearch + `native.x` on xAI. Set `native.web: true` to use provider-hosted web search instead (API tool fees may apply).
+
+## Providers (local adapters)
+
+| Provider | Auth | Notes |
+|---|---|---|
+| `exa-hosted-mcp` | None | Default. Hosted MCP bridge; rate-limited |
+| `firecrawl-hosted-mcp` | None (optional key) | Firecrawl hosted MCP bridge; rate-limited without a key |
+| `exa` | `EXA_API_KEY` | Direct Exa API |
+| `tavily` | `TAVILY_API_KEY` | Tavily search API |
+| `perplexity` | `PERPLEXITY_API_KEY` | Perplexity Search API |
+| `brave` | `BRAVE_API_KEY` | Brave Search API |
+| `ollama-cloud` | `OLLAMA_API_KEY` (required) | Ollama Cloud `POST /api/web_search` — separate HTTP API, **not** a chat-native tool |
+| `serpapi` | `SERPAPI_API_KEY` | SerpAPI results from Google, DuckDuckGo, etc. |
+| `keiro` | `KEIRO_API_KEY` | Keiro search API |
+| `parallel` | `PARALLEL_API_KEY` | Parallel search API |
+| `tako` | `TAKO_API_KEY` | Tako search API |
+| `tinyfish` | `TINYFISH_API_KEY` | TinyFish Search API (`api.search.tinyfish.ai`) — free with a TinyFish account |
+| `monid` | `MONID_API_KEY` | Monid catalog → TinyFish `/search` (no TinyFish key; uses your Monid API key) |

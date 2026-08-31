@@ -1804,7 +1804,7 @@ impl Dialog {
         frame.render_widget(footer_paragraph, chunks[5]);
     }
 
-    fn footer_lines(&self, width: u16, colors: ThemeColors) -> Vec<Line<'static>> {
+    pub fn footer_lines(&self, width: u16, colors: ThemeColors) -> Vec<Line<'static>> {
         if self.actions.is_empty() {
             return vec![Line::from(vec![])];
         }

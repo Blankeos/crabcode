@@ -38,6 +38,8 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 | `provider.<id>.options.timeout` | ✅ | partial | Integer milliseconds or `false` to disable timeout. |
 | `theme` | ✅ | ✅ | In crabcode config files only. OpenCode config `theme` is ignored by crabcode. |
 | `notifications` |  | ✅ | crabcode-specific sounds, desktop notifications, and terminal alert signals such as Zed tab dots. |
+| `images` |  | ✅ | crabcode-specific image placeholder opener. |
+| `editor` |  | ✅ | crabcode-specific shell template for clicked file paths. See [Editor](/config/editor). |
 | `mcp` | ✅ | ✅ | Uses the OpenCode MCP config shape. Enabled servers are connected at runtime and their tools are exposed as crabcode tools. |
 | `permission` | ✅ | ✅ | Global tool permission rules are enforced during AI SDK tool execution. |
 | `instructions` | ✅ | ✅ | Loads the listed files relative to the project root (or from absolute and `~/` paths) and appends their contents to the system prompt. Unreadable files produce a config warning. |
@@ -57,6 +59,8 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 ## MCP notes
 
 Use the OpenCode MCP docs for the config shape. crabcode reads the same top-level `mcp` map from OpenCode and crabcode config files, supports local stdio servers and remote HTTP servers, and registers discovered MCP tools into the normal tool list.
+
+MCP OAuth works like OpenCode (`crabcode mcp auth <name>`, or `a` in `/mcp`). Tokens are stored in `~/.local/state/crabcode/mcp-auth.json`.
 
 MCP server `enabled` flags are respected. The remote UI can toggle configured servers, and those overrides are persisted in crabcode preferences. MCP resources are not exposed as separate resource-list/read tools yet; tool calls are supported.
 

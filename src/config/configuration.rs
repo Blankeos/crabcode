@@ -407,6 +407,16 @@ impl Default for ImagesConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EditorConfig {
+    /// Shell template used when a file path is clicked. Placeholders:
+    /// `{pathname}` / `{path}` / `{filename}` (shell-quoted), `{pathname_raw}`,
+    /// `{line}`, `{column}` / `{col}`, `{location}` (quoted `path:line:column`).
+    pub open: Option<String>,
+    /// Leave the TUI, run `open` with the terminal, then restore crabcode.
+    pub suspend: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebsearchProvider {
     ExaHostedMcp,
@@ -418,6 +428,10 @@ pub enum WebsearchProvider {
     OllamaCloud,
     SerpApi,
     Keiro,
+    Parallel,
+    Tako,
+    Tinyfish,
+    Monid,
 }
 
 impl WebsearchProvider {
@@ -432,13 +446,45 @@ impl WebsearchProvider {
             Self::OllamaCloud => "ollama-cloud",
             Self::SerpApi => "serpapi",
             Self::Keiro => "keiro",
+            Self::Parallel => "parallel",
+            Self::Tako => "tako",
+            Self::Tinyfish => "tinyfish",
+            Self::Monid => "monid",
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebsearchNativeConfig {
+    /// Provider-executed web search (`web_search` / Anthropic hosted web / OpenRouter web plugin).
+    /// Default false. When true, substitutes for the local `websearch` tool if the active provider supports it.
+    pub web: Option<bool>,
+    /// Provider-executed X/Twitter search (`x_search`). Default true. xAI-only; ignored elsewhere.
+    /// Independent of `web` — can stay on while a local backend handles web search.
+    pub x: Option<bool>,
+}
+
+impl WebsearchNativeConfig {
+    pub fn web_enabled(&self) -> bool {
+        self.web.unwrap_or(false)
+    }
+
+    pub fn x_enabled(&self) -> bool {
+        self.x.unwrap_or(true)
+    }
+}
+
+impl Default for WebsearchNativeConfig {
+    fn default() -> Self {
+        Self { web: None, x: None }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebsearchConfig {
     pub enabled: Option<bool>,
+    /// Provider-executed search tools. Host policy only — aisdk receives the resulting tools list.
+    pub native: WebsearchNativeConfig,
     pub provider: WebsearchProvider,
     pub endpoint: Option<String>,
     pub api_key: Option<String>,
@@ -448,6 +494,7 @@ impl Default for WebsearchConfig {
     fn default() -> Self {
         Self {
             enabled: None,
+            native: WebsearchNativeConfig::default(),
             provider: WebsearchProvider::ExaHostedMcp,
             endpoint: None,
             api_key: None,
@@ -579,6 +626,7 @@ pub struct MergedConfig {
     pub custom_providers: HashMap<String, CustomProviderConfig>,
     pub notifications: NotificationsConfig,
     pub images: ImagesConfig,
+    pub editor: EditorConfig,
     pub websearch: WebsearchConfig,
     pub mcp: McpConfig,
     pub instructions: Vec<String>,
@@ -1221,6 +1269,7 @@ fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     out.insert("theme");
     out.insert("notifications");
     out.insert("images");
+    out.insert("editor");
     out.insert("websearch");
     out.insert("tui");
     out
@@ -1574,6 +1623,7 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     apply_notifications(obj.get("notifications"), &mut notifications, diagnostics);
     out.notifications = notifications;
     out.images = parse_images(obj.get("images"), diagnostics);
+    out.editor = parse_editor(obj.get("editor"), diagnostics);
     out.websearch = parse_websearch(obj.get("websearch"), diagnostics);
     out.mcp = parse_mcp(obj.get("mcp"), diagnostics);
     out.instructions = obj
@@ -1796,8 +1846,9 @@ fn parse_mcp_oauth(
     };
     (
         true,
-        optional_string(map.get("clientId")),
-        optional_string(map.get("clientSecret")),
+        optional_string(map.get("clientId")).or_else(|| optional_string(map.get("client_id"))),
+        optional_string(map.get("clientSecret"))
+            .or_else(|| optional_string(map.get("client_secret"))),
         optional_string(map.get("scope")),
     )
 }
@@ -1876,12 +1927,40 @@ fn parse_websearch(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -
                 }
             }
 
+            if let Some(native) = map.get("native") {
+                match native.as_object() {
+                    Some(native_map) => {
+                        if let Some(web) = native_map.get("web") {
+                            if let Some(v) = web.as_bool() {
+                                websearch.native.web = Some(v);
+                            } else {
+                                diagnostics
+                                    .warnings
+                                    .push("websearch.native.web must be a boolean".to_string());
+                            }
+                        }
+                        if let Some(x) = native_map.get("x") {
+                            if let Some(v) = x.as_bool() {
+                                websearch.native.x = Some(v);
+                            } else {
+                                diagnostics
+                                    .warnings
+                                    .push("websearch.native.x must be a boolean".to_string());
+                            }
+                        }
+                    }
+                    None => diagnostics
+                        .warnings
+                        .push("websearch.native must be an object".to_string()),
+                }
+            }
+
             if let Some(provider) = map.get("provider") {
                 if let Some(raw) = provider.as_str() {
                     match parse_websearch_provider(raw) {
                         Some(provider) => websearch.provider = provider,
                         _ => diagnostics.warnings.push(format!(
-                            "websearch.provider must be one of: exa-hosted-mcp, firecrawl-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro; got {}",
+                            "websearch.provider must be one of: exa-hosted-mcp, firecrawl-hosted-mcp, exa, tavily, perplexity, brave, ollama-cloud, serpapi, keiro, parallel, tako, tinyfish, monid; got {}",
                             raw
                         )),
                     }
@@ -1948,6 +2027,10 @@ fn parse_websearch_provider(raw: &str) -> Option<WebsearchProvider> {
         "ollama-cloud" => Some(WebsearchProvider::OllamaCloud),
         "serpapi" => Some(WebsearchProvider::SerpApi),
         "keiro" => Some(WebsearchProvider::Keiro),
+        "parallel" => Some(WebsearchProvider::Parallel),
+        "tako" => Some(WebsearchProvider::Tako),
+        "tinyfish" => Some(WebsearchProvider::Tinyfish),
+        "monid" => Some(WebsearchProvider::Monid),
         _ => None,
     }
 }
@@ -2486,6 +2569,55 @@ fn parse_image_open_with(
     }
 }
 
+fn parse_editor(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> EditorConfig {
+    let mut editor = EditorConfig::default();
+    let Some(value) = value else {
+        return editor;
+    };
+    if value.is_null() {
+        return editor;
+    }
+
+    match value {
+        Value::String(open) => {
+            let open = open.trim();
+            if !open.is_empty() {
+                editor.open = Some(open.to_string());
+            }
+        }
+        Value::Object(map) => {
+            if let Some(open) = map.get("open") {
+                match open {
+                    Value::String(open) => {
+                        let open = open.trim();
+                        if !open.is_empty() {
+                            editor.open = Some(open.to_string());
+                        }
+                    }
+                    Value::Null => {}
+                    _ => diagnostics
+                        .warnings
+                        .push("editor.open must be a string".to_string()),
+                }
+            }
+
+            if let Some(suspend) = map.get("suspend") {
+                match suspend {
+                    Value::Bool(suspend) => editor.suspend = *suspend,
+                    _ => diagnostics
+                        .warnings
+                        .push("editor.suspend must be a boolean".to_string()),
+                }
+            }
+        }
+        _ => diagnostics
+            .warnings
+            .push("editor must be a string or object".to_string()),
+    }
+
+    editor
+}
+
 fn apply_notifications(
     value: Option<&Value>,
     notifications: &mut NotificationsConfig,
@@ -2802,6 +2934,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "enabledProviders",
         "notifications",
         "images",
+        "editor",
         "websearch",
         "tui",
         "instructions",
@@ -3199,6 +3332,8 @@ mod tests {
         );
 
         assert_eq!(config.websearch.enabled, Some(true));
+        assert!(!config.websearch.native.web_enabled());
+        assert!(config.websearch.native.x_enabled());
         assert_eq!(config.websearch.provider, WebsearchProvider::Exa);
         assert_eq!(config.websearch.provider.as_str(), "exa");
         assert_eq!(
@@ -3206,6 +3341,28 @@ mod tests {
             Some("https://mcp.exa.ai/mcp")
         );
         assert_eq!(config.websearch.api_key.as_deref(), Some("secret"));
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_websearch_native_flags() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "websearch": {
+                    "native": {
+                        "web": false,
+                        "x": true
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.websearch.native.web, Some(false));
+        assert_eq!(config.websearch.native.x, Some(true));
+        assert!(!config.websearch.native.web_enabled());
+        assert!(config.websearch.native.x_enabled());
         assert!(diagnostics.warnings.is_empty());
     }
 
@@ -3274,6 +3431,22 @@ mod tests {
         assert_eq!(
             parse_websearch_provider("keiro"),
             Some(WebsearchProvider::Keiro)
+        );
+        assert_eq!(
+            parse_websearch_provider("parallel"),
+            Some(WebsearchProvider::Parallel)
+        );
+        assert_eq!(
+            parse_websearch_provider("tako"),
+            Some(WebsearchProvider::Tako)
+        );
+        assert_eq!(
+            parse_websearch_provider("tinyfish"),
+            Some(WebsearchProvider::Tinyfish)
+        );
+        assert_eq!(
+            parse_websearch_provider("monid"),
+            Some(WebsearchProvider::Monid)
         );
         assert_eq!(parse_websearch_provider("ollama"), None);
         assert_eq!(parse_websearch_provider("keiro-labs"), None);
@@ -3410,6 +3583,43 @@ mod tests {
         let config = parse_merged_config(&json!({}), &mut diagnostics);
 
         assert_eq!(config.images.open_with, ImageOpenWith::Auto);
+        assert_eq!(config.editor, EditorConfig::default());
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_editor_open_string() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "editor": "hx -- {pathname}:{line}:{column}"
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            config.editor.open.as_deref(),
+            Some("hx -- {pathname}:{line}:{column}")
+        );
+        assert!(!config.editor.suspend);
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_editor_open_object() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "editor": {
+                    "open": "hx -- {location}",
+                    "suspend": true
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.editor.open.as_deref(), Some("hx -- {location}"));
+        assert!(config.editor.suspend);
         assert!(diagnostics.warnings.is_empty());
     }
 
@@ -3652,5 +3862,56 @@ mod tests {
             resolve_api_key_value(Some("{env:MISSING_KEY}"), |_| None),
             None
         );
+    }
+
+    #[test]
+    fn parses_remote_mcp_oauth_camel_and_snake_case() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "mcp": {
+                    "doop": {
+                        "type": "remote",
+                        "url": "https://doop.design/mcp",
+                        "oauth": {
+                            "clientId": "camel",
+                            "client_secret": "snake",
+                            "scope": "openid"
+                        }
+                    },
+                    "plain": {
+                        "url": "https://mcp.grep.app"
+                    },
+                    "disabled": {
+                        "url": "https://example.com/mcp",
+                        "oauth": false
+                    }
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        let doop = match config.mcp.get("doop") {
+            Some(McpServerConfig::Remote(remote)) => remote,
+            other => panic!("expected remote doop, got {other:?}"),
+        };
+        assert!(doop.oauth_enabled);
+        assert_eq!(doop.oauth_client_id.as_deref(), Some("camel"));
+        assert_eq!(doop.oauth_client_secret.as_deref(), Some("snake"));
+        assert_eq!(doop.oauth_scope.as_deref(), Some("openid"));
+
+        let plain = match config.mcp.get("plain") {
+            Some(McpServerConfig::Remote(remote)) => remote,
+            other => panic!("expected remote plain, got {other:?}"),
+        };
+        assert!(plain.oauth_enabled);
+        assert!(plain.oauth_client_id.is_none());
+
+        let disabled = match config.mcp.get("disabled") {
+            Some(McpServerConfig::Remote(remote)) => remote,
+            other => panic!("expected remote disabled, got {other:?}"),
+        };
+        assert!(!disabled.oauth_enabled);
+        assert!(diagnostics.warnings.is_empty());
     }
 }

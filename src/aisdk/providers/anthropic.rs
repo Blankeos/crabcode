@@ -111,17 +111,25 @@ impl Provider for Anthropic {
         // immediately followed by tool_result blocks in one user message.
         let user_messages = anthropic_messages(messages);
 
-        let tool_params: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|t| {
-                let schema = serde_json::to_value(&t.input_schema).unwrap_or_default();
-                serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": schema,
-                })
-            })
-            .collect();
+        let mut tool_params: Vec<serde_json::Value> = Vec::new();
+        let mut has_hosted_search = false;
+        for t in tools {
+            match &t.transport {
+                crate::aisdk::tool::ToolTransport::ProviderNative(value) => {
+                    has_hosted_search = true;
+                    tool_params.push(value.clone());
+                }
+                crate::aisdk::tool::ToolTransport::OpenRouterPlugin(_) => {}
+                crate::aisdk::tool::ToolTransport::ClientFunction => {
+                    let schema = serde_json::to_value(&t.input_schema).unwrap_or_default();
+                    tool_params.push(serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": schema,
+                    }));
+                }
+            }
+        }
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -156,6 +164,10 @@ impl Provider for Anthropic {
             request_headers.insert("x-api-key", self.api_key.parse().unwrap());
         }
         request_headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+        if has_hosted_search {
+            // Hosted web_search tool requires the anthropic-beta header.
+            request_headers.insert("anthropic-beta", "web-search-2025-03-05".parse().unwrap());
+        }
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(
@@ -228,9 +240,17 @@ fn anthropic_stream_chunk(
             }
             None
         }
-        "content_block_start" => anthropic_tool_call_start(value)
-            .map(ChunkType::ToolCall)
-            .map(Ok),
+        "content_block_start" => {
+            if let Some(payload) = anthropic_hosted_search_start(value) {
+                Some(Ok(ChunkType::ProviderToolCall(payload)))
+            } else if let Some(payload) = anthropic_hosted_search_result(value) {
+                Some(Ok(ChunkType::ProviderToolCall(payload)))
+            } else {
+                anthropic_tool_call_start(value)
+                    .map(ChunkType::ToolCall)
+                    .map(Ok)
+            }
+        }
         "content_block_delta" => anthropic_content_block_delta(value).map(Ok),
         "message_delta" => {
             // Final usage wins for cache_read / cache_creation.
@@ -326,13 +346,79 @@ fn anthropic_message_delta(value: &serde_json::Value) -> Option<ChunkType> {
     }
 }
 
+fn anthropic_hosted_search_start(value: &serde_json::Value) -> Option<String> {
+    let content_block = value.get("content_block")?;
+    if content_block.get("type").and_then(|v| v.as_str()) != Some("server_tool_use") {
+        return None;
+    }
+    let id = content_block
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hosted_search");
+    let name = content_block
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("web_search");
+    let args = content_block
+        .get("input")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    Some(
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "status": "running",
+            "provider_executed": true,
+            "arguments": args,
+        })
+        .to_string(),
+    )
+}
+
+fn anthropic_hosted_search_result(value: &serde_json::Value) -> Option<String> {
+    let content_block = value.get("content_block")?;
+    let block_type = content_block.get("type").and_then(|v| v.as_str())?;
+    let failed = block_type == "web_search_tool_result_error";
+    if block_type != "web_search_tool_result" && !failed {
+        return None;
+    }
+    let id = content_block
+        .get("tool_use_id")
+        .or_else(|| content_block.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("hosted_search");
+    let output = content_block
+        .get("content")
+        .cloned()
+        .unwrap_or_else(|| content_block.clone());
+    Some(
+        serde_json::json!({
+            "id": id,
+            "name": "web_search",
+            "status": if failed { "failed" } else { "completed" },
+            "provider_executed": true,
+            "output": output,
+        })
+        .to_string(),
+    )
+}
+
 fn anthropic_tool_call_start(value: &serde_json::Value) -> Option<String> {
     let content_block = value.get("content_block")?;
-    if content_block
+    let block_type = content_block
         .get("type")
-        .and_then(|block_type| block_type.as_str())
-        != Some("tool_use")
-    {
+        .and_then(|block_type| block_type.as_str())?;
+
+    // Hosted web_search runs server-side; ignore those content blocks for the
+    // client tool loop (results come back as text / citations).
+    if matches!(
+        block_type,
+        "server_tool_use" | "web_search_tool_result" | "web_search_tool_result_error"
+    ) {
+        return None;
+    }
+
+    if block_type != "tool_use" {
         return None;
     }
 
@@ -633,6 +719,7 @@ fn anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                     "is_error": t.is_error,
                 }));
             }
+            Message::Reasoning(_) => {}
             Message::System(_) => {}
         }
     }

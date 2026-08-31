@@ -1,0 +1,7 @@
+# crabcode-only: stop RA auto-discovering 244 Cargo.toml files under .devrefs
+[language-server.rust-analyzer]
+command = "rust-analyzer"
+timeout = 120
+
+[language-server.rust-analyzer.config]
+linkedProjects = ["Cargo.toml"]

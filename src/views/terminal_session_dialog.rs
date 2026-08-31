@@ -25,6 +25,8 @@ const PADDING_Y: u16 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalSessionResponse {
     Close,
+    /// Park the session (keep running) and dismiss the overlay.
+    Minimize,
     Handled,
     NotHandled,
 }
@@ -66,6 +68,13 @@ impl TerminalSessionDialogState {
 
     pub fn has_active(&self) -> bool {
         self.current.is_some()
+    }
+
+    /// ProcessRegistry job id for the active interactive session, if tracked.
+    pub fn active_job_id(&self) -> Option<&str> {
+        self.current
+            .as_ref()
+            .and_then(|a| a.start.job_id.as_deref())
     }
 
     pub fn is_user_controlled(&self) -> bool {
@@ -289,6 +298,13 @@ pub fn handle_terminal_session_dialog_key_event(
         };
     }
 
+    // Esc alone minimizes (park session, keep running). Ctrl+] kills/stops.
+    // Programs that need Esc can still receive it via Ctrl+[ on terminals that
+    // distinguish the chord; many map Ctrl+[ to KeyCode::Esc as well.
+    if event.code == KeyCode::Esc && event.modifiers.is_empty() {
+        return TerminalSessionResponse::Minimize;
+    }
+
     if let Some(bytes) = encode_terminal_key(event) {
         state.send_input(bytes);
         return TerminalSessionResponse::Handled;
@@ -399,12 +415,19 @@ pub fn render_terminal_session_dialog(
 
     let footer = Line::from(vec![
         Span::styled(
+            "esc",
+            Style::default()
+                .fg(colors.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" minimize  ", Style::default().fg(colors.text_weak)),
+        Span::styled(
             "ctrl+]",
             Style::default()
                 .fg(colors.primary)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" close/stop", Style::default().fg(colors.text_weak)),
+        Span::styled(" stop", Style::default().fg(colors.text_weak)),
     ]);
     f.render_widget(Paragraph::new(footer), chunks[4]);
 }
@@ -529,6 +552,7 @@ mod tests {
             workdir: None,
             cols: 80,
             rows: 24,
+            job_id: None,
         }
     }
 
@@ -626,6 +650,21 @@ mod tests {
         );
         assert_eq!(resp, TerminalSessionResponse::Close);
         assert!(!state.has_active());
+    }
+
+    #[test]
+    fn esc_minimizes_without_stopping() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = TerminalSessionDialogState::new();
+        state.enqueue(TerminalSessionRequest {
+            start: sample_start("1", "t"),
+            control_tx: tx,
+        });
+        let resp =
+            handle_terminal_session_dialog_key_event(&mut state, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(resp, TerminalSessionResponse::Minimize);
+        assert!(state.has_active());
+        assert!(rx.try_recv().is_err(), "Esc must not send Stop to PTY");
     }
 
     #[test]

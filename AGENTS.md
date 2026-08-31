@@ -43,6 +43,17 @@ Always run fmt at the end of changes.
   }
   ```
 
+### MCP OAuth Credentials
+
+- **Location**:
+  - Default: `~/.local/state/crabcode/mcp-auth.json`
+  - With `XDG_STATE_HOME`: `$XDG_STATE_HOME/crabcode/mcp-auth.json`
+  - Test mode: `/tmp/crabcode_test_data/mcp-auth.json`
+- **Implementation**: `src/mcp/credentials.rs`
+- **Format**: JSON keyed by `"{server_name}:{server_url}"`
+- **Contents**: rmcp `StoredCredentials` (access/refresh tokens) for remote MCP OAuth
+- **CLI**: `crabcode mcp auth <name>`, `crabcode mcp logout <name>`, `crabcode mcp list`
+
 ### Models.dev API Cache
 
 - **Location**:
@@ -67,3 +78,13 @@ The cache stores provider and model information from models.dev and expires afte
 ### References
 
 There are important code references that you can check. For that the `devrefs --help` cli. Use `devrefs list` to get all current references, everything is in `.devrefs/references/*`
+
+
+## aisdk (`src/aisdk/`)
+
+Dogfooded future crate: a generic multi-provider AI SDK (Vercel AI SDK / Rig spirit), not crabcode product code.
+
+When editing `src/aisdk/`, read [`src/aisdk/README.md`](src/aisdk/README.md) first. Update that README only if the change affects the public shape or boundary rules.
+
+Enforce with: `scripts/check-aisdk-boundary.sh`
+

@@ -57,7 +57,11 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
   },
   "websearch": {
     "enabled": true,
-    "provider": "exa-hosted-mcp"
+    "provider": "exa-hosted-mcp",
+    "native": {
+      "web": false,
+      "x": true
+    }
   },
   "mcp": {
     "gh_grep": {
@@ -193,6 +197,6 @@ Direct `@agent` invocation is available for visible `subagent` and `all` agents.
 | crabcode-specific command overrides | `.crabcode/commands/` |
 | Personal defaults | `~/.config/crabcode/crabcode.jsonc` |
 
-See [Image Attachments](/config/images) for configuring where clicked `[Image #1]` placeholders open.
+See [Image Attachments](/config/images) for configuring where clicked `[Image #1]` placeholders open, and [Editor](/config/editor) for file-path clicks into Helix, Neovim, or a GUI editor.
 
 For command syntax, frontmatter, arguments, shell output, and file references, use the [OpenCode commands docs](https://opencode.ai/docs/commands/). crabcode reads the same markdown command format.

@@ -1,10 +1,15 @@
+use crate::llm::ChunkSender;
+use crate::tools::process_registry::{JobStatus, ProcessRegistry};
+use crate::tools::terminal_session::TerminalSessionTool;
 use crate::tools::{
     get_integer_param, get_string_param, validate_required, ParameterSchema, ParameterType, Tool,
     ToolContext, ToolError, ToolHandler, ToolResult,
 };
 use async_trait::async_trait;
 use serde_json::Value;
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
@@ -17,129 +22,88 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_OUTPUT_BYTES: usize = 20_000;
 const READ_CHUNK_SIZE: usize = 4_096;
 
-pub struct BashTool;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BashMode {
+    Foreground,
+    Background,
+    Interactive,
+}
+
+impl BashMode {
+    fn parse(raw: &str) -> Result<Self, ToolError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "foreground" => Ok(Self::Foreground),
+            "background" => Ok(Self::Background),
+            "interactive" => Ok(Self::Interactive),
+            other => Err(ToolError::Validation(format!(
+                "Unknown bash mode '{other}'. Expected foreground|background|interactive"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Foreground => "foreground",
+            Self::Background => "background",
+            Self::Interactive => "interactive",
+        }
+    }
+}
+
+pub struct BashTool {
+    chunk_tx: Option<ChunkSender>,
+    registry: Option<Arc<ProcessRegistry>>,
+}
 
 impl BashTool {
     pub fn new() -> Self {
-        Self
-    }
-}
-
-#[cfg(unix)]
-fn kill_process_group(pid: Option<u32>) {
-    if let Some(pid) = pid {
-        unsafe {
-            let _ = libc::killpg(pid as i32, libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(unix)]
-async fn terminate_child(child: &mut tokio::process::Child) {
-    kill_process_group(child.id());
-    let _ = child.kill().await;
-}
-
-#[cfg(not(unix))]
-fn kill_process_group(_pid: Option<u32>) {}
-
-#[cfg(not(unix))]
-async fn terminate_child(child: &mut tokio::process::Child) {
-    let _ = child.kill().await;
-}
-
-async fn drain_reader(mut reader: impl tokio::io::AsyncRead + Unpin) {
-    let mut buffer = vec![0u8; READ_CHUNK_SIZE];
-    loop {
-        match reader.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-    }
-}
-
-fn append_capped(buffer: &mut Vec<u8>, chunk: &[u8], truncated: &mut bool) {
-    if *truncated {
-        return;
-    }
-    let remaining = MAX_OUTPUT_BYTES.saturating_sub(buffer.len());
-    if remaining == 0 {
-        *truncated = true;
-        return;
-    }
-    let take = chunk.len().min(remaining);
-    buffer.extend_from_slice(&chunk[..take]);
-    if take < chunk.len() {
-        *truncated = true;
-    }
-}
-
-#[async_trait]
-impl ToolHandler for BashTool {
-    fn definition(&self) -> Tool {
-        Tool {
-            id: "bash".to_string(),
-            description: "Execute non-interactive shell commands with a timeout and captured output. Stdin is closed, so commands that prompt for input will receive EOF; use `terminal_session` when a TTY or user interaction is required."
-                .to_string(),
-            parameters: vec![
-                ParameterSchema {
-                    name: "command".to_string(),
-                    description: "Command to execute".to_string(),
-                    required: true,
-                    param_type: ParameterType::String,
-                },
-                ParameterSchema {
-                    name: "timeout".to_string(),
-                    description: "Timeout in seconds (default: 120)".to_string(),
-                    required: false,
-                    param_type: ParameterType::Integer,
-                },
-                ParameterSchema {
-                    name: "workdir".to_string(),
-                    description: "Working directory for the command".to_string(),
-                    required: false,
-                    param_type: ParameterType::String,
-                },
-                ParameterSchema {
-                    name: "description".to_string(),
-                    description: "Human-readable description of what the command does".to_string(),
-                    required: false,
-                    param_type: ParameterType::String,
-                },
-            ],
-            input_schema: None,
+        Self {
+            chunk_tx: None,
+            registry: None,
         }
     }
 
-    fn validate(&self, params: &Value) -> Result<(), ToolError> {
-        validate_required(params, &["command"])
+    pub fn with_sender(mut self, sender: ChunkSender) -> Self {
+        self.chunk_tx = Some(sender);
+        self
     }
 
-    async fn execute(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
-        let command_str = get_string_param(&params, "command")
-            .ok_or_else(|| ToolError::Validation("command is required".to_string()))?;
+    pub fn with_sender_opt(mut self, sender: Option<ChunkSender>) -> Self {
+        self.chunk_tx = sender;
+        self
+    }
 
-        let timeout_seconds = get_integer_param(&params, "timeout")
-            .map(|v| {
-                if v <= 0 {
-                    DEFAULT_TIMEOUT_SECONDS
-                } else {
-                    v as u64
-                }
-            })
-            .unwrap_or(DEFAULT_TIMEOUT_SECONDS);
+    pub fn with_registry(mut self, registry: Arc<ProcessRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
 
-        let workdir =
-            get_string_param(&params, "path").or_else(|| get_string_param(&params, "workdir"));
+    fn resolve_registry<'a>(&'a self, ctx: &'a ToolContext) -> Option<&'a Arc<ProcessRegistry>> {
+        self.registry.as_ref().or(ctx.process_registry.as_ref())
+    }
 
-        let description =
-            get_string_param(&params, "description").unwrap_or_else(|| command_str.clone());
-
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(&command_str);
+    async fn execute_foreground(
+        &self,
+        command_str: String,
+        description: String,
+        workdir: Option<String>,
+        timeout_seconds: u64,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&command_str);
+            c
+        } else {
+            let mut c = Command::new("bash");
+            c.arg("-c").arg(&command_str);
+            c
+        };
 
         if let Some(dir) = workdir {
             cmd.current_dir(dir);
+        } else {
+            cmd.current_dir(ctx.workdir());
         }
 
         cmd.stdin(Stdio::null());
@@ -284,8 +248,295 @@ impl ToolHandler for BashTool {
         Ok(
             ToolResult::new(format!("Bash: {}", description), final_output)
                 .with_metadata("exit_code", serde_json::json!(exit_code))
-                .with_metadata("command", serde_json::json!(command_str)),
+                .with_metadata("command", serde_json::json!(command_str))
+                .with_metadata("mode", serde_json::json!(BashMode::Foreground.as_str())),
         )
+    }
+
+    async fn execute_background(
+        &self,
+        command_str: String,
+        description: String,
+        workdir: PathBuf,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let registry = self.resolve_registry(ctx).ok_or_else(|| {
+            ToolError::Execution(
+                "Background mode requires a ProcessRegistry (not available in this context)"
+                    .to_string(),
+            )
+        })?;
+
+        let session_id = (!ctx.session_id.is_empty()).then(|| ctx.session_id.clone());
+        let spawned = registry
+            .spawn_background(
+                command_str.clone(),
+                description.clone(),
+                &workdir,
+                session_id,
+                ctx.cancel_token.child_token(),
+            )
+            .await
+            .map_err(ToolError::Execution)?;
+
+        let output = format!(
+            "Background job started.\n\
+task_id: {}\n\
+command: {}\n\
+workdir: {}\n\n\
+Poll output with bash_output (task_id=\"{}\").\n\
+Kill with bash_kill (task_id=\"{}\").",
+            spawned.task_id,
+            command_str,
+            workdir.display(),
+            spawned.task_id,
+            spawned.task_id
+        );
+
+        Ok(
+            ToolResult::new(format!("Background: {}", description), output)
+                .with_metadata("task_id", serde_json::json!(spawned.task_id))
+                .with_metadata("mode", serde_json::json!(BashMode::Background.as_str()))
+                .with_metadata("command", serde_json::json!(command_str))
+                .with_metadata("description", serde_json::json!(description))
+                .with_metadata("workdir", serde_json::json!(workdir.display().to_string())),
+        )
+    }
+
+    async fn execute_interactive(
+        &self,
+        command_str: String,
+        description: String,
+        workdir: PathBuf,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if self.chunk_tx.is_none() {
+            return Err(ToolError::Execution(
+                "Interactive bash requires a live UI session (chunk sender unavailable)"
+                    .to_string(),
+            ));
+        }
+
+        let registry = self.resolve_registry(ctx).cloned();
+        let job_id = if let Some(ref registry) = registry {
+            Some(
+                registry
+                    .register_interactive(command_str.clone(), description.clone(), &workdir)
+                    .await,
+            )
+        } else {
+            None
+        };
+
+        // Reuse the same PTY + UI dialog path as terminal_session.
+        // Pass job_id so terminal_session does not double-register.
+        let term = TerminalSessionTool::new().with_sender_opt(self.chunk_tx.clone());
+        let mut params = serde_json::json!({
+            "command": command_str,
+            "workdir": workdir.display().to_string(),
+            "description": description,
+        });
+        if let Some(ref id) = job_id {
+            params["job_id"] = serde_json::json!(id);
+        }
+
+        let mut result = match term.execute(params, ctx).await {
+            Ok(mut result) => {
+                if let (Some(registry), Some(job_id)) = (registry.as_ref(), job_id.as_ref()) {
+                    let stopped = result
+                        .metadata
+                        .get("stopped_by_user")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let exit_code = result
+                        .metadata
+                        .get("exit_code")
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as i32);
+                    let status = if stopped {
+                        JobStatus::Killed
+                    } else {
+                        JobStatus::Exited
+                    };
+                    registry
+                        .mark_interactive_status(job_id, status, exit_code)
+                        .await;
+                    result = result.with_metadata("task_id", serde_json::json!(job_id));
+                }
+                result.with_metadata("mode", serde_json::json!(BashMode::Interactive.as_str()))
+            }
+            Err(err) => {
+                if let (Some(registry), Some(job_id)) = (registry.as_ref(), job_id.as_ref()) {
+                    registry
+                        .mark_interactive_status(job_id, JobStatus::Failed, None)
+                        .await;
+                }
+                return Err(err);
+            }
+        };
+
+        result.title = result
+            .title
+            .replacen("Terminal session:", "Interactive:", 1);
+        Ok(result)
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        unsafe {
+            let _ = libc::killpg(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn terminate_child(child: &mut tokio::process::Child) {
+    kill_process_group(child.id());
+    let _ = child.kill().await;
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: Option<u32>) {}
+
+#[cfg(not(unix))]
+async fn terminate_child(child: &mut tokio::process::Child) {
+    let _ = child.kill().await;
+}
+
+async fn drain_reader(mut reader: impl tokio::io::AsyncRead + Unpin) {
+    let mut buffer = vec![0u8; READ_CHUNK_SIZE];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+}
+
+fn append_capped(buffer: &mut Vec<u8>, chunk: &[u8], truncated: &mut bool) {
+    if *truncated {
+        return;
+    }
+    let remaining = MAX_OUTPUT_BYTES.saturating_sub(buffer.len());
+    if remaining == 0 {
+        *truncated = true;
+        return;
+    }
+    let take = chunk.len().min(remaining);
+    buffer.extend_from_slice(&chunk[..take]);
+    if take < chunk.len() {
+        *truncated = true;
+    }
+}
+
+#[async_trait]
+impl ToolHandler for BashTool {
+    fn definition(&self) -> Tool {
+        Tool {
+            id: "bash".to_string(),
+            description: "Run shell commands with hybrid modes:\n\
+- mode=\"foreground\" (default): short non-interactive commands with timeout; stdin is closed (EOF on prompts).\n\
+- mode=\"background\": long-running servers/watchers (e.g. bun dev, cargo watch). NEVER use interactive for these. Returns a task_id immediately; manage with bash_output / bash_kill / bash_restart. Background jobs survive crabcode quit — humans can inspect them with `crabcode jobs list|logs|stop|restart`.\n\
+- mode=\"interactive\": only when the user must type (npx prompts, ssh, password entry, pagers). Opens an embedded TTY dialog (Esc minimizes / parks the session; ctrl+] stops).\n\
+Prefer bash over the legacy terminal_session alias. Use bash_output/bash_kill/bash_restart to manage background jobs. Open the jobs list via WhichKey `j` (ctrl+x then j), ctrl+p \"Background Jobs\", or the bottom-right jobs chip.\n\
+For mode=background, pass description as a short 2–4 word name (e.g. \"Dev server\")."
+                .to_string(),
+            parameters: vec![
+                ParameterSchema {
+                    name: "command".to_string(),
+                    description: "Command to execute".to_string(),
+                    required: true,
+                    param_type: ParameterType::String,
+                },
+                ParameterSchema {
+                    name: "mode".to_string(),
+                    description: "Run mode: foreground (default) | background | interactive"
+                        .to_string(),
+                    required: false,
+                    param_type: ParameterType::String,
+                },
+                ParameterSchema {
+                    name: "timeout".to_string(),
+                    description: "Timeout in seconds for foreground mode (default: 120)"
+                        .to_string(),
+                    required: false,
+                    param_type: ParameterType::Integer,
+                },
+                ParameterSchema {
+                    name: "workdir".to_string(),
+                    description: "Working directory for the command".to_string(),
+                    required: false,
+                    param_type: ParameterType::String,
+                },
+                ParameterSchema {
+                    name: "description".to_string(),
+                    description: "Short 2–4 word job name for Jobs UI / `crabcode jobs list` (e.g. \"Dev server\"). Especially useful for mode=background.".to_string(),
+                    required: false,
+                    param_type: ParameterType::String,
+                },
+            ],
+            input_schema: None,
+        }
+    }
+
+    fn validate(&self, params: &Value) -> Result<(), ToolError> {
+        validate_required(params, &["command"])?;
+        if let Some(mode) = get_string_param(params, "mode") {
+            BashMode::parse(&mode)?;
+        }
+        Ok(())
+    }
+
+    async fn execute(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        let command_str = get_string_param(&params, "command")
+            .ok_or_else(|| ToolError::Validation("command is required".to_string()))?;
+
+        let mode = BashMode::parse(
+            &get_string_param(&params, "mode").unwrap_or_else(|| "foreground".to_string()),
+        )?;
+
+        let timeout_seconds = get_integer_param(&params, "timeout")
+            .map(|v| {
+                if v <= 0 {
+                    DEFAULT_TIMEOUT_SECONDS
+                } else {
+                    v as u64
+                }
+            })
+            .unwrap_or(DEFAULT_TIMEOUT_SECONDS);
+
+        let workdir_param =
+            get_string_param(&params, "path").or_else(|| get_string_param(&params, "workdir"));
+
+        let description =
+            get_string_param(&params, "description").unwrap_or_else(|| command_str.clone());
+
+        let workdir = workdir_param
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ctx.workdir().to_path_buf());
+
+        match mode {
+            BashMode::Foreground => {
+                self.execute_foreground(
+                    command_str,
+                    description,
+                    Some(workdir.display().to_string()),
+                    timeout_seconds,
+                    ctx,
+                )
+                .await
+            }
+            BashMode::Background => {
+                self.execute_background(command_str, description, workdir, ctx)
+                    .await
+            }
+            BashMode::Interactive => {
+                self.execute_interactive(command_str, description, workdir, ctx)
+                    .await
+            }
+        }
     }
 }
 
@@ -301,6 +552,30 @@ mod tests {
         append_capped(&mut buf, &[b'a'; MAX_OUTPUT_BYTES + 10], &mut truncated);
         assert_eq!(buf.len(), MAX_OUTPUT_BYTES);
         assert!(truncated);
+    }
+
+    #[test]
+    fn mode_validation_rejects_unknown() {
+        let tool = BashTool::new();
+        let err = tool
+            .validate(&serde_json::json!({
+                "command": "echo hi",
+                "mode": "wat"
+            }))
+            .expect_err("unknown mode should fail");
+        assert!(err.to_string().contains("Unknown bash mode"));
+    }
+
+    #[test]
+    fn mode_validation_accepts_known() {
+        let tool = BashTool::new();
+        for mode in ["foreground", "background", "interactive", "BACKGROUND"] {
+            tool.validate(&serde_json::json!({
+                "command": "echo hi",
+                "mode": mode
+            }))
+            .unwrap_or_else(|_| panic!("mode {mode} should be valid"));
+        }
     }
 
     #[tokio::test]

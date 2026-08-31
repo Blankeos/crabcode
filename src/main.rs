@@ -9,8 +9,10 @@ mod autocomplete;
 mod command;
 mod config;
 mod herdr;
+mod jobs;
 mod llm;
 mod logging;
+mod maintenance;
 mod mcp;
 mod model;
 mod notify;
@@ -129,6 +131,34 @@ fn mouse_scroll_kind(kind: MouseEventKind) -> bool {
     matches!(kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp)
 }
 
+fn apply_terminal_enter_modes<W: std::io::Write>(
+    writer: &mut W,
+    keyboard_enhancement: bool,
+) -> Result<()> {
+    if keyboard_enhancement {
+        execute!(
+            writer,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableFocusChange,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+            ),
+            EnableBracketedPaste
+        )?;
+    } else {
+        execute!(
+            writer,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableFocusChange,
+            EnableBracketedPaste
+        )?;
+    }
+    Ok(())
+}
+
 fn restore_terminal_modes(
     backend: &mut CrosstermBackend<io::Stdout>,
     keyboard_enhancement: bool,
@@ -162,6 +192,47 @@ fn restore_terminal_modes(
     flush_result.context("failed to flush terminal restore commands")?;
     raw_mode_result.context("failed to disable raw mode")?;
 
+    Ok(())
+}
+
+fn run_shell_command_blocking(command: &str) -> io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "windows")]
+    {
+        ProcessCommand::new("cmd").args(["/C", command]).status()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ProcessCommand::new("sh").args(["-c", command]).status()
+    }
+}
+
+fn suspend_and_run_editor(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    keyboard_enhancement: bool,
+    command: &str,
+) -> Result<()> {
+    restore_terminal_modes(terminal.backend_mut(), keyboard_enhancement)?;
+    let _ = terminal.show_cursor();
+    let status = run_shell_command_blocking(command);
+    enable_raw_mode()?;
+    apply_terminal_enter_modes(terminal.backend_mut(), keyboard_enhancement)?;
+    let _ = terminal.hide_cursor();
+    let _ = terminal.clear();
+    drain_pending_terminal_events(Duration::from_millis(0));
+
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => push_toast(Toast::new(
+            format!("Editor command exited with {}", status),
+            crate::toast::ToastLevel::Error,
+            None,
+        )),
+        Err(err) => push_toast(Toast::new(
+            format!("Failed to run editor: {}", err),
+            crate::toast::ToastLevel::Error,
+            None,
+        )),
+    }
     Ok(())
 }
 
@@ -403,6 +474,7 @@ async fn run_print_mode(
         .get(&agent_mode)
         .and_then(|agent| agent.max_steps);
     let cancel_token = tokio_util::sync::CancellationToken::new();
+    let process_registry = std::sync::Arc::new(crate::tools::ProcessRegistry::new());
 
     let prompt_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
         Some(sender.clone()),
@@ -413,6 +485,7 @@ async fn run_print_mode(
         &websearch_config,
         &mcp_config,
         &cwd,
+        process_registry.clone(),
     )
     .await;
     let prompt_registry = crate::tools::scope_tool_registry_for_agent(
@@ -459,6 +532,7 @@ async fn run_print_mode(
             Some(prompt_registry),
             messages,
             sender,
+            process_registry,
         )
         .await
         {
@@ -484,7 +558,8 @@ async fn run_print_mode(
             | crate::llm::ChunkMessage::StreamRollback { .. }
             | crate::llm::ChunkMessage::SubagentStarted { .. }
             | crate::llm::ChunkMessage::SubagentChunk { .. }
-            | crate::llm::ChunkMessage::TerminalSessionEvent { .. } => {}
+            | crate::llm::ChunkMessage::TerminalSessionEvent { .. }
+            | crate::llm::ChunkMessage::BackgroundJobEvent { .. } => {}
             crate::llm::ChunkMessage::End => {
                 println!();
                 play_resolved_sound(&sounds, crate::sound::SoundEvent::Complete);
@@ -713,6 +788,112 @@ enum Command {
         /// Target version (e.g. `0.0.12`) or `latest`
         target: Option<String>,
     },
+
+    /// Manage survive-quit background jobs (list / logs / stop)
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
+
+    /// Periodic cleanup tasks (jobs GC today; workspaces later)
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
+
+    /// Manage MCP servers (list / auth / logout)
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum JobsCommand {
+    /// List background jobs (default: current project only)
+    List {
+        /// Show jobs from all projects
+        #[arg(long)]
+        all: bool,
+        /// Human-friendly table (future: interactive TUI picker; for now just a pretty table)
+        #[arg(short = 'i', long)]
+        interactive: bool,
+    },
+    /// Print a job's output.log
+    Logs {
+        /// Job id (e.g. job_01HXYZ…)
+        id: String,
+        /// Follow new output (like tail -f)
+        #[arg(long)]
+        follow: bool,
+        /// Number of trailing lines to print
+        #[arg(long, default_value_t = 200)]
+        tail: usize,
+    },
+    /// Stop a background job (kill process group + update ledger)
+    Stop {
+        /// Job id
+        id: String,
+    },
+    /// Stop all running jobs (default: current project only)
+    StopAll {
+        /// Stop running jobs from every project
+        #[arg(long)]
+        all: bool,
+    },
+    /// Restart a background job (same id / command / cwd)
+    Restart {
+        /// Job id
+        id: String,
+    },
+    /// Remove finished background jobs
+    ///
+    /// Scope: default = current session; `--all` = current project; `--global` = everything.
+    Clean {
+        /// Clean finished jobs for the current project (all sessions)
+        #[arg(long)]
+        all: bool,
+        /// Clean finished jobs across every project
+        #[arg(long)]
+        global: bool,
+        /// Age threshold (e.g. 7d, 24h, 30m). Ignored when --all/--global.
+        #[arg(long, default_value = "7d")]
+        older_than: String,
+        /// Report what would be removed without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum McpCommand {
+    /// List configured MCP servers
+    List,
+    /// Authenticate a remote MCP server (browser OAuth)
+    Auth {
+        /// Server name from config, e.g. doop
+        name: String,
+    },
+    /// Forget stored OAuth credentials for a remote MCP server
+    Logout {
+        /// Server name from config
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MaintenanceCommand {
+    /// Run registered maintenance tasks
+    Run {
+        /// Only run this task id (e.g. jobs)
+        #[arg(long)]
+        only: Option<String>,
+        /// Report without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List registered maintenance tasks
+    List,
 }
 
 fn is_completion_help(args: &[String]) -> bool {
@@ -856,6 +1037,66 @@ async fn main() -> Result<()> {
         Some(Command::Upgrade { target }) => {
             return crate::upgrade::upgrade(target.as_deref());
         }
+        Some(Command::Jobs { command }) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            match command {
+                JobsCommand::List { all, interactive } => {
+                    crate::jobs::cli::run_list(crate::jobs::cli::ListOpts {
+                        all: *all,
+                        interactive: *interactive,
+                        cwd,
+                    })?;
+                }
+                JobsCommand::Logs { id, follow, tail } => {
+                    crate::jobs::cli::run_logs(crate::jobs::cli::LogsOpts {
+                        id: id.clone(),
+                        follow: *follow,
+                        tail: *tail,
+                    })?;
+                }
+                JobsCommand::Stop { id } => {
+                    crate::jobs::cli::run_stop(id)?;
+                }
+                JobsCommand::StopAll { all } => {
+                    crate::jobs::cli::run_stop_all(*all, &cwd)?;
+                }
+                JobsCommand::Restart { id } => {
+                    crate::jobs::cli::run_restart(id)?;
+                }
+                JobsCommand::Clean {
+                    all,
+                    global,
+                    older_than,
+                    dry_run,
+                } => {
+                    crate::jobs::cli::run_clean(*all, *global, older_than, *dry_run, &cwd)?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Command::Maintenance { command }) => {
+            match command {
+                MaintenanceCommand::Run { only, dry_run } => {
+                    crate::maintenance::cli_run(only.clone(), *dry_run)?;
+                }
+                MaintenanceCommand::List => {
+                    crate::maintenance::cli_list()?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Command::Mcp { command }) => {
+            let cli = match command {
+                McpCommand::List => crate::mcp::cli::McpCliCommand::List,
+                McpCommand::Auth { name } => {
+                    crate::mcp::cli::McpCliCommand::Auth { name: name.clone() }
+                }
+                McpCommand::Logout { name } => {
+                    crate::mcp::cli::McpCliCommand::Logout { name: name.clone() }
+                }
+            };
+            return crate::mcp::cli::run(cli).await;
+        }
         None => {}
     }
 
@@ -955,27 +1196,7 @@ async fn main() -> Result<()> {
     // Skip blocking supports_keyboard_enhancement() CSI probe (Codex pattern).
     // Always push flags; terminals that ignore them are fine. Opt out via env.
     let keyboard_enhancement = std::env::var_os("CRABCODE_DISABLE_KEYBOARD_ENHANCEMENT").is_none();
-    if keyboard_enhancement {
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableFocusChange,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
-            ),
-            EnableBracketedPaste
-        )?;
-    } else {
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableFocusChange,
-            EnableBracketedPaste
-        )?;
-    }
+    apply_terminal_enter_modes(&mut stdout, keyboard_enhancement)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -986,6 +1207,7 @@ async fn main() -> Result<()> {
         &mut app,
         session_history_loaded,
         startup_hydrated,
+        keyboard_enhancement,
     )
     .await;
     let remote_launch_request = app.take_remote_launch_request();
@@ -1184,8 +1406,10 @@ mod tests {
 
         let help = root_help().unwrap();
         assert!(help.contains("Usage: crabcode"));
-        assert!(help.contains("completion  Generate shell completion script"));
-        assert!(help.contains("serve       Host the current workspace"));
+        assert!(help.contains("completion   Generate shell completion script"));
+        assert!(
+            help.contains("serve        Host the current workspace for browser and CLI clients")
+        );
     }
 
     #[test]
@@ -1327,6 +1551,7 @@ async fn run_event_loop(
     app: &mut App,
     mut session_history_loaded: bool,
     mut startup_hydrated: bool,
+    keyboard_enhancement: bool,
 ) -> Result<()> {
     // Adaptive poll: fast for home blink / streaming, park nearly forever when idle.
     // A short "idle" poll still burns needless redraws/sec; block until input instead.
@@ -1478,6 +1703,11 @@ async fn run_event_loop(
                     needs_redraw = true;
                 }
             }
+        }
+
+        if let Some(command) = app.take_editor_suspend() {
+            suspend_and_run_editor(terminal, keyboard_enhancement, &command)?;
+            needs_redraw = true;
         }
 
         app.process_streaming_chunks();

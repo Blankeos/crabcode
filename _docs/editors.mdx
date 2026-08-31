@@ -1,0 +1,136 @@
+---
+title: Editor Integration
+description: Click file paths from crabcode into Helix, Neovim, Herdr, tmux, Zellij, WezTerm, Ghostty, Zed, VS Code, or Cursor.
+---
+
+To make crabcode feel more seamless with your editor-of-choice, here's what you can do.
+
+# Put path clicks where you already edit
+
+You'll set `editor.open` to integrate with your editor. See [Editor config](/config/editor) for placeholders.
+
+- **Nothing set:** copies `path:line:column` in WezTerm, Ghostty, and other standalone terminals.
+- **Terminal IDEs (Neovim or Helix):** open a new multiplexer tab, or a new WezTerm / Ghostty window. Clicks cannot talk to a parent Helix.
+- **GUI IDEs (Zed, VS Code, Cursor):** auto-detected in their terminals and just open. Image placeholders use [`images.openWith`](/config/images#imagesopenwith).
+
+ACP-compatible editors can also host crabcode as a subprocess. That is a different integration: [ACP](/acp).
+
+`{pathname}` is shell-quoted, so `hx -- {pathname}:{line}:{column}` stays one path even with spaces.
+
+## WezTerm and Ghostty
+
+Standalone terminals have no Helix remote. Open a new tab or window instead of copying.
+
+### WezTerm
+
+`wezterm cli spawn` opens a tab in the current window (`WEZTERM_PANE` must be set):
+
+```jsonc title="crabcode.jsonc"
+{
+  "editor": {
+    // Helix
+    "open": "wezterm cli spawn -- hx -- {pathname}:{line}:{column}",
+    // Neovim
+    "open": "wezterm cli spawn -- nvim +{line} -- {pathname}",
+  },
+}
+```
+
+Add `--new-window` if you want a separate window.
+
+### Ghostty
+
+On macOS, Ghostty has no CLI to add a tab to the current window. `open -na` starts a new Ghostty window:
+
+```jsonc title="crabcode.jsonc"
+{
+  "editor": {
+    // Helix
+    "open": "open -na Ghostty.app --args -e hx -- {pathname}:{line}:{column}",
+    // Neovim
+    "open": "open -na Ghostty.app --args -e nvim +{line} -- {pathname}",
+  },
+}
+```
+
+On Linux, use `ghostty -e hx -- {pathname}:{line}:{column}` instead.
+
+## Multiplexers
+
+Each click creates a new tab and runs Helix or Neovim there. You do not need a pane named `hx`.
+
+### Herdr (recommended)
+
+Needs `jq`. Crabcode already reports agent status when `HERDR_PANE_ID` is set.
+
+```jsonc title="crabcode.jsonc"
+{
+  "editor": {
+    // Helix
+    "open": "herdr pane run \"$(herdr tab create --focus --label hx | jq -r .result.root_pane.pane_id)\" hx -- {pathname}:{line}:{column}",
+    // Neovim
+    "open": "herdr pane run \"$(herdr tab create --focus --label nvim | jq -r .result.root_pane.pane_id)\" nvim +{line} -- {pathname}",
+  },
+}
+```
+
+### tmux
+
+```jsonc title="crabcode.jsonc"
+{
+  "editor": {
+    // Helix
+    "open": "tmux new-window -n hx -- hx -- {pathname}:{line}:{column}",
+    // Neovim
+    "open": "tmux new-window -n nvim -- nvim +{line} -- {pathname}",
+  },
+}
+```
+
+### Zellij
+
+```jsonc title="crabcode.jsonc"
+{
+  "editor": {
+    // Helix
+    "open": "zellij action new-tab --name hx && zellij action write-chars \"hx -- {pathname_raw}:{line}:{column}\" && zellij action write 13",
+    // Neovim
+    "open": "zellij action new-tab --name nvim && zellij action write-chars \"nvim +{line} -- {pathname_raw}\" && zellij action write 13",
+  },
+}
+```
+
+`write 13` is Enter. Both panes must be in the same Zellij session so `zellij action` reaches it.
+
+## VS Code, Zed, Cursor
+
+When crabcode runs in a Zed, VS Code, or Cursor integrated terminal, path clicks already open in that window. You do not need `editor.open` unless you want to pin the command.
+
+Default (no `editor` key): detect Zed / Cursor / VS Code, open `path:line:column`, otherwise copy.
+
+```jsonc title="crabcode.jsonc"
+{
+  // Zed
+  "editor": "zed -- {location}",
+  // VS Code
+  "editor": "code --reuse-window --goto -- {location}",
+  // Cursor
+  "editor": "cursor --reuse-window --goto -- {location}",
+}
+```
+
+Image placeholders use [`images.openWith`](/config/images#imagesopenwith) (`auto`, `system`, `editor`, or a custom command).
+
+## Custom editor
+
+`editor.open` is just a shell command. Any tool with CLI args works: a markdown previewer, a GUI you launch with `open -a`, a one-off script.
+
+```jsonc title="crabcode.jsonc"
+{
+  "editor": {
+    "open": "my-markdown-editor {pathname}",
+  },
+}
+```
+
+Placeholders are listed in [Editor config](/config/editor).

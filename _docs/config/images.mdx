@@ -17,7 +17,7 @@ By default, image opening uses automatic detection:
 }
 ```
 
-## Open target
+## images.openWith
 
 `images.openWith` controls where clicked image placeholders open.
 
@@ -29,6 +29,8 @@ By default, image opening uses automatic detection:
 | command object | Run a custom command. Use `{path}` anywhere in `args` to insert the image path. |
 
 `auto` treats standalone terminals such as WezTerm, iTerm, Terminal.app, Alacritty, and Kitty as normal terminals, so they open images with the OS-level file opener.
+
+File path clicks (not image placeholders) use [`editor.open`](/config/editor) instead.
 
 ## Custom command
 

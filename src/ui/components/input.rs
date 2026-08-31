@@ -185,7 +185,10 @@ impl Input {
         let tooltip = " expand ";
         let width = tooltip.len().min(area.width as usize) as u16;
         let x = anchor_x.min(area.x + area.width.saturating_sub(width));
-        let y = if anchor_y > area.y {
+        // Prefer the padding row above the hovered line. On the first textarea
+        // row that is the 1-line pad between border and text (not row 2 inside
+        // the textarea). Only fall below when there is no room above.
+        let y = if anchor_y > 0 {
             anchor_y - 1
         } else {
             (anchor_y + 1).min(area.y + area.height.saturating_sub(1))
@@ -917,6 +920,40 @@ impl Input {
     pub fn clear_selection(&mut self) {
         self.textarea.cancel_selection();
         self.clear_selection_drag_state();
+    }
+
+    /// Screen Y of the first selected visual row inside the textarea, if any.
+    pub fn selection_screen_row(&self) -> Option<u16> {
+        let area = self.textarea_area?;
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        let (start, end) = self.textarea.selection_range()?;
+        if start == end {
+            return None;
+        }
+        let (sel_start, _) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        let visual_lines = self.visual_lines(area.width as usize);
+        let visual_idx = visual_lines.iter().enumerate().find_map(|(idx, vl)| {
+            if vl.source_row != sel_start.0 {
+                return None;
+            }
+            let overlaps = sel_start.1 >= vl.start_col
+                && (sel_start.1 < vl.end_col
+                    || (sel_start.1 == vl.end_col && vl.start_col == vl.end_col));
+            overlaps.then_some(idx)
+        })?;
+        if visual_idx < self.viewport_top || visual_idx >= self.viewport_top + area.height as usize
+        {
+            // Selection scrolled out of the textarea viewport — fall back to top row.
+            return Some(area.y);
+        }
+        let screen_row = visual_idx - self.viewport_top;
+        Some(area.y.saturating_add(screen_row as u16))
     }
 
     /// Delete the word before the cursor. Handles multi-byte emoji correctly
@@ -2551,7 +2588,11 @@ mod tests {
             })
             .unwrap();
 
-        assert!(find_buffer_text(terminal.backend().buffer(), 60, 8, " expand ").is_some());
+        let expand = find_buffer_text(terminal.backend().buffer(), 60, 8, " expand ")
+            .expect("expand tooltip rendered");
+        // Tooltip should sit in the padding row above the placeholder, not on
+        // the second textarea row.
+        assert_eq!(expand.1, y.saturating_sub(1));
     }
 
     #[test]

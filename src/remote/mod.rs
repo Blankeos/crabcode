@@ -1208,6 +1208,15 @@ pub fn list_hosts() -> Result<()> {
 
 fn tick_remote_host_app(app: &mut App) {
     keep_remote_host_app_alive(app);
+    if let Some(command) = app.take_editor_suspend() {
+        if let Err(err) = crate::utils::image_attachment::spawn_shell_script(&command) {
+            crate::push_toast(crate::toast::Toast::new(
+                format!("Failed to run editor: {}", err),
+                crate::toast::ToastLevel::Error,
+                None,
+            ));
+        }
+    }
     app.process_streaming_chunks();
     app.update_animations();
     crate::remove_expired_toasts();

@@ -18,6 +18,7 @@ const QUESTION_DIALOG_FOOTER_GAP_HEIGHT: u16 = 1;
 const QUESTION_HEADER_CANCEL_GAP_WIDTH: u16 = 1;
 const QUESTION_DIALOG_MIN_HEIGHT: u16 = 8 + QUESTION_DIALOG_FOOTER_GAP_HEIGHT;
 const QUESTION_DIALOG_CHROME_HEIGHT: u16 = 4 + QUESTION_DIALOG_FOOTER_GAP_HEIGHT;
+const QUESTION_BODY_SCROLL_STEP: u16 = 3;
 
 #[derive(Clone, Debug)]
 struct QuestionOption {
@@ -252,8 +253,14 @@ pub struct QuestionDialogState {
     queue: VecDeque<QuestionDialogRequest>,
     tab_hitboxes: Vec<QuestionTabHitbox>,
     mouse_hitboxes: Vec<QuestionMouseHitbox>,
-    /// Vertical scroll for the question body when options wrap past the panel.
+    /// Vertical scroll for the question body when content wraps past the panel.
     body_scroll_y: u16,
+    /// Keep the focused option/custom row in view after keyboard/tab changes.
+    body_follow_focus: bool,
+    /// Max `body_scroll_y` from the last render.
+    body_scroll_max: u16,
+    /// Last rendered dialog panel (for mouse-wheel hit testing).
+    last_dialog_area: Rect,
     /// Last rendered panel height (for chat bottom scroll padding).
     last_panel_height: u16,
 }
@@ -284,7 +291,28 @@ impl QuestionDialogState {
             tab_hitboxes: Vec::new(),
             mouse_hitboxes: Vec::new(),
             body_scroll_y: 0,
+            body_follow_focus: true,
+            body_scroll_max: 0,
+            last_dialog_area: Rect::default(),
             last_panel_height: 0,
+        }
+    }
+
+    fn reset_body_scroll(&mut self) {
+        self.body_scroll_y = 0;
+        self.body_follow_focus = true;
+        self.body_scroll_max = 0;
+    }
+
+    fn scroll_body(&mut self, down: bool) {
+        self.body_follow_focus = false;
+        if down {
+            self.body_scroll_y = self
+                .body_scroll_y
+                .saturating_add(QUESTION_BODY_SCROLL_STEP)
+                .min(self.body_scroll_max);
+        } else {
+            self.body_scroll_y = self.body_scroll_y.saturating_sub(QUESTION_BODY_SCROLL_STEP);
         }
     }
 
@@ -298,7 +326,7 @@ impl QuestionDialogState {
             self.current = Some(request);
             self.tab_hitboxes.clear();
             self.mouse_hitboxes.clear();
-            self.body_scroll_y = 0;
+            self.reset_body_scroll();
         } else {
             self.queue.push_back(request);
         }
@@ -358,7 +386,7 @@ impl QuestionDialogState {
         self.current = self.queue.pop_front();
         self.tab_hitboxes.clear();
         self.mouse_hitboxes.clear();
-        self.body_scroll_y = 0;
+        self.reset_body_scroll();
     }
 
     pub fn respond_current(&mut self, response: Value) {
@@ -368,7 +396,7 @@ impl QuestionDialogState {
         self.current = self.queue.pop_front();
         self.tab_hitboxes.clear();
         self.mouse_hitboxes.clear();
-        self.body_scroll_y = 0;
+        self.reset_body_scroll();
     }
 
     pub fn cancel_current(&mut self) {
@@ -379,7 +407,7 @@ impl QuestionDialogState {
         self.current = self.queue.pop_front();
         self.tab_hitboxes.clear();
         self.mouse_hitboxes.clear();
-        self.body_scroll_y = 0;
+        self.reset_body_scroll();
     }
 
     pub fn clear_with_empty(&mut self) {
@@ -394,7 +422,8 @@ impl QuestionDialogState {
         }
         self.tab_hitboxes.clear();
         self.mouse_hitboxes.clear();
-        self.body_scroll_y = 0;
+        self.reset_body_scroll();
+        self.last_dialog_area = Rect::default();
     }
 
     pub fn insert_text(&mut self, text: &str) {
@@ -865,6 +894,28 @@ pub fn handle_question_dialog_key_event(
     state: &mut QuestionDialogState,
     event: KeyEvent,
 ) -> QuestionDialogAction {
+    let is_text_entry = state
+        .active()
+        .map(|request| request.current_is_text_entry())
+        .unwrap_or(false);
+    if !is_text_entry {
+        match event.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k') => {
+                state.body_follow_focus = true;
+            }
+            KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Enter => {
+                state.reset_body_scroll();
+            }
+            _ => {}
+        }
+    }
+
     let Some(request) = state.active_mut() else {
         return QuestionDialogAction::NotHandled;
     };
@@ -1009,6 +1060,18 @@ pub fn handle_question_dialog_mouse_event(
     state: &mut QuestionDialogState,
     event: MouseEvent,
 ) -> QuestionDialogAction {
+    let point = Position::new(event.column, event.row);
+    if matches!(
+        event.kind,
+        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+    ) {
+        if !state.last_dialog_area.contains(point) {
+            return QuestionDialogAction::NotHandled;
+        }
+        state.scroll_body(matches!(event.kind, MouseEventKind::ScrollDown));
+        return QuestionDialogAction::Handled;
+    }
+
     if !matches!(
         event.kind,
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Moved
@@ -1016,12 +1079,12 @@ pub fn handle_question_dialog_mouse_event(
         return QuestionDialogAction::NotHandled;
     }
 
-    let point = Position::new(event.column, event.row);
     if let Some(tab_index) = state.tab_index_at(point) {
         if matches!(event.kind, MouseEventKind::Moved) {
             return QuestionDialogAction::NotHandled;
         }
 
+        state.reset_body_scroll();
         let Some(request) = state.active_mut() else {
             return QuestionDialogAction::NotHandled;
         };
@@ -1174,6 +1237,13 @@ fn ensure_body_scroll_visible(
     let focus = focus_line_index.min(body_lines.len().saturating_sub(1));
     let focus_start = offsets[focus];
     let focus_end = offsets[focus + 1];
+    let focus_height = focus_end.saturating_sub(focus_start);
+    if focus_height >= body_height {
+        // A wrapped row taller than the viewport cannot be fully shown. Pin to
+        // its start so consecutive frames do not bounce between start and end.
+        *scroll_y = focus_start.min(max_scroll);
+        return;
+    }
     if focus_start < *scroll_y {
         *scroll_y = focus_start;
     } else if focus_end > (*scroll_y).saturating_add(body_height) {
@@ -1334,8 +1404,6 @@ fn dialog_body_width(area_width: u16) -> u16 {
 }
 
 fn wrapped_lines_height(lines: &[Line<'_>], width: u16) -> u16 {
-    let width = usize::from(width.max(1));
-
     lines
         .iter()
         .map(|line| {
@@ -1344,15 +1412,87 @@ fn wrapped_lines_height(lines: &[Line<'_>], width: u16) -> u16 {
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect::<String>();
-            if text.is_empty() {
-                1
-            } else {
-                text.lines()
-                    .map(|part| textwrap::wrap(part, width).len().max(1) as u16)
-                    .sum()
-            }
+            text.lines()
+                .map(|part| word_wrap_row_count(part, width))
+                .sum::<u16>()
+                .max(1)
         })
         .sum()
+}
+
+/// Row count for one logical line using ratatui-style word wrap (`Wrap { trim: true }`).
+///
+/// `textwrap::wrap` packs more tightly than ratatui's WordWrapper, which made
+/// `body_scroll_max` too small and clipped "Type your own answer" off the end.
+fn word_wrap_row_count(text: &str, width: u16) -> u16 {
+    let max_w = usize::from(width.max(1));
+    if text.is_empty() {
+        return 1;
+    }
+
+    let mut rows = 1u16;
+    let mut col = 0usize;
+    for token in whitespace_tokens(text) {
+        let token_w = UnicodeWidthStr::width(token);
+        if token.chars().all(char::is_whitespace) {
+            if col == 0 {
+                continue;
+            }
+            if col.saturating_add(token_w) > max_w {
+                rows = rows.saturating_add(1);
+                col = 0;
+            } else {
+                col = col.saturating_add(token_w);
+            }
+            continue;
+        }
+
+        if token_w > max_w {
+            if col > 0 {
+                rows = rows.saturating_add(1);
+            }
+            let full_rows = token_w / max_w;
+            let rem = token_w % max_w;
+            rows = rows.saturating_add(full_rows.saturating_sub(1) as u16);
+            if rem == 0 {
+                col = max_w;
+            } else {
+                rows = rows.saturating_add(1);
+                col = rem;
+            }
+            continue;
+        }
+
+        if col > 0 && col.saturating_add(token_w) > max_w {
+            rows = rows.saturating_add(1);
+            col = token_w;
+        } else {
+            col = col.saturating_add(token_w);
+        }
+    }
+    rows.max(1)
+}
+
+fn whitespace_tokens(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut last_space: Option<bool> = None;
+    for (idx, ch) in text.char_indices() {
+        let space = ch.is_whitespace();
+        match last_space {
+            Some(prev) if prev != space => {
+                parts.push(&text[start..idx]);
+                start = idx;
+                last_space = Some(space);
+            }
+            None => last_space = Some(space),
+            Some(_) => {}
+        }
+    }
+    if start < text.len() {
+        parts.push(&text[start..]);
+    }
+    parts
 }
 
 pub fn render_question_dialog(
@@ -1365,7 +1505,8 @@ pub fn render_question_dialog(
         let Some(request) = state.active() else {
             state.tab_hitboxes.clear();
             state.mouse_hitboxes.clear();
-            state.body_scroll_y = 0;
+            state.reset_body_scroll();
+            state.last_dialog_area = Rect::default();
             state.last_panel_height = 0;
             return;
         };
@@ -1408,6 +1549,7 @@ pub fn render_question_dialog(
     // Drop temporary request borrow by ending the block above; safe to mutate now.
     let _ = tab_scroll_x_base;
     state.last_panel_height = panel_height;
+    state.last_dialog_area = dialog_area;
 
     f.render_widget(Clear, dialog_area);
     f.render_widget(
@@ -1448,60 +1590,25 @@ pub fn render_question_dialog(
         .constraints([Constraint::Min(0), Constraint::Length(cancel_chunk_width)])
         .split(chunks[0]);
 
-    // Keep the custom answer row pinned to the bottom of the body so wrapping
-    // options cannot clip "( ) Type your own answer" off-screen on resize.
-    let pin_custom = state
-        .active()
-        .and_then(|r| r.current_question())
-        .map(|q| !q.options.is_empty() && q.custom)
-        .unwrap_or(false);
     let focus_line = {
         let Some(request) = state.active() else {
             return;
         };
-        // When the custom row is sticky, keep scroll focused on option rows only.
-        if pin_custom && request.current_is_custom_row() {
-            usize::MAX
-        } else {
-            focused_body_line_index(request, &body_lines)
-        }
+        focused_body_line_index(request, &body_lines)
     };
-    let (scrollable_lines, sticky_custom) = split_sticky_custom_row(pin_custom, body_lines);
-    let sticky_height = sticky_custom
-        .as_ref()
-        .map(|line| line_wrapped_height(line, chunks[1].width).max(1))
-        .unwrap_or(0);
-    let scroll_area = if sticky_height > 0 && chunks[1].height > sticky_height {
-        Rect::new(
-            chunks[1].x,
-            chunks[1].y,
+    state.body_scroll_max =
+        wrapped_lines_height(&body_lines, chunks[1].width).saturating_sub(chunks[1].height);
+    if state.body_follow_focus {
+        ensure_body_scroll_visible(
+            &body_lines,
             chunks[1].width,
-            chunks[1].height.saturating_sub(sticky_height),
-        )
-    } else if sticky_height > 0 {
-        // Extremely short panel: prefer showing the custom row.
-        Rect::new(chunks[1].x, chunks[1].y, chunks[1].width, 0)
+            chunks[1].height,
+            focus_line,
+            &mut state.body_scroll_y,
+        );
     } else {
-        chunks[1]
-    };
-    let sticky_area = if sticky_height > 0 {
-        Rect::new(
-            chunks[1].x,
-            chunks[1].y.saturating_add(scroll_area.height),
-            chunks[1].width,
-            sticky_height.min(chunks[1].height.saturating_sub(scroll_area.height)),
-        )
-    } else {
-        Rect::default()
-    };
-
-    ensure_body_scroll_visible(
-        &scrollable_lines,
-        scroll_area.width,
-        scroll_area.height,
-        focus_line.min(scrollable_lines.len().saturating_sub(1)),
-        &mut state.body_scroll_y,
-    );
+        state.body_scroll_y = state.body_scroll_y.min(state.body_scroll_max);
+    }
     let body_scroll_y = state.body_scroll_y;
 
     let (tab_scroll_x, tab_hitboxes, mouse_hitboxes) = {
@@ -1511,17 +1618,7 @@ pub fn render_question_dialog(
         let tab_scroll_x = active_tab_scroll(request, header_chunks[0].width);
         let tab_hitboxes = question_tab_hitboxes(request, header_chunks[0], tab_scroll_x);
         let mut mouse_hitboxes =
-            question_body_hitboxes(request, &scrollable_lines, scroll_area, body_scroll_y);
-        if sticky_custom.is_some() {
-            if let Some(question) = request.current_question() {
-                if !question.options.is_empty() && sticky_area.height > 0 {
-                    mouse_hitboxes.push(QuestionMouseHitbox {
-                        area: sticky_area,
-                        target: QuestionMouseTarget::Option(question.options.len()),
-                    });
-                }
-            }
-        }
+            question_body_hitboxes(request, &body_lines, chunks[1], body_scroll_y);
         mouse_hitboxes.push(QuestionMouseHitbox {
             area: header_chunks[1],
             target: QuestionMouseTarget::Cancel,
@@ -1548,48 +1645,19 @@ pub fn render_question_dialog(
         header_chunks[1],
     );
 
-    if scroll_area.height > 0 {
+    if chunks[1].height > 0 {
         f.render_widget(
-            Paragraph::new(scrollable_lines)
+            Paragraph::new(body_lines)
                 .style(Style::default().bg(colors.dialog_background))
                 .wrap(Wrap { trim: true })
                 .scroll((body_scroll_y, 0)),
-            scroll_area,
+            chunks[1],
         );
-    }
-    if let Some(custom_line) = sticky_custom {
-        if sticky_area.height > 0 {
-            f.render_widget(
-                Paragraph::new(vec![custom_line])
-                    .style(Style::default().bg(colors.dialog_background))
-                    .wrap(Wrap { trim: true }),
-                sticky_area,
-            );
-        }
     }
 
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Left), chunks[3]);
     state.tab_hitboxes = tab_hitboxes;
     state.mouse_hitboxes = mouse_hitboxes;
-}
-
-fn split_sticky_custom_row(
-    pin_custom: bool,
-    mut body_lines: Vec<Line<'static>>,
-) -> (Vec<Line<'static>>, Option<Line<'static>>) {
-    if !pin_custom || body_lines.len() < 2 {
-        return (body_lines, None);
-    }
-    // question_body_lines ends with the custom answer row (optionally after a blank).
-    let custom = body_lines.pop();
-    if body_lines
-        .last()
-        .map(|line| line.spans.is_empty())
-        .unwrap_or(false)
-    {
-        body_lines.pop();
-    }
-    (body_lines, custom)
 }
 
 fn parse_questions(value: Value) -> Vec<QuestionItem> {
@@ -2147,6 +2215,19 @@ mod tests {
     fn mouse_moved(column: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn mouse_scroll(column: u16, row: u16, down: bool) -> MouseEvent {
+        MouseEvent {
+            kind: if down {
+                MouseEventKind::ScrollDown
+            } else {
+                MouseEventKind::ScrollUp
+            },
             column,
             row,
             modifiers: KeyModifiers::NONE,
@@ -3221,7 +3302,51 @@ mod tests {
     }
 
     #[test]
-    fn sticky_custom_row_stays_visible_when_body_overflows_on_short_terminal() {
+    fn custom_row_follows_options_without_a_middle_gap() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "Pick one",
+                "options": [
+                    { "label": "Alpha" },
+                    { "label": "Beta" },
+                    { "label": "Gamma" }
+                ]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        // Tall terminal: previously pinned custom to the body bottom and left a gap.
+        let backend = TestBackend::new(64, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        let last_option = lines
+            .iter()
+            .position(|line| line.contains("Gamma"))
+            .expect("last option should render");
+        let custom = lines
+            .iter()
+            .position(|line| line.contains("Type your own answer"))
+            .expect("custom row should render");
+
+        assert_eq!(
+            custom,
+            last_option + 1,
+            "custom row should sit directly under the last option:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn overflowing_body_scrolls_to_keep_focused_custom_row_visible() {
         use ratatui::{backend::TestBackend, Terminal};
 
         let (tx, _rx) = oneshot::channel();
@@ -3248,8 +3373,6 @@ mod tests {
             tx,
         );
         let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
-        // Narrow + short: wrapped options exceed body height and previously clipped
-        // the custom answer row off the bottom.
         let backend = TestBackend::new(72, 18);
         let mut terminal = Terminal::new(backend).unwrap();
 
@@ -3257,19 +3380,317 @@ mod tests {
             .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
             .unwrap();
 
-        let buffer = terminal.backend().buffer();
-        let rendered = (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_string()))
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        for _ in 0..3 {
+            handle_question_dialog_key_event(&mut state, key(KeyCode::Down, KeyModifiers::NONE));
+        }
 
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(
             rendered.contains("Type your own answer"),
-            "custom row should stay pinned visible on overflow:\n{rendered}"
+            "scrolling the body should keep the focused custom row visible:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_body_including_question_text() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "When designing a long-running Rust TUI application like crabcode that needs to coordinate streaming LLM responses, tool execution, SQLite preference persistence, and reactive Ratatui rendering on a single event loop, which architectural tradeoff do you consider most important for the next major refactor?",
+                "header": "Architecture",
+                "options": [
+                    {
+                        "label": "Single-threaded actor bus",
+                        "description": "Keep one event loop and ordered channels; prioritize determinism and simpler reasoning about UI state."
+                    },
+                    {
+                        "label": "Hybrid workers + main UI",
+                        "description": "Move blocking/network work off the UI thread while keeping Ratatui rendering on the main thread."
+                    },
+                    {
+                        "label": "Headless core + thin TUI",
+                        "description": "Extract a reusable session engine so CLI/headless and TUI share one state machine."
+                    }
+                ]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(72, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let before = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(before.contains("Question:"));
+        assert!(
+            state.body_scroll_max > 0,
+            "fixture should overflow the body"
+        );
+        let cursor_before = state.current.as_ref().unwrap().answers[0].cursor;
+        let dialog = state.last_dialog_area;
+
+        for _ in 0..8 {
+            assert_eq!(
+                handle_question_dialog_mouse_event(
+                    &mut state,
+                    mouse_scroll(dialog.x.saturating_add(2), dialog.y.saturating_add(2), true)
+                ),
+                QuestionDialogAction::Handled
+            );
+        }
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let after = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            !after.contains("Question:"),
+            "wheel scroll should move the question text out of the body:\n{after}"
+        );
+        assert_eq!(
+            state.current.as_ref().unwrap().answers[0].cursor,
+            cursor_before
+        );
+
+        let dialog = state.last_dialog_area;
+        let mut previous = state.body_scroll_y;
+        loop {
+            assert_eq!(
+                handle_question_dialog_mouse_event(
+                    &mut state,
+                    mouse_scroll(dialog.x.saturating_add(2), dialog.y.saturating_add(2), true)
+                ),
+                QuestionDialogAction::Handled
+            );
+            terminal
+                .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+                .unwrap();
+            if state.body_scroll_y == previous {
+                break;
+            }
+            previous = state.body_scroll_y;
+        }
+
+        let at_end = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            at_end.contains("Type your own answer"),
+            "wheel-scrolling to the end should reveal the custom row:\n{at_end}"
+        );
+    }
+
+    #[test]
+    fn short_terminal_does_not_oscillate_body_scroll() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(
+            json!([{
+                "question": "When designing a long-running Rust TUI application like crabcode that needs to coordinate streaming LLM responses, tool execution, SQLite preference persistence, and reactive Ratatui rendering on a single event loop, which architectural tradeoff do you consider most important for the next major refactor?",
+                "header": "Architecture",
+                "options": [
+                    {
+                        "label": "Single-threaded actor bus",
+                        "description": "Keep one event loop and ordered channels; prioritize determinism and simpler reasoning about UI state."
+                    },
+                    {
+                        "label": "Hybrid workers + main UI",
+                        "description": "Move blocking/network work off the UI thread while keeping Ratatui rendering on the main thread."
+                    },
+                    {
+                        "label": "Headless core + thin TUI",
+                        "description": "Extract a reusable session engine so CLI/headless and TUI share one state machine."
+                    }
+                ]
+            }]),
+            tx,
+        );
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(72, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+        let first_scroll = state.body_scroll_y;
+        let first = buffer_lines(terminal.backend().buffer());
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+        let second = buffer_lines(terminal.backend().buffer());
+
+        assert_eq!(state.body_scroll_y, first_scroll);
+        assert_eq!(first, second);
+    }
+
+    fn overflow_grill_questions() -> Value {
+        json!([{
+            "header": "Overflow case",
+            "question": "If we ship this as a product-wide default, which combination of constraints should win when they collide: (1) existing crabcode.json(c) contract in _docs/config.mdx, (2) SQLite prefs in ~/.local/state/crabcode/data.db including recent/favorite/active models, (3) auth.json provider credentials, (4) models.dev 24h cache, (5) aisdk crate boundary in src/aisdk/README.md plus scripts/check-aisdk-boundary.sh, (6) justfile/bun scripts vs new ad-hoc recipes, (7) TUI ratatui immediate-mode vs future web UI, (8) XDG_STATE_HOME vs hardcoded paths, (9) test-mode /tmp cache vs production cache, (10) never-write-exploits plus no credential harvesting, (11) docs titles that must not duplicate MDX title vs body H1, (12) fmt-at-end-of-changes, (13) citation-only-from-web-search, (14) short CLI output under 4 lines vs this grill that needs a long ready-to-implement score, (15) background jobs surviving crabcode quit, (16) dogfooded aisdk not being product code, (17) local-only vulnerability fixes vs refusing PoCs, (18) HyperFrames skills that are irrelevant here but listed, (19) iconmate vs ratatui, (20) the fact this question is intentionally long so the UI overflows? - Score: 4/10",
+            "options": [
+                {
+                    "label": "Config contract always wins, even if it contradicts SQLite prefs, auth.json, models.dev cache TTL, XDG paths, test /tmp cache, and every justfile recipe we already have",
+                    "description": "Treat _docs/config.mdx as the only source of truth. If prefs, auth, cache, or scripts disagree, rewrite them. Ignore TUI, ignore aisdk boundary, ignore fmt, ignore AGENTS.md length limits, and assume a full migration is acceptable even when it breaks existing user state on disk."
+                },
+                {
+                    "label": "Layered: config → prefs → auth → cache, with explicit override order documented in four places",
+                    "description": "crabcode.json(c) is the contract. SQLite prefs hold runtime user choices. auth.json is credentials only. models.dev cache is 24h and never a source of truth. Document this in config.mdx, prefs.rs comments, discovery.rs, and a new migration note. Still run fmt. Still respect aisdk README. Still refuse exploits. Still keep just recipes. This option is long on purpose so the picker overflows vertically and horizontally with wrapping."
+                },
+                {
+                    "label": "Ship the overflow UI as the product decision: keep asking until the prompt cannot fit",
+                    "description": "Use Question tool forever. Each round adds more options, longer descriptions, nested constraints, ready-to-implement scores, and citations. The grill never ends. Ready-to-implement stays 4/10 because we still have not named the actual feature. Also mention HyperFrames, iconmate, ratatui, XDG, auth.json, models.dev, check-aisdk-boundary.sh, and the jobs chip in the bottom-right."
+                },
+                {
+                    "label": "Stop grilling this fake overflow branch and ask a real product question next",
+                    "description": "Admit this question exists only to overflow. Next question should be about a real plan, codebase-backed, one decision, recommended answer, Score in the question text."
+                }
+            ]
+        }])
+    }
+
+    #[test]
+    fn overflowing_session_question_can_wheel_scroll_to_custom_row() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(overflow_grill_questions(), tx);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        assert!(state.body_scroll_max > 0, "overflow fixture should not fit");
+        let start = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            !start.contains("Type your own answer"),
+            "custom row should start off-screen:\n{start}"
+        );
+
+        let dialog = state.last_dialog_area;
+        let mut previous = state.body_scroll_y;
+        loop {
+            assert_eq!(
+                handle_question_dialog_mouse_event(
+                    &mut state,
+                    mouse_scroll(dialog.x.saturating_add(2), dialog.y.saturating_add(2), true)
+                ),
+                QuestionDialogAction::Handled
+            );
+            terminal
+                .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+                .unwrap();
+            if state.body_scroll_y == previous {
+                break;
+            }
+            previous = state.body_scroll_y;
+        }
+
+        let at_end = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            at_end.contains("Type your own answer"),
+            "custom row must be reachable by scrolling the whole question body:\n{at_end}"
+        );
+    }
+
+    fn ratatui_wrap_rows(text: &str, width: u16) -> u16 {
+        use ratatui::{buffer::Buffer, widgets::Widget};
+        if text.is_empty() {
+            return 1;
+        }
+        let width = width.max(1);
+        let probe = (UnicodeWidthStr::width(text) as u16)
+            .saturating_add(2)
+            .max(2);
+        let area = Rect::new(0, 0, width, probe);
+        let mut buf = Buffer::empty(area);
+        Paragraph::new(text.to_string())
+            .wrap(Wrap { trim: true })
+            .render(area, &mut buf);
+        let mut last = 0u16;
+        for y in 0..probe {
+            let row: String = (0..width)
+                .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                .collect();
+            if !row.chars().any(|ch| !ch.is_whitespace()) {
+                continue;
+            }
+            last = y + 1;
+        }
+        last.max(1)
+    }
+
+    #[test]
+    fn word_wrap_row_count_does_not_underestimate_ratatui() {
+        let (tx, _rx) = oneshot::channel();
+        let request = QuestionDialogRequest::new(overflow_grill_questions(), tx);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let body = question_body_lines(
+            &request.questions[0],
+            &request.answers[0],
+            0,
+            false,
+            &colors,
+        );
+        for width in [40u16, 72, 97, 120] {
+            for line in &body {
+                let text: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                let ours = word_wrap_row_count(&text, width);
+                let ratatui = ratatui_wrap_rows(&text, width);
+                assert!(
+                    ours >= ratatui,
+                    "width={width} ours={ours} ratatui={ratatui} text={text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overflowing_session_question_shows_custom_row_when_focused() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let (tx, _rx) = oneshot::channel();
+        let mut state = QuestionDialogState::new();
+        state.enqueue(overflow_grill_questions(), tx);
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        for _ in 0..4 {
+            handle_question_dialog_key_event(&mut state, key(KeyCode::Down, KeyModifiers::NONE));
+        }
+
+        terminal
+            .draw(|frame| render_question_dialog(frame, &mut state, frame.area(), colors))
+            .unwrap();
+
+        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+        assert!(
+            rendered.contains("Type your own answer"),
+            "focusing the custom row should scroll it into view:\n{rendered}"
         );
     }
 

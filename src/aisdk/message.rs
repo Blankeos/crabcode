@@ -18,6 +18,10 @@ pub enum Message {
     ToolCall(ToolCallMessage),
     #[serde(rename = "tool_output")]
     ToolOutput(ToolOutputMessage),
+    /// Responses API reasoning sibling. Bound to the function calls that follow
+    /// it; must be replayed with `encrypted_content` when the provider issued one.
+    #[serde(rename = "reasoning")]
+    Reasoning(ReasoningMessage),
 }
 
 impl Message {
@@ -44,6 +48,18 @@ impl Message {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::Assistant(AssistantMessage {
             content: content.into(),
+        })
+    }
+
+    pub fn reasoning(
+        id: Option<String>,
+        summary: impl Into<String>,
+        encrypted_content: Option<String>,
+    ) -> Self {
+        Self::Reasoning(ReasoningMessage {
+            id,
+            summary: summary.into(),
+            encrypted_content,
         })
     }
 
@@ -154,6 +170,24 @@ pub struct ImageContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
+}
+
+impl ReasoningMessage {
+    pub fn is_empty(&self) -> bool {
+        self.id.as_deref().is_none_or(str::is_empty)
+            && self.summary.is_empty()
+            && self.encrypted_content.as_deref().is_none_or(str::is_empty)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -20,6 +20,101 @@ pub struct PromptImage {
     pub height: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenOutcome {
+    Spawned,
+    Suspend(String),
+    Copied(String),
+}
+
+pub fn expand_editor_open_command(
+    template: &str,
+    path: &Path,
+    line: usize,
+    column: usize,
+) -> Result<String> {
+    let line = line.max(1);
+    let column = column.max(1);
+    let raw_path = path.to_string_lossy();
+    let quoted_path = shlex::try_quote(&raw_path)
+        .map_err(|err| anyhow!("failed to quote file path {}: {}", path.display(), err))?;
+    let location = format!("{}:{}:{}", raw_path, line, column);
+    let quoted_location = shlex::try_quote(&location)
+        .map_err(|err| anyhow!("failed to quote file location {}: {}", path.display(), err))?;
+
+    let mut command = template.to_string();
+    let line_text = line.to_string();
+    let column_text = column.to_string();
+    let replacements = [
+        ("{pathname_raw}", raw_path.as_ref()),
+        ("{pathname}", quoted_path.as_ref()),
+        ("{filename}", quoted_path.as_ref()),
+        ("{location}", quoted_location.as_ref()),
+        ("{column}", column_text.as_str()),
+        ("{path_raw}", raw_path.as_ref()),
+        ("{path}", quoted_path.as_ref()),
+        ("{line}", line_text.as_str()),
+        ("{col}", column_text.as_str()),
+    ];
+    for (needle, value) in replacements {
+        command = command.replace(needle, value);
+    }
+
+    if !template_has_path_placeholder(template) {
+        command = format!("{} {}", command.trim_end(), quoted_path);
+    }
+
+    Ok(command)
+}
+
+fn template_has_path_placeholder(template: &str) -> bool {
+    [
+        "{pathname_raw}",
+        "{pathname}",
+        "{filename}",
+        "{location}",
+        "{path_raw}",
+        "{path}",
+    ]
+    .iter()
+    .any(|token| template.contains(token))
+}
+
+fn open_with_editor_template(
+    template: &str,
+    path: &Path,
+    line: usize,
+    column: usize,
+    suspend: bool,
+) -> Result<OpenOutcome> {
+    let command = expand_editor_open_command(template, path, line, column)?;
+    if suspend {
+        return Ok(OpenOutcome::Suspend(command));
+    }
+    spawn_shell_script(&command)?;
+    Ok(OpenOutcome::Spawned)
+}
+
+pub(crate) fn spawn_shell_script(command: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", command])
+            .spawn()
+            .with_context(|| format!("failed to run editor command `{}`", command))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("sh")
+            .args(["-c", command])
+            .spawn()
+            .with_context(|| format!("failed to run editor command `{}`", command))?;
+        Ok(())
+    }
+}
+
 fn spawn_shell_command_at_location(
     command: &str,
     path: &Path,
@@ -302,20 +397,71 @@ pub fn open_path(path: &Path, config: &crate::config::ImagesConfig) -> Result<()
     }
 }
 
-pub fn open_file_path(path: &Path) -> Result<()> {
+pub fn open_file_path(path: &Path, editor: &crate::config::EditorConfig) -> Result<OpenOutcome> {
     if !path.exists() {
         return Err(anyhow!("file no longer exists: {}", path.display()));
     }
 
-    open_editor(path).or_else(|_| open_system(path))
+    if let Some(template) = editor.open.as_deref() {
+        return open_with_editor_template(template, path, 1, 1, editor.suspend);
+    }
+
+    open_detected_editor_or_copy(path, None, None)
 }
 
-pub fn open_file_path_at_location(path: &Path, line: usize, column: usize) -> Result<()> {
+pub fn open_file_path_at_location(
+    path: &Path,
+    line: usize,
+    column: usize,
+    editor: &crate::config::EditorConfig,
+) -> Result<OpenOutcome> {
     if !path.exists() {
         return Err(anyhow!("file no longer exists: {}", path.display()));
     }
 
-    open_editor_at_location(path, line, column).or_else(|_| open_system(path))
+    if let Some(template) = editor.open.as_deref() {
+        return open_with_editor_template(template, path, line, column, editor.suspend);
+    }
+
+    open_detected_editor_or_copy(path, Some(line), Some(column))
+}
+
+fn open_detected_editor_or_copy(
+    path: &Path,
+    line: Option<usize>,
+    column: Option<usize>,
+) -> Result<OpenOutcome> {
+    if let Some(command) = detected_editor_command() {
+        let result = if let (Some(line), Some(column)) = (line, column) {
+            spawn_command(
+                &command,
+                &editor_location_args(&command, path, line, column),
+            )
+        } else {
+            spawn_command(&command, &[path.to_string_lossy().into_owned()])
+        };
+        if result.is_ok() {
+            return Ok(OpenOutcome::Spawned);
+        }
+    }
+
+    copy_path_location(path, line, column)
+}
+
+fn copy_path_location(
+    path: &Path,
+    line: Option<usize>,
+    column: Option<usize>,
+) -> Result<OpenOutcome> {
+    let text = match (line, column) {
+        (Some(line), Some(column)) => {
+            format!("{}:{}:{}", path.display(), line.max(1), column.max(1))
+        }
+        (Some(line), None) => format!("{}:{}", path.display(), line.max(1)),
+        _ => path.to_string_lossy().into_owned(),
+    };
+    crate::utils::clipboard::copy_text(&text)?;
+    Ok(OpenOutcome::Copied(text))
 }
 
 pub fn open_url(url: &str) -> Result<()> {
@@ -675,6 +821,41 @@ mod tests {
         assert_eq!(
             editor_location_args("cursor", path, 12, 4),
             vec!["-g", "/tmp/project/src/main.rs:12:4"]
+        );
+    }
+
+    #[test]
+    fn expands_helix_open_template() {
+        let path = Path::new("/tmp/project/src/main.rs");
+        assert_eq!(
+            expand_editor_open_command("hx -- {pathname}:{line}:{column}", path, 12, 4).unwrap(),
+            "hx -- /tmp/project/src/main.rs:12:4"
+        );
+        assert_eq!(
+            expand_editor_open_command("hx -- {location}", path, 12, 4).unwrap(),
+            "hx -- /tmp/project/src/main.rs:12:4"
+        );
+    }
+
+    #[test]
+    fn expands_quoted_path_with_spaces() {
+        let path = Path::new("/tmp/my file.rs");
+        assert_eq!(
+            expand_editor_open_command("hx -- {pathname}:{line}:{col}", path, 3, 1).unwrap(),
+            "hx -- '/tmp/my file.rs':3:1"
+        );
+        assert_eq!(
+            expand_editor_open_command("hx -- {location}", path, 3, 1).unwrap(),
+            "hx -- '/tmp/my file.rs:3:1'"
+        );
+    }
+
+    #[test]
+    fn appends_path_when_template_has_no_placeholder() {
+        let path = Path::new("/tmp/project/src/main.rs");
+        assert_eq!(
+            expand_editor_open_command("zed", path, 1, 1).unwrap(),
+            "zed /tmp/project/src/main.rs"
         );
     }
 }

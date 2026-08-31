@@ -4,17 +4,60 @@ pub enum ChunkType {
     Text(String),
     Reasoning(String),
     ToolCall(String),
-    AssistantMessagePhase { phase: Option<MessagePhase> },
-    ResponseCompleted { end_turn: Option<bool> },
+    /// Provider-executed tool lifecycle (hosted search, etc.).
+    ///
+    /// Display / observability only — must never enter the client tool-execute
+    /// loop. Payload JSON:
+    /// `{ "id", "name", "status": "running"|"completed"|"failed", "arguments"?, "output"? }`.
+    ProviderToolCall(String),
+    AssistantMessagePhase {
+        phase: Option<MessagePhase>,
+    },
+    /// Opaque Responses reasoning item for the next provider step.
+    /// Display text still arrives via [`ChunkType::Reasoning`].
+    ReasoningItem(ReasoningReplayItem),
+    ResponseCompleted {
+        end_turn: Option<bool>,
+        reasoning_items: Vec<ReasoningReplayItem>,
+    },
     Retry(crate::retry::RetryStatus),
-    StreamRollback { text: String, reasoning: String },
+    StreamRollback {
+        text: String,
+        reasoning: String,
+    },
     Warning(String),
     Metadata(String),
-    End { reason: Option<FinishReason> },
+    End {
+        reason: Option<FinishReason>,
+    },
     RetryableFailure(crate::retry::RetryError),
     Failed(String),
     Incomplete(String),
     NotSupported(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReasoningReplayItem {
+    pub id: Option<String>,
+    pub summary: String,
+    pub encrypted_content: Option<String>,
+}
+
+impl ReasoningReplayItem {
+    pub fn is_empty(&self) -> bool {
+        self.id.as_deref().is_none_or(str::is_empty)
+            && self.summary.is_empty()
+            && self.encrypted_content.as_deref().is_none_or(str::is_empty)
+    }
+}
+
+impl ChunkType {
+    pub fn response_completed(end_turn: Option<bool>) -> Self {
+        Self::ResponseCompleted {
+            end_turn,
+            reasoning_items: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

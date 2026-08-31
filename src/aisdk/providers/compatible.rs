@@ -19,6 +19,7 @@ pub struct OpenAICompatible {
     provider_name: String,
     reasoning_effort: Option<String>,
     prompt_cache_key: Option<String>,
+
     /// Vercel AI Gateway: set `providerOptions.gateway.caching = "auto"` so
     /// Anthropic (and MiniMax) models get explicit cache breakpoints.
     gateway_caching_auto: bool,
@@ -38,6 +39,7 @@ pub struct OpenAICompatibleBuilder {
     provider_name: Option<String>,
     reasoning_effort: Option<String>,
     prompt_cache_key: Option<String>,
+
     gateway_caching_auto: bool,
 }
 
@@ -91,6 +93,7 @@ impl OpenAICompatibleBuilder {
                 .unwrap_or_else(|| "openai-compatible".to_string()),
             reasoning_effort: self.reasoning_effort,
             prompt_cache_key: self.prompt_cache_key,
+
             gateway_caching_auto: self.gateway_caching_auto,
         })
     }
@@ -123,20 +126,30 @@ impl Provider for OpenAICompatible {
             openai_compatible_requires_tool_call_reasoning_content(self);
         let chat_messages = openai_compatible_messages(messages, include_empty_tool_call_reasoning);
 
-        let tool_params: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|t| {
-                let schema = serde_json::to_value(&t.input_schema).unwrap_or_default();
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": schema,
-                    }
-                })
-            })
-            .collect();
+        let mut tool_params: Vec<serde_json::Value> = Vec::new();
+        let mut plugins: Vec<serde_json::Value> = Vec::new();
+        for t in tools {
+            match &t.transport {
+                crate::aisdk::tool::ToolTransport::ClientFunction => {
+                    let schema = serde_json::to_value(&t.input_schema).unwrap_or_default();
+                    tool_params.push(serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": schema,
+                        }
+                    }));
+                }
+                crate::aisdk::tool::ToolTransport::ProviderNative(value) => {
+                    // Some OpenAI-compatible gateways accept Responses-style tools.
+                    tool_params.push(value.clone());
+                }
+                crate::aisdk::tool::ToolTransport::OpenRouterPlugin(value) => {
+                    plugins.push(value.clone());
+                }
+            }
+        }
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -156,6 +169,10 @@ impl Provider for OpenAICompatible {
             if !key.is_empty() {
                 body["prompt_cache_key"] = serde_json::Value::String(key.clone());
             }
+        }
+
+        if !plugins.is_empty() {
+            body["plugins"] = serde_json::Value::Array(plugins);
         }
 
         // AI Gateway Chat Completions: enable automatic prompt caching for
@@ -273,9 +290,21 @@ fn openai_compatible_messages(
                 }));
                 index += 1;
             }
+            Message::Reasoning(_) => {
+                // Chat Completions has no reasoning item; the following
+                // tool-call group copies summary into `reasoning_content`.
+                index += 1;
+            }
             Message::ToolCall(_) => {
                 let mut tool_calls = Vec::new();
                 let mut reasoning_content = None;
+                if index > 0 {
+                    if let Some(Message::Reasoning(reasoning)) = messages.get(index - 1) {
+                        if !reasoning.summary.is_empty() {
+                            reasoning_content = Some(reasoning.summary.clone());
+                        }
+                    }
+                }
 
                 while let Some(Message::ToolCall(tool)) = messages.get(index) {
                     if reasoning_content.is_none() {
@@ -705,6 +734,25 @@ mod tests {
         assert_eq!(payload[3]["tool_call_id"], "glob:0");
         assert_eq!(payload[4]["role"], "tool");
         assert_eq!(payload[4]["tool_call_id"], "glob:1");
+    }
+
+    #[test]
+    fn reasoning_sibling_becomes_tool_call_reasoning_content() {
+        let messages = vec![
+            Message::user("inspect"),
+            Message::reasoning(Some("rs_1".to_string()), "plan", Some("enc".to_string())),
+            Message::tool_call("call_1", "read", r#"{"file_path":"src/lib.rs"}"#),
+            Message::tool_output("call_1", "read", "ok", false),
+        ];
+
+        let payload = openai_compatible_messages(&messages, false);
+
+        assert_eq!(payload.len(), 3);
+        assert_eq!(payload[0]["role"], "user");
+        assert_eq!(payload[1]["role"], "assistant");
+        assert_eq!(payload[1]["reasoning_content"], "plan");
+        assert_eq!(payload[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(payload[2]["role"], "tool");
     }
 
     #[test]

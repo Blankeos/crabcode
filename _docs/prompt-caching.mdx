@@ -52,6 +52,18 @@ In addition to sticky `prompt_cache_key = session_id`, crabcode stamps Grok Buil
 | `x-grok-req-id` | Unique per model invocation |
 | `x-grok-turn-idx` | 0-based user-turn index |
 | `x-grok-agent-id` | Process-stable agent id |
+| `x-compaction-at` | grok-4.5/4.6: `400000` (500k × 80%) until the session has compacted, then omitted (`.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-models/default_models.json`) |
+| `x-compactions-remaining` | grok-4.5/4.6: always `1` (catalog fixed value) |
+| `x-grok-doom-loop-check` | `1024` (Grok Build `DEFAULT_RECOVERY_WINDOW_TOKENS`) |
+
+Grok Build’s sampler sends that header so cli-chat-proxy emits `response.doom_loop_check` with `tail_repetition:{n}@thinking`. Crabcode treats those as confident the same way (`DoomLoopRecoveryPolicy::is_confident`: thinking channel, threshold 2..=64).
+
+- Policy / window: `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampling-types/src/doom_loop.rs`
+- SSE collector: `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/doom_loop.rs`
+
+Doom-loop recovery matches Grok Build’s sampler, not a client tool-name babysitter. Only confident `tail_repetition:{n}@thinking` from `response.doom_loop_check` resamples: skip that generation’s tools, inject `RECOVERY_REMINDER` into the **next request only** (same `<system_reminder>` user-role item as `ConversationItem::system_reminder` — not a visible user turn). After `DEFAULT_MAX_RETRIES` (2) the abort is disarmed and the turn continues. Repeating reads or shell commands are not a loop — they usually mean earlier tool results were cleared.
+
+Tool-result pruning matches Grok Build `prune_conversation` (`.devrefs/references/xai-org/grok-build/crates/codegen/xai-chat-state/src/actor/request_builder.rs`): **only when estimated tokens exceed 50% of a 500k window** (`should_prune`), last 3 user turns stay intact, older large results soft-trim at 4000/1500/1500, age ≥ 10 hard-clear. Those numbers have not changed in Grok Build; the important gate is not pruning a short session at all.
 
 **Parent-cached aux** (e.g. max-steps text-only summary): keeps parent `prompt_cache_key` + session/conv so the conversation prefix can reuse the main turn's KV cache; assigns a fresh `aux-…` req id.
 

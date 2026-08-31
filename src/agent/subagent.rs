@@ -40,6 +40,7 @@ pub async fn run_subagent(
     cancel_token: tokio_util::sync::CancellationToken,
     permissions: crate::tools::ToolPermissions,
     max_steps: Option<usize>,
+    process_registry: Option<std::sync::Arc<crate::tools::ProcessRegistry>>,
 ) -> Result<SubAgentRunResult, String> {
     use crate::aisdk::core::{
         chunk::ChunkType, response::StreamTextResponse, stop::StopReason, Message as AisdkMessage,
@@ -59,6 +60,11 @@ pub async fn run_subagent(
             &mut session.openai_options.additional_headers,
             &affinity,
         );
+        crate::llm::xai_build::inject_compaction_hint_headers(
+            &mut session.openai_options.additional_headers,
+            &session.model,
+            false,
+        );
         crate::emit_log!(
             "[prompt-cache] xai-build affinity kind=child session_id={} req_id={}",
             affinity.session_id,
@@ -68,7 +74,7 @@ pub async fn run_subagent(
 
     let scoped_registry = build_scoped_registry(full_registry, &agent).await;
 
-    let aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
+    let mut aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
         &scoped_registry,
         sender.clone(),
         agent.name.clone(),
@@ -77,8 +83,33 @@ pub async fn run_subagent(
         None,
         session.supports_image_input,
         cancel_token.clone(),
+        process_registry,
     )
     .await;
+    let hosted_selection = match crate::config::ConfigLoader::load() {
+        Ok(loaded) => {
+            let ws = &loaded.merged_config.websearch;
+            if ws.enabled.unwrap_or(true) {
+                Some(
+                    crate::aisdk::providers::hosted_search::HostedSearchSelection {
+                        web: ws.native.web_enabled(),
+                        x: ws.native.x_enabled(),
+                    },
+                )
+            } else {
+                None
+            }
+        }
+        Err(_) => Some(crate::aisdk::providers::hosted_search::HostedSearchSelection::DEFAULT),
+    };
+    if let Some(selection) = hosted_selection {
+        if selection.web || selection.x {
+            aisdk_tools.extend(crate::aisdk::providers::hosted_search::tools_for(
+                &session.provider_name,
+                selection,
+            ));
+        }
+    }
 
     let system_prompt = agent
         .instructions
@@ -153,6 +184,19 @@ pub async fn run_subagent(
                     .and_then(|value| value.as_array().map(|items| items.len()))
                     .unwrap_or(1);
                 tool_call_count = tool_call_count.saturating_add(calls);
+            }
+            ChunkType::ProviderToolCall(payload) => {
+                tool_call_count = tool_call_count.saturating_add(1);
+                if let Some(sender) = sender.as_ref() {
+                    let (calls, result) =
+                        crate::llm::client::provider_tool_call_ui_events(&payload);
+                    if !calls.is_empty() {
+                        let _ = sender.send(crate::llm::ChunkMessage::ToolCalls(calls));
+                    }
+                    if let Some(result) = result {
+                        let _ = sender.send(crate::llm::ChunkMessage::ToolResult(result));
+                    }
+                }
             }
             ChunkType::Failed(err) => {
                 crate::emit_log!(

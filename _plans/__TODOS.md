@@ -480,3 +480,19 @@ I think this is how the TUI works already anyway right?
 - [x] "providers" config, does it work
 
 - [x] Pressing a file link when it's wrapped does not point to anything, because it's wrapped. But when not wrapped it's okay. For instance `⬢ Added /Users/carlo/work/some-project/PR_REVIEW_20260821_112404.md` is clickable. But when I shrink the screen and it's wrapped, first half is clickable and the 2nd half is also clickabe but they point to nothing for obvious reasons
+
+- [x] I want to add 'g e' to scroll down.
+
+- [ ] I wanna be able to cancel queued messages if needed.
+
+- [x] Hosted search
+
+- [ ] Asking crabcode to run some tui like `lazygitrs` is causing it to crash the agent.
+
+- [ ] Extra padding in non compact mode. Or idk. controllable in tui? field? Right now it's close to the edge and it only looks good in some terminals.
+
+- [ ] /btw command
+
+- [x] wanna add tinyfish and monid (free search apis)
+
+- [x] Bug: Fix the questions.. There's too much gap between 1-3 choices and the "Type your own answer". Because we always want type your own to be visible. Just amke them in the same container, no justification in the middle and if overflowing, just make it scroll the entire question dialog.

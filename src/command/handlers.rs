@@ -694,9 +694,7 @@ pub fn handle_mcp<'a>(
 
     Box::pin(async move {
         if !args.is_empty() {
-            return CommandResult::Error(
-                "This command only opens the MCP dialog. Usage: /mcp".to_string(),
-            );
+            return CommandResult::Error("Usage: /mcp or /mcp auth <name>".to_string());
         }
 
         CommandResult::Success(String::new())
@@ -1028,7 +1026,7 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "mcp".to_string(),
-        description: "List MCP servers".to_string(),
+        description: "List MCP servers (/mcp auth <name> to authenticate)".to_string(),
         handler: handle_mcp,
         hidden_tokens: vec![],
         chat_only: false,
@@ -1390,7 +1388,7 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 19);
+        assert_eq!(names.len(), 20);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));

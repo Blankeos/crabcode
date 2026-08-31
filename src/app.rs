@@ -44,6 +44,10 @@ use crate::views::connect_dialog::{
     init_connect_dialog, render_connect_dialog,
 };
 use crate::views::home::{init_home, render_home};
+use crate::views::jobs_dialog::{
+    handle_jobs_dialog_key_event, handle_jobs_dialog_mouse_event, init_jobs_dialog,
+    render_jobs_dialog, JobsDialogAction,
+};
 use crate::views::mcp_dialog::{
     handle_mcp_dialog_key_event, handle_mcp_dialog_mouse_event, init_mcp_dialog, render_mcp_dialog,
     McpDialogAction,
@@ -102,10 +106,11 @@ use crate::views::title_dialog::{
     render_title_dialog, TitleDialogAction,
 };
 use crate::views::{
-    AgentsDialogState, ChatState, ConnectDialogState, HomeState, McpDialogState, ModelsDialogState,
-    MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState, QuestionDialogState,
-    RemoteDialogState, SessionRenameDialogState, SessionsDialogState, StorageDialogState,
-    SuggestionsPopupState, TerminalSessionDialogState, ThemesDialogState, TitleDialogState,
+    AgentsDialogState, ChatState, ConnectDialogState, HomeState, JobsDialogState, McpDialogState,
+    ModelsDialogState, MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState,
+    QuestionDialogState, RemoteDialogState, SessionRenameDialogState, SessionsDialogState,
+    StorageDialogState, SuggestionsPopupState, TerminalSessionDialogState, ThemesDialogState,
+    TitleDialogState,
 };
 
 use crate::{
@@ -236,6 +241,7 @@ pub enum OverlayFocus {
     SkillsDialog,
     McpDialog,
     TimelineDialog,
+    JobsDialog,
     CopyActions,
     MessageActions,
     CommandPalette,
@@ -266,6 +272,12 @@ enum ProviderOAuthTaskMessage {
         provider: OAuthProvider,
         error: String,
     },
+}
+
+#[derive(Debug)]
+enum McpOAuthTaskMessage {
+    Success { name: String },
+    Failed { name: String, error: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +441,7 @@ struct ToolCallViewState {
 enum SelectionActionTarget {
     Chat,
     Input,
+    JobsDetail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -844,6 +857,9 @@ pub struct App {
     pub title_dialog_state: TitleDialogState,
     pub which_key_state: crate::views::which_key::WhichKeyState,
     pub timeline_dialog_state: crate::views::timeline_dialog::TimelineDialogState,
+    pub jobs_dialog_state: JobsDialogState,
+    /// Last-rendered jobs chip hit area (chat status line); set during render.
+    jobs_chip_area: Option<ratatui::layout::Rect>,
     /// First Esc arms a double-Esc gesture (cancel while streaming, timeline when idle).
     /// Matches OpenCode: second Esc confirms; arm expires after [`Self::ESC_ARM_TIMEOUT`].
     esc_primed_at: Option<std::time::Instant>,
@@ -856,6 +872,8 @@ pub struct App {
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     provider_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<ProviderOAuthTaskMessage>>,
     provider_oauth_in_progress: Option<OAuthProvider>,
+    mcp_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<McpOAuthTaskMessage>>,
+    mcp_oauth_in_progress: Option<String>,
     compaction_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<CompactionTaskMessage>>,
     compaction_pending: Option<CompactionPending>,
     storage_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<StorageTaskMessage>>,
@@ -889,6 +907,8 @@ pub struct App {
     pub sounds: crate::sound::ResolvedSoundsConfig,
     pub notifications: crate::config::NotificationsConfig,
     pub images: crate::config::ImagesConfig,
+    pub editor: crate::config::EditorConfig,
+    pending_editor_suspend: Option<String>,
     pub websearch: crate::config::configuration::WebsearchConfig,
     pub mcp: crate::config::configuration::McpConfig,
     pub config_raw_merged: serde_json::Value,
@@ -926,6 +946,8 @@ pub struct App {
     startup_hydrated: bool,
     pending_model_override: Option<String>,
     pending_cli_agent: Option<String>,
+    /// Shared background/interactive process registry (jobs UI next).
+    pub process_registry: std::sync::Arc<crate::tools::ProcessRegistry>,
 }
 
 /// Cached sum of context tokens for all completed messages of the currently
@@ -1014,6 +1036,7 @@ impl App {
         let mcp_dialog_state = init_mcp_dialog("MCP", vec![]);
         let which_key_state = crate::views::which_key::init_which_key();
         let timeline_dialog_state = crate::views::timeline_dialog::init_timeline_dialog();
+        let jobs_dialog_state = init_jobs_dialog();
         let command_palette_state = init_command_palette();
         let find_bar = FindBar::new();
         let storage_dialog_state = init_storage_dialog();
@@ -1094,6 +1117,8 @@ impl App {
             title_dialog_state,
             which_key_state,
             timeline_dialog_state,
+            jobs_dialog_state,
+            jobs_chip_area: None,
             esc_primed_at: None,
             copy_actions_dialog: None,
             message_actions_index: None,
@@ -1104,6 +1129,8 @@ impl App {
             api_key_input,
             provider_oauth_receiver: None,
             provider_oauth_in_progress: None,
+            mcp_oauth_receiver: None,
+            mcp_oauth_in_progress: None,
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,
@@ -1133,12 +1160,14 @@ impl App {
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
             images: crate::config::ImagesConfig::default(),
+            editor: crate::config::EditorConfig::default(),
+            pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
-            tool_permissions: crate::tools::ToolPermissions::new(cwd_path),
+            tool_permissions: crate::tools::ToolPermissions::new(cwd_path.clone()),
             skills_dirs: Vec::new(),
             plugin_specs: Vec::new(),
             project_root: std::path::PathBuf::from("."),
@@ -1168,6 +1197,9 @@ impl App {
             startup_hydrated: false,
             pending_model_override: model_override.map(str::to_string),
             pending_cli_agent: cli_agent.map(str::to_string),
+            process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
+                cwd_path,
+            )),
         })
     }
 
@@ -1373,6 +1405,7 @@ impl App {
         self.sounds = resolved_sounds;
         self.notifications = loaded_config.merged_config.notifications.clone();
         self.images = loaded_config.merged_config.images.clone();
+        self.editor = loaded_config.merged_config.editor.clone();
         self.websearch = loaded_config.merged_config.websearch.clone();
         self.mcp = mcp_config;
         self.config_raw_merged = loaded_config.raw_merged;
@@ -1810,8 +1843,9 @@ impl App {
             &location.path,
             location.line,
             location.column,
+            &self.editor,
         ) {
-            Ok(()) => {
+            Ok(crate::utils::image_attachment::OpenOutcome::Spawned) => {
                 push_toast(Toast::new(
                     format!(
                         "Opened {}:{}:{}",
@@ -1822,6 +1856,18 @@ impl App {
                     ToastLevel::Info,
                     None,
                 ));
+                self.dismiss_selection_actions();
+            }
+            Ok(crate::utils::image_attachment::OpenOutcome::Copied(text)) => {
+                push_toast(Toast::new(
+                    format!("Copied {}", text),
+                    ToastLevel::Info,
+                    None,
+                ));
+                self.dismiss_selection_actions();
+            }
+            Ok(crate::utils::image_attachment::OpenOutcome::Suspend(command)) => {
+                self.pending_editor_suspend = Some(command);
                 self.dismiss_selection_actions();
             }
             Err(err) => push_toast(Toast::new(
@@ -2884,7 +2930,8 @@ impl App {
             .with_context(|| format!("failed to switch to {}", path.display()))?;
         self.cwd = path_text.clone();
         self.cached_git_branch_path.clear();
-        self.tool_permissions = self.tool_permissions.clone().with_workdir(path);
+        self.tool_permissions = self.tool_permissions.clone().with_workdir(path.clone());
+        self.process_registry.set_workdir_blocking(&path);
         self.session_manager
             .switch_current_workspace_path(&path_text)
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
@@ -2897,14 +2944,38 @@ impl App {
         self.selection_action_bar.map(|state| match state.target {
             SelectionActionTarget::Chat => chat_selection_action_bar_area(
                 self.current_chat_area(),
-                self.chat_state.chat.scroll_offset,
+                self.chat_state.chat.resolved_scroll_offset(),
                 &self.chat_state.chat.selection,
                 state,
             ),
             SelectionActionTarget::Input => input_selection_action_bar_area(
                 self.last_frame_size,
                 self.suggestions_popup_anchor_area(),
+                self.input.selection_screen_row(),
             ),
+            SelectionActionTarget::JobsDetail => {
+                let content = self.jobs_dialog_state.detail_content_area();
+                let selection = &self.jobs_dialog_state.selection;
+                let ((s_line, _), (e_line, _)) = selection.range();
+                let top_line = s_line.min(e_line);
+                let scroll = self.jobs_dialog_state.detail_scroll as usize;
+                let visible_row = top_line.saturating_sub(scroll) as u16;
+                let row = content
+                    .y
+                    .saturating_add(visible_row)
+                    .saturating_sub(1)
+                    .max(content.y.saturating_sub(1));
+                let width = selection_action_bar_width(state);
+                let x = content
+                    .x
+                    .saturating_add(content.width.saturating_sub(width) / 2);
+                Rect {
+                    x,
+                    y: row.min(content.y.saturating_add(content.height.saturating_sub(1))),
+                    width: width.min(content.width.max(1)),
+                    height: 1,
+                }
+            }
         })
     }
 
@@ -2999,6 +3070,13 @@ impl App {
             return true;
         }
 
+        if let Some(text) = self.jobs_dialog_state.selected_text() {
+            self.copy_text_with_toast(&text, "Copied to clipboard");
+            self.jobs_dialog_state.clear_selection();
+            self.selection_action_bar = None;
+            return true;
+        }
+
         false
     }
 
@@ -3010,6 +3088,10 @@ impl App {
         }
         if self.input.has_selection() {
             self.input.clear_selection();
+            return true;
+        }
+        if self.jobs_dialog_state.selection.active {
+            self.jobs_dialog_state.clear_selection();
             return true;
         }
         false
@@ -3058,6 +3140,7 @@ impl App {
                 .has_selection()
                 .then(|| self.input.get_selected_text())
                 .filter(|text| !text.is_empty()),
+            SelectionActionTarget::JobsDetail => self.jobs_dialog_state.selected_text(),
         }
     }
 
@@ -3309,12 +3392,26 @@ impl App {
         if self.overlay_focus == OverlayFocus::TerminalSessionDialog
             && self.terminal_session_dialog_state.has_active()
         {
+            let job_id = self
+                .terminal_session_dialog_state
+                .active_job_id()
+                .map(str::to_string);
             let resp = handle_terminal_session_dialog_key_event(
                 &mut self.terminal_session_dialog_state,
                 key,
             );
-            if resp == TerminalSessionResponse::Close {
-                self.after_terminal_session_overlay_closed();
+            match resp {
+                TerminalSessionResponse::Close => {
+                    if let Some(id) = job_id {
+                        let _ = self.process_registry.kill_blocking(&id);
+                    }
+                    self.after_terminal_session_overlay_closed();
+                }
+                TerminalSessionResponse::Minimize => {
+                    // Park session: keep running, dismiss overlay only.
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                TerminalSessionResponse::Handled | TerminalSessionResponse::NotHandled => {}
             }
             self.record_overlay_close_after_key(overlay_before_key);
             return;
@@ -3929,6 +4026,22 @@ impl App {
                     crate::views::timeline_dialog::TimelineDialogAction::NotHandled => false,
                 }
             }
+            OverlayFocus::JobsDialog => {
+                if !(key.code == KeyCode::Char('y')
+                    && key.modifiers == event::KeyModifiers::NONE
+                    && self.jobs_dialog_state.is_detail_open()
+                    && self.try_copy_selection())
+                {
+                    let action = handle_jobs_dialog_key_event(
+                        &mut self.jobs_dialog_state,
+                        key,
+                        &self.process_registry,
+                        self.session_spinner_frame,
+                    );
+                    self.handle_jobs_dialog_action(action);
+                }
+                true
+            }
             OverlayFocus::CopyActions => {
                 if let Some(ref mut dialog) = self.copy_actions_dialog {
                     let event = dialog.handle_key_event(key);
@@ -4024,6 +4137,10 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         self.open_timeline_dialog();
                     }
+                    crate::views::which_key::WhichKeyAction::ShowJobs => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.open_jobs_dialog();
+                    }
                     crate::views::which_key::WhichKeyAction::ToggleThinking => {
                         self.overlay_focus = OverlayFocus::None;
                         self.chat_state.chat.toggle_thinking_visible();
@@ -4063,8 +4180,19 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         self.chat_state.chat.scroll_down(1);
                     }
-                    crate::views::which_key::WhichKeyAction::None => {
+                    crate::views::which_key::WhichKeyAction::ScrollToTop => {
                         self.overlay_focus = OverlayFocus::None;
+                        self.chat_state.chat.scroll_to_top();
+                    }
+                    crate::views::which_key::WhichKeyAction::ScrollToBottom => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.chat_state.chat.scroll_to_bottom();
+                    }
+                    crate::views::which_key::WhichKeyAction::None => {
+                        // Keep focus while which-key is still open (e.g. nested submenu).
+                        if !self.which_key_state.is_visible() {
+                            self.overlay_focus = OverlayFocus::None;
+                        }
                     }
                 }
                 true
@@ -4517,6 +4645,7 @@ impl App {
         let selection_is_dragging = match state.target {
             SelectionActionTarget::Chat => self.chat_state.chat.selection.is_dragging,
             SelectionActionTarget::Input => self.input.is_selection_dragging(),
+            SelectionActionTarget::JobsDetail => self.jobs_dialog_state.selection.is_dragging,
         };
         if selection_is_dragging {
             if area.contains(point) && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -4524,6 +4653,7 @@ impl App {
                 match state.target {
                     SelectionActionTarget::Chat => self.chat_state.chat.finish_selection_drag(),
                     SelectionActionTarget::Input => self.input.finish_selection_drag(),
+                    SelectionActionTarget::JobsDetail => self.jobs_dialog_state.selection.finish(),
                 }
             } else {
                 return false;
@@ -4617,7 +4747,7 @@ impl App {
         }
     }
 
-    fn open_chat_hyperlink_target(&self, target: &HyperlinkTarget) {
+    fn open_chat_hyperlink_target(&mut self, target: &HyperlinkTarget) {
         match target {
             HyperlinkTarget::File(target) => {
                 let result = if let Some(line) = target.line {
@@ -4625,16 +4755,25 @@ impl App {
                         &target.path,
                         line,
                         target.column.unwrap_or(1),
+                        &self.editor,
                     )
                 } else {
-                    crate::utils::image_attachment::open_file_path(&target.path)
+                    crate::utils::image_attachment::open_file_path(&target.path, &self.editor)
                 };
                 match result {
-                    Ok(()) => push_toast(Toast::new(
-                        format!("Opened {}", target.path.display()),
-                        ToastLevel::Info,
-                        None,
-                    )),
+                    Ok(crate::utils::image_attachment::OpenOutcome::Spawned) => {
+                        push_toast(Toast::new(
+                            format!("Opened {}", target.path.display()),
+                            ToastLevel::Info,
+                            None,
+                        ))
+                    }
+                    Ok(crate::utils::image_attachment::OpenOutcome::Copied(text)) => push_toast(
+                        Toast::new(format!("Copied {}", text), ToastLevel::Info, None),
+                    ),
+                    Ok(crate::utils::image_attachment::OpenOutcome::Suspend(command)) => {
+                        self.pending_editor_suspend = Some(command);
+                    }
                     Err(err) => push_toast(Toast::new(
                         format!("Failed to open file: {}", err),
                         ToastLevel::Error,
@@ -4686,6 +4825,19 @@ impl App {
         {
             self.dismiss_selection_actions();
             return;
+        }
+
+        // Bottom-right jobs chip → open jobs dialog.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && mouse.modifiers.is_empty()
+            && self.overlay_focus == OverlayFocus::None
+        {
+            if let Some(area) = self.jobs_chip_area {
+                if area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    self.open_jobs_dialog();
+                    return;
+                }
+            }
         }
 
         if matches!(mouse.kind, MouseEventKind::Moved) && self.base_focus != BaseFocus::Chat {
@@ -4950,6 +5102,41 @@ impl App {
             if !self.timeline_dialog_state.dialog.is_visible() {
                 self.chat_state.chat.clear_highlighted_message();
                 self.overlay_focus = OverlayFocus::None;
+            }
+        } else if self.overlay_focus == OverlayFocus::JobsDialog {
+            let action = handle_jobs_dialog_mouse_event(
+                &mut self.jobs_dialog_state,
+                mouse,
+                &self.process_registry,
+                self.session_spinner_frame,
+            );
+            self.handle_jobs_dialog_action(action);
+            // Click-outside hides via Dialog::handle_mouse_event → Handled, not Close.
+            // Mirror Sessions/Skills/Mcp: clear overlay when the dialog is gone, otherwise
+            // keys stay trapped in JobsDialog and the TUI looks frozen (ctrl-cc still works).
+            if !self.jobs_dialog_state.is_visible() {
+                self.selection_action_bar = None;
+                self.overlay_focus = OverlayFocus::None;
+            } else if self.jobs_dialog_state.is_detail_open() {
+                match mouse.kind {
+                    MouseEventKind::Up(MouseButton::Left)
+                        if self.jobs_dialog_state.selection.active
+                            && !self.jobs_dialog_state.selection.is_dragging =>
+                    {
+                        self.show_selection_action_bar_for(SelectionActionTarget::JobsDetail);
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if !self.jobs_dialog_state.selection.active
+                            && self.selection_action_bar
+                                == Some(SelectionActionBarState {
+                                    target: SelectionActionTarget::JobsDetail,
+                                    can_open_in_editor: false,
+                                }) =>
+                    {
+                        self.selection_action_bar = None;
+                    }
+                    _ => {}
+                }
             }
         } else if self.overlay_focus == OverlayFocus::CopyActions {
             if let Some(ref mut dialog) = self.copy_actions_dialog {
@@ -5752,6 +5939,7 @@ impl App {
                     CommandPaletteAppAction::OpenStorage => self.open_storage_dialog(),
                     CommandPaletteAppAction::OpenSkillsDialog => self.show_skills_dialog(),
                     CommandPaletteAppAction::OpenMcpDialog => self.show_mcp_dialog(),
+                    CommandPaletteAppAction::OpenJobs => self.open_jobs_dialog(),
                 }
                 self.clear_suggestions_and_blur();
             }
@@ -6332,7 +6520,7 @@ impl App {
                     return;
                 }
                 if parsed.name == "mcp" {
-                    self.show_mcp_dialog();
+                    self.handle_mcp_slash(&parsed.args);
                     return;
                 }
                 if parsed.name == "title" {
@@ -6572,7 +6760,7 @@ impl App {
             return;
         }
         if parsed.name == "mcp" {
-            self.show_mcp_dialog();
+            self.handle_mcp_slash(&parsed.args);
             return;
         }
         if parsed.name == "title" {
@@ -6934,6 +7122,74 @@ impl App {
         }
     }
 
+    fn open_jobs_dialog(&mut self) {
+        self.reset_esc_primed_state();
+        self.jobs_dialog_state
+            .refresh_from_registry(&self.process_registry, self.session_spinner_frame);
+        self.jobs_dialog_state.show();
+        self.overlay_focus = OverlayFocus::JobsDialog;
+    }
+
+    fn handle_jobs_dialog_action(&mut self, action: JobsDialogAction) {
+        match action {
+            JobsDialogAction::Close => {
+                self.jobs_dialog_state.hide();
+                self.selection_action_bar = None;
+                if self.overlay_focus == OverlayFocus::JobsDialog {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+            }
+            JobsDialogAction::NotHandled => {}
+            JobsDialogAction::Handled => {}
+            JobsDialogAction::Kill(id) => {
+                let _ = self.process_registry.kill_blocking(&id);
+                // If we killed the parked interactive session, drop it too.
+                if self.terminal_session_dialog_state.active_job_id() == Some(id.as_str()) {
+                    self.terminal_session_dialog_state.close_current();
+                    if self.overlay_focus == OverlayFocus::TerminalSessionDialog {
+                        self.after_terminal_session_overlay_closed();
+                    }
+                }
+                if self.jobs_dialog_state.is_detail_open() {
+                    let _ = self
+                        .jobs_dialog_state
+                        .refresh_detail_output(&self.process_registry);
+                } else {
+                    self.jobs_dialog_state
+                        .refresh_from_registry(&self.process_registry, self.session_spinner_frame);
+                }
+            }
+            JobsDialogAction::Restart(id) => match self.process_registry.restart_blocking(&id) {
+                Ok(_) => {
+                    if self.jobs_dialog_state.is_detail_open() {
+                        let _ = self
+                            .jobs_dialog_state
+                            .refresh_detail_output(&self.process_registry);
+                    } else {
+                        self.jobs_dialog_state.refresh_from_registry(
+                            &self.process_registry,
+                            self.session_spinner_frame,
+                        );
+                    }
+                }
+                Err(err) => {
+                    crate::emit_log!("[JOBS] restart failed id={} err={}", id, err);
+                }
+            },
+            JobsDialogAction::FocusInteractive(id) => {
+                self.jobs_dialog_state.hide();
+                self.selection_action_bar = None;
+                if self.terminal_session_dialog_state.active_job_id() == Some(id.as_str())
+                    && self.terminal_session_dialog_state.has_active()
+                {
+                    self.overlay_focus = OverlayFocus::TerminalSessionDialog;
+                } else if self.overlay_focus == OverlayFocus::JobsDialog {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+            }
+        }
+    }
+
     fn show_message_actions(&mut self, idx: usize) {
         let return_focus = if self.overlay_focus == OverlayFocus::TimelineDialog {
             OverlayFocus::TimelineDialog
@@ -7178,6 +7434,10 @@ impl App {
 
     pub fn take_remote_launch_request(&mut self) -> Option<RemoteLaunchRequest> {
         self.remote_launch_request.take()
+    }
+
+    pub fn take_editor_suspend(&mut self) -> Option<String> {
+        self.pending_editor_suspend.take()
     }
 
     fn open_remote_dialog(&mut self) {
@@ -7912,6 +8172,17 @@ impl App {
         self.overlay_focus = OverlayFocus::SkillsDialog;
     }
 
+    fn handle_mcp_slash(&mut self, args: &[String]) {
+        if args.first().map(|s| s.as_str()) == Some("auth") {
+            match args.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                Some(name) => self.begin_mcp_oauth(name),
+                None => self.show_mcp_dialog(),
+            }
+            return;
+        }
+        self.show_mcp_dialog();
+    }
+
     fn show_mcp_dialog(&mut self) {
         let selected = self
             .mcp_dialog_state
@@ -7931,50 +8202,172 @@ impl App {
     fn refresh_mcp_dialog_items(&mut self) {
         use crate::ui::components::dialog::DialogItem;
 
+        let live = self.live_mcp_views();
         let mut items = self
             .remote_mcp_servers()
             .into_iter()
-            .map(|server| DialogItem {
-                id: server.name.clone(),
-                name: server.name,
-                group: "MCP".to_string(),
-                description: String::new(),
-                tip: Some(
-                    if server.enabled {
+            .map(|server| {
+                let live = live.iter().find(|view| view.name == server.name);
+                let status = live
+                    .map(|view| view.status.as_str())
+                    .unwrap_or(if server.enabled {
                         "enabled"
                     } else {
                         "disabled"
-                    }
-                    .to_string(),
-                ),
-                provider_id: String::new(),
-                active: server.enabled,
+                    });
+                let detail = live.and_then(|view| view.detail.as_deref()).unwrap_or("");
+                let tip = if detail.is_empty() {
+                    status.to_string()
+                } else {
+                    format!("{status}: {detail}")
+                };
+                DialogItem {
+                    id: server.name.clone(),
+                    name: server.name,
+                    group: "MCP".to_string(),
+                    description: String::new(),
+                    tip: Some(tip),
+                    provider_id: String::new(),
+                    active: server.enabled,
+                }
             })
             .collect::<Vec<_>>();
         items.sort_by(|a, b| a.id.cmp(&b.id));
         self.mcp_dialog_state = init_mcp_dialog("MCP", items);
     }
 
+    fn live_mcp_views(&self) -> Vec<crate::mcp::McpServerView> {
+        let manager =
+            crate::mcp::McpManager::ensure(self.mcp.clone(), std::path::PathBuf::from(&self.cwd));
+        manager
+            .try_lock()
+            .map(|guard| guard.views())
+            .unwrap_or_default()
+    }
+
     fn handle_mcp_dialog_action(&mut self, action: McpDialogAction) {
-        let McpDialogAction::Toggle { server_id } = action else {
+        match action {
+            McpDialogAction::None => {}
+            McpDialogAction::Toggle { server_id } => {
+                let selected = server_id.clone();
+                match self.remote_toggle_mcp_server(&server_id) {
+                    Ok(_) => {
+                        self.refresh_mcp_dialog_items();
+                        self.mcp_dialog_state
+                            .dialog
+                            .select_item_by_key(&selected, "");
+                        self.mcp_dialog_state.dialog.show();
+                    }
+                    Err(err) => {
+                        self.play_sound_event(crate::sound::SoundEvent::Error);
+                        push_toast(Toast::new(
+                            format!("Failed to toggle MCP server: {err}"),
+                            ToastLevel::Error,
+                            Some(std::time::Duration::from_secs(3)),
+                        ));
+                    }
+                }
+            }
+            McpDialogAction::Auth { server_id } => self.begin_mcp_oauth(&server_id),
+        }
+    }
+
+    fn begin_mcp_oauth(&mut self, name: &str) {
+        if self.mcp_oauth_in_progress.is_some() || self.provider_oauth_in_progress.is_some() {
+            push_toast(Toast::new(
+                "An OAuth flow is already in progress",
+                ToastLevel::Info,
+                None,
+            ));
+            return;
+        }
+        let Some(crate::config::McpServerConfig::Remote(remote)) = self.mcp.get(name).cloned()
+        else {
+            push_toast(Toast::new(
+                format!("MCP server '{name}' is not a remote server"),
+                ToastLevel::Error,
+                None,
+            ));
             return;
         };
-        let selected = server_id.clone();
-        match self.remote_toggle_mcp_server(&server_id) {
-            Ok(_) => {
-                self.refresh_mcp_dialog_items();
-                self.mcp_dialog_state
-                    .dialog
-                    .select_item_by_key(&selected, "");
-                self.mcp_dialog_state.dialog.show();
+        if !remote.oauth_enabled {
+            push_toast(Toast::new(
+                format!("OAuth is disabled for MCP server '{name}'"),
+                ToastLevel::Info,
+                None,
+            ));
+            return;
+        }
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<McpOAuthTaskMessage>();
+        self.mcp_oauth_receiver = Some(receiver);
+        self.mcp_oauth_in_progress = Some(name.to_string());
+        self.provider_oauth_flow_state
+            .show_browser_waiting_for(format!("MCP {name}"));
+        self.mcp_dialog_state.dialog.hide();
+        self.overlay_focus = OverlayFocus::ProviderOAuthFlow;
+
+        let server_name = name.to_string();
+        let mcp_config = self.mcp.clone();
+        let workspace = std::path::PathBuf::from(&self.cwd);
+        tokio::spawn(async move {
+            let auth =
+                crate::mcp::oauth::authenticate_with_url_callback(&server_name, &remote, |url| {
+                    let _ = crate::utils::image_attachment::open_url(url);
+                })
+                .await;
+            let result = match auth {
+                Ok(()) => {
+                    let manager = crate::mcp::McpManager::ensure(mcp_config, workspace);
+                    let mut guard = manager.lock().await;
+                    guard.reconnect(&server_name).await
+                }
+                Err(err) => Err(err),
+            };
+            let _ = match result {
+                Ok(()) => sender.send(McpOAuthTaskMessage::Success { name: server_name }),
+                Err(err) => sender.send(McpOAuthTaskMessage::Failed {
+                    name: server_name,
+                    error: err.to_string(),
+                }),
+            };
+        });
+    }
+
+    fn process_mcp_oauth_events(&mut self) {
+        let mut events = Vec::new();
+        if let Some(receiver) = &mut self.mcp_oauth_receiver {
+            while let Ok(event) = receiver.try_recv() {
+                events.push(event);
             }
-            Err(err) => {
-                self.play_sound_event(crate::sound::SoundEvent::Error);
-                push_toast(Toast::new(
-                    format!("Failed to toggle MCP server: {err}"),
-                    ToastLevel::Error,
-                    Some(std::time::Duration::from_secs(3)),
-                ));
+        }
+        for event in events {
+            match event {
+                McpOAuthTaskMessage::Success { name } => {
+                    self.mcp_oauth_in_progress = None;
+                    self.mcp_oauth_receiver = None;
+                    self.provider_oauth_flow_state.hide();
+                    push_toast(Toast::new(
+                        format!("Authenticated MCP server \"{name}\""),
+                        ToastLevel::Success,
+                        None,
+                    ));
+                    self.show_mcp_dialog();
+                }
+                McpOAuthTaskMessage::Failed { name, error } => {
+                    self.mcp_oauth_in_progress = None;
+                    self.mcp_oauth_receiver = None;
+                    self.provider_oauth_flow_state.hide();
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
+                    push_toast(Toast::new(
+                        format!("MCP \"{name}\" auth failed: {error}"),
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(6)),
+                    ));
+                    if self.overlay_focus == OverlayFocus::ProviderOAuthFlow {
+                        self.show_mcp_dialog();
+                    }
+                }
             }
         }
     }
@@ -8889,6 +9282,16 @@ impl App {
             self.session_spinner_frame = (self.session_spinner_frame + 1) % 6;
             self.last_session_spinner_update = std::time::Instant::now();
             self.update_sessions_dialog_live_state(true);
+            if self.jobs_dialog_state.is_visible() {
+                if self.jobs_dialog_state.is_detail_open() {
+                    let _ = self
+                        .jobs_dialog_state
+                        .refresh_detail_output(&self.process_registry);
+                } else {
+                    self.jobs_dialog_state
+                        .refresh_from_registry(&self.process_registry, self.session_spinner_frame);
+                }
+            }
         }
     }
 
@@ -8919,6 +9322,9 @@ impl App {
             || (self.overlay_focus == OverlayFocus::SessionsDialog
                 && self.sessions_dialog_state.dialog.is_visible()
                 && self.sessions_dialog_has_streaming_rows())
+            // Keep ticking while the jobs dialog is open so duration/spinner
+            // stay live — never call running_count_blocking here (can stall UI).
+            || self.jobs_dialog_state.is_visible()
     }
 
     fn sessions_dialog_has_streaming_rows(&self) -> bool {
@@ -9031,6 +9437,7 @@ impl App {
 
     pub fn process_streaming_chunks(&mut self) {
         self.process_provider_oauth_events();
+        self.process_mcp_oauth_events();
         self.process_compaction_events();
         self.process_storage_events();
         self.process_models_events();
@@ -9285,6 +9692,21 @@ impl App {
                 event,
             } => {
                 self.handle_terminal_session_stream_event(&tool_call_id, event);
+                true
+            }
+            crate::llm::ChunkMessage::BackgroundJobEvent { .. } => {
+                if self.jobs_dialog_state.is_visible() {
+                    if self.jobs_dialog_state.is_detail_open() {
+                        let _ = self
+                            .jobs_dialog_state
+                            .refresh_detail_output(&self.process_registry);
+                    } else {
+                        self.jobs_dialog_state.refresh_from_registry(
+                            &self.process_registry,
+                            self.session_spinner_frame,
+                        );
+                    }
+                }
                 true
             }
         }
@@ -9667,8 +10089,58 @@ impl App {
                             });
 
                         let call_id = call.id.clone();
-                        msg.add_tool_call_part(call.id, call.function.name, args_value);
-                        inserted.push((call_id, idx));
+                        // Upsert: hosted search may emit running then completed with same id.
+                        if let Some(existing) = msg.parts.iter_mut().find(|part| {
+                            part.part_type == "tool_call"
+                                && part.tool_id() == Some(call_id.as_str())
+                        }) {
+                            if let Some(obj) = existing.data.as_object_mut() {
+                                obj.insert(
+                                    "name".into(),
+                                    serde_json::Value::String(call.function.name.clone()),
+                                );
+                                // Hosted search completed events sometimes omit sources /
+                                // wipe query to ""; don't replace richer running args.
+                                let incoming_hollow =
+                                    crate::llm::client::hosted_search_args_are_hollow(&args_value);
+                                let existing_hollow = obj
+                                    .get("args")
+                                    .map(crate::llm::client::hosted_search_args_are_hollow)
+                                    .unwrap_or(true);
+                                if !incoming_hollow || existing_hollow {
+                                    obj.insert("args".into(), args_value);
+                                }
+                                if matches!(
+                                    call.function.name.as_str(),
+                                    "x_search" | "web_search" | "file_search"
+                                ) {
+                                    obj.insert(
+                                        "provider_executed".into(),
+                                        serde_json::Value::Bool(true),
+                                    );
+                                }
+                            }
+                        } else {
+                            msg.add_tool_call_part(
+                                call.id.clone(),
+                                call.function.name.clone(),
+                                args_value,
+                            );
+                            if matches!(
+                                call.function.name.as_str(),
+                                "x_search" | "web_search" | "file_search"
+                            ) {
+                                if let Some(part) = msg.parts.last_mut() {
+                                    if let Some(obj) = part.data.as_object_mut() {
+                                        obj.insert(
+                                            "provider_executed".into(),
+                                            serde_json::Value::Bool(true),
+                                        );
+                                    }
+                                }
+                            }
+                            inserted.push((call_id, idx));
+                        }
                     }
                     chat.mark_streaming_tool_render_pending(idx);
                 }
@@ -9716,6 +10188,12 @@ impl App {
                     };
                     v["id"] = serde_json::Value::String(result.tool_call_id.clone());
                     v["name"] = serde_json::Value::String(result.name.clone());
+                    if matches!(
+                        result.name.as_str(),
+                        "x_search" | "web_search" | "file_search"
+                    ) {
+                        v["provider_executed"] = serde_json::Value::Bool(true);
+                    }
 
                     if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&result.content)
                     {
@@ -9755,6 +10233,44 @@ impl App {
                         };
                         v["status"] = serde_json::Value::String(status.to_string());
                         v["output_preview"] = serde_json::Value::String(result.content.clone());
+                    }
+
+                    // Hosted search completed SSE often omits sources / clears query;
+                    // reuse running tool_call args for preview + result card header.
+                    if matches!(
+                        result.name.as_str(),
+                        "web_search" | "x_search" | "file_search"
+                    ) {
+                        if let Some(args) = msg
+                            .tool_call_part_data(&result.tool_call_id)
+                            .and_then(|part| part.get("args"))
+                            .filter(|a| !crate::llm::client::hosted_search_args_are_hollow(a))
+                            .cloned()
+                        {
+                            let result_args_hollow = v
+                                .get("args")
+                                .map(crate::llm::client::hosted_search_args_are_hollow)
+                                .unwrap_or(true);
+                            if result_args_hollow {
+                                v["args"] = args.clone();
+                            }
+
+                            let preview_is_stub = v
+                                .get("output_preview")
+                                .and_then(|p| p.as_str())
+                                .map(|s| s.trim().is_empty() || s.starts_with("Provider-executed "))
+                                .unwrap_or(true);
+                            if preview_is_stub {
+                                let enriched = crate::llm::client::hosted_search_output_preview(
+                                    &result.name,
+                                    v.get("status").and_then(|s| s.as_str()).unwrap_or("ok"),
+                                    &serde_json::json!({ "arguments": args }),
+                                );
+                                if !enriched.starts_with("Provider-executed ") {
+                                    v["output_preview"] = serde_json::Value::String(enriched);
+                                }
+                            }
+                        }
                     }
 
                     if msg.role == crate::session::types::MessageRole::Assistant {
@@ -9886,6 +10402,7 @@ impl App {
         let websearch_config = self.websearch.clone();
         let mcp_config = self.mcp.clone();
         let custom_instructions = self.custom_instructions.clone();
+        let process_registry = self.process_registry.clone();
         let cwd = self.cwd.clone();
         let is_git_repo = crate::utils::git::is_git_repo(&cwd).unwrap_or(false);
 
@@ -9911,6 +10428,7 @@ impl App {
                         &websearch_config,
                         &mcp_config,
                         &cwd,
+                        process_registry.clone(),
                     )
                     .await;
                     crate::tools::scope_tool_registry_for_agent(
@@ -9959,6 +10477,7 @@ impl App {
                 None,
                 messages,
                 sender_clone.clone(),
+                process_registry,
             );
 
             let result: Result<Result<(), Box<dyn std::error::Error>>, u64> = match provider_timeout
@@ -10534,6 +11053,7 @@ impl App {
         let parent_agent = self.agent.clone();
         let tool_permissions = self.tool_permissions.clone();
         let agent_registry = self.agent_registry.clone();
+        let process_registry = self.process_registry.clone();
         let task_description = format!("{} mention", agent_name);
         let sender_for_error = sender.clone();
 
@@ -10553,6 +11073,7 @@ impl App {
                     tool_permissions.clone(),
                     agent_registry.clone(),
                     cancel_token.clone(),
+                    process_registry,
                 )
                 .await;
                 let task = crate::tools::TaskTool::new(registry)
@@ -10899,6 +11420,8 @@ impl App {
                     self.session_manager
                         .get_current_session()
                         .map(|s| s.title.as_str()),
+                    self.process_registry.running_count(),
+                    &mut self.jobs_chip_area,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -11012,6 +11535,13 @@ impl App {
             );
         }
 
+        if self.jobs_dialog_state.is_visible()
+            && (self.overlay_focus == OverlayFocus::JobsDialog
+                || self.jobs_dialog_state.dialog.is_visible())
+        {
+            render_jobs_dialog(f, &mut self.jobs_dialog_state, size, colors);
+        }
+
         if self.overlay_focus == OverlayFocus::CopyActions {
             if let Some(ref mut dialog) = self.copy_actions_dialog {
                 dialog.render(f, size, colors);
@@ -11093,13 +11623,18 @@ impl App {
         if let Some(state) = self.selection_action_bar {
             let area = match state.target {
                 SelectionActionTarget::Chat => chat_selection_action_bar_area(
-                    self.chat_area_for_size(size),
-                    self.chat_state.chat.scroll_offset,
+                    self.current_chat_area(),
+                    self.chat_state.chat.resolved_scroll_offset(),
                     &self.chat_state.chat.selection,
                     state,
                 ),
-                SelectionActionTarget::Input => {
-                    input_selection_action_bar_area(size, self.suggestions_popup_anchor_area())
+                SelectionActionTarget::Input => input_selection_action_bar_area(
+                    size,
+                    self.suggestions_popup_anchor_area(),
+                    self.input.selection_screen_row(),
+                ),
+                SelectionActionTarget::JobsDetail => {
+                    self.current_selection_action_bar_area().unwrap_or_default()
                 }
             };
             render_selection_action_bar(f, area, state, &colors);
@@ -11144,10 +11679,14 @@ fn selection_action_for_column(state: SelectionActionBarState, column: usize) ->
             SelectionAction::Dismiss
         }
         SelectionActionTarget::Chat => SelectionAction::Dismiss,
-        SelectionActionTarget::Input if column < INPUT_SELECTION_ACTION_ESC_COL => {
+        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail
+            if column < INPUT_SELECTION_ACTION_ESC_COL =>
+        {
             SelectionAction::Copy
         }
-        SelectionActionTarget::Input => SelectionAction::Dismiss,
+        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail => {
+            SelectionAction::Dismiss
+        }
     }
 }
 
@@ -11164,9 +11703,16 @@ fn chat_selection_action_bar_area(
         height: chat_area.height,
     };
     let ((start_line, start_col), (end_line, _)) = selection.range();
+    // Stick-to-bottom stores `scroll_offset = usize::MAX`. Resolve it here too so
+    // the bar still anchors to the selection if a caller forgets.
+    let visible_start = if scroll_offset == usize::MAX {
+        start_line.saturating_sub(content_area.height.saturating_sub(1) as usize)
+    } else {
+        scroll_offset
+    };
     selection_action_bar_area_for_anchor(
         content_area,
-        scroll_offset,
+        visible_start,
         start_line,
         end_line,
         start_col,
@@ -11174,8 +11720,13 @@ fn chat_selection_action_bar_area(
     )
 }
 
-fn input_selection_action_bar_area(frame_area: Rect, input_area: Rect) -> Rect {
-    let y = input_area.y.saturating_sub(1);
+fn input_selection_action_bar_area(
+    frame_area: Rect,
+    input_area: Rect,
+    selection_row: Option<u16>,
+) -> Rect {
+    // Prefer one row above the selection; fall back to one above the input box.
+    let y = selection_row.unwrap_or(input_area.y).saturating_sub(1);
     let x = input_area.x.saturating_add(1);
     clamp_action_bar_area(
         frame_area,
@@ -11196,7 +11747,9 @@ fn selection_action_bar_width(state: SelectionActionBarState) -> u16 {
     match state.target {
         SelectionActionTarget::Chat if state.can_open_in_editor => SELECTION_ACTION_BAR_WIDTH,
         SelectionActionTarget::Chat => CHAT_SELECTION_ACTION_ESC_COL_NO_EDITOR as u16 + 4,
-        SelectionActionTarget::Input => INPUT_SELECTION_ACTION_ESC_COL as u16 + 4,
+        SelectionActionTarget::Input | SelectionActionTarget::JobsDetail => {
+            INPUT_SELECTION_ACTION_ESC_COL as u16 + 4
+        }
     }
 }
 
@@ -11513,6 +12066,8 @@ mod tests {
             title_dialog_state: init_title_dialog(),
             which_key_state: crate::views::which_key::init_which_key(),
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
+            jobs_dialog_state: init_jobs_dialog(),
+            jobs_chip_area: None,
             esc_primed_at: None,
             copy_actions_dialog: None,
             message_actions_index: None,
@@ -11523,6 +12078,8 @@ mod tests {
             api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
             provider_oauth_receiver: None,
             provider_oauth_in_progress: None,
+            mcp_oauth_receiver: None,
+            mcp_oauth_in_progress: None,
             compaction_receiver: None,
             compaction_pending: None,
             storage_receiver: None,
@@ -11552,6 +12109,8 @@ mod tests {
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
             images: crate::config::ImagesConfig::default(),
+            editor: crate::config::EditorConfig::default(),
+            pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             config_raw_merged: serde_json::json!({}),
@@ -11587,6 +12146,9 @@ mod tests {
             startup_hydrated: true,
             pending_model_override: None,
             pending_cli_agent: None,
+            process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
+                std::path::PathBuf::from("."),
+            )),
         }
     }
 
@@ -12098,6 +12660,30 @@ mod tests {
     }
 
     #[test]
+    fn jobs_dialog_click_outside_clears_overlay_focus() {
+        // Regression: Dialog::handle_mouse_event hides on outside click and
+        // returns Handled (not Close). Without clearing overlay_focus here,
+        // keys stay trapped in JobsDialog → TUI looks frozen (ctrl-cc still works).
+        let mut app = test_app();
+        app.open_jobs_dialog();
+        assert_eq!(app.overlay_focus, OverlayFocus::JobsDialog);
+        assert!(app.jobs_dialog_state.is_visible());
+
+        app.jobs_dialog_state.dialog.dialog_area = ratatui::layout::Rect::new(10, 5, 40, 12);
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+
+        assert!(
+            !app.jobs_dialog_state.is_visible(),
+            "click outside should hide the jobs dialog"
+        );
+        assert_eq!(
+            app.overlay_focus,
+            OverlayFocus::None,
+            "overlay focus must clear so the input can receive keys again"
+        );
+    }
+
+    #[test]
     fn selection_action_bar_column_mapping_matches_rendered_labels() {
         let chat_without_editor = SelectionActionBarState {
             target: SelectionActionTarget::Chat,
@@ -12136,6 +12722,45 @@ mod tests {
             selection_action_for_column(input, 8),
             SelectionAction::Dismiss
         );
+    }
+
+    #[test]
+    fn chat_selection_action_bar_anchors_near_selection_when_stuck_to_bottom() {
+        let chat_area = Rect::new(0, 0, 80, 20);
+        let selection = crate::ui::selection::Selection {
+            active: true,
+            start_line: 100,
+            start_col: 4,
+            end_line: 100,
+            end_col: 10,
+            is_dragging: false,
+            anchor: None,
+        };
+        let state = SelectionActionBarState {
+            target: SelectionActionTarget::Chat,
+            can_open_in_editor: false,
+        };
+
+        // Stick-to-bottom sentinel must resolve instead of pinning to the top.
+        let stuck = chat_selection_action_bar_area(chat_area, usize::MAX, &selection, state);
+        assert_eq!(stuck.y, chat_area.y + 18);
+        assert!(stuck.y > chat_area.y + 10);
+
+        // Explicit resolved scroll (selection near bottom of viewport) matches.
+        let resolved_start = 100usize.saturating_sub(19);
+        let area = chat_selection_action_bar_area(chat_area, resolved_start, &selection, state);
+        assert_eq!(area.y, chat_area.y + 18); // one above last viewport row
+        assert_eq!(area.y, stuck.y);
+    }
+
+    #[test]
+    fn input_selection_action_bar_anchors_above_selection_row() {
+        let frame = Rect::new(0, 0, 80, 24);
+        let input_area = Rect::new(2, 18, 40, 4);
+        let area = input_selection_action_bar_area(frame, input_area, Some(20));
+        assert_eq!(area.y, 19);
+        let fallback = input_selection_action_bar_area(frame, input_area, None);
+        assert_eq!(fallback.y, 17);
     }
 
     #[test]

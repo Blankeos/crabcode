@@ -12,6 +12,11 @@ const TOKEN_AUTH_VALUE: &str = "xai-grok-cli";
 const VERSION_HEADER: &str = "x-grok-client-version";
 
 const PROTOCOL_VERSION_FALLBACK: &str = "0.2.111";
+/// Grok Build sampler default window.
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampling-types/src/doom_loop.rs`
+/// (`DoomLoopRecoveryPolicy::DEFAULT_RECOVERY_WINDOW_TOKENS`).
+const DOOM_LOOP_CHECK_HEADER: &str = "x-grok-doom-loop-check";
+const DOOM_LOOP_CHECK_WINDOW_TOKENS: &str = "1024";
 const VERSION_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const VERSION_RETRY_TTL: Duration = Duration::from_secs(5 * 60);
 const VERSION_URLS: &[&str] = &[
@@ -33,7 +38,7 @@ pub(crate) struct XaiBuildRetryPolicy;
 pub(crate) struct RequestOverrides {
     pub(crate) api_key: String,
     pub(crate) base_url: &'static str,
-    pub(crate) model: &'static str,
+    pub(crate) model: String,
     pub(crate) headers: std::collections::HashMap<String, String>,
 }
 
@@ -66,33 +71,55 @@ pub(crate) fn retry_policy_for(
     })
 }
 
-pub(crate) async fn request_overrides(oauth_access: String) -> RequestOverrides {
+pub(crate) async fn request_overrides(
+    oauth_access: String,
+    selected_model: Option<&str>,
+) -> RequestOverrides {
     let protocol_version = protocol_version().await;
-    request_overrides_with_version(oauth_access, protocol_version)
+    request_overrides_with_version(oauth_access, protocol_version, selected_model)
 }
 
 fn request_overrides_with_version(
     oauth_access: String,
     protocol_version: String,
+    selected_model: Option<&str>,
 ) -> RequestOverrides {
+    // Honor the user's selected model; only fall back to the Build default when
+    // nothing was picked. Forcing `MODEL` here silently downgraded selections
+    // like `grok-4.6` to `grok-4.5`, whose vision backend currently misreads
+    // attached images (hallucinated descriptions).
+    let model = selected_model
+        .map(str::to_string)
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| MODEL.to_string());
+
     let mut headers = std::collections::HashMap::new();
     headers.insert(
         "User-Agent".to_string(),
         format!("crabcode/{}", env!("CARGO_PKG_VERSION")),
     );
     headers.insert(TOKEN_AUTH_HEADER.to_string(), TOKEN_AUTH_VALUE.to_string());
-    headers.insert("x-grok-model-override".to_string(), MODEL.to_string());
+    headers.insert("x-grok-model-override".to_string(), model.clone());
     headers.insert(
         "x-grok-client-identifier".to_string(),
         "crabcode".to_string(),
     );
     headers.insert(VERSION_HEADER.to_string(), protocol_version);
     headers.insert("x-grok-client-mode".to_string(), "default".to_string());
+    // Same opt-in as Grok Build's sampler: send `x-grok-doom-loop-check` so
+    // cli-chat-proxy emits `response.doom_loop_check` with
+    // `tail_repetition:{n}@thinking`.
+    // `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/doom_loop.rs`
+    // `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampling-types/src/doom_loop.rs`
+    headers.insert(
+        DOOM_LOOP_CHECK_HEADER.to_string(),
+        DOOM_LOOP_CHECK_WINDOW_TOKENS.to_string(),
+    );
 
     RequestOverrides {
         api_key: oauth_access,
         base_url: BASE_URL,
-        model: MODEL,
+        model,
         headers,
     }
 }
@@ -216,6 +243,49 @@ pub(crate) fn inject_session_affinity_headers_simple(
 
 pub(crate) fn new_req_id() -> String {
     format!("crabcode-{}", cuid2::create_id())
+}
+
+/// grok-4.5 / grok-4.6 catalog: `compaction_at_tokens: true` with 500k × 80%.
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-models/default_models.json`
+const COMPACTION_HINT_CONTEXT_WINDOW: u64 = 500_000;
+const COMPACTION_HINT_THRESHOLD_PERCENT: u8 = 80;
+
+pub(crate) const COMPACTION_AT_HEADER: &str = "x-compaction-at";
+pub(crate) const COMPACTIONS_REMAINING_HEADER: &str = "x-compactions-remaining";
+
+/// grok-4.5 / grok-4.6 default_models.json enable these request hints.
+pub(crate) fn model_sends_compaction_hints(model: &str) -> bool {
+    let id = model.rsplit('/').next().unwrap_or(model).trim();
+    id == "grok-4.5"
+        || id == "grok-4.6"
+        || id.starts_with("grok-4.5-")
+        || id.starts_with("grok-4.6-")
+}
+
+/// Client-side compact hints for cli-chat-proxy (`x-compaction-at`,
+/// `x-compactions-remaining`).
+///
+/// Matches grok-4.5/4.6 catalog: remaining is a fixed `1`; `x-compaction-at`
+/// is `context_window * 80 / 100` until the session has compacted, then omitted.
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-models/default_models.json`
+pub(crate) fn inject_compaction_hint_headers(
+    headers: &mut std::collections::HashMap<String, String>,
+    model: &str,
+    has_compaction_summary: bool,
+) {
+    headers.remove(COMPACTION_AT_HEADER);
+    headers.remove(COMPACTIONS_REMAINING_HEADER);
+    if !model_sends_compaction_hints(model) {
+        return;
+    }
+
+    // Catalog `compactions_remaining: 1` is Fixed(1) — does not flip after compact.
+    headers.insert(COMPACTIONS_REMAINING_HEADER.to_string(), "1".to_string());
+    if !has_compaction_summary {
+        let at =
+            COMPACTION_HINT_CONTEXT_WINDOW * u64::from(COMPACTION_HINT_THRESHOLD_PERCENT) / 100;
+        headers.insert(COMPACTION_AT_HEADER.to_string(), at.to_string());
+    }
 }
 
 /// Process-stable agent id (Grok Build `x-grok-agent-id` counterpart).
@@ -379,7 +449,7 @@ mod tests {
     #[test]
     fn request_overrides_match_proxy_contract() {
         let overrides =
-            request_overrides_with_version("oauth-token".to_string(), "9.8.7".to_string());
+            request_overrides_with_version("oauth-token".to_string(), "9.8.7".to_string(), None);
         assert_eq!(overrides.api_key, "oauth-token");
         assert_eq!(overrides.base_url, BASE_URL);
         assert_eq!(overrides.model, MODEL);
@@ -398,6 +468,37 @@ mod tests {
             overrides.headers.get("User-Agent").map(String::as_str),
             Some(concat!("crabcode/", env!("CARGO_PKG_VERSION")))
         );
+        assert_eq!(
+            overrides
+                .headers
+                .get(super::DOOM_LOOP_CHECK_HEADER)
+                .map(String::as_str),
+            Some(super::DOOM_LOOP_CHECK_WINDOW_TOKENS)
+        );
+    }
+
+    #[test]
+    fn request_overrides_honor_selected_model() {
+        let overrides = request_overrides_with_version(
+            "oauth-token".to_string(),
+            "9.8.7".to_string(),
+            Some("grok-4.6"),
+        );
+        assert_eq!(overrides.model, "grok-4.6");
+        assert_eq!(
+            overrides
+                .headers
+                .get("x-grok-model-override")
+                .map(String::as_str),
+            Some("grok-4.6")
+        );
+
+        let empty = request_overrides_with_version(
+            "oauth-token".to_string(),
+            "9.8.7".to_string(),
+            Some(""),
+        );
+        assert_eq!(empty.model, MODEL);
     }
 
     #[test]
@@ -440,6 +541,44 @@ mod tests {
         assert!(headers
             .get("x-grok-req-id")
             .is_some_and(|id| id.starts_with("crabcode-")));
+    }
+
+    #[test]
+    fn grok_46_sends_compaction_at_until_compacted() {
+        let mut headers = HashMap::new();
+        super::inject_compaction_hint_headers(&mut headers, "xai/grok-4.6", false);
+        assert_eq!(
+            headers
+                .get(super::COMPACTIONS_REMAINING_HEADER)
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            headers.get(super::COMPACTION_AT_HEADER).map(String::as_str),
+            Some("400000")
+        );
+
+        super::inject_compaction_hint_headers(&mut headers, "grok-4.6", true);
+        assert_eq!(
+            headers
+                .get(super::COMPACTIONS_REMAINING_HEADER)
+                .map(String::as_str),
+            Some("1"),
+            "grok-4.6 catalog uses Fixed(1); remaining does not flip"
+        );
+        assert!(
+            headers.get(super::COMPACTION_AT_HEADER).is_none(),
+            "x-compaction-at is omitted after the session has compacted"
+        );
+    }
+
+    #[test]
+    fn composer_does_not_send_compaction_hints() {
+        let mut headers = HashMap::new();
+        headers.insert(super::COMPACTION_AT_HEADER.to_string(), "stale".to_string());
+        super::inject_compaction_hint_headers(&mut headers, "grok-composer-2.5-fast", false);
+        assert!(headers.get(super::COMPACTION_AT_HEADER).is_none());
+        assert!(headers.get(super::COMPACTIONS_REMAINING_HEADER).is_none());
     }
 
     #[test]

@@ -283,6 +283,226 @@ impl ToolCallLogInfo {
     }
 }
 
+/// Map a provider-executed tool payload into UI ToolCalls / ToolResult events.
+///
+/// Hosted search never runs client-side; these events are display-only.
+
+fn is_provider_executed_tool_part(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    if obj
+        .get("provider_executed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    matches!(
+        obj.get("name").and_then(|v| v.as_str()),
+        Some("x_search") | Some("web_search") | Some("file_search")
+    )
+}
+
+/// Build a display preview for provider-executed hosted search.
+/// Prefer explicit `output`; otherwise summarize `arguments.sources` / `action`
+/// (xAI web_search often only returns sources on the call args).
+pub(crate) fn hosted_search_output_preview(
+    name: &str,
+    status: &str,
+    value: &serde_json::Value,
+) -> String {
+    if let Some(output) = value.get("output") {
+        let preview = match output {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        if !preview.trim().is_empty() {
+            return preview;
+        }
+    }
+
+    // Prefer arguments, then action (OpenAI Responses nests query/sources there).
+    let args = value
+        .get("arguments")
+        .or_else(|| value.get("action"))
+        .unwrap_or(&serde_json::Value::Null);
+
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+
+    let provider_label = match name {
+        "x_search" => "native (x)",
+        _ => "native",
+    };
+
+    let sources = args
+        .get("sources")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if query.is_empty() && sources.is_empty() {
+        return format!("Provider-executed {name} {status}.");
+    }
+
+    let results: Vec<crate::tools::websearch::SearchItem> = sources
+        .iter()
+        .filter_map(|source| {
+            let url = source
+                .get("url")
+                .and_then(|u| u.as_str())
+                .or_else(|| source.as_str())
+                .map(str::trim)
+                .filter(|u| !u.is_empty())?
+                .to_string();
+            let title = source
+                .get("title")
+                .and_then(|t| t.as_str())
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .unwrap_or(url.as_str())
+                .to_string();
+            let snippet = source
+                .get("snippet")
+                .or_else(|| source.get("description"))
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let date = source
+                .get("date")
+                .or_else(|| source.get("published_date"))
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            Some(crate::tools::websearch::SearchItem {
+                title,
+                url,
+                snippet,
+                date,
+            })
+        })
+        .take(8)
+        .collect();
+
+    // x_search usually has no URL sources — don't claim "No search results found".
+    if results.is_empty() && name == "x_search" {
+        return format!("Search provider: {provider_label}\nQuery: {query}\n");
+    }
+
+    crate::tools::websearch::format_results(provider_label, query, results, None)
+}
+
+/// Hosted-search args that look populated but carry no usable query/sources.
+pub(crate) fn hosted_search_args_are_hollow(args: &serde_json::Value) -> bool {
+    match args {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            t.is_empty() || t == "{}"
+        }
+        serde_json::Value::Object(map) if map.is_empty() => true,
+        serde_json::Value::Object(map) => {
+            // Non-search tool args (read/list/grep/glob/…) must not look hollow —
+            // otherwise assistant_tool_part_info refuses to merge call args onto
+            // tool_result parts and exploration grouping falls apart.
+            const SEARCH_KEYS: &[&str] = &["query", "sources", "type", "limit"];
+            if map.keys().any(|k| !SEARCH_KEYS.contains(&k.as_str())) {
+                return false;
+            }
+            let query_empty = map
+                .get("query")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            let sources_empty = match map.get("sources") {
+                None => true,
+                Some(serde_json::Value::Array(a)) => a.is_empty(),
+                Some(serde_json::Value::Null) => true,
+                Some(_) => false,
+            };
+            // Keep non-search keys (e.g. limit) from blocking hollow detection when
+            // the only useful fields (query/sources) are blank.
+            query_empty && sources_empty
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn provider_tool_call_ui_events(
+    payload: &str,
+) -> (
+    Vec<crate::llm::ToolCall>,
+    Option<crate::llm::ToolCallResult>,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return (Vec::new(), None);
+    };
+
+    let id = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hosted_search")
+        .to_string();
+    let name = value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("web_search")
+        .to_string();
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("running");
+
+    let arguments = match value.get("arguments") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => "{}".to_string(),
+    };
+
+    // Emit ToolCalls only while running so completed events don't duplicate cards.
+    // Completed/failed emit ToolResult (and a ToolCalls create if the running event
+    // was never seen — handled below by always including calls for first paint).
+    let calls = if status == "running" || status == "completed" || status == "failed" {
+        // Always include a ToolCalls create; add_tool_calls_to_session may duplicate
+        // if we already inserted — prefer upsert in app for hosted ids.
+        vec![crate::llm::ToolCall {
+            id: id.clone(),
+            call_type: "function".to_string(),
+            function: crate::llm::FunctionCall {
+                name: name.clone(),
+                arguments: arguments.clone(),
+            },
+        }]
+    } else {
+        Vec::new()
+    };
+
+    let result = if status == "completed" || status == "failed" {
+        let output_preview = hosted_search_output_preview(&name, status, &value);
+        // Use "ok" so the TUI shows output_preview (it gates on status == "ok").
+        let payload = serde_json::json!({
+            "status": if status == "failed" { "error" } else { "ok" },
+            "provider_executed": true,
+            "output_preview": output_preview,
+            "title": name,
+        });
+        Some(crate::llm::ToolCallResult {
+            tool_call_id: id,
+            role: "tool".to_string(),
+            name,
+            content: payload.to_string(),
+        })
+    } else {
+        None
+    };
+
+    (calls, result)
+}
+
 fn tool_call_log_info(tool_call: &str) -> ToolCallLogInfo {
     let mut info = ToolCallLogInfo::default();
     let Ok(value) = serde_json::from_str::<serde_json::Value>(tool_call) else {
@@ -367,6 +587,7 @@ pub async fn stream_llm_with_cancellation(
     tool_registry: Option<crate::tools::ToolRegistry>,
     messages: Vec<crate::session::types::Message>,
     sender: crate::llm::ChunkSender,
+    process_registry: std::sync::Arc<crate::tools::ProcessRegistry>,
 ) -> Result<(), DynError> {
     struct SessionConfigGuard(crate::agent::config::LlmSessionRegistration);
     impl Drop for SessionConfigGuard {
@@ -383,9 +604,12 @@ pub async fn stream_llm_with_cancellation(
         agent_max_steps,
         messages.len()
     );
+    let ui_model = model.clone();
     let request_config =
         prepare_request_config(&provider_name, model, reasoning_effort, &sender).await?;
     let mut request_config = request_config;
+    let model_mismatch_warning =
+        ui_vs_request_model_mismatch_warning(&ui_model, &request_config.model_name);
     // Sticky prompt-cache routing: same key for every tool step in this session.
     request_config.openai_options.prompt_cache_key = Some(session_id.clone());
 
@@ -405,6 +629,7 @@ pub async fn stream_llm_with_cancellation(
                 &websearch_config,
                 &mcp_config,
                 &workspace,
+                process_registry.clone(),
             )
             .await;
             crate::tools::refresh_mcp_tools(&registry, &mcp_config, &workspace).await;
@@ -453,7 +678,14 @@ pub async fn stream_llm_with_cancellation(
         show_vlm_agent_hint,
     );
     // Stamp Build affinity *after* message conversion so turn_idx matches wire content.
-    stamp_build_main_turn_affinity(&mut request_config, &session_id, &aisdk_messages);
+    stamp_build_main_turn_affinity(
+        &mut request_config,
+        &session_id,
+        &aisdk_messages,
+        messages
+            .iter()
+            .any(crate::session::compaction::is_compaction_summary),
+    );
 
     let mut aisdk_tools = convert_to_aisdk_tools(
         &tool_registry,
@@ -464,10 +696,23 @@ pub async fn stream_llm_with_cancellation(
         None,
         request_config.supports_image_input,
         cancel_token.clone(),
+        Some(process_registry.clone()),
     )
     .await;
     if text_only_image_turn {
         aisdk_tools.retain(|tool| tool.name != "view_image");
+    }
+    if websearch_config.enabled.unwrap_or(true) {
+        let selection = crate::aisdk::providers::hosted_search::HostedSearchSelection {
+            web: websearch_config.native.web_enabled(),
+            x: websearch_config.native.x_enabled(),
+        };
+        if selection.web || selection.x {
+            aisdk_tools.extend(crate::aisdk::providers::hosted_search::tools_for(
+                &request_config.provider_name,
+                selection,
+            ));
+        }
     }
 
     let message_count = aisdk_messages.len();
@@ -500,6 +745,7 @@ pub async fn stream_llm_with_cancellation(
         &mut token_count,
         &start_time,
         primary_log_context,
+        model_mismatch_warning,
     )
     .await
     .map_err(|err| err.to_string())
@@ -555,7 +801,14 @@ pub async fn stream_llm_with_cancellation(
     // Parent-cached aux: same conversation prefix + sticky session key, fresh req id.
     // Tools are empty (text-only summary) so tool-schema cache may miss; system+history still hit.
     let mut summary_config = request_config.clone();
-    stamp_build_parent_cached_aux(&mut summary_config, &session_id, &follow_up_messages);
+    stamp_build_parent_cached_aux(
+        &mut summary_config,
+        &session_id,
+        &follow_up_messages,
+        messages
+            .iter()
+            .any(crate::session::compaction::is_compaction_summary),
+    );
     let summary_log_context = StreamLogContext::new(
         "max_steps_summary",
         &summary_config,
@@ -581,6 +834,7 @@ pub async fn stream_llm_with_cancellation(
         &mut token_count,
         &start_time,
         summary_log_context,
+        None,
     )
     .await
     .map_err(|err| err.to_string())
@@ -706,7 +960,9 @@ pub async fn summarize_for_compaction(
                 return Err(anyhow::anyhow!("Compaction unsupported: {}", msg).into());
             }
             ChunkType::Reasoning(_)
+            | ChunkType::ReasoningItem(_)
             | ChunkType::ToolCall(_)
+            | ChunkType::ProviderToolCall(_)
             | ChunkType::End { .. }
             | ChunkType::AssistantMessagePhase { .. }
             | ChunkType::ResponseCompleted { .. }
@@ -763,7 +1019,9 @@ pub async fn generate_session_title(
                 return Err(anyhow::anyhow!("Title generation unsupported: {}", msg).into());
             }
             ChunkType::Reasoning(_)
+            | ChunkType::ReasoningItem(_)
             | ChunkType::ToolCall(_)
+            | ChunkType::ProviderToolCall(_)
             | ChunkType::End { .. }
             | ChunkType::AssistantMessagePhase { .. }
             | ChunkType::ResponseCompleted { .. }
@@ -924,6 +1182,8 @@ fn apply_provider_request_defaults(
         // Ask xAI not to persist Responses, including subagent requests.
         request_config.openai_options.force_store_false = true;
     }
+
+    // Hosted search tools are appended to the tools list later (AI-SDK style).
 }
 
 fn maybe_apply_unauthenticated_free_provider_key(
@@ -1232,7 +1492,9 @@ async fn maybe_apply_xai_oauth_overrides(
         }
     }
 
-    let overrides = super::xai_build::request_overrides(oauth_access).await;
+    let overrides =
+        super::xai_build::request_overrides(oauth_access, Some(request_config.model_name.as_str()))
+            .await;
     request_config.api_key = Some(overrides.api_key);
     request_config.base_url = overrides.base_url.to_string();
     request_config.model_name = overrides.model.to_string();
@@ -1249,11 +1511,30 @@ fn send_warning(sender: &crate::llm::ChunkSender, warning: impl Into<String>) {
     let _ = sender.send(crate::llm::ChunkMessage::Warning(warning.into()));
 }
 
+/// Compare the UI picker model to the post-override request `Model:` logged in
+/// `prepare_request_config`. This is the outbound request after client-side
+/// rewrites (e.g. xAI OAuth `x-grok-model-override`), not `response.model`.
+fn ui_vs_request_model_mismatch_warning(ui_model: &str, request_model: &str) -> Option<String> {
+    let ui_id = ui_model.rsplit('/').next().unwrap_or(ui_model).trim();
+    let request_id = request_model
+        .rsplit('/')
+        .next()
+        .unwrap_or(request_model)
+        .trim();
+    if ui_id.is_empty() || request_id.is_empty() || ui_id.eq_ignore_ascii_case(request_id) {
+        return None;
+    }
+    Some(format!(
+        "Warning: {ui_id} in UI, but {request_id} on the wire. It silently changed"
+    ))
+}
+
 /// Stamp sticky Build affinity for a main agent turn (session == conv).
 fn stamp_build_main_turn_affinity(
     request_config: &mut ProviderRequestConfig,
     session_id: &str,
     messages: &[AisdkMessage],
+    has_compaction_summary: bool,
 ) {
     if !super::xai_build::is_build_transport(&request_config.openai_options.additional_headers) {
         return;
@@ -1264,13 +1545,19 @@ fn stamp_build_main_turn_affinity(
         &mut request_config.openai_options.additional_headers,
         &affinity,
     );
+    super::xai_build::inject_compaction_hint_headers(
+        &mut request_config.openai_options.additional_headers,
+        &request_config.model_name,
+        has_compaction_summary,
+    );
     crate::emit_log!(
-        "[prompt-cache] xai-build affinity kind=main session_id={} conv_id={} req_id={} turn_idx={} agent_id={}",
+        "[prompt-cache] xai-build affinity kind=main session_id={} conv_id={} req_id={} turn_idx={} agent_id={} compacted={}",
         affinity.session_id,
         affinity.conv_id,
         affinity.req_id,
         turn_idx,
-        affinity.agent_id.as_deref().unwrap_or("-")
+        affinity.agent_id.as_deref().unwrap_or("-"),
+        has_compaction_summary
     );
 }
 
@@ -1282,6 +1569,7 @@ fn stamp_build_parent_cached_aux(
     request_config: &mut ProviderRequestConfig,
     parent_session_id: &str,
     messages: &[AisdkMessage],
+    has_compaction_summary: bool,
 ) {
     request_config.openai_options.prompt_cache_key = Some(parent_session_id.to_string());
     if !super::xai_build::is_build_transport(&request_config.openai_options.additional_headers) {
@@ -1294,12 +1582,18 @@ fn stamp_build_parent_cached_aux(
         &mut request_config.openai_options.additional_headers,
         &affinity,
     );
+    super::xai_build::inject_compaction_hint_headers(
+        &mut request_config.openai_options.additional_headers,
+        &request_config.model_name,
+        has_compaction_summary,
+    );
     crate::emit_log!(
-        "[prompt-cache] xai-build affinity kind=parent_aux session_id={} conv_id={} req_id={} turn_idx={}",
+        "[prompt-cache] xai-build affinity kind=parent_aux session_id={} conv_id={} req_id={} turn_idx={} compacted={}",
         affinity.session_id,
         affinity.conv_id,
         affinity.req_id,
-        turn_idx
+        turn_idx,
+        has_compaction_summary
     );
 }
 
@@ -1541,6 +1835,7 @@ async fn relay_stream_to_sender(
     token_count: &mut usize,
     start_time: &Instant,
     context: StreamLogContext<'_>,
+    mut mismatch_warning: Option<String>,
 ) -> Result<StreamRelayResult, DynError> {
     let mut stats = RelayStats::default();
     crate::emit_log!(
@@ -1569,6 +1864,10 @@ async fn relay_stream_to_sender(
             None => break,
         };
 
+        if let Some(warning) = mismatch_warning.take() {
+            send_warning(sender, warning);
+        }
+
         match chunk {
             ChunkType::Text(text) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
@@ -1589,6 +1888,10 @@ async fn relay_stream_to_sender(
                 crate::emit_log!("[RELAY] Reasoning chunk ({} chars)", reasoning.len());
                 let _ = sender.send(crate::llm::ChunkMessage::Reasoning(reasoning));
             }
+            ChunkType::ReasoningItem(_) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("ReasoningItem", elapsed_ms);
+            }
             ChunkType::ToolCall(tool_call) => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("ToolCall", elapsed_ms);
@@ -1604,6 +1907,23 @@ async fn relay_stream_to_sender(
                     info.arguments_done_chars,
                     tool_call.len(),
                 );
+            }
+            ChunkType::ProviderToolCall(payload) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("ProviderToolCall", elapsed_ms);
+                stats.tool_call_chunks += 1;
+                stats.tool_call_bytes += payload.len();
+                crate::emit_log!(
+                    "[RELAY] ProviderToolCall chunk received bytes={}",
+                    payload.len()
+                );
+                let (calls, result) = provider_tool_call_ui_events(&payload);
+                if !calls.is_empty() {
+                    let _ = sender.send(crate::llm::ChunkMessage::ToolCalls(calls));
+                }
+                if let Some(result) = result {
+                    let _ = sender.send(crate::llm::ChunkMessage::ToolResult(result));
+                }
             }
             ChunkType::End { reason } => {
                 let elapsed_ms = start_time.elapsed().as_millis();
@@ -1627,7 +1947,7 @@ async fn relay_stream_to_sender(
                     stats,
                 });
             }
-            ChunkType::ResponseCompleted { end_turn } => {
+            ChunkType::ResponseCompleted { end_turn, .. } => {
                 let elapsed_ms = start_time.elapsed().as_millis();
                 stats.record_chunk("ResponseCompleted", elapsed_ms);
                 stats.response_completed_chunks += 1;
@@ -1907,13 +2227,18 @@ fn append_assistant_parts_for_model(
                 aisdk_messages.push(AisdkMessage::assistant(text));
             }
             "tool_call" => {
-                if pending_tools.is_complete() {
-                    pending_tools.flush_complete_pairs(aisdk_messages);
-                }
-
                 let Some(obj) = part.data.as_object() else {
                     continue;
                 };
+                // Hosted search cards are display-only; do not replay as client
+                // function_call history (provider already executed them).
+                // Local websearch tool id is `websearch`; hosted names differ.
+                if is_provider_executed_tool_part(obj) {
+                    continue;
+                }
+                if pending_tools.is_complete() {
+                    pending_tools.flush_complete_pairs(aisdk_messages);
+                }
                 if let Some(message) = tool_call_message_from_model_obj(obj) {
                     if let Some(id) = part.tool_id() {
                         pending_tools.add_call(id.to_string(), message);
@@ -1924,6 +2249,9 @@ fn append_assistant_parts_for_model(
                 let Some(obj) = part.data.as_object() else {
                     continue;
                 };
+                if is_provider_executed_tool_part(obj) {
+                    continue;
+                }
 
                 let Some(id) = part.tool_id().map(str::to_string) else {
                     continue;
@@ -2232,7 +2560,9 @@ enum ProviderKind {
 impl ProviderKind {
     fn from_provider(_provider_name: &str, npm_package: &str) -> Self {
         match npm_package {
-            "@ai-sdk/openai-compatible" | "@ai-sdk/gateway" => Self::OpenAICompatible,
+            "@ai-sdk/openai-compatible" | "@ai-sdk/gateway" | "@openrouter/ai-sdk-provider" => {
+                Self::OpenAICompatible
+            }
             "@ai-sdk/anthropic" => Self::Anthropic,
             _ => Self::OpenAI,
         }
@@ -2269,8 +2599,8 @@ mod tests {
         is_openai_oauth_model_allowed, maybe_apply_unauthenticated_free_provider_key,
         model_supports_image_input, openai_oauth_default_originator,
         openai_oauth_model_uses_responses_lite, openai_request_instructions, resolve_api_key,
-        resolve_model_route, vlm_agent_has_model, AisdkMessage, OpenAIRequestOptions, ProviderKind,
-        ProviderRequestConfig,
+        resolve_model_route, ui_vs_request_model_mismatch_warning, vlm_agent_has_model,
+        AisdkMessage, OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
     };
 
     use crate::persistence::AuthConfig;
@@ -2615,6 +2945,37 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_uses_openai_compatible_chat_completions() {
+        let provider: crate::model::discovery::Provider =
+            serde_json::from_value(serde_json::json!({
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "api": "https://openrouter.ai/api/v1",
+                "env": ["OPENROUTER_API_KEY"],
+                "npm": "@openrouter/ai-sdk-provider",
+                "models": {
+                    "z-ai/glm-5.2:free": {
+                        "id": "z-ai/glm-5.2:free",
+                        "name": "GLM 5.2 Free"
+                    }
+                }
+            }))
+            .unwrap();
+
+        let route = resolve_model_route(&provider, "z-ai/glm-5.2:free".to_string());
+        assert_eq!(route.npm_package, "@openrouter/ai-sdk-provider");
+        assert_eq!(route.api, "https://openrouter.ai/api/v1");
+        assert_eq!(
+            ProviderKind::from_provider("openrouter", &route.npm_package),
+            ProviderKind::OpenAICompatible
+        );
+        assert_eq!(
+            ProviderKind::OpenAICompatible.normalize_base_url(&route.api),
+            "https://openrouter.ai/api/v1"
+        );
+    }
+
+    #[test]
     fn grok_composer_is_text_only_for_raw_image_transport() {
         let stale_image_model: crate::model::discovery::Model =
             serde_json::from_value(serde_json::json!({
@@ -2808,6 +3169,7 @@ mod tests {
             .iter()
             .map(|message| match message {
                 AisdkMessage::Assistant(_) => "assistant".to_string(),
+                AisdkMessage::Reasoning(_) => "reasoning".to_string(),
                 AisdkMessage::ToolCall(call) => format!("call:{}", call.call_id),
                 AisdkMessage::ToolOutput(output) => format!("output:{}", output.call_id),
                 other => panic!("unexpected message: {other:?}"),
@@ -3182,6 +3544,25 @@ mod tests {
     }
 
     #[test]
+    fn ui_vs_request_model_mismatch_warns_when_oauth_rewrites_picker() {
+        assert_eq!(
+            ui_vs_request_model_mismatch_warning("xai/grok-4.6", "grok-4.5"),
+            Some(
+                "Warning: grok-4.6 in UI, but grok-4.5 on the wire. It silently changed"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            ui_vs_request_model_mismatch_warning("grok-4.6", "grok-4.6"),
+            None
+        );
+        assert_eq!(
+            ui_vs_request_model_mismatch_warning("xai/grok-4.6", "xai/grok-4.6"),
+            None
+        );
+    }
+
+    #[test]
     fn compaction_marker_is_not_sent_to_model() {
         let stats = crate::session::types::CompactionStats {
             before_tokens: 12_000,
@@ -3228,7 +3609,9 @@ mod tests {
                 AisdkMessage::User(m) => m.content.clone(),
                 AisdkMessage::Assistant(m) => m.content.clone(),
                 AisdkMessage::System(m) => m.content.clone(),
-                AisdkMessage::ToolCall(_) | AisdkMessage::ToolOutput(_) => String::new(),
+                AisdkMessage::Reasoning(_)
+                | AisdkMessage::ToolCall(_)
+                | AisdkMessage::ToolOutput(_) => String::new(),
             })
             .collect::<Vec<_>>();
 
@@ -3236,6 +3619,127 @@ mod tests {
         assert!(rendered.iter().any(|c| c == "tail"));
         assert!(!rendered.iter().any(|c| c == "old user"));
         assert!(!rendered.iter().any(|c| c == "old assistant"));
+    }
+
+    #[test]
+    fn provider_tool_call_ui_events_emits_running_and_completed() {
+        let (calls, result) = super::provider_tool_call_ui_events(
+            r#"{"id":"xs_1","name":"x_search","status":"running","arguments":{"query":"carlo"}}"#,
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "xs_1");
+        assert_eq!(calls[0].function.name, "x_search");
+        assert!(result.is_none());
+
+        let (calls, result) = super::provider_tool_call_ui_events(
+            r#"{"id":"xs_1","name":"x_search","status":"completed","arguments":{"query":"carlo"}}"#,
+        );
+        assert_eq!(calls.len(), 1);
+        let result = result.expect("completed should emit ToolResult");
+        assert_eq!(result.tool_call_id, "xs_1");
+        assert_eq!(result.name, "x_search");
+        let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["provider_executed"], true);
+        // x_search with query only still shows provider + query header.
+        assert_eq!(
+            payload["output_preview"],
+            "Search provider: native (x)\nQuery: carlo\n"
+        );
+    }
+
+    #[test]
+    fn provider_tool_call_ui_events_web_search_preview_lists_sources() {
+        let payload = serde_json::json!({
+            "id": "ws_1",
+            "name": "web_search",
+            "status": "completed",
+            "provider_executed": true,
+            "arguments": {
+                "type": "search",
+                "query": "carlo taleon",
+                "sources": [
+                    {"type": "url", "url": "https://carlo.tl/", "title": "Carlo"},
+                    {"type": "url", "url": "https://github.com/blankeos"}
+                ]
+            }
+        });
+        let (_calls, result) = super::provider_tool_call_ui_events(&payload.to_string());
+        let result = result.expect("completed web_search should emit ToolResult");
+        let body: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(body["status"], "ok");
+        let preview = body["output_preview"].as_str().unwrap();
+        // Same formatter as local websearch (`format_results`).
+        assert_eq!(
+            preview,
+            crate::tools::websearch::format_results(
+                "native",
+                "carlo taleon",
+                vec![
+                    crate::tools::websearch::SearchItem {
+                        title: "Carlo".into(),
+                        url: "https://carlo.tl/".into(),
+                        snippet: None,
+                        date: None,
+                    },
+                    crate::tools::websearch::SearchItem {
+                        title: "https://github.com/blankeos".into(),
+                        url: "https://github.com/blankeos".into(),
+                        snippet: None,
+                        date: None,
+                    },
+                ],
+                None,
+            )
+        );
+    }
+
+    #[test]
+    fn hosted_search_args_are_hollow_detects_empty_query_sources() {
+        assert!(super::hosted_search_args_are_hollow(&serde_json::json!({
+            "type": "search",
+            "query": "",
+            "sources": []
+        })));
+        assert!(!super::hosted_search_args_are_hollow(&serde_json::json!({
+            "type": "search",
+            "query": "crabcode",
+            "sources": []
+        })));
+        // Local exploration tool args must never look hollow.
+        assert!(!super::hosted_search_args_are_hollow(&serde_json::json!({
+            "pattern": "Explored",
+            "path": "src"
+        })));
+        assert!(!super::hosted_search_args_are_hollow(&serde_json::json!({
+            "file_path": "/repo/justfile"
+        })));
+    }
+
+    #[test]
+    fn convert_messages_skips_provider_executed_hosted_search_parts() {
+        let mut assistant = crate::session::types::Message::assistant("");
+        assistant.add_tool_call_part("xs_1", "x_search", serde_json::json!({"query": "carlo"}));
+        if let Some(part) = assistant.parts.last_mut() {
+            if let Some(obj) = part.data.as_object_mut() {
+                obj.insert("provider_executed".into(), serde_json::Value::Bool(true));
+            }
+        }
+        assistant.add_or_update_tool_result_part(serde_json::json!({
+            "id": "xs_1",
+            "name": "x_search",
+            "status": "completed",
+            "provider_executed": true,
+            "output_preview": "done"
+        }));
+
+        let messages = convert_messages(&[assistant]);
+        assert!(
+            messages
+                .iter()
+                .all(|m| !matches!(m, AisdkMessage::ToolCall(_) | AisdkMessage::ToolOutput(_))),
+            "hosted search parts must not replay into API history"
+        );
     }
 }
 fn content_with_vlm_agent_hint(content: &str, image_paths: &[String]) -> String {

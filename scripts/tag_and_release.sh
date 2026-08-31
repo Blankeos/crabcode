@@ -12,6 +12,21 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
+branch="$(git branch --show-current)"
+if [[ "$branch" != "main" ]]; then
+    echo "❗ Releases must be tagged from main (currently on '${branch:-detached HEAD}')."
+    echo "   git checkout main && git pull && just tag"
+    exit 1
+fi
+
+echo "🦋 Fetching origin/main..."
+git fetch --quiet origin main
+
+if ! git merge-base --is-ancestor origin/main HEAD; then
+    echo "❗ local main has diverged from origin/main. Pull/rebase first."
+    exit 1
+fi
+
 # Written by AI :)
 NAME=$(sed -n 's/^name *= *"\([^"]*\)".*/\1/p' Cargo.toml)
 CURRENT=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
@@ -74,9 +89,8 @@ echo "🦋 Creating git tag v${NEW}"
 git tag "v${NEW}"
 
 # Create release binaries (with cargo-dist)
-echo "🦋 Pushing..."
-git push
-git push --tags
+echo "🦋 Pushing release commit and tag atomically..."
+git push --atomic origin main "v${NEW}"
 
 # ============================================
 # PUBLISHING: I put it here as documentation, but this is manual for now!

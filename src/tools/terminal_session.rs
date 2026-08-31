@@ -1,4 +1,5 @@
 use crate::llm::{ChunkMessage, ChunkSender};
+use crate::tools::process_registry::{JobStatus, ProcessRegistry};
 use crate::tools::{
     get_string_param, validate_required, ParameterSchema, ParameterType, Tool, ToolContext,
     ToolError, ToolHandler, ToolResult,
@@ -9,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -27,6 +29,9 @@ pub struct TerminalSessionStart {
     pub workdir: Option<String>,
     pub cols: u16,
     pub rows: u16,
+    /// ProcessRegistry id when this session is tracked as an interactive job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,15 +264,24 @@ fn kill_pty_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
 
 pub struct TerminalSessionTool {
     sender: Option<ChunkSender>,
+    registry: Option<Arc<ProcessRegistry>>,
 }
 
 impl TerminalSessionTool {
     pub fn new() -> Self {
-        Self { sender: None }
+        Self {
+            sender: None,
+            registry: None,
+        }
     }
 
     pub fn with_sender_opt(mut self, sender: Option<ChunkSender>) -> Self {
         self.sender = sender;
+        self
+    }
+
+    pub fn with_registry(mut self, registry: Arc<ProcessRegistry>) -> Self {
+        self.registry = Some(registry);
         self
     }
 
@@ -527,8 +541,11 @@ impl ToolHandler for TerminalSessionTool {
             id: "terminal_session".to_string(),
             description:
                 "Run an interactive shell command in a user-controlled embedded terminal. \
-The user can type input, resize the terminal, and stop the session. Use this for interactive CLIs \
-that need a TTY (prompts, pagers, curses). Prefer non-interactive `bash` when possible."
+The user can type input, resize the terminal, and stop the session (ctrl+]); Esc minimizes \
+(parks the session while keeping it running). Use this for interactive CLIs that need a TTY \
+(prompts, pagers, curses). Prefer non-interactive `bash` when possible. For long-running \
+commands you don't need to watch, use `bash` with mode=background and poll with bash_output / \
+stop with bash_kill."
                     .to_string(),
             parameters: vec![
                 ParameterSchema {
@@ -573,6 +590,29 @@ that need a TTY (prompts, pagers, curses). Prefer non-interactive `bash` when po
         let session_id = cuid2::create_id();
         let tool_call_id = ctx.call_id.clone().unwrap_or_else(|| cuid2::create_id());
 
+        let registry = self
+            .registry
+            .clone()
+            .or_else(|| ctx.process_registry.clone());
+        let workdir_path = workdir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ctx.workdir().to_path_buf());
+        // Prefer a job_id supplied by the caller (e.g. bash interactive already
+        // registered). Otherwise register here so terminal_session jobs appear.
+        let supplied_job_id = get_string_param(&params, "job_id");
+        let job_id = if let Some(id) = supplied_job_id {
+            Some(id)
+        } else if let Some(ref registry) = registry {
+            Some(
+                registry
+                    .register_interactive(command.clone(), description.clone(), &workdir_path)
+                    .await,
+            )
+        } else {
+            None
+        };
+
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
 
         let start = TerminalSessionStart {
@@ -583,26 +623,59 @@ that need a TTY (prompts, pagers, curses). Prefer non-interactive `bash` when po
             workdir: workdir.clone(),
             cols: DEFAULT_TERMINAL_COLS,
             rows: DEFAULT_TERMINAL_ROWS,
+            job_id: job_id.clone(),
         };
 
-        sender
-            .send(ChunkMessage::TerminalSessionRequest(
-                TerminalSessionRequest {
-                    start: start.clone(),
-                    control_tx,
-                },
-            ))
-            .map_err(|_| {
-                ToolError::Execution("Failed to deliver terminal session request to UI".to_string())
-            })?;
+        if let Err(err) = sender.send(ChunkMessage::TerminalSessionRequest(
+            TerminalSessionRequest {
+                start: start.clone(),
+                control_tx,
+            },
+        )) {
+            if let (Some(registry), Some(job_id)) = (registry.as_ref(), job_id.as_ref()) {
+                registry
+                    .mark_interactive_status(job_id, JobStatus::Failed, None)
+                    .await;
+            }
+            return Err(ToolError::Execution(format!(
+                "Failed to deliver terminal session request to UI: {err}"
+            )));
+        }
 
         if ctx.is_aborted() {
+            if let (Some(registry), Some(job_id)) = (registry.as_ref(), job_id.as_ref()) {
+                registry
+                    .mark_interactive_status(job_id, JobStatus::Killed, None)
+                    .await;
+            }
             return Err(ToolError::Execution("Cancelled".to_string()));
         }
 
-        let result = self
+        let result = match self
             .run_session(sender.clone(), start, &mut control_rx, ctx)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                if let (Some(registry), Some(job_id)) = (registry.as_ref(), job_id.as_ref()) {
+                    registry
+                        .mark_interactive_status(job_id, JobStatus::Failed, None)
+                        .await;
+                }
+                return Err(err);
+            }
+        };
+
+        if let (Some(registry), Some(job_id)) = (registry.as_ref(), job_id.as_ref()) {
+            let status = if result.stopped_by_user {
+                JobStatus::Killed
+            } else {
+                JobStatus::Exited
+            };
+            registry
+                .mark_interactive_status(job_id, status, result.exit_code)
+                .await;
+        }
 
         let output = if result.transcript_plain.trim().is_empty() {
             "(no output)".to_string()
@@ -611,25 +684,27 @@ that need a TTY (prompts, pagers, curses). Prefer non-interactive `bash` when po
         };
 
         let exit_code = result.exit_code.unwrap_or(-1);
-        Ok(
-            ToolResult::new(format!("Terminal session: {}", description), output)
-                .with_metadata("exit_code", serde_json::json!(exit_code))
-                .with_metadata("command", serde_json::json!(command))
-                .with_metadata("description", serde_json::json!(description))
-                .with_metadata("workdir", serde_json::json!(workdir))
-                .with_metadata("session_id", serde_json::json!(result.session_id))
-                .with_metadata(
-                    "transcript_bytes",
-                    serde_json::json!(result.transcript_bytes),
-                )
-                .with_metadata(
-                    "transcript_truncated",
-                    serde_json::json!(result.transcript_truncated),
-                )
-                .with_metadata("cols", serde_json::json!(result.cols))
-                .with_metadata("rows", serde_json::json!(result.rows))
-                .with_metadata("stopped_by_user", serde_json::json!(result.stopped_by_user)),
-        )
+        let mut tool_result = ToolResult::new(format!("Terminal session: {}", description), output)
+            .with_metadata("exit_code", serde_json::json!(exit_code))
+            .with_metadata("command", serde_json::json!(command))
+            .with_metadata("description", serde_json::json!(description))
+            .with_metadata("workdir", serde_json::json!(workdir))
+            .with_metadata("session_id", serde_json::json!(result.session_id))
+            .with_metadata(
+                "transcript_bytes",
+                serde_json::json!(result.transcript_bytes),
+            )
+            .with_metadata(
+                "transcript_truncated",
+                serde_json::json!(result.transcript_truncated),
+            )
+            .with_metadata("cols", serde_json::json!(result.cols))
+            .with_metadata("rows", serde_json::json!(result.rows))
+            .with_metadata("stopped_by_user", serde_json::json!(result.stopped_by_user));
+        if let Some(job_id) = job_id {
+            tool_result = tool_result.with_metadata("task_id", serde_json::json!(job_id));
+        }
+        Ok(tool_result)
     }
 }
 
@@ -691,6 +766,7 @@ mod tests {
             workdir: None,
             cols: 80,
             rows: 24,
+            job_id: None,
         };
         let ctx =
             ToolContext::from_cancel_token("session", "message", "Build", CancellationToken::new());
