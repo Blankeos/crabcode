@@ -260,9 +260,13 @@ pub async fn stream_with_tools<P: Provider>(
                             end_turn,
                             reasoning_items,
                             doom_loop_triggers,
+                            usage,
                         }) => {
                             saw_terminal_event = true;
                             response_end_turn = end_turn;
+                            if let Some(usage) = usage {
+                                let _ = tx_loop.send(ChunkType::Usage(usage));
+                            }
                             for item in reasoning_items {
                                 merge_reasoning_replay_item(&mut reasoning_replay_items, item);
                             }
@@ -341,6 +345,9 @@ pub async fn stream_with_tools<P: Provider>(
                                 server_doom_loop = true;
                             }
                             let _ = tx_loop.send(ChunkType::Metadata(msg));
+                        }
+                        Ok(ChunkType::Usage(usage)) => {
+                            let _ = tx_loop.send(ChunkType::Usage(usage));
                         }
                         Ok(ChunkType::Warning(msg)) => {
                             let _ = tx_loop.send(ChunkType::Warning(msg));

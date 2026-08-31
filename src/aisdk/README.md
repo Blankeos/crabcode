@@ -33,6 +33,7 @@ In-tree AI SDK used by the host binary (`mod aisdk` in `src/main.rs`).
 Done for packaging/host hooks:
 
 - Neutral logging (`log` module + host `set_logger`)
+- Provider-neutral token usage events (`ChunkType::Usage`)
 - No `crate::aisdk::...` inside the tree (`mod.rs` / re-exports use `super::`)
 - Absolute `crate::{chunk,error,...}` paths are crate-root-shaped (host re-exports them today)
 - Product-leaky debug path renamed/feature-gated

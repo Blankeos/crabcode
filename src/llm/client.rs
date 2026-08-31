@@ -970,6 +970,7 @@ pub async fn summarize_for_compaction(
             | ChunkType::RetryableFailure(_)
             | ChunkType::Warning(_)
             | ChunkType::Metadata(_)
+            | ChunkType::Usage(_)
             | ChunkType::Start
             | ChunkType::Incomplete(_) => {}
             ChunkType::StreamRollback { text, .. } => {
@@ -1029,6 +1030,7 @@ pub async fn generate_session_title(
             | ChunkType::RetryableFailure(_)
             | ChunkType::Warning(_)
             | ChunkType::Metadata(_)
+            | ChunkType::Usage(_)
             | ChunkType::Start
             | ChunkType::Incomplete(_) => {}
             ChunkType::StreamRollback { text, .. } => {
@@ -1977,6 +1979,11 @@ async fn relay_stream_to_sender(
                 stats.record_chunk("Metadata", elapsed_ms);
                 stats.record_metadata(&message);
                 crate::emit_log!("[RELAY] Metadata {}", message);
+            }
+            ChunkType::Usage(usage) => {
+                let elapsed_ms = start_time.elapsed().as_millis();
+                stats.record_chunk("Usage", elapsed_ms);
+                let _ = sender.send(crate::llm::ChunkMessage::Usage(usage));
             }
             ChunkType::Retry(status) => {
                 let elapsed_ms = start_time.elapsed().as_millis();

@@ -551,6 +551,7 @@ async fn run_print_mode(
             }
             crate::llm::ChunkMessage::ToolCalls(_)
             | crate::llm::ChunkMessage::ToolResult(_)
+            | crate::llm::ChunkMessage::Usage(_)
             | crate::llm::ChunkMessage::Metrics { .. }
             | crate::llm::ChunkMessage::Cancelled
             | crate::llm::ChunkMessage::Reasoning(_)

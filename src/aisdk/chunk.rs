@@ -20,6 +20,7 @@ pub enum ChunkType {
         end_turn: Option<bool>,
         reasoning_items: Vec<ReasoningReplayItem>,
         doom_loop_triggers: Vec<String>,
+        usage: Option<TokenUsage>,
     },
     Retry(crate::retry::RetryStatus),
     StreamRollback {
@@ -28,6 +29,7 @@ pub enum ChunkType {
     },
     Warning(String),
     Metadata(String),
+    Usage(TokenUsage),
     End {
         reason: Option<FinishReason>,
     },
@@ -35,6 +37,21 @@ pub enum ChunkType {
     Failed(String),
     Incomplete(String),
     NotSupported(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TokenUsage {
+    /// Non-cached input tokens.
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl TokenUsage {
+    pub fn is_empty(self) -> bool {
+        self.input == 0 && self.output == 0 && self.cache_read == 0 && self.cache_write == 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -58,6 +75,7 @@ impl ChunkType {
             end_turn,
             reasoning_items: Vec::new(),
             doom_loop_triggers: Vec::new(),
+            usage: None,
         }
     }
 }

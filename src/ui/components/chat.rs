@@ -45,6 +45,7 @@ fn assistant_tool_part_info(
             if result_ids.contains(id) {
                 return None;
             }
+
             let mut info = parsed_tool_message_from_object(part.data.as_object()?, false);
             if part.data.get("status").is_none() {
                 info.status = "running".to_string();
@@ -1688,6 +1689,85 @@ fn plan_update_display(
 }
 
 impl Chat {
+    pub fn record_usage(
+        &mut self,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+        cost: f64,
+    ) {
+        if self.streaming_assistant_idx().is_none() {
+            self.messages.push(Message::incomplete(""));
+        }
+        let Some(message) = self
+            .messages
+            .iter_mut()
+            .rfind(|message| message.role == MessageRole::Assistant && !message.is_complete)
+        else {
+            return;
+        };
+
+        if let Some(part) = message
+            .parts
+            .iter_mut()
+            .find(|part| part.part_type == "usage")
+        {
+            let current_input = part
+                .data
+                .get("input")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0);
+            let current_output = part
+                .data
+                .get("output")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0);
+            let current_cache_read = part
+                .data
+                .get("cache_read")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0);
+            let current_cache_write = part
+                .data
+                .get("cache_write")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0);
+            let current_cost = part
+                .data
+                .get("cost")
+                .and_then(JsonValue::as_f64)
+                .unwrap_or(0.0);
+            part.data = serde_json::json!({
+                "input": current_input.saturating_add(input),
+                "output": current_output.saturating_add(output),
+                "cache_read": current_cache_read.saturating_add(cache_read),
+                "cache_write": current_cache_write.saturating_add(cache_write),
+                "cost": current_cost + cost,
+            });
+        } else {
+            message
+                .parts
+                .push(crate::session::types::MessagePart::usage(
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                    cost,
+                ));
+        }
+
+        if output > 0 {
+            message.output_tokens = Some(
+                message
+                    .output_tokens
+                    .unwrap_or(0)
+                    .saturating_add(output as usize),
+            );
+            message.token_count = message.output_tokens;
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             messages: Vec::new(),
@@ -2593,8 +2673,8 @@ impl Chat {
             .rposition(|m| m.role == MessageRole::Assistant)
         {
             if let Some(msg) = self.messages.get_mut(idx) {
-                msg.output_tokens = Some(token_count);
-                msg.token_count = Some(token_count);
+                msg.output_tokens = Some(msg.output_tokens.unwrap_or(token_count));
+                msg.token_count = msg.output_tokens;
                 msg.duration_ms = Some(decode_duration_ms);
                 msg.tokens_per_sec = final_tps;
                 msg.finish_reasoning_timer(finalized_at);
@@ -8076,6 +8156,27 @@ mod tests {
         chat.append_to_last_assistant(" assistant");
         assert_eq!(chat.messages.len(), 3);
         assert_eq!(chat.messages[2].content, " assistant");
+    }
+
+    #[test]
+    fn record_usage_accumulates_provider_steps_on_streaming_assistant() {
+        let mut chat = Chat::new();
+
+        chat.record_usage(1_000, 100, 500, 50, 0.01);
+        chat.record_usage(2_000, 200, 750, 25, 0.02);
+
+        let message = chat.messages.last().unwrap();
+        let usage = message
+            .parts
+            .iter()
+            .find(|part| part.part_type == "usage")
+            .unwrap();
+        assert_eq!(usage.data["input"], 3_000);
+        assert_eq!(usage.data["output"], 300);
+        assert_eq!(usage.data["cache_read"], 1_250);
+        assert_eq!(usage.data["cache_write"], 75);
+        assert!((usage.data["cost"].as_f64().unwrap() - 0.03).abs() < f64::EPSILON);
+        assert_eq!(message.output_tokens, Some(300));
     }
 
     #[test]

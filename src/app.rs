@@ -9728,6 +9728,35 @@ impl App {
                 push_toast(Toast::new(msg, ToastLevel::Warning, None));
                 true
             }
+            crate::llm::ChunkMessage::Usage(usage) => {
+                let cost = self
+                    .discovery
+                    .as_ref()
+                    .and_then(|discovery| {
+                        discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
+                    })
+                    .map(|pricing| {
+                        let per_million = 1_000_000.0;
+                        usage.input as f64 / per_million * pricing.input
+                            + usage.output as f64 / per_million * pricing.output
+                            + usage.cache_read as f64 / per_million
+                                * pricing.cache_read.unwrap_or(pricing.input)
+                            + usage.cache_write as f64 / per_million
+                                * pricing.cache_write.unwrap_or(pricing.input)
+                    })
+                    .unwrap_or(0.0);
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.record_usage(
+                        usage.input,
+                        usage.output,
+                        usage.cache_read,
+                        usage.cache_write,
+                        cost,
+                    );
+                }
+                self.mark_streaming_snapshot_pending(session_id);
+                true
+            }
             crate::llm::ChunkMessage::End => {
                 self.finish_streaming_session(session_id);
                 false

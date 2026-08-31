@@ -88,6 +88,19 @@ impl MessagePart {
         }
     }
 
+    pub fn usage(input: u64, output: u64, cache_read: u64, cache_write: u64, cost: f64) -> Self {
+        Self {
+            part_type: "usage".to_string(),
+            data: serde_json::json!({
+                "input": input,
+                "output": output,
+                "cache_read": cache_read,
+                "cache_write": cache_write,
+                "cost": cost,
+            }),
+        }
+    }
+
     pub fn text_value(&self) -> Option<&str> {
         self.data.get("text").and_then(|value| value.as_str())
     }

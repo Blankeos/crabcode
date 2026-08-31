@@ -17,6 +17,47 @@ pub struct StatsOptions {
     pub project: Option<String>,
 }
 
+fn usage_from_parts(parts: &str, fallback_output: u64) -> UsageTotals {
+    let Ok(parts) = serde_json::from_str::<Vec<Value>>(parts) else {
+        return UsageTotals {
+            output: fallback_output,
+            ..UsageTotals::default()
+        };
+    };
+    let usage_parts: Vec<&Value> = parts
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("usage"))
+        .collect();
+    if usage_parts.is_empty() {
+        return UsageTotals {
+            output: fallback_output,
+            ..UsageTotals::default()
+        };
+    }
+
+    usage_parts
+        .into_iter()
+        .fold(UsageTotals::default(), |mut totals, usage| {
+            totals.input = totals
+                .input
+                .saturating_add(usage.get("input").and_then(Value::as_u64).unwrap_or(0));
+            totals.output = totals
+                .output
+                .saturating_add(usage.get("output").and_then(Value::as_u64).unwrap_or(0));
+            totals.cache_read = totals
+                .cache_read
+                .saturating_add(usage.get("cache_read").and_then(Value::as_u64).unwrap_or(0));
+            totals.cache_write = totals.cache_write.saturating_add(
+                usage
+                    .get("cache_write")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            );
+            totals.cost += usage.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
+            totals
+        })
+}
+
 fn model_title_row() -> String {
     let text = "MODEL USAGE";
     let left = (BOX_WIDTH.saturating_sub(text.len())) / 2;
@@ -46,7 +87,6 @@ impl UsageTotals {
 struct SessionRow {
     id: i64,
     workspace_path: Option<String>,
-    total_cost: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +96,7 @@ struct MessageRow {
     parts: String,
     model: Option<String>,
     provider: Option<String>,
-    output_tokens: u64,
+    usage: UsageTotals,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -131,12 +171,16 @@ fn collect(conn: &Connection, options: &StatsOptions, now: i64) -> Result<StatsR
     let mut active_days = HashSet::new();
 
     for message in &filtered_messages {
-        usage.output = usage.output.saturating_add(message.output_tokens);
+        usage.input = usage.input.saturating_add(message.usage.input);
+        usage.output = usage.output.saturating_add(message.usage.output);
+        usage.cache_read = usage.cache_read.saturating_add(message.usage.cache_read);
+        usage.cache_write = usage.cache_write.saturating_add(message.usage.cache_write);
+        usage.cost += message.usage.cost;
         *session_tokens.entry(message.session_id).or_default() = session_tokens
             .get(&message.session_id)
             .copied()
             .unwrap_or_default()
-            .saturating_add(message.output_tokens);
+            .saturating_add(message.usage.tokens());
 
         if let Some(day) = Local
             .timestamp_opt(message.timestamp, 0)
@@ -163,15 +207,19 @@ fn collect(conn: &Connection, options: &StatsOptions, now: i64) -> Result<StatsR
             };
             let stats = model_counts.entry(name).or_default();
             stats.messages += 1;
-            stats.usage.output = stats.usage.output.saturating_add(message.output_tokens);
+            stats.usage.input = stats.usage.input.saturating_add(message.usage.input);
+            stats.usage.output = stats.usage.output.saturating_add(message.usage.output);
+            stats.usage.cache_read = stats
+                .usage
+                .cache_read
+                .saturating_add(message.usage.cache_read);
+            stats.usage.cache_write = stats
+                .usage
+                .cache_write
+                .saturating_add(message.usage.cache_write);
+            stats.usage.cost += message.usage.cost;
         }
     }
-
-    usage.cost = report_sessions
-        .iter()
-        .filter_map(|id| selected_sessions.get(id))
-        .map(|session| session.total_cost)
-        .sum();
 
     let mut per_session: Vec<u64> = session_tokens.into_values().collect();
     per_session.sort_unstable();
@@ -222,7 +270,7 @@ fn collect(conn: &Connection, options: &StatsOptions, now: i64) -> Result<StatsR
 
 fn load_sessions(conn: &Connection) -> Result<Vec<SessionRow>> {
     let mut statement = conn.prepare(
-        "SELECT s.id, w.root_path, s.total_cost
+        "SELECT s.id, w.root_path
          FROM sessions s
          LEFT JOIN workspaces w ON w.id = s.workspace_id",
     )?;
@@ -230,7 +278,6 @@ fn load_sessions(conn: &Connection) -> Result<Vec<SessionRow>> {
         Ok(SessionRow {
             id: row.get(0)?,
             workspace_path: row.get(1)?,
-            total_cost: row.get(2)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -245,13 +292,14 @@ fn load_messages(conn: &Connection) -> Result<Vec<MessageRow>> {
     )?;
     let rows = statement.query_map([], |row| {
         let output_tokens: i64 = row.get(5)?;
+        let usage = usage_from_parts(&row.get::<_, String>(2)?, output_tokens.max(0) as u64);
         Ok(MessageRow {
             session_id: row.get(0)?,
             timestamp: row.get(1)?,
             parts: row.get(2)?,
             model: row.get(3)?,
             provider: row.get(4)?,
-            output_tokens: output_tokens.max(0) as u64,
+            usage,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -513,7 +561,7 @@ mod tests {
              ('m2', 1, 'user', '[]', 1001, 0, 0, NULL, NULL),
              ('m3', 2, 'assistant', ?2, 90000, 800, 800, 'openai/gpt-test', 'openai')",
             params![
-                r#"[{"type":"tool_call","name":"read"},{"type":"tool_call","name":"bash"}]"#,
+                r#"[{"type":"tool_call","name":"read"},{"type":"tool_call","name":"bash"},{"type":"usage","input":4000,"output":1200,"cache_read":3000,"cache_write":500,"cost":0.125}]"#,
                 r#"[{"type":"tool_call","name":"read"}]"#
             ],
         )
@@ -535,13 +583,18 @@ mod tests {
 
         assert_eq!(report.sessions, 2);
         assert_eq!(report.messages, 3);
+        assert_eq!(report.usage.input, 4_000);
         assert_eq!(report.usage.output, 2_000);
-        assert_eq!(report.average_tokens_per_session, 1_000);
-        assert_eq!(report.median_tokens_per_session, 1_000);
+        assert_eq!(report.usage.cache_read, 3_000);
+        assert_eq!(report.usage.cache_write, 500);
+        assert_eq!(report.usage.cost, 0.125);
+        assert_eq!(report.average_tokens_per_session, 4_750);
+        assert_eq!(report.median_tokens_per_session, 4_750);
         assert_eq!(report.tool_total, 3);
         assert_eq!(report.tools, vec![("read".into(), 2), ("bash".into(), 1)]);
         assert_eq!(report.models[0].0, "openai/gpt-test");
         assert_eq!(report.models[0].1.messages, 2);
+        assert_eq!(report.models[0].1.usage.input, 4_000);
         assert_eq!(report.models[0].1.usage.output, 2_000);
     }
 

@@ -20,6 +20,28 @@ pub struct Anthropic {
     reasoning_effort: Option<String>,
 }
 
+fn anthropic_usage(usage: &serde_json::Value) -> Option<crate::chunk::TokenUsage> {
+    let usage = crate::chunk::TokenUsage {
+        input: usage
+            .get("input_tokens")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        output: usage
+            .get("output_tokens")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        cache_read: usage
+            .get("cache_read_input_tokens")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        cache_write: usage
+            .get("cache_creation_input_tokens")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+    };
+    (!usage.is_empty()).then_some(usage)
+}
+
 impl Anthropic {
     pub fn builder() -> AnthropicBuilder {
         AnthropicBuilder::default()
@@ -237,6 +259,7 @@ fn anthropic_stream_chunk(
             // Partial usage early in the stream (cache fields may already appear).
             if let Some(usage) = value.get("message").and_then(|m| m.get("usage")) {
                 log_anthropic_usage(usage);
+                return anthropic_usage(usage).map(ChunkType::Usage).map(Ok);
             }
             None
         }
@@ -256,6 +279,9 @@ fn anthropic_stream_chunk(
             // Final usage wins for cache_read / cache_creation.
             if let Some(usage) = value.get("usage") {
                 log_anthropic_usage(usage);
+                if let Some(usage) = anthropic_usage(usage) {
+                    return Some(Ok(ChunkType::Usage(usage)));
+                }
             }
             anthropic_message_delta(value).map(Ok)
         }
