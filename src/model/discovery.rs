@@ -823,8 +823,15 @@ impl Discovery {
         provider_id: &str,
         model_id: &str,
     ) -> Option<crate::model::reasoning::ReasoningCapability> {
-        let entry = self.load_cache_entry().ok()??;
-        let provider = entry.data.get(provider_id)?;
+        let mut providers = self
+            .load_cache_entry()
+            .ok()
+            .flatten()
+            .map(|entry| entry.data.clone())
+            .unwrap_or_default();
+        self.apply_custom_provider_overlays(&mut providers);
+
+        let provider = providers.get(provider_id)?;
         let model = provider.models.get(model_id)?;
         let provider_npm = model
             .provider
@@ -1032,6 +1039,59 @@ mod tests {
         assert_eq!(
             discovery.get_provider_name("mygateway"),
             Some("My Gateway".to_string())
+        );
+    }
+
+    #[test]
+    fn custom_model_reasoning_capability_is_available_without_catalog_cache() {
+        let providers = HashMap::from([(
+            "clika".to_string(),
+            CustomProviderConfig {
+                name: Some("CliKA".to_string()),
+                npm: Some("@ai-sdk/openai-compatible".to_string()),
+                base_url: None,
+                api_key: None,
+                models: HashMap::from([(
+                    "gpt-5.6-terra".to_string(),
+                    CustomModelConfig {
+                        name: Some("CliKA gpt-5.6-terra".to_string()),
+                        context_window: None,
+                        max_tokens: None,
+                        attachment: None,
+                        reasoning: Some(true),
+                        reasoning_options: Some(vec![crate::model::reasoning::ReasoningOption {
+                            kind: "effort".to_string(),
+                            values: vec![
+                                "low".to_string(),
+                                "medium".to_string(),
+                                "high".to_string(),
+                            ],
+                        }]),
+                        temperature: None,
+                        tool_call: None,
+                        modalities: None,
+                        launch: false,
+                    },
+                )]),
+            },
+        )]);
+        let discovery = Discovery::new_with_custom(Some(providers)).expect("discovery");
+
+        let capability = discovery
+            .get_model_reasoning_capability("clika", "gpt-5.6-terra")
+            .expect("reasoning capability");
+
+        assert_eq!(
+            capability.values(),
+            &[
+                crate::model::reasoning::ReasoningEffort::Low,
+                crate::model::reasoning::ReasoningEffort::Medium,
+                crate::model::reasoning::ReasoningEffort::High,
+            ]
+        );
+        assert_eq!(
+            capability.default_effort(),
+            Some(crate::model::reasoning::ReasoningEffort::Medium)
         );
     }
 
