@@ -970,13 +970,13 @@ pub fn register_all_commands(registry: &mut Registry) {
         name: "variants".to_string(),
         description: "Switch model variant".to_string(),
         handler: handle_variants,
-        hidden_tokens: vec![],
+        hidden_tokens: vec!["reasoning effort".to_string()],
         chat_only: false,
     });
 
     registry.register(Command {
         name: "status".to_string(),
-        description: "Show MCP status".to_string(),
+        description: "Show status".to_string(),
         handler: handle_status,
         hidden_tokens: Vec::new(),
         chat_only: false,

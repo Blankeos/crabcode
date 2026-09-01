@@ -6889,6 +6889,14 @@ impl App {
         if self.start_models_command(&mut parsed) {
             return;
         }
+        if parsed.name == "variants" {
+            self.open_variants_dialog(&parsed.args);
+            return;
+        }
+        if parsed.name == "status" {
+            self.open_status_dialog(&parsed.args);
+            return;
+        }
         if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
             self.open_copy_actions_dialog();
             return;
@@ -12552,6 +12560,36 @@ mod tests {
         assert_eq!(app.input.get_text(), "draft prompt");
         assert_eq!(app.overlay_focus, OverlayFocus::AgentsDialog);
         assert!(app.agents_dialog_state.dialog.is_visible());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_palette_opens_status_dialog() {
+        let mut app = test_app();
+
+        app.handle_command_palette_action(CommandPaletteAction::RunCommand("status".to_string()));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::StatusDialog);
+        assert!(app.status_dialog_state.is_visible());
+        assert_eq!(app.base_focus, BaseFocus::Home);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_palette_opens_variants_dialog() {
+        let mut app = test_app();
+        app.provider_name = "openai".to_string();
+        app.model = "gpt-5".to_string();
+        app.model_reasoning_options.insert(
+            (app.provider_name.clone(), app.model.clone()),
+            vec![crate::model::reasoning::ReasoningOption {
+                kind: "effort".to_string(),
+                values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            }],
+        );
+
+        app.handle_command_palette_action(CommandPaletteAction::RunCommand("variants".to_string()));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::VariantsDialog);
+        assert!(app.variants_dialog_state.dialog.is_visible());
     }
 
     #[test]

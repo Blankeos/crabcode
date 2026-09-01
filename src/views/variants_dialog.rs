@@ -4,10 +4,11 @@ use ratatui::{layout::Rect, Frame};
 use crate::{
     model::reasoning::{ReasoningCapability, ReasoningEffort},
     theme::ThemeColors,
-    ui::components::dialog::{Dialog, DialogItem},
+    ui::components::dialog::{Dialog, DialogAction, DialogItem},
 };
 
 const DEFAULT_VARIANT_ID: &str = "default";
+const VARIANTS_DIALOG_HEIGHT: u16 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariantsDialogAction {
@@ -22,7 +23,9 @@ pub struct VariantsDialogState {
 impl VariantsDialogState {
     pub fn new() -> Self {
         Self {
-            dialog: Dialog::new("Select variant"),
+            dialog: Dialog::new("Select variant")
+                .with_max_height(VARIANTS_DIALOG_HEIGHT)
+                .with_actions(base_actions()),
         }
     }
 
@@ -58,6 +61,19 @@ impl Default for VariantsDialogState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn base_actions() -> Vec<DialogAction> {
+    vec![
+        DialogAction {
+            label: "Select".to_string(),
+            key: "enter".to_string(),
+        },
+        DialogAction {
+            label: "Close".to_string(),
+            key: "esc".to_string(),
+        },
+    ]
 }
 
 fn variant_item(id: &str, name: &str, active: bool) -> DialogItem {
@@ -204,5 +220,25 @@ mod tests {
         );
         assert!(!state.dialog.is_visible());
         assert_eq!(state.selected_effort(), Some(Some(ReasoningEffort::Medium)));
+    }
+
+    #[test]
+    fn variants_dialog_is_shorter_than_default_picker() {
+        use crate::theme::Theme;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut state = shown_state();
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let colors = Theme::load_builtin_default().get_colors(true);
+
+        terminal
+            .draw(|frame| {
+                render_variants_dialog(frame, &mut state, frame.area(), colors);
+            })
+            .expect("render variants dialog");
+
+        assert_eq!(state.dialog.dialog_area.height, VARIANTS_DIALOG_HEIGHT);
+        assert!(state.dialog.dialog_area.height < 25);
     }
 }

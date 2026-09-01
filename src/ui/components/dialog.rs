@@ -90,6 +90,7 @@ pub struct Dialog {
     pub actions: Vec<DialogAction>,
     bottom_gap_height: u16,
     pub position: DialogPosition,
+    max_height: Option<u16>,
     pub pending_delete_id: Option<String>,
     collapsible_groups: bool,
     collapsed_groups: HashSet<String>,
@@ -128,6 +129,7 @@ impl Dialog {
             actions: Vec::new(),
             bottom_gap_height: 1,
             position: DialogPosition::Center,
+            max_height: None,
             pending_delete_id: None,
             collapsible_groups: false,
             collapsed_groups: HashSet::new(),
@@ -140,6 +142,11 @@ impl Dialog {
 
     pub fn with_position(mut self, position: DialogPosition) -> Self {
         self.position = position;
+        self
+    }
+
+    pub fn with_max_height(mut self, height: u16) -> Self {
+        self.max_height = Some(height.max(1));
         self
     }
 
@@ -975,8 +982,9 @@ impl Dialog {
 
             match self.position {
                 DialogPosition::Center => {
+                    let dialog_height = self.max_height.unwrap_or(DIALOG_HEIGHT_CENTER);
                     let list_area_height =
-                        DIALOG_HEIGHT_CENTER.saturating_sub(total_fixed_height + padding_total);
+                        dialog_height.saturating_sub(total_fixed_height + padding_total);
                     list_area_height as usize
                 }
                 DialogPosition::Left | DialogPosition::Right => {
@@ -1585,7 +1593,9 @@ impl Dialog {
         match self.position {
             DialogPosition::Center => {
                 let dialog_width = area.width.min(DIALOG_WIDTH_CENTER);
-                let dialog_height = area.height.min(DIALOG_HEIGHT_CENTER);
+                let dialog_height = area
+                    .height
+                    .min(self.max_height.unwrap_or(DIALOG_HEIGHT_CENTER));
 
                 self.dialog_area = Rect {
                     x: (area.width - dialog_width) / 2,
@@ -1886,6 +1896,7 @@ impl Clone for Dialog {
             actions: self.actions.clone(),
             bottom_gap_height: self.bottom_gap_height,
             position: self.position,
+            max_height: self.max_height,
             pending_delete_id: self.pending_delete_id.clone(),
             collapsible_groups: self.collapsible_groups,
             collapsed_groups: self.collapsed_groups.clone(),
