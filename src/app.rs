@@ -6175,14 +6175,14 @@ impl App {
     }
 
     fn open_copy_actions_dialog(&mut self) {
-        let mut items = vec![ActionDialogItem {
+        let model_item = ActionDialogItem {
             id: "model".to_string(),
             key: 'm',
             label: "Copy provider+model id".to_string(),
             description: "Active provider/model identifier".to_string(),
-        }];
-        if self.base_focus == BaseFocus::Chat {
-            items.extend([
+        };
+        let items = if self.base_focus == BaseFocus::Chat {
+            vec![
                 ActionDialogItem {
                     id: "transcript".to_string(),
                     key: 't',
@@ -6201,8 +6201,11 @@ impl App {
                     label: "Copy session title".to_string(),
                     description: "Current session name".to_string(),
                 },
-            ]);
-        }
+                model_item,
+            ]
+        } else {
+            vec![model_item]
+        };
         let mut dialog = ActionDialog::with_items("Copy", items);
         dialog.show();
         self.copy_actions_dialog = Some(dialog);
@@ -13252,7 +13255,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_command_opens_action_dialog_with_model_default() {
+    fn copy_command_opens_action_dialog_with_transcript_default() {
         let mut app = test_app();
         app.create_new_session(Some("Copy me".to_string()));
         app.base_focus = BaseFocus::Chat;
@@ -13264,10 +13267,14 @@ mod tests {
         assert_eq!(dialog.selected_index(), 0);
         assert_eq!(
             dialog.get_selected().map(|item| item.id.as_str()),
+            Some("transcript")
+        );
+        assert_eq!(dialog.items[0].key, 't');
+        assert_eq!(
+            dialog.items.last().map(|item| item.id.as_str()),
             Some("model")
         );
-        assert_eq!(dialog.items[0].key, 'm');
-        assert!(dialog.items.iter().any(|item| item.id == "transcript"));
+        assert_eq!(dialog.items.last().map(|item| item.key), Some('m'));
     }
 
     #[test]
