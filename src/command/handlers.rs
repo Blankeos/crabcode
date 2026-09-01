@@ -1008,10 +1008,10 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "copy".to_string(),
-        description: "Copy session details to clipboard".to_string(),
+        description: "Copy provider/model id or session details to clipboard".to_string(),
         handler: handle_copy,
         hidden_tokens: vec![],
-        chat_only: true,
+        chat_only: false,
     });
 
     registry.register(Command {

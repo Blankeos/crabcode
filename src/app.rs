@@ -6175,9 +6175,14 @@ impl App {
     }
 
     fn open_copy_actions_dialog(&mut self) {
-        let mut dialog = ActionDialog::with_items(
-            "Copy",
-            vec![
+        let mut items = vec![ActionDialogItem {
+            id: "model".to_string(),
+            key: 'm',
+            label: "Copy provider+model id".to_string(),
+            description: "Active provider/model identifier".to_string(),
+        }];
+        if self.base_focus == BaseFocus::Chat {
+            items.extend([
                 ActionDialogItem {
                     id: "transcript".to_string(),
                     key: 't',
@@ -6196,8 +6201,9 @@ impl App {
                     label: "Copy session title".to_string(),
                     description: "Current session name".to_string(),
                 },
-            ],
-        );
+            ]);
+        }
+        let mut dialog = ActionDialog::with_items("Copy", items);
         dialog.show();
         self.copy_actions_dialog = Some(dialog);
         self.overlay_focus = OverlayFocus::CopyActions;
@@ -6205,6 +6211,10 @@ impl App {
 
     fn execute_copy_action(&mut self, action: &str) {
         match action {
+            "model" => {
+                let text = format!("{}/{}", self.provider_name, self.model);
+                self.copy_text_with_toast(&text, "Provider+model id copied to clipboard");
+            }
             "transcript" => self.copy_session_transcript(),
             "id" => {
                 let Some(id) = self.session_manager.get_current_session_id().cloned() else {
@@ -6649,7 +6659,7 @@ impl App {
                     self.open_status_dialog(&parsed.args);
                     return;
                 }
-                if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
+                if parsed.name == "copy" {
                     self.open_copy_actions_dialog();
                     return;
                 }
@@ -6897,7 +6907,7 @@ impl App {
             self.open_status_dialog(&parsed.args);
             return;
         }
-        if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
+        if parsed.name == "copy" {
             self.open_copy_actions_dialog();
             return;
         }
@@ -11551,6 +11561,9 @@ impl App {
                 let subagent_tabs = self.subagent_tabs_for_current_session();
                 let queued_messages = self.queued_message_previews_for_current_session();
                 let (display_agent, display_model) = self.current_session_agent_model_for_display();
+                let display_model_name =
+                    self.model_name_for_display(&self.provider_name, &display_model);
+                let display_provider_name = self.provider_name_for_display(&self.provider_name);
                 let retry_status = self.current_session_retry_status();
                 let below_chat = self.dialog_below_chat_height(size);
                 let scroll_padding = if self.overlay_focus == OverlayFocus::QuestionDialog
@@ -11581,7 +11594,8 @@ impl App {
                     branch,
                     display_agent,
                     display_model,
-                    self.provider_name.clone(),
+                    display_model_name,
+                    display_provider_name,
                     reasoning_effort,
                     &colors,
                     is_streaming,
@@ -13238,7 +13252,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_command_opens_action_dialog_with_transcript_default() {
+    fn copy_command_opens_action_dialog_with_model_default() {
         let mut app = test_app();
         app.create_new_session(Some("Copy me".to_string()));
         app.base_focus = BaseFocus::Chat;
@@ -13250,9 +13264,24 @@ mod tests {
         assert_eq!(dialog.selected_index(), 0);
         assert_eq!(
             dialog.get_selected().map(|item| item.id.as_str()),
-            Some("transcript")
+            Some("model")
         );
-        assert_eq!(dialog.items[0].key, 't');
+        assert_eq!(dialog.items[0].key, 'm');
+        assert!(dialog.items.iter().any(|item| item.id == "transcript"));
+    }
+
+    #[test]
+    fn copy_command_on_home_only_offers_model_id() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Home;
+
+        tokio_test::block_on(app.process_input("/copy"));
+
+        let dialog = app.copy_actions_dialog.as_ref().expect("copy dialog");
+        assert_eq!(app.overlay_focus, OverlayFocus::CopyActions);
+        assert_eq!(dialog.items.len(), 1);
+        assert_eq!(dialog.items[0].id, "model");
+        assert_eq!(dialog.items[0].key, 'm');
     }
 
     #[test]

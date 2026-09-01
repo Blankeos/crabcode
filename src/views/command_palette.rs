@@ -262,9 +262,9 @@ fn core_palette_items(
         ),
         (
             "copy",
-            "Copy Session Transcript",
+            "Copy",
             "Workspace",
-            "Copy the current transcript",
+            "Copy provider/model id or session details",
         ),
         (
             "compact",
@@ -631,7 +631,7 @@ mod tests {
         state.refresh_items(&registry, false, true, false);
 
         assert!(state.dialog.items.iter().any(|item| item.id == "models"));
-        assert!(!state.dialog.items.iter().any(|item| item.id == "copy"));
+        assert!(state.dialog.items.iter().any(|item| item.id == "copy"));
         assert!(!state.dialog.items.iter().any(|item| item.id == "fork"));
         assert!(!state
             .dialog

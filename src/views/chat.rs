@@ -143,6 +143,7 @@ pub fn render_chat(
     branch: Option<String>,
     agent: String,
     model: String,
+    model_display: String,
     provider_name: String,
     reasoning_effort: Option<String>,
     colors: &ThemeColors,
@@ -463,7 +464,7 @@ pub fn render_chat(
             f,
             above_status_chunks[4],
             &agent,
-            &model,
+            &model_display,
             &provider_name,
             reasoning_effort.as_deref(),
             colors,
@@ -477,7 +478,7 @@ pub fn render_chat(
             above_status_chunks[6],
         );
 
-        let status_bar = StatusBar::new(version, cwd, branch, agent, model);
+        let status_bar = StatusBar::new(version, cwd, branch, agent, model_display);
         status_bar.render(f, main_chunks[1], colors);
         if find_bar.is_active() {
             find_bar.set_match_status(
@@ -590,7 +591,7 @@ pub fn render_chat(
         above_status_chunks[6],
     );
 
-    let status_bar = StatusBar::new(version, cwd, branch, agent, model);
+    let status_bar = StatusBar::new(version, cwd, branch, agent, model_display);
     status_bar.render(f, main_chunks[1], colors);
 
     if find_bar.is_active() {
@@ -2133,6 +2134,7 @@ mod tests {
                     None,
                     "build".into(),
                     "model".into(),
+                    "model".into(),
                     "provider".into(),
                     None,
                     &colors,
@@ -2189,6 +2191,7 @@ mod tests {
                     "/tmp".into(),
                     None,
                     "build".into(),
+                    "model".into(),
                     "model".into(),
                     "provider".into(),
                     None,
@@ -2266,6 +2269,7 @@ mod tests {
                     "/tmp".into(),
                     None,
                     "build".into(),
+                    "model".into(),
                     "model".into(),
                     "provider".into(),
                     None,
