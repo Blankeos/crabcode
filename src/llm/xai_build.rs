@@ -17,6 +17,10 @@ const PROTOCOL_VERSION_FALLBACK: &str = "0.2.111";
 /// (`DoomLoopRecoveryPolicy::DEFAULT_RECOVERY_WINDOW_TOKENS`).
 const DOOM_LOOP_CHECK_HEADER: &str = "x-grok-doom-loop-check";
 const DOOM_LOOP_CHECK_WINDOW_TOKENS: &str = "1024";
+/// Grok Build sibling header; default is the 64-token primitive minimum.
+/// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampling-types/src/doom_loop.rs`
+const EXACT_REPETITION_CHECK_HEADER: &str = "x-grok-exact-repetition-check";
+const EXACT_REPETITION_MIN_TOKENS: &str = "64";
 const VERSION_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const VERSION_RETRY_TTL: Duration = Duration::from_secs(5 * 60);
 const VERSION_URLS: &[&str] = &[
@@ -114,6 +118,10 @@ fn request_overrides_with_version(
     headers.insert(
         DOOM_LOOP_CHECK_HEADER.to_string(),
         DOOM_LOOP_CHECK_WINDOW_TOKENS.to_string(),
+    );
+    headers.insert(
+        EXACT_REPETITION_CHECK_HEADER.to_string(),
+        EXACT_REPETITION_MIN_TOKENS.to_string(),
     );
 
     RequestOverrides {
@@ -474,6 +482,13 @@ mod tests {
                 .get(super::DOOM_LOOP_CHECK_HEADER)
                 .map(String::as_str),
             Some(super::DOOM_LOOP_CHECK_WINDOW_TOKENS)
+        );
+        assert_eq!(
+            overrides
+                .headers
+                .get(super::EXACT_REPETITION_CHECK_HEADER)
+                .map(String::as_str),
+            Some(super::EXACT_REPETITION_MIN_TOKENS)
         );
     }
 

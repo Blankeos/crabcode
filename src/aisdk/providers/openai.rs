@@ -1548,23 +1548,19 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
             if let Some(usage) = resp.get("usage") {
                 log_openai_responses_usage(usage);
             }
+            log_openai_responses_completed(resp);
             Some(Ok(ChunkType::ResponseCompleted {
                 end_turn: resp.get("end_turn").and_then(|value| value.as_bool()),
                 reasoning_items: reasoning_items_from_response_output(resp),
+                doom_loop_triggers: doom_loop_triggers_from(resp),
             }))
         }
         // Grok Build / cli-chat-proxy: `response.doom_loop_check` with
         // `doom_loop_check.triggers` like `tail_repetition:8@thinking`.
-        // `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/doom_loop.rs`
+        // Also present on `response.completed` (`doom_loop_check` field).
+        // `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampling-types/src/doom_loop.rs`
         "response.doom_loop_check" => {
-            let triggers = value
-                .pointer("/doom_loop_check/triggers")
-                .and_then(|value| value.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|value| value.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
+            let triggers = doom_loop_triggers_from(&value).join(",");
             Some(Ok(ChunkType::Metadata(format!(
                 "doom_loop_check triggers={triggers}"
             ))))
@@ -1627,6 +1623,68 @@ fn log_openai_responses_usage(usage: &serde_json::Value) {
         cached,
         hit_pct
     ));
+}
+
+/// Attribute a `response.completed` payload: status, incomplete reason, and
+/// output item types. Needed when a turn finishes with no error after
+/// reasoning-only / empty assistant output.
+fn log_openai_responses_completed(response: &serde_json::Value) {
+    let status = response
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let end_turn = response.get("end_turn").and_then(|value| value.as_bool());
+    let incomplete_reason = response
+        .get("incomplete_details")
+        .and_then(|details| details.get("reason"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("none");
+    let (output_count, output_types) = summarize_response_output_types(response);
+
+    let doom_loop_triggers = doom_loop_triggers_from(response);
+    let doom_loop = if doom_loop_triggers.is_empty() {
+        "none".to_string()
+    } else {
+        doom_loop_triggers.join(",")
+    };
+
+    crate::log::log(&format!(
+        "openai-responses completed status={status} end_turn={end_turn:?} incomplete_reason={incomplete_reason} output_count={output_count} output_types=[{output_types}] doom_loop_check={doom_loop}"
+    ));
+}
+
+fn doom_loop_triggers_from(value: &serde_json::Value) -> Vec<String> {
+    value
+        .pointer("/doom_loop_check/triggers")
+        .or_else(|| value.pointer("/response/doom_loop_check/triggers"))
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .map(str::to_string)
+        .collect()
+}
+
+fn summarize_response_output_types(response: &serde_json::Value) -> (usize, String) {
+    let Some(output) = response.get("output").and_then(|value| value.as_array()) else {
+        return (0, String::new());
+    };
+
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for item in output {
+        let item_type = item
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        *counts.entry(item_type).or_default() += 1;
+    }
+
+    let output_types = counts
+        .into_iter()
+        .map(|(item_type, count)| format!("{item_type}={count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    (output.len(), output_types)
 }
 
 fn responses_provider_error_message(value: &serde_json::Value, fallback: &str) -> String {
@@ -2348,10 +2406,10 @@ mod tests {
         add_responses_lite_header, build_openai_messages, build_websocket_request_body,
         fresh_websocket_request_body, is_client_tool_call_event, openai_chunk_is_terminal,
         request_snapshot_from_body, response_sse_data_to_chunk, responses_function_call_chunk,
-        websocket_connection_is_idle, websocket_continuation_mode_after_idle_policy,
-        websocket_continuation_mode_from_state, OpenAI, OpenAIResponseSnapshot,
-        OpenAIWebsocketState, WebsocketContinuationMode, WebsocketStreamProgress,
-        OPENAI_CODEX_WINDOW_ID_HEADER, OPENAI_RESPONSES_LITE_HEADER,
+        summarize_response_output_types, websocket_connection_is_idle,
+        websocket_continuation_mode_after_idle_policy, websocket_continuation_mode_from_state,
+        OpenAI, OpenAIResponseSnapshot, OpenAIWebsocketState, WebsocketContinuationMode,
+        WebsocketStreamProgress, OPENAI_CODEX_WINDOW_ID_HEADER, OPENAI_RESPONSES_LITE_HEADER,
         OPENAI_RESPONSES_LITE_WS_METADATA_KEY, OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK,
         OPENAI_WEBSOCKET_IDLE_MAX,
     };
@@ -2911,6 +2969,49 @@ mod tests {
             }
             other => panic!("expected ResponseCompleted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn response_completed_captures_terminal_doom_loop_triggers() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.completed","response":{"output":[{"type":"reasoning","id":"rs_1"}],"doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}}"#,
+        )
+        .expect("expected terminal chunk");
+
+        match chunk {
+            Ok(ChunkType::ResponseCompleted {
+                doom_loop_triggers, ..
+            }) => {
+                assert_eq!(
+                    doom_loop_triggers,
+                    vec!["tail_repetition:8@thinking".to_string()]
+                );
+            }
+            other => panic!("expected ResponseCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn summarize_response_output_types_counts_reasoning_and_function_calls() {
+        let response = serde_json::json!({
+            "output": [
+                {"type": "reasoning", "id": "rs_1"},
+                {"type": "function_call", "call_id": "call_1", "name": "read"},
+                {"type": "function_call", "call_id": "call_2", "name": "read"},
+            ]
+        });
+        let (count, types) = summarize_response_output_types(&response);
+        assert_eq!(count, 3);
+        assert_eq!(types, "function_call=2,reasoning=1");
+    }
+
+    #[test]
+    fn summarize_response_output_types_empty_when_missing_output() {
+        let response = serde_json::json!({"status": "completed"});
+        assert_eq!(
+            summarize_response_output_types(&response),
+            (0, String::new())
+        );
     }
 
     #[test]

@@ -126,6 +126,9 @@ pub fn retryable(error: &RetryError) -> bool {
         || lower.contains("error sending request")
         || lower.contains("server_error")
         || lower.contains("too_many_requests")
+        || lower.contains("empty response")
+        || lower.contains("reasoning_only")
+        || lower.contains("no_visible_content")
 }
 
 pub fn retry_message(error: &RetryError) -> String {
