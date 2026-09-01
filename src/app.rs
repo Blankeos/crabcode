@@ -1,5 +1,8 @@
 use crate::views::status_dialog::render_status_dialog;
-use crate::views::variants_dialog::render_variants_dialog;
+use crate::views::variants_dialog::{
+    handle_variants_dialog_key_event, handle_variants_dialog_mouse_event, render_variants_dialog,
+    VariantsDialogAction,
+};
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -4198,7 +4201,8 @@ impl App {
                 true
             }
             OverlayFocus::VariantsDialog => {
-                if self.variants_dialog_state.handle_key_event(key) {
+                let action = handle_variants_dialog_key_event(&mut self.variants_dialog_state, key);
+                if matches!(action, VariantsDialogAction::Select) {
                     self.select_variant();
                 }
                 if !self.variants_dialog_state.dialog.is_visible() {
@@ -5077,7 +5081,8 @@ impl App {
                 self.overlay_focus = OverlayFocus::None;
             }
         } else if self.overlay_focus == OverlayFocus::VariantsDialog {
-            if self.variants_dialog_state.dialog.handle_mouse_event(mouse) {
+            let action = handle_variants_dialog_mouse_event(&mut self.variants_dialog_state, mouse);
+            if matches!(action, VariantsDialogAction::Select) {
                 self.select_variant();
             }
             if !self.variants_dialog_state.dialog.is_visible() {
