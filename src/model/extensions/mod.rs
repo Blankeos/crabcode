@@ -587,6 +587,7 @@ mod tests {
             free: true,
             local: false,
             reasoning_options: Vec::new(),
+            context_window: None,
         };
         let paid_model = crate::model::types::Model {
             id: "gpt-5.3-codex".to_string(),
@@ -599,6 +600,7 @@ mod tests {
             free: false,
             local: false,
             reasoning_options: Vec::new(),
+            context_window: None,
         };
 
         assert!(ModelExtensions::is_available_without_connection(

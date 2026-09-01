@@ -104,7 +104,10 @@ fn provider_is_enabled(
     provider_id: &str,
 ) -> bool {
     !config.disabled_providers.contains(provider_id)
-        && (config.enabled_providers.is_empty() || config.enabled_providers.contains(provider_id))
+        && config
+            .enabled_providers
+            .as_ref()
+            .is_none_or(|enabled| enabled.contains(provider_id))
 }
 
 #[cfg(test)]
@@ -124,6 +127,7 @@ mod tests {
             free: false,
             local: false,
             reasoning_options: Vec::new(),
+            context_window: None,
         };
 
         assert_eq!(model_ref(&model), "openai/gpt-5");

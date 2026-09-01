@@ -293,7 +293,7 @@ impl AcpService {
         let reasoning = model_reasoning(&config, &models, &provider, &model);
         let reasoning_selection =
             reasoning.unwrap_or(crate::model::reasoning::ReasoningEffort::None);
-        let context_window = model_context_window(&config, &provider, &model);
+        let context_window = model_context_window(&config, &models, &provider, &model);
         let agent = config
             .merged_config
             .default_agent
@@ -474,8 +474,12 @@ impl AcpService {
         session.provider.clone_from(&model.provider_id);
         session.model.clone_from(&model.id);
         session.reasoning = resolved_reasoning(session, session.reasoning_selection);
-        session.context_window =
-            model_context_window(&session.config, &session.provider, &session.model);
+        session.context_window = model_context_window(
+            &session.config,
+            &session.models,
+            &session.provider,
+            &session.model,
+        );
         Ok(SetSessionConfigOptionResponse::new(session_config_options(
             session,
         )))
@@ -551,7 +555,7 @@ impl AcpService {
         let reasoning = model_reasoning(&config, &models, &provider, &model);
         let reasoning_selection =
             reasoning.unwrap_or(crate::model::reasoning::ReasoningEffort::None);
-        let context_window = model_context_window(&config, &provider, &model);
+        let context_window = model_context_window(&config, &models, &provider, &model);
         let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
         let session = AcpSession {
             cwd,
@@ -973,7 +977,20 @@ fn model_reasoning_capability(
     .filter(|capability| !capability.values().is_empty())
 }
 
-fn model_context_window(config: &LoadedConfig, provider: &str, model: &str) -> Option<u32> {
+fn model_context_window(
+    config: &LoadedConfig,
+    models: &[crate::model::types::Model],
+    provider: &str,
+    model: &str,
+) -> Option<u32> {
+    if let Some(context_window) = models
+        .iter()
+        .find(|candidate| candidate.provider_id == provider && candidate.id == model)
+        .and_then(|model| model.context_window)
+    {
+        return Some(context_window);
+    }
+
     let discovery = crate::model::discovery::Discovery::new_with_custom(Some(
         config.merged_config.custom_providers.clone(),
     ))
@@ -1482,6 +1499,7 @@ mod tests {
             free: false,
             local: false,
             reasoning_options: Vec::new(),
+            context_window: None,
         }
     }
 
@@ -1574,6 +1592,12 @@ mod tests {
     fn config_with_command(command: crate::command::custom::CustomCommand) -> LoadedConfig {
         let mut merged_config = crate::config::configuration::MergedConfig::default();
         merged_config.commands.push(command);
+        config_with_merged(merged_config)
+    }
+
+    fn config_with_merged(
+        merged_config: crate::config::configuration::MergedConfig,
+    ) -> LoadedConfig {
         LoadedConfig {
             merged_config,
             raw_merged: serde_json::Value::Null,
@@ -1583,6 +1607,10 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             xdg_config_home: PathBuf::from("/tmp"),
         }
+    }
+
+    fn empty_config() -> LoadedConfig {
+        config_with_merged(crate::config::configuration::MergedConfig::default())
     }
 
     fn session_with_config(config: LoadedConfig) -> AcpSession {
@@ -1806,6 +1834,17 @@ mod tests {
         );
         assert!(find_selectable_model(&models, "openai/missing").is_err());
         assert!(find_selectable_model(&models, "other/gpt-5").is_err());
+    }
+
+    #[test]
+    fn resolves_context_window_from_selectable_models() {
+        let mut model = model("example", "Example", "large-context", "Large Context");
+        model.context_window = Some(1_090_000);
+
+        assert_eq!(
+            model_context_window(&empty_config(), &[model], "example", "large-context"),
+            Some(1_090_000)
+        );
     }
 
     #[test]
