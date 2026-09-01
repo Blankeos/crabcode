@@ -91,6 +91,7 @@ pub struct Dialog {
     bottom_gap_height: u16,
     pub position: DialogPosition,
     max_height: Option<u16>,
+    search_visible: bool,
     pub pending_delete_id: Option<String>,
     collapsible_groups: bool,
     collapsed_groups: HashSet<String>,
@@ -130,6 +131,7 @@ impl Dialog {
             bottom_gap_height: 1,
             position: DialogPosition::Center,
             max_height: None,
+            search_visible: true,
             pending_delete_id: None,
             collapsible_groups: false,
             collapsed_groups: HashSet::new(),
@@ -148,6 +150,22 @@ impl Dialog {
     pub fn with_max_height(mut self, height: u16) -> Self {
         self.max_height = Some(height.max(1));
         self
+    }
+
+    pub fn with_search_visible(mut self, visible: bool) -> Self {
+        self.search_visible = visible;
+        if !visible {
+            self.search_query.clear();
+        }
+        self
+    }
+
+    fn search_area_height(&self) -> u16 {
+        if self.search_visible {
+            SEARCH_AREA_HEIGHT
+        } else {
+            0
+        }
     }
 
     pub fn with_collapsible_groups(mut self, enabled: bool) -> Self {
@@ -976,7 +994,7 @@ impl Dialog {
 
             let footer_height = self.footer_height();
             let total_fixed_height =
-                1 + 1 + SEARCH_AREA_HEIGHT + self.bottom_gap_height + footer_height;
+                1 + 1 + self.search_area_height() + self.bottom_gap_height + footer_height;
             let (_, padding_y) = self.content_padding();
             let padding_total = padding_y * 2;
 
@@ -1074,7 +1092,7 @@ impl Dialog {
         [
             ratatui::layout::Constraint::Length(1),
             ratatui::layout::Constraint::Length(1),
-            ratatui::layout::Constraint::Length(SEARCH_AREA_HEIGHT),
+            ratatui::layout::Constraint::Length(self.search_area_height()),
             ratatui::layout::Constraint::Min(0),
             ratatui::layout::Constraint::Length(self.bottom_gap_height),
             ratatui::layout::Constraint::Length(self.footer_height()),
@@ -1263,6 +1281,7 @@ impl Dialog {
             }
             KeyCode::Char('j') if event.modifiers == KeyModifiers::CONTROL => true,
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
+            _ if !self.search_visible => false,
             _ => {
                 let previous_query = self.search_query.clone();
                 input_textarea(&mut self.search_textarea, event);
@@ -1669,7 +1688,9 @@ impl Dialog {
         .alignment(ratatui::layout::Alignment::Right);
         frame.render_widget(esc_paragraph, header_chunks[1]);
 
-        frame.render_widget(&self.search_textarea, chunks[2]);
+        if self.search_visible {
+            frame.render_widget(&self.search_textarea, chunks[2]);
+        }
 
         let mut content_lines = Vec::new();
         let list_area_width = chunks[3].width.saturating_sub(2); // Subtract scrollbar width
@@ -1897,6 +1918,7 @@ impl Clone for Dialog {
             bottom_gap_height: self.bottom_gap_height,
             position: self.position,
             max_height: self.max_height,
+            search_visible: self.search_visible,
             pending_delete_id: self.pending_delete_id.clone(),
             collapsible_groups: self.collapsible_groups,
             collapsed_groups: self.collapsed_groups.clone(),

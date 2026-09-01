@@ -8,7 +8,7 @@ use crate::{
 };
 
 const DEFAULT_VARIANT_ID: &str = "default";
-const VARIANTS_DIALOG_HEIGHT: u16 = 14;
+const VARIANTS_DIALOG_HEIGHT: u16 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariantsDialogAction {
@@ -25,6 +25,7 @@ impl VariantsDialogState {
         Self {
             dialog: Dialog::new("Select variant")
                 .with_max_height(VARIANTS_DIALOG_HEIGHT)
+                .with_search_visible(false)
                 .with_actions(base_actions()),
         }
     }
@@ -240,5 +241,6 @@ mod tests {
 
         assert_eq!(state.dialog.dialog_area.height, VARIANTS_DIALOG_HEIGHT);
         assert!(state.dialog.dialog_area.height < 25);
+        assert!(state.dialog.visible_row_count >= 5);
     }
 }
