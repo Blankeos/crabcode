@@ -14,12 +14,14 @@ pub mod remote_dialog;
 pub mod session_rename_dialog;
 pub mod sessions_dialog;
 pub mod skills_dialog;
+pub mod status_dialog;
 pub mod storage_dialog;
 pub mod suggestions_popup;
 pub mod terminal_session_dialog;
 pub mod themes_dialog;
 pub mod timeline_dialog;
 pub mod title_dialog;
+pub mod variants_dialog;
 pub mod which_key;
 
 pub use agents_dialog::AgentsDialogState;
@@ -37,10 +39,12 @@ pub use remote_dialog::RemoteDialogState;
 pub use session_rename_dialog::SessionRenameDialogState;
 pub use sessions_dialog::SessionsDialogState;
 pub use skills_dialog::SkillsDialogState;
+pub use status_dialog::StatusDialogState;
 pub use storage_dialog::StorageDialogState;
 pub use suggestions_popup::SuggestionsPopupState;
 pub use terminal_session_dialog::TerminalSessionDialogState;
 pub use themes_dialog::ThemesDialogState;
 pub use title_dialog::TitleDialogState;
+pub use variants_dialog::VariantsDialogState;
 #[allow(unused_imports)]
 pub use which_key::WhichKeyAction;

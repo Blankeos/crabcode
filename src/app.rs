@@ -1,3 +1,8 @@
+use crate::views::status_dialog::render_status_dialog;
+use crate::views::variants_dialog::{
+    handle_variants_dialog_key_event, handle_variants_dialog_mouse_event, render_variants_dialog,
+    VariantsDialogAction,
+};
 use ratatui::crossterm::event::{
     self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -109,8 +114,8 @@ use crate::views::{
     AgentsDialogState, ChatState, ConnectDialogState, HomeState, JobsDialogState, McpDialogState,
     ModelsDialogState, MoveSessionDialogState, PermissionDialogState, ProviderOAuthFlowState,
     QuestionDialogState, RemoteDialogState, SessionRenameDialogState, SessionsDialogState,
-    StorageDialogState, SuggestionsPopupState, TerminalSessionDialogState, ThemesDialogState,
-    TitleDialogState,
+    StatusDialogState, StorageDialogState, SuggestionsPopupState, TerminalSessionDialogState,
+    ThemesDialogState, TitleDialogState, VariantsDialogState,
 };
 
 use crate::{
@@ -225,6 +230,8 @@ pub enum OverlayFocus {
     None,
     AgentsDialog,
     ModelsDialog,
+    VariantsDialog,
+    StatusDialog,
     RefreshModelsDialog,
     ThemesDialog,
     ConnectDialog,
@@ -835,6 +842,8 @@ pub struct App {
     pub suggestions_popup_state: SuggestionsPopupState,
     pub agents_dialog_state: AgentsDialogState,
     pub models_dialog_state: ModelsDialogState,
+    pub variants_dialog_state: VariantsDialogState,
+    pub status_dialog_state: StatusDialogState,
     pub themes_dialog_state: ThemesDialogState,
     themes_dialog_original_theme_index: usize,
     themes_dialog_original_dark_mode: bool,
@@ -911,6 +920,9 @@ pub struct App {
     pending_editor_suspend: Option<String>,
     pub websearch: crate::config::configuration::WebsearchConfig,
     pub mcp: crate::config::configuration::McpConfig,
+    mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
+    mcp_summary: crate::views::home::McpSummary,
+    mcp_server_views: Vec<crate::mcp::McpServerView>,
     pub config_raw_merged: serde_json::Value,
     custom_instructions: String,
     terminal_focused: bool,
@@ -1021,6 +1033,8 @@ impl App {
         let suggestions_popup_state = init_suggestions_popup(popup);
         let agents_dialog_state = init_agents_dialog("Select agent", vec![]);
         let models_dialog_state = init_models_dialog("Models", vec![]);
+        let variants_dialog_state = VariantsDialogState::new();
+        let status_dialog_state = StatusDialogState::default();
         let themes_dialog_state = init_themes_dialog("Themes", vec![], false);
         let connect_dialog_state = init_connect_dialog();
         let provider_oauth_flow_state = init_provider_oauth_flow();
@@ -1093,6 +1107,8 @@ impl App {
             suggestions_popup_state,
             agents_dialog_state,
             models_dialog_state,
+            variants_dialog_state,
+            status_dialog_state,
             themes_dialog_state,
             themes_dialog_original_theme_index: 0,
             themes_dialog_original_dark_mode: true,
@@ -1162,6 +1178,9 @@ impl App {
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
+            mcp_manager: None,
+            mcp_summary: crate::views::home::McpSummary::default(),
+            mcp_server_views: Vec::new(),
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
@@ -1224,14 +1243,8 @@ impl App {
         let loaded_config = crate::config::ConfigLoader::load()?;
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
-        if !mcp_config.is_empty() {
-            let warm_cfg = mcp_config.clone();
-            let warm_cwd =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let _ = tokio::spawn(async move {
-                let _ = crate::mcp::McpManager::ensure(warm_cfg, warm_cwd);
-            });
-        }
+        let warm_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        self.mcp_manager = Some(crate::mcp::McpManager::ensure(mcp_config.clone(), warm_cwd));
         self.input
             .set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
@@ -1412,6 +1425,56 @@ impl App {
         self.pending_model_override = None;
         self.pending_cli_agent = None;
         Ok(())
+    }
+
+    fn open_variants_dialog(&mut self, args: &[String]) {
+        if !args.is_empty() {
+            push_toast(Toast::new(
+                "Usage: /variants",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        let Some(capability) =
+            self.reasoning_capability_for_model(&self.provider_name, &self.model)
+        else {
+            push_toast(Toast::new(
+                "The active model has no variants",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        };
+        if capability.values().is_empty() {
+            push_toast(Toast::new(
+                "The active model has no variants",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+
+        let selected = self.reasoning_effort_override_for_model(&self.provider_name, &self.model);
+        self.variants_dialog_state.show(&capability, selected);
+        self.overlay_focus = OverlayFocus::VariantsDialog;
+    }
+
+    fn select_variant(&mut self) {
+        let Some(effort) = self.variants_dialog_state.selected_effort() else {
+            return;
+        };
+        let provider_id = self.provider_name.clone();
+        let model_id = self.model.clone();
+        match self.set_reasoning_effort_override_for_model(provider_id, model_id, effort) {
+            Ok(()) => self.variants_dialog_state.dialog.hide(),
+            Err(error) => push_toast(Toast::new(
+                format!("Failed to save variant: {error}"),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            )),
+        }
     }
 
     fn play_sound_event(&self, event: crate::sound::SoundEvent) {
@@ -2721,8 +2784,8 @@ impl App {
         model_id: &str,
     ) -> Option<crate::model::reasoning::ReasoningEffort> {
         let capability = self.reasoning_capability_for_model(provider_id, model_id)?;
-        let requested = self.reasoning_effort_override_for_model(provider_id, model_id)?;
-        let resolved = capability.resolve(Some(requested))?;
+        let requested = self.reasoning_effort_override_for_model(provider_id, model_id);
+        let resolved = capability.resolve(requested)?;
         if resolved == crate::model::reasoning::ReasoningEffort::None {
             return None;
         }
@@ -2758,6 +2821,57 @@ impl App {
     fn active_reasoning_effort_label(&self) -> Option<String> {
         self.active_reasoning_effort()
             .map(|effort| effort.as_str().to_string())
+    }
+
+    fn model_name_for_display(&self, provider_id: &str, model_id: &str) -> String {
+        self.discovery
+            .as_ref()
+            .and_then(|discovery| discovery.get_model_name(provider_id, model_id))
+            .unwrap_or_else(|| model_id.to_string())
+    }
+
+    fn provider_name_for_display(&self, provider_id: &str) -> String {
+        self.discovery
+            .as_ref()
+            .and_then(|discovery| discovery.get_provider_name(provider_id))
+            .unwrap_or_else(|| provider_id.to_string())
+    }
+
+    fn refresh_mcp_summary(&mut self) {
+        let Some(manager) = self.mcp_manager.as_ref() else {
+            self.mcp_summary = crate::views::home::McpSummary {
+                connected: 0,
+                enabled: 0,
+                has_error: false,
+            };
+            return;
+        };
+        let Ok(manager) = manager.try_lock() else {
+            return;
+        };
+        let views = manager.views();
+        let enabled = views.iter().filter(|server| server.enabled).count();
+        self.mcp_summary = crate::views::home::McpSummary {
+            connected: views
+                .iter()
+                .filter(|server| server.enabled && server.status == "connected")
+                .count(),
+            enabled,
+            has_error: views
+                .iter()
+                .any(|server| server.enabled && server.status == "failed"),
+        };
+        self.mcp_server_views = views;
+    }
+
+    fn open_status_dialog(&mut self, args: &[String]) {
+        if !args.is_empty() {
+            push_toast(Toast::new("Usage: /status", ToastLevel::Warning, None));
+            return;
+        }
+        self.refresh_mcp_summary();
+        self.status_dialog_state.show(self.mcp_server_views.clone());
+        self.overlay_focus = OverlayFocus::StatusDialog;
     }
 
     fn cycle_reasoning_effort_for_model(
@@ -4086,6 +4200,23 @@ impl App {
                 }
                 true
             }
+            OverlayFocus::VariantsDialog => {
+                let action = handle_variants_dialog_key_event(&mut self.variants_dialog_state, key);
+                if matches!(action, VariantsDialogAction::Select) {
+                    self.select_variant();
+                }
+                if !self.variants_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
+            OverlayFocus::StatusDialog => {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                    self.status_dialog_state.hide();
+                    self.overlay_focus = OverlayFocus::None;
+                }
+                true
+            }
             OverlayFocus::StorageDialog => {
                 let action = handle_storage_dialog_key_event(&mut self.storage_dialog_state, key);
                 self.handle_storage_dialog_action(action);
@@ -4819,6 +4950,17 @@ impl App {
             return;
         }
 
+        if self.overlay_focus == OverlayFocus::StatusDialog
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+            if !self.status_dialog_state.contains(position) {
+                self.status_dialog_state.hide();
+                self.overlay_focus = OverlayFocus::None;
+            }
+            return;
+        }
+
         // Bottom-right jobs chip → open jobs dialog.
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && mouse.modifiers.is_empty()
@@ -4936,6 +5078,14 @@ impl App {
                 crate::views::models_dialog::ModelsDialogAction::None => {}
             }
             if !self.models_dialog_state.dialog.is_visible() {
+                self.overlay_focus = OverlayFocus::None;
+            }
+        } else if self.overlay_focus == OverlayFocus::VariantsDialog {
+            let action = handle_variants_dialog_mouse_event(&mut self.variants_dialog_state, mouse);
+            if matches!(action, VariantsDialogAction::Select) {
+                self.select_variant();
+            }
+            if !self.variants_dialog_state.dialog.is_visible() {
                 self.overlay_focus = OverlayFocus::None;
             }
         } else if self.overlay_focus == OverlayFocus::PermissionDialog {
@@ -5530,6 +5680,19 @@ impl App {
                     .insert_str(&text);
                 self.models_dialog_state.dialog.set_search_query(
                     self.models_dialog_state
+                        .dialog
+                        .search_textarea
+                        .lines()
+                        .join(""),
+                );
+            }
+            (_, OverlayFocus::VariantsDialog) => {
+                self.variants_dialog_state
+                    .dialog
+                    .search_textarea
+                    .insert_str(&text);
+                self.variants_dialog_state.dialog.set_search_query(
+                    self.variants_dialog_state
                         .dialog
                         .search_textarea
                         .lines()
@@ -6478,6 +6641,14 @@ impl App {
                 if self.start_models_command(&mut parsed) {
                     return;
                 }
+                if parsed.name == "variants" {
+                    self.open_variants_dialog(&parsed.args);
+                    return;
+                }
+                if parsed.name == "status" {
+                    self.open_status_dialog(&parsed.args);
+                    return;
+                }
                 if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
                     self.open_copy_actions_dialog();
                     return;
@@ -6716,6 +6887,14 @@ impl App {
             return;
         }
         if self.start_models_command(&mut parsed) {
+            return;
+        }
+        if parsed.name == "variants" {
+            self.open_variants_dialog(&parsed.args);
+            return;
+        }
+        if parsed.name == "status" {
+            self.open_status_dialog(&parsed.args);
             return;
         }
         if parsed.name == "copy" && self.base_focus == BaseFocus::Chat {
@@ -11328,8 +11507,12 @@ impl App {
         }
         let status_cwd = self.active_workspace_path();
         let branch = self.current_git_branch(&status_cwd);
-        let usage_text = &self.cached_usage_text;
         let reasoning_effort = self.active_reasoning_effort_label();
+        self.refresh_mcp_summary();
+        let mcp_summary = self.mcp_summary;
+        let model_name = self.model_name_for_display(&self.provider_name, &self.model);
+        let provider_name = self.provider_name_for_display(&self.provider_name);
+        let usage_text = &self.cached_usage_text;
 
         match self.base_focus {
             BaseFocus::Home => {
@@ -11341,11 +11524,12 @@ impl App {
                     status_cwd.clone(),
                     branch.clone(),
                     self.agent.clone(),
-                    self.model.clone(),
-                    self.provider_name.clone(),
+                    model_name,
+                    provider_name,
                     reasoning_effort.clone(),
+                    mcp_summary,
                     &colors,
-                    &usage_text,
+                    usage_text,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -11404,7 +11588,7 @@ impl App {
                     is_compacting,
                     esc_cancel_primed,
                     retry_status.as_ref(),
-                    &usage_text,
+                    usage_text,
                     subagent_tabs,
                     &queued_messages,
                     &mut self.find_bar,
@@ -11450,6 +11634,17 @@ impl App {
                 colors,
                 reasoning_effort.as_deref(),
             );
+        }
+
+        if self.overlay_focus == OverlayFocus::VariantsDialog
+            && self.variants_dialog_state.dialog.is_visible()
+        {
+            render_variants_dialog(f, &mut self.variants_dialog_state, size, colors);
+        }
+
+        if self.overlay_focus == OverlayFocus::StatusDialog && self.status_dialog_state.is_visible()
+        {
+            render_status_dialog(f, &mut self.status_dialog_state, size, &colors);
         }
 
         if self.overlay_focus == OverlayFocus::RefreshModelsDialog {
@@ -12036,6 +12231,8 @@ mod tests {
             suggestions_popup_state: init_suggestions_popup(Popup::new()),
             agents_dialog_state: init_agents_dialog("Select agent", vec![]),
             models_dialog_state: init_models_dialog("Models", vec![]),
+            variants_dialog_state: VariantsDialogState::new(),
+            status_dialog_state: StatusDialogState::default(),
             themes_dialog_state: init_themes_dialog("Themes", vec![], false),
             themes_dialog_original_theme_index: 0,
             themes_dialog_original_dark_mode: true,
@@ -12105,6 +12302,9 @@ mod tests {
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
+            mcp_manager: None,
+            mcp_summary: crate::views::home::McpSummary::default(),
+            mcp_server_views: Vec::new(),
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
@@ -12362,6 +12562,36 @@ mod tests {
         assert!(app.agents_dialog_state.dialog.is_visible());
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_palette_opens_status_dialog() {
+        let mut app = test_app();
+
+        app.handle_command_palette_action(CommandPaletteAction::RunCommand("status".to_string()));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::StatusDialog);
+        assert!(app.status_dialog_state.is_visible());
+        assert_eq!(app.base_focus, BaseFocus::Home);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_palette_opens_variants_dialog() {
+        let mut app = test_app();
+        app.provider_name = "openai".to_string();
+        app.model = "gpt-5".to_string();
+        app.model_reasoning_options.insert(
+            (app.provider_name.clone(), app.model.clone()),
+            vec![crate::model::reasoning::ReasoningOption {
+                kind: "effort".to_string(),
+                values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            }],
+        );
+
+        app.handle_command_palette_action(CommandPaletteAction::RunCommand("variants".to_string()));
+
+        assert_eq!(app.overlay_focus, OverlayFocus::VariantsDialog);
+        assert!(app.variants_dialog_state.dialog.is_visible());
+    }
+
     #[test]
     fn agent_dialog_includes_config_all_mode_agents() {
         let mut app = test_app();
@@ -12451,6 +12681,26 @@ mod tests {
         assert_eq!(
             app.active_primary_agent_reasoning_effort(),
             Some(crate::model::reasoning::ReasoningEffort::Low)
+        );
+    }
+
+    #[test]
+    fn reasoning_capable_model_uses_catalog_default_without_override() {
+        let mut app = test_app();
+        app.provider_name = "openai".to_string();
+        app.model = "gpt-5".to_string();
+        app.model_reasoning_options.insert(
+            (app.provider_name.clone(), app.model.clone()),
+            vec![crate::model::reasoning::ReasoningOption {
+                kind: "effort".to_string(),
+                values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            }],
+        );
+
+        assert!(app.reasoning_efforts.is_empty());
+        assert_eq!(
+            app.active_primary_agent_reasoning_effort(),
+            Some(crate::model::reasoning::ReasoningEffort::Medium)
         );
     }
 
