@@ -10,6 +10,7 @@ use ratatui::Frame;
 pub struct StatusDialogState {
     visible: bool,
     servers: Vec<McpServerView>,
+    area: Option<Rect>,
 }
 
 impl StatusDialogState {
@@ -20,6 +21,11 @@ impl StatusDialogState {
 
     pub fn hide(&mut self) {
         self.visible = false;
+        self.area = None;
+    }
+
+    pub fn contains(&self, position: ratatui::layout::Position) -> bool {
+        self.area.is_some_and(|area| area.contains(position))
     }
 
     pub fn is_visible(&self) -> bool {
@@ -29,7 +35,7 @@ impl StatusDialogState {
 
 pub fn render_status_dialog(
     frame: &mut Frame<'_>,
-    state: &StatusDialogState,
+    state: &mut StatusDialogState,
     area: Rect,
     colors: &ThemeColors,
 ) {
@@ -45,6 +51,7 @@ pub fn render_status_dialog(
     let [dialog_area] = Layout::vertical([Constraint::Length(desired_height.max(7))])
         .flex(Flex::Center)
         .areas(dialog_area);
+    state.area = Some(dialog_area);
 
     frame.render_widget(Clear, dialog_area);
 
@@ -136,4 +143,32 @@ pub fn render_status_dialog(
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), chunks[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Theme;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn rendered_dialog_tracks_bounds_for_outside_click_dismissal() {
+        let mut state = StatusDialogState::default();
+        state.show(Vec::new());
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let colors = Theme::load_builtin_default().get_colors(true);
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_status_dialog(frame, &mut state, area, &colors);
+            })
+            .expect("render status dialog");
+
+        assert!(state.contains(ratatui::layout::Position::new(40, 12)));
+        assert!(!state.contains(ratatui::layout::Position::new(0, 0)));
+        state.hide();
+        assert!(!state.contains(ratatui::layout::Position::new(40, 12)));
+    }
 }

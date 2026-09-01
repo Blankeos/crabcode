@@ -1240,11 +1240,8 @@ impl App {
         let loaded_config = crate::config::ConfigLoader::load()?;
         let mut mcp_config = loaded_config.merged_config.mcp.clone();
         crate::remote_mcp::apply_mcp_overrides(&mut mcp_config, prefs_dao.as_ref());
-        if !mcp_config.is_empty() {
-            let warm_cwd =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            self.mcp_manager = Some(crate::mcp::McpManager::ensure(mcp_config.clone(), warm_cwd));
-        }
+        let warm_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        self.mcp_manager = Some(crate::mcp::McpManager::ensure(mcp_config.clone(), warm_cwd));
         self.input
             .set_image_open_config(loaded_config.merged_config.images.clone());
         if !loaded_config.diagnostics.info.is_empty() {
@@ -2838,11 +2835,10 @@ impl App {
     }
 
     fn refresh_mcp_summary(&mut self) {
-        let enabled = self.mcp.values().filter(|server| server.enabled()).count();
         let Some(manager) = self.mcp_manager.as_ref() else {
             self.mcp_summary = crate::views::home::McpSummary {
                 connected: 0,
-                enabled,
+                enabled: 0,
                 has_error: false,
             };
             return;
@@ -2851,6 +2847,7 @@ impl App {
             return;
         };
         let views = manager.views();
+        let enabled = views.iter().filter(|server| server.enabled).count();
         self.mcp_summary = crate::views::home::McpSummary {
             connected: views
                 .iter()
@@ -4946,6 +4943,17 @@ impl App {
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             self.dismiss_selection_actions();
+            return;
+        }
+
+        if self.overlay_focus == OverlayFocus::StatusDialog
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+            if !self.status_dialog_state.contains(position) {
+                self.status_dialog_state.hide();
+                self.overlay_focus = OverlayFocus::None;
+            }
             return;
         }
 
@@ -11623,7 +11631,7 @@ impl App {
 
         if self.overlay_focus == OverlayFocus::StatusDialog && self.status_dialog_state.is_visible()
         {
-            render_status_dialog(f, &self.status_dialog_state, size, &colors);
+            render_status_dialog(f, &mut self.status_dialog_state, size, &colors);
         }
 
         if self.overlay_focus == OverlayFocus::RefreshModelsDialog {
@@ -12630,6 +12638,26 @@ mod tests {
         assert_eq!(
             app.active_primary_agent_reasoning_effort(),
             Some(crate::model::reasoning::ReasoningEffort::Low)
+        );
+    }
+
+    #[test]
+    fn reasoning_capable_model_uses_catalog_default_without_override() {
+        let mut app = test_app();
+        app.provider_name = "openai".to_string();
+        app.model = "gpt-5".to_string();
+        app.model_reasoning_options.insert(
+            (app.provider_name.clone(), app.model.clone()),
+            vec![crate::model::reasoning::ReasoningOption {
+                kind: "effort".to_string(),
+                values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            }],
+        );
+
+        assert!(app.reasoning_efforts.is_empty());
+        assert_eq!(
+            app.active_primary_agent_reasoning_effort(),
+            Some(crate::model::reasoning::ReasoningEffort::Medium)
         );
     }
 

@@ -976,9 +976,9 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "status".to_string(),
-        description: "Show system status".to_string(),
+        description: "Show MCP status".to_string(),
         handler: handle_status,
-        hidden_tokens: vec!["mcp".to_string()],
+        hidden_tokens: Vec::new(),
         chat_only: false,
     });
 
@@ -1433,7 +1433,7 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 22);
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
@@ -1452,6 +1452,8 @@ mod tests {
         assert!(names.contains(&"skills".to_string()));
         assert!(names.contains(&"mcp".to_string()));
         assert!(names.contains(&"title".to_string()));
+        assert!(names.contains(&"variants".to_string()));
+        assert!(names.contains(&"status".to_string()));
         assert!(registry.is_chat_only("compact"));
         assert!(registry.is_chat_only("fork"));
         assert!(registry.is_chat_only("move"));
