@@ -730,11 +730,7 @@ impl SessionManager {
         session_id: &str,
         message: &crate::session::types::Message,
     ) -> Result<(), SessionError> {
-        if let Some(session) = self.sessions.get_mut(session_id) {
-            session.add_message(message.clone());
-            self.message_counts
-                .insert(session_id.to_string(), session.messages.len());
-        } else {
+        if !self.sessions.contains_key(session_id) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
 
@@ -742,11 +738,18 @@ impl SessionManager {
             if let Some(db_id) = self.id_mapping.get(session_id) {
                 let mut db_message: crate::persistence::Message = message.clone().into();
                 db_message.session_id = *db_id;
-                let _ = dao
-                    .add_message(&db_message)
-                    .map_err(|e| SessionError::PersistenceError(e.to_string()));
+                dao.add_message(&db_message)
+                    .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
             }
         }
+
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+        session.add_message(message.clone());
+        self.message_counts
+            .insert(session_id.to_string(), session.messages.len());
         Ok(())
     }
 
@@ -968,6 +971,9 @@ impl SessionManager {
             self.message_counts.remove(id);
             if self.current_session_id.as_ref() == Some(&id.to_string()) {
                 self.current_session_id = None;
+            }
+            if let Err(error) = crate::persistence::attachments::cleanup_session(id) {
+                crate::emit_log!("Failed to clean session attachments for {}: {}", id, error);
             }
             true
         } else {

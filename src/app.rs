@@ -7500,9 +7500,23 @@ impl App {
             .map(|session| fork_title_from_session_title(&session.title))
             .unwrap_or_else(|| fork_title_from_session_title("fork"));
 
-        let _ = self.create_new_session(Some(fork_title));
-        for msg in &messages_to_fork {
-            let _ = self.session_manager.add_message_to_current_session(msg);
+        let fork_id = self.create_new_session(Some(fork_title));
+        let messages_to_fork =
+            match crate::persistence::attachments::clone_messages(&messages_to_fork, &fork_id) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    self.session_manager.delete_session(&fork_id);
+                    self.push_command_error(format!("Failed to copy fork attachments: {error}"));
+                    return false;
+                }
+            };
+        if let Err(error) = self
+            .session_manager
+            .replace_session_messages(&fork_id, messages_to_fork.clone())
+        {
+            self.session_manager.delete_session(&fork_id);
+            self.push_command_error(format!("Failed to persist fork: {error:?}"));
+            return false;
         }
 
         self.chat_state.chat.clear();

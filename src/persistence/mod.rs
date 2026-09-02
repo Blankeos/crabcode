@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+pub mod attachments;
 pub mod auth;
 pub mod conversions;
 pub mod db;
@@ -55,7 +56,7 @@ fn resolve_state_home(xdg_state_home: Option<OsString>, home_dir: Option<PathBuf
         .join("state")
 }
 
-fn create_private_dir_all(dir: &Path) -> Result<()> {
+pub(crate) fn create_private_dir_all(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     restrict_dir_permissions(dir)?;
     Ok(())

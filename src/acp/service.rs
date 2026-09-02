@@ -19,7 +19,6 @@ use agent_client_protocol::{Client, ConnectionTo, Error};
 use base64::Engine as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +28,34 @@ pub struct AcpService {
     sessions: Arc<AsyncMutex<HashMap<String, AcpSession>>>,
     session_manager: Arc<Mutex<SessionManager>>,
     client_capabilities: Arc<Mutex<agent_client_protocol::schema::v1::ClientCapabilities>>,
+}
+
+struct ManagedAttachmentGuard {
+    paths: Vec<String>,
+    committed: bool,
+}
+
+impl ManagedAttachmentGuard {
+    fn new(paths: Vec<String>) -> Self {
+        Self {
+            paths,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ManagedAttachmentGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            for path in &self.paths {
+                crate::persistence::attachments::remove_file(Path::new(path));
+            }
+        }
+    }
 }
 
 struct AcpQuestionField {
@@ -657,9 +684,21 @@ impl AcpService {
                 .switch_current_workspace_path(&source.cwd.to_string_lossy())
                 .map_err(|_| internal_error())?;
             let fork_id = manager.create_session(Some(format!("{} (fork)", session_id)));
-            manager
+            let messages =
+                match crate::persistence::attachments::clone_messages(&messages, &fork_id) {
+                    Ok(messages) => messages,
+                    Err(_) => {
+                        manager.delete_session(&fork_id);
+                        return Err(internal_error());
+                    }
+                };
+            if manager
                 .replace_session_messages(&fork_id, messages)
-                .map_err(|_| internal_error())?;
+                .is_err()
+            {
+                manager.delete_session(&fork_id);
+                return Err(internal_error());
+            }
             fork_id
         };
         self.sessions
@@ -857,7 +896,9 @@ impl AcpService {
             }
             return self.compact_session(&session_id, session, connection).await;
         }
-        let (prompt, local_image_paths) = prompt_content(prompt, supports_images, &session)?;
+        let (prompt, local_image_paths) =
+            prompt_content(prompt, supports_images, &session_id, &session)?;
+        let mut attachment_guard = ManagedAttachmentGuard::new(local_image_paths.clone());
         let prompt = expand_slash_command(&session, &prompt).await?;
         if prompt.trim().is_empty() {
             return Err(Error::invalid_params().data("prompt must include text content"));
@@ -891,6 +932,7 @@ impl AcpService {
             manager
                 .add_message_to_session(&session_id, &user_message)
                 .map_err(|_| internal_error())?;
+            attachment_guard.commit();
             manager
                 .set_session_status(
                     &session_id,
@@ -1511,11 +1553,10 @@ fn workspace_path(path: &Path) -> Result<PathBuf, Error> {
     Ok(path)
 }
 
-static ACP_IMAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
 fn prompt_content(
     parts: Vec<ContentBlock>,
     supports_images: bool,
+    session_id: &str,
     session: &AcpSession,
 ) -> Result<(String, Vec<String>), Error> {
     let mut text = String::new();
@@ -1542,7 +1583,15 @@ fn prompt_content(
                         session.provider, session.model
                     )));
                 }
-                local_image_paths.push(write_prompt_image(&image)?);
+                match write_prompt_image(session_id, &image) {
+                    Ok(path) => local_image_paths.push(path),
+                    Err(error) => {
+                        for path in &local_image_paths {
+                            crate::persistence::attachments::remove_file(Path::new(path));
+                        }
+                        return Err(error);
+                    }
+                }
             }
             ContentBlock::Audio(_) => {
                 return Err(Error::invalid_params().data("audio ACP prompts are not supported yet"));
@@ -1583,6 +1632,7 @@ fn prompt_text(parts: Vec<ContentBlock>) -> Result<String, Error> {
 }
 
 fn write_prompt_image(
+    session_id: &str,
     image: &agent_client_protocol::schema::v1::ImageContent,
 ) -> Result<String, Error> {
     const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -1606,11 +1656,8 @@ fn write_prompt_image(
         return Err(Error::invalid_params().data("image exceeds the 20 MiB size limit"));
     }
 
-    let directory = std::env::temp_dir().join("crabcode").join("acp-images");
-    std::fs::create_dir_all(&directory).map_err(|_| internal_error())?;
-    let sequence = ACP_IMAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let path = directory.join(format!("{}-{sequence}.{extension}", std::process::id()));
-    std::fs::write(&path, data).map_err(|_| internal_error())?;
+    let path = crate::persistence::attachments::write(session_id, extension, &data)
+        .map_err(|_| internal_error())?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -2648,25 +2695,58 @@ mod tests {
     }
 
     #[test]
-    fn writes_supported_acp_image_to_temp_file() {
+    fn writes_supported_acp_image_to_managed_session_storage() {
+        let session_id = format!("acp-image-{}", cuid2::create_id());
         let image = agent_client_protocol::schema::v1::ImageContent::new("aGk=", "image/png");
-        let path = write_prompt_image(&image).expect("image file");
+        let path = write_prompt_image(&session_id, &image).expect("image file");
 
+        assert!(Path::new(&path).starts_with(crate::persistence::attachments::root_dir()));
         assert_eq!(std::fs::read(&path).expect("image bytes"), b"hi");
-        let _ = std::fs::remove_file(path);
+        crate::persistence::attachments::cleanup_session(&session_id).unwrap();
     }
 
     #[test]
-    fn writes_acp_clipboard_image_data_uri_to_temp_file() {
+    fn writes_acp_clipboard_image_data_uri_to_managed_storage() {
+        let session_id = format!("acp-image-{}", cuid2::create_id());
         let image = agent_client_protocol::schema::v1::ImageContent::new(
             "data:image/png;base64,aGk=",
             "application/octet-stream",
         );
-        let path = write_prompt_image(&image).expect("image file");
+        let path = write_prompt_image(&session_id, &image).expect("image file");
 
         assert!(path.ends_with(".png"));
         assert_eq!(std::fs::read(&path).expect("image bytes"), b"hi");
-        let _ = std::fs::remove_file(path);
+        crate::persistence::attachments::cleanup_session(&session_id).unwrap();
+    }
+
+    #[test]
+    fn prompt_image_failure_rolls_back_prior_managed_files() {
+        let session_id = format!("acp-image-{}", cuid2::create_id());
+        let result = prompt_content(
+            vec![
+                ContentBlock::Image(agent_client_protocol::schema::v1::ImageContent::new(
+                    "aGk=",
+                    "image/png",
+                )),
+                ContentBlock::Image(agent_client_protocol::schema::v1::ImageContent::new(
+                    "not-base64",
+                    "image/png",
+                )),
+            ],
+            true,
+            &session_id,
+            &test_session(),
+        );
+
+        assert!(result.is_err());
+        let directory = crate::persistence::attachments::session_dir(&session_id).unwrap();
+        assert!(
+            !directory.exists()
+                || std::fs::read_dir(&directory)
+                    .unwrap()
+                    .all(|entry| entry.is_err())
+        );
+        crate::persistence::attachments::cleanup_session(&session_id).unwrap();
     }
 
     #[test]
@@ -2676,14 +2756,14 @@ mod tests {
             "image/png",
         );
 
-        assert!(write_prompt_image(&image).is_err());
+        assert!(write_prompt_image("test", &image).is_err());
     }
 
     #[test]
     fn rejects_unsupported_acp_image_mime_type() {
         let image = agent_client_protocol::schema::v1::ImageContent::new("aGk=", "image/tiff");
 
-        assert!(write_prompt_image(&image).is_err());
+        assert!(write_prompt_image("test", &image).is_err());
     }
 
     fn config_with_command(command: crate::command::custom::CustomCommand) -> LoadedConfig {
