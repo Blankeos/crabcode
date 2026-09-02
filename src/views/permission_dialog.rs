@@ -556,6 +556,7 @@ mod tests {
     fn bash_detail_lines_show_command_and_workdir() {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let prompt = PermissionPrompt {
+            tool_call_id: None,
             tool_id: "bash".to_string(),
             action: PermissionAction::Bash,
             permission: "bash".to_string(),
@@ -589,6 +590,7 @@ mod tests {
     fn external_directory_detail_target_shows_wildcard_scope() {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let prompt = PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "external_directory".to_string(),
@@ -614,6 +616,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "bash".to_string(),
             action: PermissionAction::Bash,
             permission: "bash".to_string(),
@@ -658,6 +661,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "read".to_string(),
@@ -689,6 +693,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "external_directory".to_string(),
@@ -729,6 +734,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "read".to_string(),
@@ -770,6 +776,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "read".to_string(),

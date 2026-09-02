@@ -146,7 +146,13 @@ pub async fn convert_to_aisdk_tools(
                 }
 
                 if let Err(e) = permissions
-                    .preflight(&agent_mode, &tool_id_for_exec, &input, sender.as_ref())
+                    .preflight_for_call(
+                        &agent_mode,
+                        &tool_id_for_exec,
+                        &input,
+                        Some(&call_id),
+                        sender.as_ref(),
+                    )
                     .await
                 {
                     let err = format!("{}", e);

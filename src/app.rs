@@ -12467,6 +12467,7 @@ mod tests {
         let mut app = test_app();
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -12498,6 +12499,7 @@ mod tests {
         let mut app = test_app();
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -13123,6 +13125,7 @@ mod tests {
         app.chat_state.chat.scroll_offset = 0;
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),

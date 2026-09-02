@@ -25,6 +25,12 @@ pub struct AcpService {
     session_manager: Arc<Mutex<SessionManager>>,
 }
 
+fn permission_tool_call_id(tool_call_id: Option<&str>) -> String {
+    tool_call_id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("permission:{}", cuid2::create_id()))
+}
+
 fn resolved_reasoning(
     session: &AcpSession,
     requested: crate::model::reasoning::ReasoningEffort,
@@ -1188,7 +1194,7 @@ async fn request_permission(
     session_id: &str,
     prompt: &crate::tools::PermissionPrompt,
 ) -> crate::tools::PermissionResponse {
-    let tool_call_id = format!("permission:{}", cuid2::create_id());
+    let tool_call_id = permission_tool_call_id(prompt.tool_call_id.as_deref());
     let input = serde_json::json!({
         "tool": prompt.tool_id,
         "permission": prompt.permission,
@@ -1534,6 +1540,16 @@ mod tests {
         let payload = serde_json::json!({"output_preview": "legacy output"});
 
         assert_eq!(tool_result_text(&payload), "legacy output");
+    }
+
+    #[test]
+    fn acp_permission_prefers_originating_tool_call_id() {
+        assert_eq!(permission_tool_call_id(Some("call_123")), "call_123");
+    }
+
+    #[test]
+    fn acp_permission_generates_fallback_id_without_origin() {
+        assert!(permission_tool_call_id(None).starts_with("permission:"));
     }
 
     #[test]
