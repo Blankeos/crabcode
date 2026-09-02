@@ -1154,6 +1154,16 @@ fn send_text(
         .map_err(|_| internal_error())
 }
 
+fn tool_result_text(payload: &serde_json::Value) -> String {
+    payload
+        .get("output")
+        .or_else(|| payload.get("output_preview"))
+        .or_else(|| payload.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn send_tool_call(
     connection: &ConnectionTo<Client>,
     session_id: &str,
@@ -1247,12 +1257,7 @@ fn send_tool_result(
         Some("ok") => ToolCallStatus::Completed,
         _ => ToolCallStatus::Failed,
     };
-    let text = payload
-        .get("output_preview")
-        .or_else(|| payload.get("error"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let text = tool_result_text(&payload);
     let fields = ToolCallUpdateFields::new()
         .status(status)
         .content((!text.is_empty()).then(|| vec![ToolCallContent::from(text)]))
@@ -1512,6 +1517,23 @@ mod tests {
             tool_title("read", &serde_json::json!({"filePath": "src/main.rs"})),
             "src/main.rs"
         );
+    }
+
+    #[test]
+    fn acp_tool_result_prefers_full_output() {
+        let payload = serde_json::json!({
+            "output": "complete tool output",
+            "output_preview": "short preview",
+        });
+
+        assert_eq!(tool_result_text(&payload), "complete tool output");
+    }
+
+    #[test]
+    fn acp_tool_result_supports_legacy_preview_payloads() {
+        let payload = serde_json::json!({"output_preview": "legacy output"});
+
+        assert_eq!(tool_result_text(&payload), "legacy output");
     }
 
     #[test]

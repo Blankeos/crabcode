@@ -228,24 +228,7 @@ pub async fn convert_to_aisdk_tools(
                 };
 
                 if let Some(ref sender) = sender {
-                    let preview = truncate_tool_output(&tool_result.output, TOOL_UI_PREVIEW_LIMIT);
-
-                    let line_count = tool_result.output.lines().count();
-                    let meta = serde_json::Value::Object(
-                        tool_result
-                            .metadata
-                            .into_iter()
-                            .collect::<serde_json::Map<String, serde_json::Value>>(),
-                    );
-
-                    let payload = serde_json::json!({
-                        "status": "ok",
-                        "title": tool_result.title,
-                        "output_preview": preview,
-                        "line_count": line_count,
-                        "metadata": meta,
-                    })
-                    .to_string();
+                    let payload = tool_success_payload(&tool_result);
 
                     if sender
                         .send(crate::llm::ChunkMessage::ToolResult(
@@ -334,6 +317,27 @@ fn truncate_tool_output(output: &str, limit: usize) -> String {
     truncated
 }
 
+fn tool_success_payload(tool_result: &crate::tools::ToolResult) -> String {
+    let preview = truncate_tool_output(&tool_result.output, TOOL_UI_PREVIEW_LIMIT);
+    let meta = serde_json::Value::Object(
+        tool_result
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
+
+    serde_json::json!({
+        "status": "ok",
+        "title": tool_result.title,
+        "output": tool_result.output,
+        "output_preview": preview,
+        "line_count": tool_result.output.lines().count(),
+        "metadata": meta,
+    })
+    .to_string()
+}
+
 fn unsupported_image_input_note(image_count: usize) -> String {
     let image_label = if image_count == 1 { "image" } else { "images" };
     format!(
@@ -355,6 +359,7 @@ fn send_tool_error_result(
     let payload = serde_json::json!({
         "status": "error",
         "title": "Tool failed",
+        "output": error,
         "output_preview": preview,
         "line_count": error.lines().count().max(1),
         "metadata": {
@@ -401,7 +406,8 @@ fn param_to_json_schema(param_type: &crate::tools::ParameterType) -> serde_json:
 
 #[cfg(test)]
 mod tests {
-    use super::{send_tool_error_result, truncate_tool_output};
+    use super::{send_tool_error_result, tool_success_payload, truncate_tool_output};
+    use std::collections::HashMap;
 
     #[test]
     fn truncate_tool_output_bounds_large_results() {
@@ -418,6 +424,28 @@ mod tests {
         let output = "small result";
 
         assert_eq!(truncate_tool_output(output, 40_000), output);
+    }
+
+    #[test]
+    fn tool_success_payload_retains_full_output_and_bounded_preview() {
+        let output = "a".repeat(5_000);
+        let result = crate::tools::ToolResult {
+            title: "Large result".to_string(),
+            output: output.clone(),
+            metadata: HashMap::new(),
+            images: Vec::new(),
+        };
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&tool_success_payload(&result)).expect("payload should be json");
+
+        assert_eq!(payload["output"], output);
+        assert!(payload["output_preview"]
+            .as_str()
+            .is_some_and(|preview| preview.len() < 5_000));
+        assert!(payload["output_preview"]
+            .as_str()
+            .is_some_and(|preview| preview.contains("tool output truncated to 4000 bytes")));
     }
 
     #[test]
@@ -443,6 +471,10 @@ mod tests {
             serde_json::from_str(&result.content).expect("payload should be json");
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["title"], "Tool failed");
+        assert_eq!(
+            payload["output"],
+            "Execution error: Could not find text to replace"
+        );
         assert_eq!(
             payload["output_preview"],
             "Execution error: Could not find text to replace"
