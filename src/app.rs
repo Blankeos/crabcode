@@ -9741,6 +9741,7 @@ impl App {
                 false
             }
             crate::llm::ChunkMessage::Metrics { .. } => true,
+            crate::llm::ChunkMessage::TurnStopReason(_) => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.set_session_retry_status(session_id, None);
                 // Close the generation sample as a tool-calls finish (excluded from

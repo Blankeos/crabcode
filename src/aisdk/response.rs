@@ -13,6 +13,21 @@ use tokio::sync::mpsc;
 
 const PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT: usize = 1;
 const PROVIDER_STEP_MAX_RETRIES: usize = 10;
+
+fn terminal_stop_reason(reason: Option<&FinishReason>) -> StopReason {
+    match reason {
+        Some(FinishReason::Length) => StopReason::MaxTokens,
+        Some(FinishReason::Refusal | FinishReason::ContentFilter) => StopReason::Refusal,
+        _ => StopReason::Finish,
+    }
+}
+
+fn provider_reason_ends_turn(reason: Option<&FinishReason>) -> bool {
+    matches!(
+        reason,
+        Some(FinishReason::Length | FinishReason::Refusal | FinishReason::ContentFilter)
+    )
+}
 /// Grok Build only acts on `tail_repetition:{n}@thinking` from
 /// `response.doom_loop_check` — never on tool names across steps.
 /// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/doom_loop.rs`
@@ -768,6 +783,7 @@ pub async fn stream_with_tools<P: Provider>(
                     && response_end_turn.is_none()
                     && last_assistant_message_phase.is_none()
                     && phase_less_ambiguous_follow_ups < PHASELESS_AMBIGUOUS_FOLLOW_UP_LIMIT
+                    && !provider_reason_ends_turn(provider_finish_reason.as_ref())
                     && provider_finish_reason
                         .as_ref()
                         .is_some_and(|reason| !reason.is_final_assistant_stop());
@@ -808,7 +824,8 @@ pub async fn stream_with_tools<P: Provider>(
                     )));
                     continue;
                 }
-                *stop_reason_arc.lock().await = Some(StopReason::Finish);
+                *stop_reason_arc.lock().await =
+                    Some(terminal_stop_reason(provider_finish_reason.as_ref()));
                 break;
             }
 
@@ -4477,4 +4494,23 @@ mod tests {
         assert_eq!(calls[0].name, "read");
         assert_eq!(calls[0].arguments["file_path"], "Cargo.toml");
     }
+}
+#[test]
+fn terminal_provider_reasons_map_to_typed_stop_reasons() {
+    assert_eq!(
+        terminal_stop_reason(Some(&FinishReason::Length)),
+        StopReason::MaxTokens
+    );
+    assert_eq!(
+        terminal_stop_reason(Some(&FinishReason::Refusal)),
+        StopReason::Refusal
+    );
+    assert_eq!(
+        terminal_stop_reason(Some(&FinishReason::ContentFilter)),
+        StopReason::Refusal
+    );
+    assert_eq!(
+        terminal_stop_reason(Some(&FinishReason::Stop)),
+        StopReason::Finish
+    );
 }

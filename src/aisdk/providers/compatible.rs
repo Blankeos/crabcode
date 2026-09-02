@@ -604,12 +604,6 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
 
     match finish_reason {
         "" => {}
-        "length" => chunks.push(Ok(ChunkType::Incomplete(
-            "finish_reason=length".to_string(),
-        ))),
-        "content_filter" => chunks.push(Ok(ChunkType::Failed(
-            "finish_reason=content_filter".to_string(),
-        ))),
         _ => chunks.push(Ok(ChunkType::End {
             reason: Some(FinishReason::from_openai_compatible(finish_reason)),
         })),
@@ -780,14 +774,17 @@ mod tests {
     }
 
     #[test]
-    fn length_finish_reason_emits_incomplete_chunk() {
+    fn length_finish_reason_emits_terminal_reason() {
         let data = r#"{"choices":[{"index":0,"finish_reason":"length","delta":{"role":"assistant","content":""}}]}"#;
 
         let chunks = process_sse_data(data);
 
-        assert!(chunks
-            .iter()
-            .any(|chunk| matches!(chunk, Ok(ChunkType::Incomplete(_)))));
+        assert!(chunks.iter().any(|chunk| matches!(
+            chunk,
+            Ok(ChunkType::End {
+                reason: Some(FinishReason::Length)
+            })
+        )));
     }
 
     #[test]

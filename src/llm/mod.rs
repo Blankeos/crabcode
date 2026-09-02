@@ -47,6 +47,7 @@ pub enum ChunkMessage {
         job_id: String,
         event: BackgroundJobEventKind,
     },
+    TurnStopReason(TurnStopReason),
     End,
     Failed(String),
     Cancelled,
@@ -54,6 +55,12 @@ pub enum ChunkMessage {
         token_count: usize,
         duration_ms: u64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnStopReason {
+    MaxTokens,
+    Refusal,
 }
 
 #[derive(Debug, Clone)]

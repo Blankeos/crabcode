@@ -558,7 +558,8 @@ async fn run_print_mode(
             | crate::llm::ChunkMessage::SubagentStarted { .. }
             | crate::llm::ChunkMessage::SubagentChunk { .. }
             | crate::llm::ChunkMessage::TerminalSessionEvent { .. }
-            | crate::llm::ChunkMessage::BackgroundJobEvent { .. } => {}
+            | crate::llm::ChunkMessage::BackgroundJobEvent { .. }
+            | crate::llm::ChunkMessage::TurnStopReason(_) => {}
             crate::llm::ChunkMessage::End => {
                 println!();
                 play_resolved_sound(&sounds, crate::sound::SoundEvent::Complete);

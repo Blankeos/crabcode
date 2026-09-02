@@ -37,5 +37,6 @@ Done for packaging/host hooks:
 - Absolute `crate::{chunk,error,...}` paths are crate-root-shaped (host re-exports them today)
 - Product-leaky debug path renamed/feature-gated
 - Product-flavored comments/tests scrubbed
+- Typed terminal stop reasons include normal completion, max tokens, refusal, hooks, and errors
 
 Keep app glue outside this tree (`src/tools/aisdk_bridge.rs`, `src/llm/*`).

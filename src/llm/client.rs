@@ -48,6 +48,14 @@ struct ProviderRequestConfig {
     gateway_caching_auto: bool,
 }
 
+fn turn_stop_reason(stop_reason: Option<&StopReason>) -> Option<crate::llm::TurnStopReason> {
+    match stop_reason {
+        Some(StopReason::MaxTokens) => Some(crate::llm::TurnStopReason::MaxTokens),
+        Some(StopReason::Refusal) => Some(crate::llm::TurnStopReason::Refusal),
+        _ => None,
+    }
+}
+
 impl ProviderRequestConfig {
     fn new(
         kind: ProviderKind,
@@ -767,6 +775,9 @@ pub async fn stream_llm_with_cancellation(
     };
 
     let stop_reason = response.stop_reason().await;
+    if let Some(reason) = turn_stop_reason(stop_reason.as_ref()) {
+        let _ = sender.send(crate::llm::ChunkMessage::TurnStopReason(reason));
+    }
     let stream_outcome = relay_result.outcome;
     let primary_outcome_label = stream_outcome_label(stream_outcome, stop_reason.as_ref());
     crate::emit_log!(
@@ -3762,4 +3773,16 @@ fn content_with_vlm_agent_hint(content: &str, image_paths: &[String]) -> String 
     } else {
         format!("{content}\n\n{hint}")
     }
+}
+#[test]
+fn maps_runtime_stop_reasons_to_turn_events() {
+    assert_eq!(
+        turn_stop_reason(Some(&StopReason::MaxTokens)),
+        Some(crate::llm::TurnStopReason::MaxTokens)
+    );
+    assert_eq!(
+        turn_stop_reason(Some(&StopReason::Refusal)),
+        Some(crate::llm::TurnStopReason::Refusal)
+    );
+    assert_eq!(turn_stop_reason(Some(&StopReason::Finish)), None);
 }

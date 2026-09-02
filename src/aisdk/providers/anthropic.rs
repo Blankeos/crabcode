@@ -337,13 +337,9 @@ fn anthropic_message_delta(value: &serde_json::Value) -> Option<ChunkType> {
         .and_then(|delta| delta.get("stop_reason"))
         .and_then(|stop_reason| stop_reason.as_str())?;
 
-    match stop_reason {
-        "max_tokens" => Some(ChunkType::Incomplete("stop_reason=max_tokens".to_string())),
-        "refusal" => Some(ChunkType::Failed("stop_reason=refusal".to_string())),
-        reason => Some(ChunkType::End {
-            reason: Some(FinishReason::from_anthropic(reason)),
-        }),
-    }
+    Some(ChunkType::End {
+        reason: Some(FinishReason::from_anthropic(stop_reason)),
+    })
 }
 
 fn anthropic_hosted_search_start(value: &serde_json::Value) -> Option<String> {
@@ -810,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn max_tokens_stop_reason_emits_incomplete_chunk() {
+    fn max_tokens_stop_reason_emits_terminal_reason() {
         let value = serde_json::json!({
             "type": "message_delta",
             "delta": {
@@ -821,7 +817,32 @@ mod tests {
             .expect("event should produce a chunk")
             .expect("chunk should parse");
 
-        assert!(matches!(chunk, ChunkType::Incomplete(_)));
+        assert!(matches!(
+            chunk,
+            ChunkType::End {
+                reason: Some(FinishReason::Length)
+            }
+        ));
+    }
+
+    #[test]
+    fn refusal_stop_reason_emits_terminal_reason() {
+        let value = serde_json::json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "refusal",
+            },
+        });
+        let chunk = anthropic_stream_chunk("message_delta", &value)
+            .expect("event should produce a chunk")
+            .expect("chunk should parse");
+
+        assert!(matches!(
+            chunk,
+            ChunkType::End {
+                reason: Some(FinishReason::Refusal)
+            }
+        ));
     }
 
     #[test]

@@ -717,6 +717,7 @@ impl AcpService {
         assistant.agent_mode = Some(session.agent.clone());
         let mut failed = None;
         let mut cancelled = false;
+        let mut turn_stop_reason = None;
 
         while let Some(chunk) = receiver.recv().await {
             match chunk {
@@ -756,6 +757,7 @@ impl AcpService {
                 }
                 crate::llm::ChunkMessage::Cancelled => cancelled = true,
                 crate::llm::ChunkMessage::Failed(error) => failed = Some(error),
+                crate::llm::ChunkMessage::TurnStopReason(reason) => turn_stop_reason = Some(reason),
                 crate::llm::ChunkMessage::PermissionRequest(prompt) => {
                     let response = request_permission(&connection, &session_id, &prompt).await;
                     let _ = prompt.response_tx.send(response);
@@ -801,7 +803,15 @@ impl AcpService {
         if let Some(error) = failed {
             return Err(internal_error_with(&error));
         }
-        Ok(PromptResponse::new(StopReason::EndTurn))
+        Ok(PromptResponse::new(acp_stop_reason(turn_stop_reason)))
+    }
+}
+
+fn acp_stop_reason(reason: Option<crate::llm::TurnStopReason>) -> StopReason {
+    match reason {
+        Some(crate::llm::TurnStopReason::MaxTokens) => StopReason::MaxTokens,
+        Some(crate::llm::TurnStopReason::Refusal) => StopReason::Refusal,
+        None => StopReason::EndTurn,
     }
 }
 
@@ -1754,6 +1764,19 @@ mod tests {
     #[test]
     fn acp_permission_generates_fallback_id_without_origin() {
         assert!(permission_tool_call_id(None).starts_with("permission:"));
+    }
+
+    #[test]
+    fn maps_typed_turn_stop_reasons_to_acp() {
+        assert_eq!(
+            acp_stop_reason(Some(crate::llm::TurnStopReason::MaxTokens)),
+            StopReason::MaxTokens
+        );
+        assert_eq!(
+            acp_stop_reason(Some(crate::llm::TurnStopReason::Refusal)),
+            StopReason::Refusal
+        );
+        assert_eq!(acp_stop_reason(None), StopReason::EndTurn);
     }
 
     #[test]
