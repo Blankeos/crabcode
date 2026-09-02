@@ -30,6 +30,39 @@ pub struct AcpService {
     client_capabilities: Arc<Mutex<agent_client_protocol::schema::v1::ClientCapabilities>>,
 }
 
+fn mcp_native_tool_content(metadata: &serde_json::Value) -> Vec<ToolCallContent> {
+    metadata
+        .get("mcp_result")
+        .and_then(|result| result.get("content"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| {
+            !matches!(
+                block.get("type").and_then(serde_json::Value::as_str),
+                Some("text")
+            )
+        })
+        .filter_map(|block| {
+            serde_json::from_value::<ContentBlock>(block.clone())
+                .ok()
+                .map(ToolCallContent::from)
+        })
+        .collect()
+}
+
+fn metadata_has_mcp_images(metadata: Option<&serde_json::Value>) -> bool {
+    metadata
+        .and_then(|metadata| metadata.get("mcp_result"))
+        .and_then(|result| result.get("content"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|content| {
+            content
+                .iter()
+                .any(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("image"))
+        })
+}
+
 fn permission_tool_content(
     prompt: &crate::tools::PermissionPrompt,
     cwd: &Path,
@@ -1936,10 +1969,13 @@ fn tool_result_content(payload: &serde_json::Value, cwd: &Path) -> Vec<ToolCallC
         } else if let Some(diff) = tool_diff(metadata, cwd) {
             content.push(diff);
         }
+        content.extend(mcp_native_tool_content(metadata));
     }
 
-    if let Some(images) = payload.get("images").and_then(serde_json::Value::as_array) {
-        content.extend(images.iter().filter_map(tool_result_image));
+    if !metadata_has_mcp_images(payload.get("metadata")) {
+        if let Some(images) = payload.get("images").and_then(serde_json::Value::as_array) {
+            content.extend(images.iter().filter_map(tool_result_image));
+        }
     }
 
     content
@@ -3031,6 +3067,44 @@ mod tests {
         assert!(matches!(
             command.input,
             Some(AvailableCommandInput::Unstructured(_))
+        ));
+    }
+
+    #[test]
+    fn acp_tool_result_restores_native_mcp_resources() {
+        let metadata = serde_json::json!({
+            "mcp_result": {
+                "content": [
+                    {
+                        "type": "image",
+                        "data": "aGk=",
+                        "mimeType": "image/png",
+                        "annotations": { "priority": 0.5 }
+                    },
+                    {
+                        "type": "resource_link",
+                        "uri": "file:///tmp/readme.md",
+                        "name": "readme",
+                        "mimeType": "text/markdown",
+                        "annotations": { "priority": 0.8 }
+                    }
+                ]
+            }
+        });
+
+        let content = mcp_native_tool_content(&metadata);
+        assert_eq!(content.len(), 2);
+        assert!(matches!(
+            &content[0],
+            ToolCallContent::Content(content)
+                if matches!(&content.content, ContentBlock::Image(image)
+                    if image.data == "aGk=" && image.annotations.is_some())
+        ));
+        assert!(matches!(
+            &content[1],
+            ToolCallContent::Content(content)
+                if matches!(&content.content, ContentBlock::ResourceLink(link)
+                    if link.uri == "file:///tmp/readme.md")
         ));
     }
 

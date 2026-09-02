@@ -292,16 +292,41 @@ impl McpManager {
         if result.is_error == Some(true) {
             return Err(ToolError::Execution(call_tool_result_text(&result)));
         }
-        let output = if let Some(structured) = result.structured_content {
-            serde_json::to_string_pretty(&structured).unwrap_or_else(|_| structured.to_string())
-        } else {
-            call_tool_result_text(&result)
-        };
-        Ok(ToolResult::new(
-            format!("MCP: {server_name}.{tool_name}"),
-            output,
-        ))
+        Ok(mcp_tool_result(server_name, tool_name, &result))
     }
+}
+
+fn mcp_tool_result(
+    server_name: &str,
+    tool_name: &str,
+    result: &rmcp::model::CallToolResult,
+) -> ToolResult {
+    let text = call_tool_result_text(result);
+    let output = if let Some(structured) = result.structured_content.as_ref() {
+        let structured =
+            serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string());
+        if text.trim().is_empty() || text == structured {
+            structured
+        } else {
+            format!("{structured}\n\n{text}")
+        }
+    } else {
+        text
+    };
+    let mut tool_result = ToolResult::new(format!("MCP: {server_name}.{tool_name}"), output)
+        .with_metadata(
+            "mcp_result",
+            serde_json::to_value(&result).unwrap_or(serde_json::Value::Null),
+        );
+    for content in &result.content {
+        if let ContentBlock::Image(image) = content {
+            tool_result = tool_result.with_image(
+                format!("data:{};base64,{}", image.mime_type, image.data),
+                image.mime_type.clone(),
+            );
+        }
+    }
+    tool_result
 }
 
 type ConnectOutcome = Result<(RunningService<RoleClient, ()>, Vec<McpToolSpec>), McpStatus>;
@@ -753,6 +778,36 @@ fn parameter_type_from_schema(schema: &Value) -> ParameterType {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn mcp_result_preserves_images_resources_annotations_and_structured_content() {
+        let resource = rmcp::model::Resource::new("file:///tmp/readme.md", "readme")
+            .with_mime_type("text/markdown");
+        let mut result = rmcp::model::CallToolResult::success(vec![
+            ContentBlock::Image(
+                rmcp::model::ImageContent::new("aGk=", "image/png")
+                    .with_annotations(rmcp::model::Annotations::default().with_priority(0.8)),
+            ),
+            ContentBlock::ResourceLink(resource),
+        ]);
+        result.structured_content = Some(json!({"answer": 42}));
+
+        let converted = mcp_tool_result("docs", "lookup", &result);
+        assert_eq!(converted.images.len(), 1);
+        assert_eq!(converted.images[0].media_type, "image/png");
+        assert_eq!(
+            converted.metadata["mcp_result"]["structuredContent"]["answer"],
+            42
+        );
+        let priority = converted.metadata["mcp_result"]["content"][0]["annotations"]["priority"]
+            .as_f64()
+            .unwrap();
+        assert!((priority - 0.8).abs() < 0.000_001);
+        assert_eq!(
+            converted.metadata["mcp_result"]["content"][1]["uri"],
+            "file:///tmp/readme.md"
+        );
+    }
 
     #[test]
     fn normalize_strips_root_anyof_with_non_object_branches() {
