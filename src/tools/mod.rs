@@ -62,6 +62,10 @@ pub trait ToolHandler: Send + Sync {
     fn definition(&self) -> Tool;
     fn validate(&self, params: &Value) -> Result<(), ToolError>;
     async fn execute(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError>;
+    /// MCP server this handler was discovered from. Built-in tools return `None`.
+    fn mcp_server(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub fn validate_required(params: &Value, required: &[&str]) -> Result<(), ToolError> {

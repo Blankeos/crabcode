@@ -73,6 +73,7 @@ Tool-result pruning matches Grok Build `prune_conversation` (`.devrefs/reference
 
 - **Empty system/user rows** are dropped before the wire (they pad the sticky prefix).  
 - **Images** use hysteresis: compact only above a trigger (~6 MiB total data-urls), then reclaim to a lower target (~3 MiB) so later turns stay cache-warm instead of re-evicting every step.
+- **Tool schemas** (built-in + **enabled** MCP only) ride every request, including each tool-loop step — the Responses API requires the `tools` array. Prompt cache is supposed to cover that prefix. Disabled MCP servers are dropped from the live manager *before* the next request is built, so toggling `/mcp` off must not leave those schemas on the wire.
 
 ---
 

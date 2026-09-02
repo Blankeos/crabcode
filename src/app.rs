@@ -2548,12 +2548,30 @@ impl App {
         format!("Ask anything... \"{}\"", suggestions[index])
     }
 
+    fn mcp_tool_prefix_tokens(&self) -> usize {
+        let Some(manager) = self.mcp_manager.as_ref() else {
+            return 0;
+        };
+        let Ok(manager) = manager.try_lock() else {
+            return 0;
+        };
+        manager
+            .tools()
+            .iter()
+            .map(|spec| {
+                let schema_len = spec.input_schema.to_string().len();
+                (spec.tool_id.len() + spec.description.len() + schema_len) / 4
+            })
+            .sum()
+    }
+
     fn session_usage_text(&mut self) -> String {
         let total_tokens = if self.is_streaming {
             self.streaming_context_tokens_cached()
         } else {
             crate::session::compaction::total_context_tokens(&self.chat_state.chat.messages)
-        };
+        }
+        .saturating_add(self.mcp_tool_prefix_tokens());
         let messages = &self.chat_state.chat.messages;
 
         let mut text = if total_tokens == 0 {
@@ -10931,7 +10949,36 @@ impl App {
             .prefs_dao
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("preferences unavailable"))?;
-        crate::remote_mcp::remote_toggle_mcp_server(prefs, &mut self.mcp, name)
+        let servers = crate::remote_mcp::remote_toggle_mcp_server(prefs, &mut self.mcp, name)?;
+        let enabled = self
+            .mcp
+            .get(name)
+            .map(|server| server.enabled())
+            .unwrap_or(false);
+        if let Some(manager) = self.mcp_manager.clone() {
+            let name = name.to_string();
+            if enabled {
+                tokio::spawn(async move {
+                    let mut manager = manager.lock().await;
+                    let _ = manager.set_enabled(&name, true).await;
+                });
+            } else {
+                let dropped = manager
+                    .try_lock()
+                    .map(|mut guard| {
+                        guard.disable_sync(&name);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !dropped {
+                    tokio::spawn(async move {
+                        manager.lock().await.disable_sync(&name);
+                    });
+                }
+            }
+        }
+        self.refresh_mcp_summary();
+        Ok(servers)
     }
 
     pub fn remote_queued_message_previews(&self) -> Vec<String> {

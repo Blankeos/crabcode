@@ -32,6 +32,25 @@ impl ToolRegistry {
         tools.get(id).cloned()
     }
 
+    pub async fn unregister(&self, id: &str) {
+        self.tools.write().await.remove(id);
+        self.order.write().await.retain(|existing| existing != id);
+    }
+
+    pub async fn mcp_tool_ids(&self) -> Vec<ToolId> {
+        let tools = self.tools.read().await;
+        let order = self.order.read().await;
+        order
+            .iter()
+            .filter(|id| {
+                tools
+                    .get(*id)
+                    .is_some_and(|handler| handler.mcp_server().is_some())
+            })
+            .cloned()
+            .collect()
+    }
+
     pub async fn list(&self) -> Vec<Tool> {
         let tools = self.tools.read().await;
         let order = self.order.read().await;
@@ -131,5 +150,22 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec!["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn unregister_removes_tool_and_order() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(TestTool("first"))).await;
+        registry.register(Arc::new(TestTool("second"))).await;
+        registry.unregister("first").await;
+
+        let ids: Vec<_> = registry
+            .list()
+            .await
+            .into_iter()
+            .map(|tool| tool.id)
+            .collect();
+        assert_eq!(ids, vec!["second"]);
+        assert!(registry.get("first").await.is_none());
     }
 }
