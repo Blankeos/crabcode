@@ -340,6 +340,7 @@ fn tool_success_payload(tool_result: &crate::tools::ToolResult) -> String {
         "output_preview": preview,
         "line_count": tool_result.output.lines().count(),
         "metadata": meta,
+        "images": tool_result.images,
     })
     .to_string()
 }
@@ -452,6 +453,21 @@ mod tests {
         assert!(payload["output_preview"]
             .as_str()
             .is_some_and(|preview| preview.contains("tool output truncated to 4000 bytes")));
+    }
+
+    #[test]
+    fn tool_success_payload_retains_result_images() {
+        let result = crate::tools::ToolResult::new("Image", "viewed")
+            .with_image("data:image/png;base64,aGk=", "image/png");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&tool_success_payload(&result)).expect("payload should be json");
+
+        assert_eq!(
+            payload["images"][0]["data_url"],
+            "data:image/png;base64,aGk="
+        );
+        assert_eq!(payload["images"][0]["media_type"], "image/png");
     }
 
     #[test]

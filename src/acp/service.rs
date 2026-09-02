@@ -7,8 +7,9 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionResponse, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo,
     SessionMode, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, UsageUpdate,
+    SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent, ToolCallLocation,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
+    UsageUpdate,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
 use base64::Engine as _;
@@ -383,11 +384,11 @@ impl AcpService {
         cwd: PathBuf,
         connection: ConnectionTo<Client>,
     ) -> Result<LoadSessionResponse, Error> {
-        let (_session, messages) = self.attach_persisted_session(&session_id, cwd).await?;
-        replay_messages(&connection, &session_id, &messages)?;
+        let (session, messages) = self.attach_persisted_session(&session_id, cwd).await?;
+        replay_messages(&connection, &session_id, &messages, &session.cwd)?;
         Ok(LoadSessionResponse::new()
-            .modes(session_modes(&_session))
-            .config_options(session_config_options(&_session)))
+            .modes(session_modes(&session))
+            .config_options(session_config_options(&session)))
     }
 
     pub async fn resume_session(
@@ -729,7 +730,7 @@ impl AcpService {
                 }
                 crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                     for tool_call in tool_calls {
-                        send_tool_call(&connection, &session_id, tool_call)?;
+                        send_tool_call(&connection, &session_id, tool_call, &session.cwd)?;
                     }
                 }
                 crate::llm::ChunkMessage::ToolResult(result) => {
@@ -738,7 +739,7 @@ impl AcpService {
                         "name": result.name,
                         "content": result.content,
                     }));
-                    send_tool_result(&connection, &session_id, result)?;
+                    send_tool_result(&connection, &session_id, result, &session.cwd)?;
                 }
                 crate::llm::ChunkMessage::Metrics {
                     token_count,
@@ -1170,10 +1171,129 @@ fn tool_result_text(payload: &serde_json::Value) -> String {
         .to_string()
 }
 
+fn absolute_tool_path(path: &str, cwd: &Path) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn tool_locations(tool_name: &str, input: &serde_json::Value, cwd: &Path) -> Vec<ToolCallLocation> {
+    let paths = if tool_name == "write_files" {
+        input
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|file| file.get("file_path").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect()
+    } else if tool_name == "apply_patch" {
+        crate::tools::patch::patch_paths_from_params(input)
+    } else {
+        input
+            .get("file_path")
+            .or_else(|| input.get("filePath"))
+            .or_else(|| input.get("filepath"))
+            .or_else(|| input.get("path"))
+            .and_then(serde_json::Value::as_str)
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default()
+    };
+
+    paths
+        .into_iter()
+        .map(|path| ToolCallLocation::new(absolute_tool_path(&path, cwd)))
+        .collect()
+}
+
+fn tool_result_locations(payload: &serde_json::Value, cwd: &Path) -> Vec<ToolCallLocation> {
+    let Some(metadata) = payload.get("metadata") else {
+        return Vec::new();
+    };
+    let line = metadata
+        .get("line_number")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|line| u32::try_from(line).ok());
+
+    if let Some(changes) = metadata
+        .get("changes")
+        .and_then(serde_json::Value::as_array)
+    {
+        return changes
+            .iter()
+            .filter_map(|change| change.get("path").and_then(serde_json::Value::as_str))
+            .map(|path| ToolCallLocation::new(absolute_tool_path(path, cwd)))
+            .collect();
+    }
+
+    metadata
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(|path| ToolCallLocation::new(absolute_tool_path(path, cwd)).line(line))
+        .into_iter()
+        .collect()
+}
+
+fn tool_result_content(payload: &serde_json::Value, cwd: &Path) -> Vec<ToolCallContent> {
+    let mut content = Vec::new();
+    let text = tool_result_text(payload);
+    if !text.is_empty() {
+        content.push(ToolCallContent::from(text));
+    }
+
+    if let Some(metadata) = payload.get("metadata") {
+        if let Some(changes) = metadata
+            .get("changes")
+            .and_then(serde_json::Value::as_array)
+        {
+            content.extend(changes.iter().filter_map(|change| tool_diff(change, cwd)));
+        } else if let Some(diff) = tool_diff(metadata, cwd) {
+            content.push(diff);
+        }
+    }
+
+    if let Some(images) = payload.get("images").and_then(serde_json::Value::as_array) {
+        content.extend(images.iter().filter_map(tool_result_image));
+    }
+
+    content
+}
+
+fn tool_diff(change: &serde_json::Value, cwd: &Path) -> Option<ToolCallContent> {
+    let path = change.get("path")?.as_str()?;
+    let new_text = change.get("new_text")?.as_str()?;
+    let old_text = change.get("old_text").and_then(serde_json::Value::as_str);
+    Some(
+        agent_client_protocol::schema::v1::Diff::new(
+            absolute_tool_path(path, cwd),
+            new_text.to_string(),
+        )
+        .old_text(old_text.map(str::to_string))
+        .into(),
+    )
+}
+
+fn tool_result_image(image: &serde_json::Value) -> Option<ToolCallContent> {
+    let data = image.get("data_url")?.as_str()?;
+    let media_type = image.get("media_type")?.as_str()?;
+    let encoded = data
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(','))
+        .map(|(_, encoded)| encoded)
+        .unwrap_or(data);
+    Some(ToolCallContent::from(ContentBlock::Image(
+        agent_client_protocol::schema::v1::ImageContent::new(encoded, media_type),
+    )))
+}
+
 fn send_tool_call(
     connection: &ConnectionTo<Client>,
     session_id: &str,
     tool_call: crate::llm::ToolCall,
+    cwd: &Path,
 ) -> Result<(), Error> {
     let raw_input = serde_json::from_str(&tool_call.function.arguments)
         .unwrap_or_else(|_| serde_json::json!({ "arguments": tool_call.function.arguments }));
@@ -1182,6 +1302,7 @@ fn send_tool_call(
         ToolCall::new(tool_call.id, title)
             .kind(tool_kind(&tool_call.function.name))
             .status(ToolCallStatus::Pending)
+            .locations(tool_locations(&tool_call.function.name, &raw_input, cwd))
             .raw_input(raw_input),
     );
     connection
@@ -1255,6 +1376,7 @@ fn send_tool_result(
     connection: &ConnectionTo<Client>,
     session_id: &str,
     result: crate::llm::ToolCallResult,
+    cwd: &Path,
 ) -> Result<(), Error> {
     let payload = serde_json::from_str::<serde_json::Value>(&result.content).unwrap_or_else(
         |_| serde_json::json!({ "status": "error", "output_preview": result.content }),
@@ -1263,11 +1385,15 @@ fn send_tool_result(
         Some("ok") => ToolCallStatus::Completed,
         _ => ToolCallStatus::Failed,
     };
-    let text = tool_result_text(&payload);
-    let fields = ToolCallUpdateFields::new()
+    let content = tool_result_content(&payload, cwd);
+    let locations = tool_result_locations(&payload, cwd);
+    let mut fields = ToolCallUpdateFields::new()
         .status(status)
-        .content((!text.is_empty()).then(|| vec![ToolCallContent::from(text)]))
+        .content((!content.is_empty()).then_some(content))
         .raw_output(payload);
+    if !locations.is_empty() {
+        fields = fields.locations(locations);
+    }
     let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(result.tool_call_id, fields));
     connection
         .send_notification(SessionNotification::new(session_id.to_string(), update))
@@ -1293,6 +1419,7 @@ fn replay_messages(
     connection: &ConnectionTo<Client>,
     session_id: &str,
     messages: &[crate::session::types::Message],
+    cwd: &Path,
 ) -> Result<(), Error> {
     for (message_index, message) in messages.iter().enumerate() {
         let message_id = format!("{session_id}:message:{message_index}");
@@ -1336,8 +1463,8 @@ fn replay_messages(
                                 )?;
                             }
                         }
-                        "tool_call" => replay_tool_call(connection, session_id, part)?,
-                        "tool_result" => replay_tool_result(connection, session_id, part)?,
+                        "tool_call" => replay_tool_call(connection, session_id, part, cwd)?,
+                        "tool_result" => replay_tool_result(connection, session_id, part, cwd)?,
                         _ => {}
                     }
                 }
@@ -1374,6 +1501,7 @@ fn replay_tool_call(
     connection: &ConnectionTo<Client>,
     session_id: &str,
     part: &crate::session::types::MessagePart,
+    cwd: &Path,
 ) -> Result<(), Error> {
     let Some(tool_call_id) = part.tool_id() else {
         return Ok(());
@@ -1394,6 +1522,7 @@ fn replay_tool_call(
         ToolCall::new(tool_call_id.to_string(), tool_title(name, &input))
             .kind(tool_kind(name))
             .status(status)
+            .locations(tool_locations(name, &input, cwd))
             .raw_input(input),
     );
     connection
@@ -1405,6 +1534,7 @@ fn replay_tool_result(
     connection: &ConnectionTo<Client>,
     session_id: &str,
     part: &crate::session::types::MessagePart,
+    cwd: &Path,
 ) -> Result<(), Error> {
     let Some(tool_call_id) = part.tool_id() else {
         return Ok(());
@@ -1424,6 +1554,7 @@ fn replay_tool_result(
             name: part.tool_name().unwrap_or("tool").to_string(),
             content,
         },
+        cwd,
     )
 }
 
@@ -1540,6 +1671,79 @@ mod tests {
         let payload = serde_json::json!({"output_preview": "legacy output"});
 
         assert_eq!(tool_result_text(&payload), "legacy output");
+    }
+
+    #[test]
+    fn acp_tool_locations_normalize_multi_file_and_patch_paths() {
+        let cwd = Path::new("/tmp/workspace");
+        let write_locations = tool_locations(
+            "write_files",
+            &serde_json::json!({
+                "files": [
+                    {"file_path": "src/a.rs", "content": "a"},
+                    {"file_path": "/tmp/b.rs", "content": "b"}
+                ]
+            }),
+            cwd,
+        );
+        assert_eq!(
+            write_locations[0].path,
+            PathBuf::from("/tmp/workspace/src/a.rs")
+        );
+        assert_eq!(write_locations[1].path, PathBuf::from("/tmp/b.rs"));
+
+        let patch_locations = tool_locations(
+            "apply_patch",
+            &serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: src/a.rs\n*** Add File: src/b.rs\n*** End Patch"
+            }),
+            cwd,
+        );
+        assert_eq!(patch_locations.len(), 2);
+        assert_eq!(
+            patch_locations[1].path,
+            PathBuf::from("/tmp/workspace/src/b.rs")
+        );
+    }
+
+    #[test]
+    fn acp_tool_result_emits_diff_location_and_image_content() {
+        let payload = serde_json::json!({
+            "output": "updated",
+            "metadata": {
+                "path": "src/main.rs",
+                "line_number": 4,
+                "old_text": "fn old() {}",
+                "new_text": "fn new() {}"
+            },
+            "images": [{
+                "data_url": "data:image/png;base64,aGk=",
+                "media_type": "image/png"
+            }]
+        });
+        let cwd = Path::new("/tmp/workspace");
+
+        let locations = tool_result_locations(&payload, cwd);
+        assert_eq!(
+            locations[0].path,
+            PathBuf::from("/tmp/workspace/src/main.rs")
+        );
+        assert_eq!(locations[0].line, Some(4));
+
+        let content = tool_result_content(&payload, cwd);
+        let diff = content.iter().find_map(|item| match item {
+            ToolCallContent::Diff(diff) => Some(diff),
+            _ => None,
+        });
+        let diff = diff.expect("diff content");
+        assert_eq!(diff.path, PathBuf::from("/tmp/workspace/src/main.rs"));
+        assert_eq!(diff.old_text.as_deref(), Some("fn old() {}"));
+        assert_eq!(diff.new_text, "fn new() {}");
+        assert!(content.iter().any(|item| matches!(
+            item,
+            ToolCallContent::Content(content)
+                if matches!(&content.content, ContentBlock::Image(image) if image.data == "aGk=" && image.mime_type == "image/png")
+        )));
     }
 
     #[test]
