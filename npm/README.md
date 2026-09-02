@@ -36,6 +36,15 @@ cargo install crabcode             # or cargo (build from source)
 curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | sh # or linux/macos (via curl)
 ```
 
+### Upgrade
+
+Detects how you installed (brew / npm / bun / cargo / install.sh) and upgrades in place:
+
+```sh
+crabcode upgrade          # latest
+crabcode upgrade 0.0.12   # specific version
+```
+
 ## Quick Start
 
 1. Run crabcode:
@@ -71,13 +80,17 @@ It works (almost) exactly like OpenCode. Just opens faster, with some intuitive 
 
 ### Shell Completion
 
-Generate a completion script for the current shell:
-
 ```sh
-crabcode completion >> ~/.zshrc
+crabcode completion zsh --install
 ```
 
-`crabcode completion` generates Zsh completions when `$SHELL` ends in `zsh`; it generates Bash completions for all other shells.
+Same for `bash`, `fish`, `elvish`, `powershell`. Restart the shell, then Tab.
+
+`--install` writes the script to the shell autoload path (`$XDG_DATA_HOME` / `$XDG_CONFIG_HOME` when set) and a small marked block in your rc (zsh/bash/elvish/powershell). Zsh autoloads on first Tab (`fpath` + `compdef`, no `source` of the script at startup). Fish autoloads from `~/.config/fish/completions` with no rc edit. Bash uses `~/.bashrc` if present, otherwise `~/.bash_profile`. PowerShell dotsources `"$HOME/..."`. If `.zshrc` has `alias cc=crabcode` (or similar), that name is included in the zsh script.
+
+Without `--install`, the script is printed to stdout. `crabcode completion` with no shell uses `$SHELL` (zsh/fish/elvish/pwsh, else bash).
+
+If you previously ran `crabcode completion >> ~/.zshrc`, re-run `--install` so that dump is stripped and replaced by the autoload hook.
 
 ### Agent Types
 
@@ -133,6 +146,8 @@ Like any benchmark, please take this with a grain of salt. I have a cherry-picke
 | 🦀 crabcode |  100% |  19/19 |    29.8s |        2768 |   $0.0094 |
 | 🔲 opencode |  100% |  19/19 |    34.9s |        4612 |   $0.0279 |
 | ⚛️ codex    |  100% |  19/19 |    33.7s |       36888 |   $0.3506 |
+
+CLI startup / first-frame / idle-CPU vs peers (hyperfine + PTY): see **[PERF.md](PERF.md)** (`just bench-perf`).
 
 ## Contributing
 
