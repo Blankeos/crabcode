@@ -225,6 +225,11 @@ pub async fn run_subagent(
                     message
                 );
             }
+            ChunkType::Usage(usage) => {
+                if let Some(sender) = sender.as_ref() {
+                    let _ = sender.send(crate::llm::ChunkMessage::Usage(usage));
+                }
+            }
             ChunkType::Retry(status) => {
                 if let Some(sender) = sender.as_ref() {
                     let _ = sender.send(crate::llm::ChunkMessage::Retry(status));
@@ -317,6 +322,11 @@ pub async fn run_subagent(
                         agent.name,
                         message
                     );
+                }
+                ChunkType::Usage(usage) => {
+                    if let Some(sender) = sender.as_ref() {
+                        let _ = sender.send(crate::llm::ChunkMessage::Usage(usage));
+                    }
                 }
                 ChunkType::Retry(status) => {
                     if let Some(sender) = sender.as_ref() {

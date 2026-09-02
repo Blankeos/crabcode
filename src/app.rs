@@ -2590,18 +2590,11 @@ impl App {
                         text = format!("{} ({}%)", text, pct);
                     }
                 }
+            }
 
-                if let Some(cost) =
-                    discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
-                {
-                    let output_tokens: usize =
-                        messages.iter().filter_map(|m| m.output_tokens).sum();
-                    let total = (output_tokens.max(total_tokens)) as f64;
-                    let price = total / 1_000_000.0 * cost.output;
-                    if price > 0.001 {
-                        text = format!("{} \u{00b7} ${:.2}", text, price);
-                    }
-                }
+            let session_cost: f64 = messages.iter().map(|message| message.usage_cost()).sum();
+            if session_cost > 0.001 {
+                text = format!("{} \u{00b7} ${:.2}", text, session_cost);
             }
         }
 
@@ -9746,6 +9739,34 @@ impl App {
                 push_toast(Toast::new(msg, ToastLevel::Warning, None));
                 true
             }
+            crate::llm::ChunkMessage::Usage(usage) => {
+                let cost = self
+                    .discovery
+                    .as_ref()
+                    .and_then(|discovery| {
+                        discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
+                    })
+                    .map(|pricing| {
+                        pricing.estimate_tokens(
+                            usage.input,
+                            usage.output,
+                            usage.cache_read,
+                            usage.cache_write,
+                        )
+                    })
+                    .unwrap_or(0.0);
+                if let Some(chat) = self.chat_for_session_mut(session_id) {
+                    chat.record_usage(
+                        usage.input,
+                        usage.output,
+                        usage.cache_read,
+                        usage.cache_write,
+                        cost,
+                    );
+                }
+                self.mark_streaming_snapshot_pending(session_id);
+                true
+            }
             crate::llm::ChunkMessage::End => {
                 self.finish_streaming_session(session_id);
                 false
@@ -15375,6 +15396,25 @@ mod tests {
         assert_eq!(
             app.session_usage_text(),
             "360 \u{00b7} last compact saved 97%"
+        );
+    }
+
+    #[test]
+    fn session_usage_text_uses_stored_usage_cost() {
+        let mut app = test_app();
+        let mut message = crate::session::types::Message::assistant("done");
+        message.token_count = Some(1_000);
+        message
+            .parts
+            .push(crate::session::types::MessagePart::usage(
+                1_000_000, 0, 0, 0, 1.25,
+            ));
+        app.chat_state.chat.add_message(message);
+
+        assert!(
+            app.session_usage_text().contains("$1.25"),
+            "footer should show stored usage cost, got {}",
+            app.session_usage_text()
         );
     }
 

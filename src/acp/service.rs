@@ -747,6 +747,25 @@ impl AcpService {
                         base_context_tokens.saturating_add(token_count),
                     )?;
                 }
+                crate::llm::ChunkMessage::Usage(usage) => {
+                    assistant
+                        .parts
+                        .push(crate::session::types::MessagePart::usage(
+                            usage.input,
+                            usage.output,
+                            usage.cache_read,
+                            usage.cache_write,
+                            0.0,
+                        ));
+                    if usage.output > 0 {
+                        assistant.output_tokens = Some(
+                            assistant
+                                .output_tokens
+                                .unwrap_or(0)
+                                .saturating_add(usage.output as usize),
+                        );
+                    }
+                }
                 crate::llm::ChunkMessage::Cancelled => cancelled = true,
                 crate::llm::ChunkMessage::Failed(error) => failed = Some(error),
                 crate::llm::ChunkMessage::PermissionRequest(prompt) => {

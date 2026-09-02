@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 const ANTHROPIC_STREAM_CONNECT_TIMEOUT_SECS: u64 = 30;
 
@@ -196,31 +197,36 @@ impl Provider for Anthropic {
             return Err(Error::Provider(retry_error.message));
         }
 
+        let pending_usage = Arc::new(Mutex::new(PartialAnthropicUsage::default()));
         let stream = response
             .bytes_stream()
             .eventsource()
-            .filter_map(|ev| match ev {
-                Ok(event) => {
-                    let event_type = event.event.as_str();
-                    let data = &event.data;
+            .flat_map(move |ev| {
+                let pending_usage = pending_usage.clone();
+                futures::stream::iter(match ev {
+                    Ok(event) => {
+                        let event_type = event.event.as_str();
+                        let data = &event.data;
 
-                    if data.is_empty() {
-                        return futures::future::ready(None);
-                    }
-
-                    match serde_json::from_str::<serde_json::Value>(data) {
-                        Ok(value) => {
-                            futures::future::ready(anthropic_stream_chunk(event_type, &value))
+                        if data.is_empty() {
+                            Vec::new()
+                        } else {
+                            match serde_json::from_str::<serde_json::Value>(data) {
+                                Ok(value) => {
+                                    let mut pending =
+                                        pending_usage.lock().unwrap_or_else(|err| err.into_inner());
+                                    anthropic_stream_chunks(event_type, &value, &mut pending)
+                                }
+                                Err(e) => {
+                                    vec![Ok(ChunkType::Failed(format!("Invalid SSE data: {}", e)))]
+                                }
+                            }
                         }
-                        Err(e) => futures::future::ready(Some(Ok(ChunkType::Failed(format!(
-                            "Invalid SSE data: {}",
-                            e
-                        ))))),
                     }
-                }
-                Err(e) => futures::future::ready(Some(Ok(ChunkType::RetryableFailure(
-                    RetryError::from_message(format!("SSE error: {}", e)),
-                )))),
+                    Err(e) => vec![Ok(ChunkType::RetryableFailure(RetryError::from_message(
+                        format!("SSE error: {}", e),
+                    )))],
+                })
             })
             .boxed();
 
@@ -228,45 +234,122 @@ impl Provider for Anthropic {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PartialAnthropicUsage {
+    input: Option<u64>,
+    output: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<u64>,
+}
+
+impl PartialAnthropicUsage {
+    fn merge(&mut self, other: Self) {
+        self.input = other.input.or(self.input);
+        self.output = other.output.or(self.output);
+        self.cache_read = other.cache_read.or(self.cache_read);
+        self.cache_write = other.cache_write.or(self.cache_write);
+    }
+
+    fn take_usage(&mut self) -> Option<crate::chunk::TokenUsage> {
+        let usage = crate::chunk::TokenUsage {
+            input: self.input.unwrap_or(0),
+            output: self.output.unwrap_or(0),
+            cache_read: self.cache_read.unwrap_or(0),
+            cache_write: self.cache_write.unwrap_or(0),
+        };
+        *self = Self::default();
+        (!usage.is_empty()).then_some(usage)
+    }
+}
+
+fn parse_anthropic_usage(usage: &serde_json::Value) -> PartialAnthropicUsage {
+    PartialAnthropicUsage {
+        input: usage.get("input_tokens").and_then(|value| value.as_u64()),
+        output: usage.get("output_tokens").and_then(|value| value.as_u64()),
+        cache_read: usage
+            .get("cache_read_input_tokens")
+            .and_then(|value| value.as_u64()),
+        cache_write: usage
+            .get("cache_creation_input_tokens")
+            .and_then(|value| value.as_u64()),
+    }
+}
+
 fn anthropic_stream_chunk(
     event_type: &str,
     value: &serde_json::Value,
 ) -> Option<Result<ChunkType>> {
+    let mut pending = PartialAnthropicUsage::default();
+    anthropic_stream_chunks(event_type, value, &mut pending)
+        .into_iter()
+        .next()
+}
+
+fn anthropic_stream_chunks(
+    event_type: &str,
+    value: &serde_json::Value,
+    pending_usage: &mut PartialAnthropicUsage,
+) -> Vec<Result<ChunkType>> {
     match event_type {
         "message_start" => {
-            // Partial usage early in the stream (cache fields may already appear).
+            // Input/cache usually arrive here; output is still partial.
             if let Some(usage) = value.get("message").and_then(|m| m.get("usage")) {
                 log_anthropic_usage(usage);
+                pending_usage.merge(parse_anthropic_usage(usage));
             }
-            None
+            Vec::new()
         }
         "content_block_start" => {
             if let Some(payload) = anthropic_hosted_search_start(value) {
-                Some(Ok(ChunkType::ProviderToolCall(payload)))
+                vec![Ok(ChunkType::ProviderToolCall(payload))]
             } else if let Some(payload) = anthropic_hosted_search_result(value) {
-                Some(Ok(ChunkType::ProviderToolCall(payload)))
+                vec![Ok(ChunkType::ProviderToolCall(payload))]
             } else {
                 anthropic_tool_call_start(value)
                     .map(ChunkType::ToolCall)
                     .map(Ok)
+                    .into_iter()
+                    .collect()
             }
         }
-        "content_block_delta" => anthropic_content_block_delta(value).map(Ok),
+        "content_block_delta" => anthropic_content_block_delta(value)
+            .map(Ok)
+            .into_iter()
+            .collect(),
         "message_delta" => {
-            // Final usage wins for cache_read / cache_creation.
+            // Final usage is cumulative. Merge over message_start so input and
+            // cache are not dropped when the delta only reports output_tokens.
+            let mut chunks = Vec::with_capacity(2);
             if let Some(usage) = value.get("usage") {
                 log_anthropic_usage(usage);
+                pending_usage.merge(parse_anthropic_usage(usage));
             }
-            anthropic_message_delta(value).map(Ok)
+            let terminal = anthropic_message_delta(value);
+            if terminal.is_some() {
+                if let Some(usage) = pending_usage.take_usage() {
+                    chunks.push(Ok(ChunkType::Usage(usage)));
+                }
+            }
+            if let Some(terminal) = terminal {
+                chunks.push(Ok(terminal));
+            }
+            chunks
         }
-        "message_stop" => Some(Ok(ChunkType::End { reason: None })),
+        "message_stop" => {
+            let mut chunks = Vec::with_capacity(2);
+            if let Some(usage) = pending_usage.take_usage() {
+                chunks.push(Ok(ChunkType::Usage(usage)));
+            }
+            chunks.push(Ok(ChunkType::End { reason: None }));
+            chunks
+        }
         "error" => {
             let error_msg = value["error"]["message"]
                 .as_str()
                 .unwrap_or("Unknown error");
-            Some(Ok(ChunkType::Failed(error_msg.to_string())))
+            vec![Ok(ChunkType::Failed(error_msg.to_string()))]
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
@@ -841,6 +924,68 @@ mod tests {
             ChunkType::End {
                 reason: Some(FinishReason::EndTurn)
             }
+        ));
+    }
+
+    #[test]
+    fn message_start_usage_is_held_until_final_delta() {
+        let start = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "usage": {
+                    "input_tokens": 25,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 40,
+                    "cache_creation_input_tokens": 8,
+                },
+            },
+        });
+        let delta = serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn" },
+            "usage": { "output_tokens": 15 },
+        });
+
+        let mut pending = PartialAnthropicUsage::default();
+        assert!(anthropic_stream_chunks("message_start", &start, &mut pending).is_empty());
+
+        let chunks = anthropic_stream_chunks("message_delta", &delta, &mut pending);
+        assert!(matches!(
+            chunks.as_slice(),
+            [
+                Ok(ChunkType::Usage(crate::chunk::TokenUsage {
+                    input: 25,
+                    output: 15,
+                    cache_read: 40,
+                    cache_write: 8,
+                })),
+                Ok(ChunkType::End {
+                    reason: Some(FinishReason::EndTurn)
+                }),
+            ]
+        ));
+    }
+
+    #[test]
+    fn message_stop_does_not_double_emit_merged_usage() {
+        let start = serde_json::json!({
+            "type": "message_start",
+            "message": { "usage": { "input_tokens": 12, "output_tokens": 0 } },
+        });
+        let delta = serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn" },
+            "usage": { "output_tokens": 9 },
+        });
+
+        let mut pending = PartialAnthropicUsage::default();
+        anthropic_stream_chunks("message_start", &start, &mut pending);
+        anthropic_stream_chunks("message_delta", &delta, &mut pending);
+        let stop = anthropic_stream_chunks("message_stop", &serde_json::json!({}), &mut pending);
+
+        assert!(matches!(
+            stop.as_slice(),
+            [Ok(ChunkType::End { reason: None })]
         ));
     }
 
