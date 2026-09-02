@@ -710,8 +710,8 @@ impl AcpService {
             let _ = stream_sender.send(crate::llm::ChunkMessage::End);
         });
 
-        let message_id = cuid2::create_id();
         let mut assistant = crate::session::types::Message::incomplete("");
+        let message_id = assistant.id.clone();
         assistant.provider = Some(session.provider.clone());
         assistant.model = Some(session.model.clone());
         assistant.agent_mode = Some(session.agent.clone());
@@ -1431,8 +1431,8 @@ fn replay_messages(
     messages: &[crate::session::types::Message],
     cwd: &Path,
 ) -> Result<(), Error> {
-    for (message_index, message) in messages.iter().enumerate() {
-        let message_id = format!("{session_id}:message:{message_index}");
+    for message in messages {
+        let message_id = message.id.clone();
         match message.role {
             crate::session::types::MessageRole::User => {
                 if !message.content.is_empty() {

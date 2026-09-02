@@ -158,6 +158,7 @@ impl CompactionStats {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
+    pub id: String,
     pub role: MessageRole,
     pub content: String,
     pub reasoning: Option<String>,
@@ -194,6 +195,7 @@ impl Message {
         };
 
         Self {
+            id: cuid2::create_id(),
             role,
             content,
             reasoning: None,
@@ -242,6 +244,7 @@ impl Message {
         };
 
         Self {
+            id: cuid2::create_id(),
             role: MessageRole::Assistant,
             content,
             reasoning: None,

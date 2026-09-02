@@ -71,7 +71,7 @@ impl From<SessionMessage> for Message {
         }
 
         Message {
-            id: cuid2::create_id(),
+            id: msg.id,
             session_id: 0,
             role: match msg.role {
                 MessageRole::User => "user".to_string(),
@@ -170,6 +170,7 @@ impl TryFrom<Message> for SessionMessage {
         };
 
         Ok(SessionMessage {
+            id: msg.id,
             role,
             content,
             reasoning,
@@ -230,6 +231,18 @@ pub fn persistence_to_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_id_round_trips_through_persistence() {
+        let session_message = SessionMessage::assistant("hello");
+        let id = session_message.id.clone();
+
+        let persistence_message: Message = session_message.into();
+        assert_eq!(persistence_message.id, id);
+
+        let restored = SessionMessage::try_from(persistence_message).unwrap();
+        assert_eq!(restored.id, id);
+    }
 
     #[test]
     fn compaction_stats_round_trip_through_message_parts() {
