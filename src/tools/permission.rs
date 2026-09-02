@@ -106,7 +106,9 @@ pub struct PermissionPrompt {
     pub target: Option<String>,
     pub command: Option<String>,
     pub workdir: Option<String>,
+    pub workspace: String,
     pub reason: String,
+    pub raw_input: Value,
     pub response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
 }
 
@@ -376,6 +378,7 @@ impl ToolPermissions {
                         PermissionReasonKind::ConfiguredAsk,
                         path.as_deref(),
                         command.clone(),
+                        params,
                         tool_call_id,
                         sender,
                     )
@@ -421,6 +424,7 @@ impl ToolPermissions {
                     reason_kind,
                     reason_path.as_deref().or(path.as_deref()),
                     command.clone(),
+                    params,
                     tool_call_id,
                     sender,
                 )
@@ -457,6 +461,7 @@ impl ToolPermissions {
                             reason_kind,
                             path.as_deref(),
                             command,
+                            params,
                             tool_call_id,
                             sender,
                         )
@@ -475,6 +480,7 @@ impl ToolPermissions {
         reason_kind: PermissionReasonKind,
         path: Option<&Path>,
         command: Option<String>,
+        params: &Value,
         tool_call_id: Option<&str>,
         sender: Option<&ChunkSender>,
     ) -> Result<(), ToolError> {
@@ -540,7 +546,9 @@ impl ToolPermissions {
             target: prompt_target,
             command,
             workdir,
+            workspace: self.workdir.to_string_lossy().into_owned(),
             reason: reason_text,
+            raw_input: params.clone(),
             response_tx,
         };
 
@@ -1330,6 +1338,11 @@ mod tests {
             _ => panic!("Expected permission prompt"),
         };
         assert_eq!(prompt.tool_call_id.as_deref(), Some("call_123"));
+        assert_eq!(
+            prompt.raw_input,
+            serde_json::json!({ "file_path": "/tmp/elsewhere/file.txt" })
+        );
+        assert_eq!(prompt.workspace, "/tmp/workspace");
         let _ = prompt.response_tx.send(PermissionResponse::Deny);
         assert!(pending
             .await

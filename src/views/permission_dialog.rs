@@ -564,7 +564,9 @@ mod tests {
             target: Some("cargo test".to_string()),
             command: Some("cargo test".to_string()),
             workdir: Some("/tmp/workspace".to_string()),
+            workspace: "/tmp/workspace".to_string(),
             reason: "Bash command execution requires permission".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         };
         let colors = Theme::load_builtin_default().get_colors(true);
@@ -598,7 +600,9 @@ mod tests {
             target: Some("/Users/carlo/Desktop/Projects/sheetpilot".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "Tool 'read' wants to access path outside working directory".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         };
         let colors = Theme::load_builtin_default().get_colors(true);
@@ -624,7 +628,9 @@ mod tests {
             target: Some("cargo test".to_string()),
             command: Some("cargo test".to_string()),
             workdir: Some("/tmp/workspace".to_string()),
+            workspace: "/tmp/workspace".to_string(),
             reason: "Bash command execution requires permission".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
 
@@ -669,7 +675,9 @@ mod tests {
             target: Some("/tmp/file".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "explicit approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
 
@@ -701,7 +709,9 @@ mod tests {
             target: Some("/Users/carlo/Desktop/Projects/sheetpilot/README.md".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "Tool 'read' wants to access path outside working directory: /Users/carlo/Desktop/Projects/sheetpilot/README.md".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
         let colors = Theme::load_builtin_default().get_colors(true);
@@ -742,7 +752,9 @@ mod tests {
             target: Some("/tmp/file".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "explicit approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
         let colors = Theme::load_builtin_default().get_colors(true);
@@ -784,7 +796,9 @@ mod tests {
             target: Some("/tmp/file".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "explicit approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
         let colors = Theme::load_builtin_default().get_colors(true);

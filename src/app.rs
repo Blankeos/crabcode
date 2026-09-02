@@ -12504,7 +12504,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
@@ -12536,7 +12538,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
@@ -13162,7 +13166,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         app.overlay_focus = OverlayFocus::PermissionDialog;

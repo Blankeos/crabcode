@@ -30,6 +30,76 @@ pub struct AcpService {
     client_capabilities: Arc<Mutex<agent_client_protocol::schema::v1::ClientCapabilities>>,
 }
 
+fn permission_tool_content(
+    prompt: &crate::tools::PermissionPrompt,
+    cwd: &Path,
+) -> Vec<ToolCallContent> {
+    match prompt.tool_id.as_str() {
+        "write" => prompt
+            .raw_input
+            .get("file_path")
+            .or_else(|| prompt.raw_input.get("filePath"))
+            .and_then(serde_json::Value::as_str)
+            .zip(
+                prompt
+                    .raw_input
+                    .get("content")
+                    .and_then(serde_json::Value::as_str),
+            )
+            .map(|(path, new_text)| vec![preflight_diff(path, new_text, cwd)])
+            .unwrap_or_default(),
+        "write_files" => prompt
+            .raw_input
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|file| {
+                let path = file.get("file_path")?.as_str()?;
+                let content = file.get("content")?.as_str()?;
+                Some(preflight_diff(path, content, cwd))
+            })
+            .collect(),
+        "edit" => permission_edit_diff(&prompt.raw_input, cwd)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn preflight_diff(path: &str, new_text: &str, cwd: &Path) -> ToolCallContent {
+    let path = absolute_tool_path(path, cwd);
+    let old_text = std::fs::read_to_string(&path).ok();
+    agent_client_protocol::schema::v1::Diff::new(path, new_text.to_string())
+        .old_text(old_text)
+        .into()
+}
+
+fn permission_edit_diff(input: &serde_json::Value, cwd: &Path) -> Option<ToolCallContent> {
+    let path = input
+        .get("file_path")
+        .or_else(|| input.get("filePath"))?
+        .as_str()?;
+    let old_string = input.get("old_string")?.as_str()?;
+    let new_string = input.get("new_string")?.as_str()?;
+    let absolute = absolute_tool_path(path, cwd);
+    let old_text = std::fs::read_to_string(&absolute).ok()?;
+    let new_text = if input
+        .get("replace_all")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        old_text.replace(old_string, new_string)
+    } else {
+        old_text.replacen(old_string, new_string, 1)
+    };
+    Some(
+        agent_client_protocol::schema::v1::Diff::new(absolute, new_text)
+            .old_text(old_text)
+            .into(),
+    )
+}
+
 fn write_prompt_audio(
     session_id: &str,
     audio: &agent_client_protocol::schema::v1::AudioContent,
@@ -1937,15 +2007,22 @@ async fn request_permission(
         "command": prompt.command,
         "workdir": prompt.workdir,
         "reason": prompt.reason,
+        "input": prompt.raw_input,
     });
-    let tool_call = ToolCallUpdate::new(
-        tool_call_id,
-        ToolCallUpdateFields::new()
+    let cwd = PathBuf::from(&prompt.workspace);
+    let content = permission_tool_content(prompt, &cwd);
+    let tool_call = ToolCallUpdate::new(tool_call_id, {
+        let mut fields = ToolCallUpdateFields::new()
             .title(permission_title(prompt))
             .kind(tool_kind(&prompt.tool_id))
             .status(ToolCallStatus::Pending)
-            .raw_input(input),
-    );
+            .locations(tool_locations(&prompt.tool_id, &prompt.raw_input, &cwd))
+            .raw_input(input);
+        if !content.is_empty() {
+            fields = fields.content(content);
+        }
+        fields
+    });
     let request = RequestPermissionRequest::new(
         session_id.to_string(),
         tool_call,
@@ -2558,6 +2635,40 @@ mod tests {
     #[test]
     fn acp_permission_generates_fallback_id_without_origin() {
         assert!(permission_tool_call_id(None).starts_with("permission:"));
+    }
+
+    #[test]
+    fn acp_permission_edit_includes_preflight_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "fn old() {}\n").unwrap();
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let prompt = crate::tools::PermissionPrompt {
+            tool_call_id: Some("call_edit".to_string()),
+            tool_id: "edit".to_string(),
+            action: crate::tools::PermissionAction::Write,
+            permission: "edit".to_string(),
+            patterns: vec![path.to_string_lossy().into_owned()],
+            target: Some(path.to_string_lossy().into_owned()),
+            command: None,
+            workdir: None,
+            workspace: dir.path().to_string_lossy().into_owned(),
+            reason: "approval".to_string(),
+            raw_input: serde_json::json!({
+                "file_path": path,
+                "old_string": "old",
+                "new_string": "new",
+                "replace_all": false
+            }),
+            response_tx,
+        };
+
+        let content = permission_tool_content(&prompt, dir.path());
+        let ToolCallContent::Diff(diff) = &content[0] else {
+            panic!("expected preflight diff");
+        };
+        assert_eq!(diff.old_text.as_deref(), Some("fn old() {}\n"));
+        assert_eq!(diff.new_text, "fn new() {}\n");
     }
 
     #[test]
