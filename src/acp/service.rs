@@ -26,6 +26,24 @@ pub struct AcpService {
     session_manager: Arc<Mutex<SessionManager>>,
 }
 
+fn compact_command(prompt: &str) -> Result<bool, Error> {
+    let trimmed = prompt.trim();
+    let Some(command_line) = trimmed.strip_prefix('/') else {
+        return Ok(false);
+    };
+    let (name, args) = command_line
+        .split_once(char::is_whitespace)
+        .map(|(name, args)| (name, args.trim()))
+        .unwrap_or((command_line, ""));
+    if name != "compact" {
+        return Ok(false);
+    }
+    if !args.is_empty() {
+        return Err(Error::invalid_params().data("Usage: /compact"));
+    }
+    Ok(true)
+}
+
 fn permission_tool_call_id(tool_call_id: Option<&str>) -> String {
     tool_call_id
         .map(str::to_string)
@@ -63,6 +81,7 @@ fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
         .merged_config
         .commands
         .iter()
+        .filter(|command| command.name != "compact")
         .map(|command| {
             let description = command
                 .description
@@ -77,18 +96,25 @@ fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
             available
         })
         .collect();
-    commands.extend(session.skills.all().into_iter().map(|skill| {
-        AvailableCommand::new(
-            skill.name.clone(),
-            skill
-                .description
-                .clone()
-                .unwrap_or_else(|| format!("Use the {} skill", skill.name)),
-        )
-        .input(AvailableCommandInput::Unstructured(
-            UnstructuredCommandInput::new("Task or context for this skill"),
-        ))
-    }));
+    commands.extend(
+        session
+            .skills
+            .all()
+            .into_iter()
+            .filter(|skill| skill.name != "compact")
+            .map(|skill| {
+                AvailableCommand::new(
+                    skill.name.clone(),
+                    skill
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| format!("Use the {} skill", skill.name)),
+                )
+                .input(AvailableCommandInput::Unstructured(
+                    UnstructuredCommandInput::new("Task or context for this skill"),
+                ))
+            }),
+    );
     commands.push(AvailableCommand::new(
         "skills",
         "List skills available in this workspace",
@@ -96,6 +122,10 @@ fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
     commands.push(AvailableCommand::new(
         "mcp",
         "List configured MCP servers and their status",
+    ));
+    commands.push(AvailableCommand::new(
+        "compact",
+        "Summarize this session to reduce context",
     ));
     commands.sort_by(|left, right| left.name.cmp(&right.name));
     commands.dedup_by(|left, right| left.name == right.name);
@@ -598,6 +628,22 @@ impl AcpService {
             .iter()
             .find(|model| model.provider_id == session.provider && model.id == session.model)
             .is_some_and(|model| model.attachment);
+        let compact_text = prompt
+            .iter()
+            .filter_map(|part| match part {
+                ContentBlock::Text(content) => Some(content.text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        if compact_command(&compact_text)? {
+            if prompt
+                .iter()
+                .any(|part| !matches!(part, ContentBlock::Text(_)))
+            {
+                return Err(Error::invalid_params().data("/compact does not accept attachments"));
+            }
+            return self.compact_session(&session_id, session, connection).await;
+        }
         let (prompt, local_image_paths) = prompt_content(prompt, supports_images, &session)?;
         let prompt = expand_slash_command(&session, &prompt).await?;
         if prompt.trim().is_empty() {
@@ -805,6 +851,194 @@ impl AcpService {
         }
         Ok(PromptResponse::new(acp_stop_reason(turn_stop_reason)))
     }
+
+    async fn compact_session(
+        &self,
+        session_id: &str,
+        session: AcpSession,
+        connection: ConnectionTo<Client>,
+    ) -> Result<PromptResponse, Error> {
+        let cancellation = CancellationToken::new();
+        {
+            let mut sessions = self.sessions.lock().await;
+            let current = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+            if current.cancellation.is_some() {
+                return Err(Error::invalid_params().data("session already has an active prompt"));
+            }
+            current.cancellation = Some(cancellation.clone());
+        }
+        let status_result = self
+            .session_manager
+            .lock()
+            .map_err(|_| internal_error())?
+            .set_session_status(
+                session_id,
+                crate::session::types::SessionStatus::Streaming,
+                None,
+            );
+        if status_result.is_err() {
+            if let Some(current) = self.sessions.lock().await.get_mut(session_id) {
+                current.cancellation = None;
+            }
+            return Err(internal_error());
+        }
+
+        let result = self
+            .run_compaction(session_id, &session, cancellation.clone())
+            .await;
+        if let Some(current) = self.sessions.lock().await.get_mut(session_id) {
+            current.cancellation = None;
+        }
+        self.session_manager
+            .lock()
+            .map_err(|_| internal_error())?
+            .set_session_status(session_id, crate::session::types::SessionStatus::Idle, None)
+            .map_err(|_| internal_error())?;
+
+        match result {
+            Ok(stats) => {
+                let feedback = format!(
+                    "Context compacted ({})",
+                    crate::session::compaction::format_compaction_stats(stats)
+                );
+                send_text(
+                    &connection,
+                    session_id,
+                    &cuid2::create_id(),
+                    feedback,
+                    false,
+                )?;
+                Ok(PromptResponse::new(StopReason::EndTurn))
+            }
+            Err(_error) if cancellation.is_cancelled() => {
+                Ok(PromptResponse::new(StopReason::Cancelled))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn run_compaction(
+        &self,
+        session_id: &str,
+        session: &AcpSession,
+        cancellation: CancellationToken,
+    ) -> Result<crate::session::types::CompactionStats, Error> {
+        let messages = {
+            let manager = self.session_manager.lock().map_err(|_| internal_error())?;
+            manager
+                .get_session_ref(session_id)
+                .map(|stored| stored.messages.clone())
+                .ok_or_else(|| Error::invalid_params().data("unknown session"))?
+        };
+        let selection = crate::session::compaction::select_messages_for_compaction_with_min(
+            &messages,
+            crate::session::compaction::DEFAULT_TAIL_TURNS,
+            0,
+        )
+        .ok_or_else(|| Error::invalid_params().data("Nothing to compact"))?;
+        let before_tokens = crate::session::compaction::total_context_tokens(&messages);
+        let before_messages =
+            crate::session::compaction::filter_messages_for_context(&messages).len();
+        let prompt = crate::session::compaction::build_prompt(&selection.messages_to_summarize);
+        let summary = crate::llm::client::summarize_for_compaction(
+            session.provider.clone(),
+            session.model.clone(),
+            compaction_reasoning(session),
+            prompt,
+            cancellation.clone(),
+        )
+        .await
+        .map_err(|error| internal_error_with(&error.to_string()))?;
+        if cancellation.is_cancelled() {
+            return Err(internal_error_with("Compaction cancelled by user"));
+        }
+        let (compacted, stats) = compacted_messages(
+            &messages,
+            &selection,
+            &summary,
+            session,
+            before_tokens,
+            before_messages,
+        )?;
+        let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
+        manager
+            .replace_session_messages(session_id, compacted)
+            .map_err(|_| internal_error())?;
+        Ok(stats)
+    }
+}
+
+fn compaction_reasoning(session: &AcpSession) -> Option<crate::model::reasoning::ReasoningEffort> {
+    use crate::model::reasoning::ReasoningEffort;
+    let capability = model_reasoning_capability(
+        &session.config,
+        &session.models,
+        &session.provider,
+        &session.model,
+    )?;
+    [
+        ReasoningEffort::None,
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Low,
+    ]
+    .into_iter()
+    .find(|effort| capability.values().contains(effort))
+    .or(session.reasoning)
+    .filter(|effort| *effort != ReasoningEffort::None)
+}
+
+fn compacted_messages(
+    messages: &[crate::session::types::Message],
+    selection: &crate::session::compaction::CompactionSelection,
+    summary: &str,
+    session: &AcpSession,
+    before_tokens: usize,
+    before_messages: usize,
+) -> Result<
+    (
+        Vec<crate::session::types::Message>,
+        crate::session::types::CompactionStats,
+    ),
+    Error,
+> {
+    let mut compacted = crate::session::compaction::apply_soft_compaction(
+        messages,
+        selection,
+        summary,
+        Some(session.model.clone()),
+        Some(session.provider.clone()),
+        Some(session.agent.clone()),
+        crate::session::types::CompactionStats {
+            before_tokens,
+            after_tokens: 0,
+            before_messages,
+            after_messages: 0,
+        },
+    );
+    let after_tokens = crate::session::compaction::total_context_tokens(&compacted);
+    let after_messages = crate::session::compaction::filter_messages_for_context(&compacted).len();
+    let stats = crate::session::types::CompactionStats {
+        before_tokens,
+        after_tokens,
+        before_messages,
+        after_messages,
+    };
+    if after_tokens >= before_tokens {
+        return Err(Error::invalid_params().data(format!(
+            "Compaction did not reduce context ({})",
+            crate::session::compaction::format_compaction_stats(stats)
+        )));
+    }
+    if let Some(marker) = compacted
+        .iter_mut()
+        .rev()
+        .find(|message| crate::session::compaction::is_compaction_marker(message))
+    {
+        marker.compaction_stats = Some(stats);
+    }
+    Ok((compacted, stats))
 }
 
 fn acp_stop_reason(reason: Option<crate::llm::TurnStopReason>) -> StopReason {
@@ -1432,6 +1666,9 @@ fn replay_messages(
     cwd: &Path,
 ) -> Result<(), Error> {
     for message in messages {
+        if crate::session::compaction::is_compaction_display_item(message) {
+            continue;
+        }
         let message_id = message.id.clone();
         match message.role {
             crate::session::types::MessageRole::User => {
@@ -1646,6 +1883,30 @@ mod tests {
         model
     }
 
+    fn test_session() -> AcpSession {
+        AcpSession {
+            cwd: PathBuf::from("/tmp"),
+            config: crate::config::configuration::LoadedConfig {
+                merged_config: crate::config::configuration::MergedConfig::default(),
+                raw_merged: serde_json::Value::Null,
+                diagnostics: Default::default(),
+                inventory: Default::default(),
+                project_root: PathBuf::from("/tmp"),
+                cwd: PathBuf::from("/tmp"),
+                xdg_config_home: PathBuf::from("/tmp"),
+            },
+            skills: crate::skill::SkillStore::load(Path::new("/tmp"), Path::new("/tmp")),
+            models: vec![model("example", "Example", "chat", "Chat")],
+            provider: "example".to_string(),
+            model: "chat".to_string(),
+            agent: "Build".to_string(),
+            reasoning_selection: crate::model::reasoning::ReasoningEffort::High,
+            reasoning: None,
+            context_window: None,
+            cancellation: None,
+        }
+    }
+
     #[test]
     fn maps_crabcode_tools_to_acp_kinds() {
         assert_eq!(tool_kind("bash"), ToolKind::Execute);
@@ -1777,6 +2038,62 @@ mod tests {
             StopReason::Refusal
         );
         assert_eq!(acp_stop_reason(None), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn recognizes_only_exact_compact_control_command() {
+        assert_eq!(compact_command("/compact").unwrap(), true);
+        assert_eq!(compact_command("  /compact  ").unwrap(), true);
+        assert_eq!(compact_command("/compactness").unwrap(), false);
+        assert_eq!(compact_command("hello").unwrap(), false);
+        assert!(compact_command("/compact extra").is_err());
+    }
+
+    #[test]
+    fn advertises_compact_as_no_input_command() {
+        let session = test_session();
+        let command = available_commands(&session)
+            .into_iter()
+            .find(|command| command.name == "compact")
+            .expect("compact command");
+        assert_eq!(
+            command.description,
+            "Summarize this session to reduce context"
+        );
+        assert!(command.input.is_none());
+    }
+
+    #[test]
+    fn builds_smaller_soft_compaction_for_acp() {
+        let session = test_session();
+        let messages = vec![
+            crate::session::types::Message::user("u".repeat(8_000)),
+            crate::session::types::Message::assistant("a".repeat(8_000)),
+            crate::session::types::Message::user("recent"),
+        ];
+        let selection = crate::session::compaction::select_messages_for_compaction_with_min(
+            &messages,
+            crate::session::compaction::DEFAULT_TAIL_TURNS,
+            0,
+        )
+        .expect("compaction selection");
+        let before_tokens = crate::session::compaction::total_context_tokens(&messages);
+        let before_messages =
+            crate::session::compaction::filter_messages_for_context(&messages).len();
+
+        let (compacted, stats) = compacted_messages(
+            &messages,
+            &selection,
+            "short handoff",
+            &session,
+            before_tokens,
+            before_messages,
+        )
+        .expect("smaller compaction");
+
+        assert!(stats.after_tokens < stats.before_tokens);
+        assert!(crate::session::compaction::latest_compaction_stats(&compacted).is_some());
+        assert_eq!(compacted[0].id, messages[0].id);
     }
 
     #[test]
@@ -2075,28 +2392,7 @@ mod tests {
 
     #[test]
     fn preserves_selected_reasoning_effort_when_model_cannot_apply_it() {
-        let model = model("example", "Example", "chat", "Chat");
-        let session = AcpSession {
-            cwd: PathBuf::from("/tmp"),
-            config: crate::config::configuration::LoadedConfig {
-                merged_config: crate::config::configuration::MergedConfig::default(),
-                raw_merged: serde_json::Value::Null,
-                diagnostics: Default::default(),
-                inventory: Default::default(),
-                project_root: PathBuf::from("/tmp"),
-                cwd: PathBuf::from("/tmp"),
-                xdg_config_home: PathBuf::from("/tmp"),
-            },
-            skills: crate::skill::SkillStore::load(Path::new("/tmp"), Path::new("/tmp")),
-            models: vec![model],
-            provider: "example".to_string(),
-            model: "chat".to_string(),
-            agent: "Build".to_string(),
-            reasoning_selection: crate::model::reasoning::ReasoningEffort::High,
-            reasoning: None,
-            context_window: None,
-            cancellation: None,
-        };
+        let session = test_session();
         let option = reasoning_config_option(&session);
         assert_eq!(option.id.to_string(), "effort");
         assert_eq!(option.name, "Effort");
