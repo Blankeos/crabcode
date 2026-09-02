@@ -9740,7 +9740,20 @@ impl App {
                 self.cancelled_streaming_session(session_id);
                 false
             }
-            crate::llm::ChunkMessage::Metrics { .. } => true,
+            crate::llm::ChunkMessage::Metrics {
+                duration_ms,
+                usage,
+                cost,
+                ..
+            } => {
+                if let Some(usage) = usage {
+                    if let Some(chat) = self.chat_for_session_mut(session_id) {
+                        chat.apply_streaming_usage(usage, cost, duration_ms);
+                    }
+                    self.mark_streaming_snapshot_pending(session_id);
+                }
+                true
+            }
             crate::llm::ChunkMessage::TurnStopReason(_) => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.set_session_retry_status(session_id, None);

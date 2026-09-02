@@ -1562,14 +1562,13 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
                 return Some(Ok(responses_error_chunk(&value, event_type)));
             }
             let resp = &value["response"];
-            if let Some(usage) = resp.get("usage") {
-                log_openai_responses_usage(usage);
-            }
+            let usage = resp.get("usage").and_then(openai_responses_usage);
             log_openai_responses_completed(resp);
             Some(Ok(ChunkType::ResponseCompleted {
                 end_turn: resp.get("end_turn").and_then(|value| value.as_bool()),
                 reasoning_items: reasoning_items_from_response_output(resp),
                 doom_loop_triggers: doom_loop_triggers_from(resp),
+                usage,
             }))
         }
         // Grok Build / cli-chat-proxy: `response.doom_loop_check` with
@@ -1604,7 +1603,7 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
 
 /// Log Responses API usage for prompt-cache visibility.
 /// Looks for `input_tokens_details.cached_tokens` (OpenAI/xAI shape).
-fn log_openai_responses_usage(usage: &serde_json::Value) {
+fn openai_responses_usage(usage: &serde_json::Value) -> Option<crate::chunk::LanguageModelUsage> {
     let input = usage
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
@@ -1621,7 +1620,7 @@ fn log_openai_responses_usage(usage: &serde_json::Value) {
         .unwrap_or(0);
 
     if input.is_none() && output.is_none() && cached == 0 {
-        return;
+        return None;
     }
 
     let input_v = input.unwrap_or(0);
@@ -1638,6 +1637,12 @@ fn log_openai_responses_usage(usage: &serde_json::Value) {
         cached,
         hit_pct
     ));
+    Some(crate::chunk::LanguageModelUsage {
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
+        cache_read_tokens: cached,
+        cache_write_tokens: 0,
+    })
 }
 
 /// Attribute a `response.completed` payload: status, incomplete reason, and
@@ -2506,6 +2511,28 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn response_completed_retains_provider_usage() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":200,"output_tokens":50,"input_tokens_details":{"cached_tokens":150}}}}"#,
+        )
+        .expect("expected completion chunk")
+        .expect("completion should parse");
+
+        let ChunkType::ResponseCompleted { usage, .. } = chunk else {
+            panic!("expected response completed");
+        };
+        assert_eq!(
+            usage,
+            Some(crate::chunk::LanguageModelUsage {
+                input_tokens: 200,
+                output_tokens: 50,
+                cache_read_tokens: 150,
+                cache_write_tokens: 0,
+            })
+        );
     }
 
     #[test]

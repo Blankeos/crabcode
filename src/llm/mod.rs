@@ -55,6 +55,8 @@ pub enum ChunkMessage {
     Metrics {
         token_count: usize,
         duration_ms: u64,
+        usage: Option<crate::aisdk::chunk::LanguageModelUsage>,
+        cost: Option<f64>,
     },
 }
 

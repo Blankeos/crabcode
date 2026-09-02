@@ -2,17 +2,18 @@ use crate::config::configuration::LoadedConfig;
 use crate::session::manager::SessionManager;
 use agent_client_protocol::schema::v1::{
     AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, ContentBlock, ContentChunk,
-    CreateElicitationRequest, CreateTerminalRequest, ElicitationAction, ElicitationContentValue,
-    ElicitationFormMode, ElicitationSchema, ElicitationSessionScope, EmbeddedResourceResource,
-    EnumOption, KillTerminalRequest, ListSessionsResponse, LoadSessionResponse, McpServer,
-    MultiSelectPropertySchema, NewSessionResponse, PermissionOption, PermissionOptionKind,
-    PromptResponse, ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    ResumeSessionResponse, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo, SessionMode,
-    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionResponse,
-    StopReason, StringPropertySchema, Terminal, TerminalOutputRequest, ToolCall, ToolCallContent,
-    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    UnstructuredCommandInput, UsageUpdate, WaitForTerminalExitRequest,
+    Cost as AcpCost, CreateElicitationRequest, CreateTerminalRequest, ElicitationAction,
+    ElicitationContentValue, ElicitationFormMode, ElicitationSchema, ElicitationSessionScope,
+    EmbeddedResourceResource, EnumOption, KillTerminalRequest, ListSessionsResponse,
+    LoadSessionResponse, McpServer, MultiSelectPropertySchema, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PromptResponse, ReleaseTerminalRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionResponse, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo,
+    SessionMode, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionResponse, StopReason, StringPropertySchema, Terminal,
+    TerminalOutputRequest, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, UsageUpdate,
+    WaitForTerminalExitRequest,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
 use base64::Engine as _;
@@ -100,6 +101,7 @@ fn acp_question_form(
                 if label.is_empty() {
                     return None;
                 }
+
                 let value = format!("q{question_index}_option_{option_index}");
                 labels.insert(value.clone(), label.to_string());
                 let description = option
@@ -928,7 +930,17 @@ impl AcpService {
         .await;
         messages.insert(0, crate::session::types::Message::system(system_prompt));
         let base_context_tokens = crate::session::compaction::total_context_tokens(&messages);
-        send_usage(&connection, &session_id, &session, base_context_tokens)?;
+        let base_cost = messages
+            .iter()
+            .filter_map(|message| message.cost)
+            .sum::<f64>();
+        send_usage(
+            &connection,
+            &session_id,
+            &session,
+            base_context_tokens,
+            (base_cost > 0.0).then_some(base_cost),
+        )?;
 
         let stream_session_id = session_id.clone();
         let stream_cancellation = cancellation.clone();
@@ -1002,14 +1014,20 @@ impl AcpService {
                 crate::llm::ChunkMessage::Metrics {
                     token_count,
                     duration_ms,
+                    usage,
+                    cost,
                 } => {
                     assistant.token_count = Some(token_count);
                     assistant.duration_ms = Some(duration_ms);
+                    if let Some(usage) = usage {
+                        assistant.apply_usage(usage, cost);
+                    }
                     send_usage(
                         &connection,
                         &session_id,
                         &session,
                         base_context_tokens.saturating_add(token_count),
+                        cost.map(|turn_cost| base_cost + turn_cost),
                     )?;
                 }
                 crate::llm::ChunkMessage::Cancelled => cancelled = true,
@@ -2026,11 +2044,15 @@ fn send_usage(
     session_id: &str,
     session: &AcpSession,
     used: usize,
+    cost: Option<f64>,
 ) -> Result<(), Error> {
     let Some(size) = session.context_window else {
         return Ok(());
     };
-    let update = SessionUpdate::UsageUpdate(UsageUpdate::new(used as u64, size as u64));
+    let update = SessionUpdate::UsageUpdate(
+        UsageUpdate::new(used as u64, size as u64)
+            .cost(cost.map(|amount| AcpCost::new(amount, "USD"))),
+    );
     connection
         .send_notification(SessionNotification::new(session_id.to_string(), update))
         .map_err(|_| internal_error())
@@ -2290,6 +2312,16 @@ mod tests {
         assert_eq!(tool_kind("read"), ToolKind::Read);
         assert_eq!(tool_kind("apply_patch"), ToolKind::Edit);
         assert_eq!(tool_kind("unknown"), ToolKind::Other);
+    }
+
+    #[test]
+    fn acp_usage_update_includes_cumulative_usd_cost() {
+        let update = UsageUpdate::new(1_000, 200_000).cost(AcpCost::new(0.125, "USD"));
+        assert_eq!(update.cost.as_ref().map(|cost| cost.amount), Some(0.125));
+        assert_eq!(
+            update.cost.as_ref().map(|cost| cost.currency.as_str()),
+            Some("USD")
+        );
     }
 
     #[test]

@@ -38,5 +38,6 @@ Done for packaging/host hooks:
 - Product-leaky debug path renamed/feature-gated
 - Product-flavored comments/tests scrubbed
 - Typed terminal stop reasons include normal completion, max tokens, refusal, hooks, and errors
+- Normalized provider usage events retain input, output, cache-read, and cache-write token accounting across multi-step turns
 
 Keep app glue outside this tree (`src/tools/aisdk_bridge.rs`, `src/llm/*`).

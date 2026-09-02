@@ -16,7 +16,39 @@ pub fn run_migrations(db: &mut Connection) -> Result<()> {
         migrate_to_v3(db)?;
     }
 
+    if current_version < 4 {
+        migrate_to_v4(db)?;
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_v4_adds_authoritative_usage_columns() {
+        let mut db = Connection::open_in_memory().unwrap();
+        run_migrations(&mut db).unwrap();
+
+        let columns = db
+            .prepare("PRAGMA table_info(messages)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        for column in [
+            "input_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost",
+            "usage_authoritative",
+        ] {
+            assert!(columns.iter().any(|candidate| candidate == column));
+        }
+    }
 }
 
 fn get_current_version(db: &Connection) -> Result<i32> {
@@ -104,6 +136,30 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
         params![],
     )?;
 
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_v4(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction()?;
+    let _ = tx.execute("ALTER TABLE messages ADD COLUMN input_tokens INTEGER", []);
+    let _ = tx.execute(
+        "ALTER TABLE messages ADD COLUMN cache_read_tokens INTEGER",
+        [],
+    );
+    let _ = tx.execute(
+        "ALTER TABLE messages ADD COLUMN cache_write_tokens INTEGER",
+        [],
+    );
+    let _ = tx.execute("ALTER TABLE messages ADD COLUMN cost REAL", []);
+    let _ = tx.execute(
+        "ALTER TABLE messages ADD COLUMN usage_authoritative INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    tx.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at) VALUES (4, strftime('%s', 'now'))",
+        params![],
+    )?;
     tx.commit()?;
     Ok(())
 }

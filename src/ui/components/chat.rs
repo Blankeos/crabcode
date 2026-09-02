@@ -1860,6 +1860,22 @@ impl Chat {
         self.invalidate_cache();
     }
 
+    pub fn apply_streaming_usage(
+        &mut self,
+        usage: crate::aisdk::chunk::LanguageModelUsage,
+        cost: Option<f64>,
+        duration_ms: u64,
+    ) {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .rfind(|message| message.role == MessageRole::Assistant)
+        {
+            message.apply_usage(usage, cost);
+            message.duration_ms = Some(duration_ms);
+        }
+    }
+
     pub fn truncate_messages(&mut self, len: usize) {
         self.messages.truncate(len);
         self.invalidate_cache();
@@ -2593,7 +2609,9 @@ impl Chat {
             .rposition(|m| m.role == MessageRole::Assistant)
         {
             if let Some(msg) = self.messages.get_mut(idx) {
-                msg.output_tokens = Some(token_count);
+                if !msg.usage_authoritative {
+                    msg.output_tokens = Some(token_count);
+                }
                 msg.token_count = Some(token_count);
                 msg.duration_ms = Some(decode_duration_ms);
                 msg.tokens_per_sec = final_tps;

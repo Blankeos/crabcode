@@ -436,7 +436,7 @@ fn debug_log(msg: &str) {
 /// Log OpenAI-compatible / AI Gateway usage via the host logger.
 /// Looks for `prompt_tokens_details.cached_tokens` and Anthropic-style fields
 /// that some gateways forward.
-fn log_openai_compatible_usage(usage: &serde_json::Value) {
+fn openai_compatible_usage(usage: &serde_json::Value) -> Option<crate::chunk::LanguageModelUsage> {
     let prompt = usage.get("prompt_tokens").and_then(|v| v.as_u64());
     let completion = usage.get("completion_tokens").and_then(|v| v.as_u64());
     let cached = usage
@@ -459,7 +459,7 @@ fn log_openai_compatible_usage(usage: &serde_json::Value) {
         && cache_read == 0
         && cache_creation == 0
     {
-        return;
+        return None;
     }
 
     // Prefer OpenAI-style cached_tokens; fall back to Anthropic-style cache_read.
@@ -489,10 +489,27 @@ fn log_openai_compatible_usage(usage: &serde_json::Value) {
         cache_creation,
         hit_pct
     ));
+
+    let anthropic_shape = cached == 0 && (cache_read > 0 || cache_creation > 0);
+    let input_tokens = if anthropic_shape {
+        prompt
+            .unwrap_or(0)
+            .saturating_add(cache_read)
+            .saturating_add(cache_creation)
+    } else {
+        prompt.unwrap_or(0)
+    };
+    Some(crate::chunk::LanguageModelUsage {
+        input_tokens,
+        output_tokens: completion.unwrap_or(0),
+        cache_read_tokens: effective_cached,
+        cache_write_tokens: cache_creation,
+    })
 }
 
 fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     let data = data.trim();
+    let mut chunks = Vec::new();
 
     if data == "[DONE]" {
         debug_log("[SSE] Terminal: [DONE]");
@@ -501,7 +518,7 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
 
     if data.is_empty() || is_sse_metadata_line(data) {
         debug_log("[SSE] Ignored: empty or metadata/comment");
-        return vec![];
+        return chunks;
     }
 
     debug_log(&format!("[SSE] Raw data: {}", data));
@@ -525,8 +542,9 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
 
     // Final usage often arrives on a choices-empty (or choices-missing) chunk.
     // Log cache-related fields so gateway Anthropic hits are verifiable.
-    if let Some(usage) = value.get("usage") {
-        log_openai_compatible_usage(usage);
+    let usage = value.get("usage").and_then(openai_compatible_usage);
+    if let Some(usage) = usage {
+        chunks.push(Ok(ChunkType::Usage(usage)));
     }
 
     let Some(choices) = value["choices"].as_array() else {
@@ -534,18 +552,16 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
             "[SSE] No choices array. JSON keys: {:?}",
             value.as_object().map(|o| o.keys().collect::<Vec<_>>())
         ));
-        return vec![];
+        return chunks;
     };
 
     if choices.is_empty() {
         debug_log("[SSE] choices array is empty");
-        return vec![];
+        return chunks;
     }
 
     let choice = &choices[0];
     let finish_reason = choice["finish_reason"].as_str().unwrap_or("");
-    let mut chunks = Vec::new();
-
     // Log the full choice structure for debugging
     debug_log(&format!(
         "[SSE] Choice JSON: {}",
@@ -643,6 +659,23 @@ mod tests {
             .expect("api key should be optional");
 
         assert!(provider.api_key.is_empty());
+    }
+
+    #[test]
+    fn usage_only_chunk_emits_normalized_usage() {
+        let chunks = process_sse_data(
+            r#"{"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":80}}}"#,
+        );
+
+        assert!(matches!(
+            chunks.as_slice(),
+            [Ok(ChunkType::Usage(crate::chunk::LanguageModelUsage {
+                input_tokens: 120,
+                output_tokens: 30,
+                cache_read_tokens: 80,
+                cache_write_tokens: 0,
+            }))]
+        ));
     }
 
     #[test]

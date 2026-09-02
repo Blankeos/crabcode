@@ -94,6 +94,11 @@ impl From<SessionMessage> for Message {
             t1_ms: msg.t1_ms.map(|v| v as i64),
             tn_ms: msg.tn_ms.map(|v| v as i64),
             output_tokens: msg.output_tokens.map(|v| v as i64),
+            input_tokens: msg.input_tokens.map(|v| v as i64),
+            cache_read_tokens: msg.cache_read_tokens.map(|v| v as i64),
+            cache_write_tokens: msg.cache_write_tokens.map(|v| v as i64),
+            cost: msg.cost,
+            usage_authoritative: msg.usage_authoritative,
         }
     }
 }
@@ -201,6 +206,25 @@ impl TryFrom<Message> for SessionMessage {
             output_tokens: msg
                 .output_tokens
                 .and_then(|v| if v > 0 { Some(v as usize) } else { None }),
+            input_tokens: msg
+                .input_tokens
+                .and_then(|v| if v > 0 { Some(v as usize) } else { None }),
+            cache_read_tokens: msg.cache_read_tokens.and_then(|v| {
+                if v > 0 {
+                    Some(v as usize)
+                } else {
+                    None
+                }
+            }),
+            cache_write_tokens: msg.cache_write_tokens.and_then(|v| {
+                if v > 0 {
+                    Some(v as usize)
+                } else {
+                    None
+                }
+            }),
+            cost: msg.cost,
+            usage_authoritative: msg.usage_authoritative,
             tokens_per_sec: None,
             model: msg.model.clone(),
             provider: msg.provider.clone(),
@@ -242,6 +266,28 @@ mod tests {
 
         let restored = SessionMessage::try_from(persistence_message).unwrap();
         assert_eq!(restored.id, id);
+    }
+
+    #[test]
+    fn authoritative_usage_round_trips_through_persistence() {
+        let mut session_message = SessionMessage::assistant("hello");
+        session_message.apply_usage(
+            crate::aisdk::chunk::LanguageModelUsage {
+                input_tokens: 100,
+                output_tokens: 25,
+                cache_read_tokens: 60,
+                cache_write_tokens: 10,
+            },
+            Some(0.0125),
+        );
+
+        let restored = SessionMessage::try_from(Message::from(session_message)).unwrap();
+        assert_eq!(restored.input_tokens, Some(100));
+        assert_eq!(restored.output_tokens, Some(25));
+        assert_eq!(restored.cache_read_tokens, Some(60));
+        assert_eq!(restored.cache_write_tokens, Some(10));
+        assert_eq!(restored.cost, Some(0.0125));
+        assert!(restored.usage_authoritative);
     }
 
     #[test]

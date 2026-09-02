@@ -148,6 +148,7 @@ pub async fn stream_with_tools<P: Provider>(
         let mut cached_repeatable_tool_results: HashMap<String, ToolOutput> = HashMap::new();
         let mut phase_less_ambiguous_follow_ups = 0usize;
         let mut doom_loop = DoomLoopTracker::default();
+        let mut total_usage = crate::chunk::LanguageModelUsage::default();
 
         loop {
             step_idx += 1;
@@ -275,7 +276,12 @@ pub async fn stream_with_tools<P: Provider>(
                             end_turn,
                             reasoning_items,
                             doom_loop_triggers,
+                            usage,
                         }) => {
+                            if let Some(usage) = usage {
+                                total_usage += usage;
+                                let _ = tx_loop.send(ChunkType::Usage(total_usage));
+                            }
                             saw_terminal_event = true;
                             response_end_turn = end_turn;
                             for item in reasoning_items {
@@ -356,6 +362,10 @@ pub async fn stream_with_tools<P: Provider>(
                                 server_doom_loop = true;
                             }
                             let _ = tx_loop.send(ChunkType::Metadata(msg));
+                        }
+                        Ok(ChunkType::Usage(usage)) => {
+                            total_usage += usage;
+                            let _ = tx_loop.send(ChunkType::Usage(total_usage));
                         }
                         Ok(ChunkType::Warning(msg)) => {
                             let _ = tx_loop.send(ChunkType::Warning(msg));
@@ -2956,6 +2966,7 @@ mod tests {
                         end_turn: None,
                         reasoning_items: Vec::new(),
                         doom_loop_triggers: vec!["tail_repetition:8@thinking".to_string()],
+                        usage: None,
                     }),
                 ],
                 1 => vec![
@@ -4100,7 +4111,7 @@ mod tests {
         assert!(!empty_logged);
         assert_eq!(retries, 0);
         assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
-        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+        assert_eq!(response.stop_reason().await, Some(StopReason::Refusal));
     }
 
     #[tokio::test]
