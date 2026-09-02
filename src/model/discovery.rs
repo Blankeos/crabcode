@@ -796,6 +796,20 @@ impl Discovery {
         model.cost.clone()
     }
 
+    pub fn estimate_usage_cost(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) -> f64 {
+        self.get_model_pricing(&provider_id.to_lowercase(), model_id)
+            .map(|pricing| pricing.estimate_tokens(input, output, cache_read, cache_write))
+            .unwrap_or(0.0)
+    }
+
     pub fn get_model_limit(&self, provider_id: &str, model_id: &str) -> Option<u32> {
         let entry = self.load_cache_entry().ok()??;
         let provider = entry.data.get(provider_id)?;

@@ -9743,11 +9743,10 @@ impl App {
                 let cost = self
                     .discovery
                     .as_ref()
-                    .and_then(|discovery| {
-                        discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
-                    })
-                    .map(|pricing| {
-                        pricing.estimate_tokens(
+                    .map(|discovery| {
+                        discovery.estimate_usage_cost(
+                            &self.provider_name,
+                            &self.model,
                             usage.input,
                             usage.output,
                             usage.cache_read,
