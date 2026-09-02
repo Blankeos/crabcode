@@ -45,7 +45,6 @@ fn assistant_tool_part_info(
             if result_ids.contains(id) {
                 return None;
             }
-
             let mut info = parsed_tool_message_from_object(part.data.as_object()?, false);
             if part.data.get("status").is_none() {
                 info.status = "running".to_string();
@@ -1713,38 +1712,22 @@ impl Chat {
             .iter_mut()
             .find(|part| part.part_type == "usage")
         {
-            let current_input = part
-                .data
-                .get("input")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0);
-            let current_output = part
-                .data
-                .get("output")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0);
-            let current_cache_read = part
-                .data
-                .get("cache_read")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0);
-            let current_cache_write = part
-                .data
-                .get("cache_write")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0);
-            let current_cost = part
-                .data
-                .get("cost")
-                .and_then(JsonValue::as_f64)
-                .unwrap_or(0.0);
-            part.data = serde_json::json!({
-                "input": current_input.saturating_add(input),
-                "output": current_output.saturating_add(output),
-                "cache_read": current_cache_read.saturating_add(cache_read),
-                "cache_write": current_cache_write.saturating_add(cache_write),
-                "cost": current_cost + cost,
-            });
+            if let Some(current) = part.recorded_usage() {
+                let total = current.saturating_add(crate::session::types::RecordedUsage {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                    cost,
+                });
+                *part = crate::session::types::MessagePart::usage(
+                    total.input,
+                    total.output,
+                    total.cache_read,
+                    total.cache_write,
+                    total.cost,
+                );
+            }
         } else {
             message
                 .parts
@@ -8166,16 +8149,12 @@ mod tests {
         chat.record_usage(2_000, 200, 750, 25, 0.02);
 
         let message = chat.messages.last().unwrap();
-        let usage = message
-            .parts
-            .iter()
-            .find(|part| part.part_type == "usage")
-            .unwrap();
-        assert_eq!(usage.data["input"], 3_000);
-        assert_eq!(usage.data["output"], 300);
-        assert_eq!(usage.data["cache_read"], 1_250);
-        assert_eq!(usage.data["cache_write"], 75);
-        assert!((usage.data["cost"].as_f64().unwrap() - 0.03).abs() < f64::EPSILON);
+        let usage = message.recorded_usage().unwrap();
+        assert_eq!(usage.input, 3_000);
+        assert_eq!(usage.output, 300);
+        assert_eq!(usage.cache_read, 1_250);
+        assert_eq!(usage.cache_write, 75);
+        assert!((usage.cost - 0.03).abs() < f64::EPSILON);
         assert_eq!(message.output_tokens, Some(300));
     }
 

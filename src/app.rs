@@ -2548,12 +2548,30 @@ impl App {
         format!("Ask anything... \"{}\"", suggestions[index])
     }
 
+    fn mcp_tool_prefix_tokens(&self) -> usize {
+        let Some(manager) = self.mcp_manager.as_ref() else {
+            return 0;
+        };
+        let Ok(manager) = manager.try_lock() else {
+            return 0;
+        };
+        manager
+            .tools()
+            .iter()
+            .map(|spec| {
+                let schema_len = spec.input_schema.to_string().len();
+                (spec.tool_id.len() + spec.description.len() + schema_len) / 4
+            })
+            .sum()
+    }
+
     fn session_usage_text(&mut self) -> String {
         let total_tokens = if self.is_streaming {
             self.streaming_context_tokens_cached()
         } else {
             crate::session::compaction::total_context_tokens(&self.chat_state.chat.messages)
-        };
+        }
+        .saturating_add(self.mcp_tool_prefix_tokens());
         let messages = &self.chat_state.chat.messages;
 
         let mut text = if total_tokens == 0 {
@@ -2572,18 +2590,11 @@ impl App {
                         text = format!("{} ({}%)", text, pct);
                     }
                 }
+            }
 
-                if let Some(cost) =
-                    discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
-                {
-                    let output_tokens: usize =
-                        messages.iter().filter_map(|m| m.output_tokens).sum();
-                    let total = (output_tokens.max(total_tokens)) as f64;
-                    let price = total / 1_000_000.0 * cost.output;
-                    if price > 0.001 {
-                        text = format!("{} \u{00b7} ${:.2}", text, price);
-                    }
-                }
+            let session_cost: f64 = messages.iter().map(|message| message.usage_cost()).sum();
+            if session_cost > 0.001 {
+                text = format!("{} \u{00b7} ${:.2}", text, session_cost);
             }
         }
 
@@ -9736,13 +9747,12 @@ impl App {
                         discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
                     })
                     .map(|pricing| {
-                        let per_million = 1_000_000.0;
-                        usage.input as f64 / per_million * pricing.input
-                            + usage.output as f64 / per_million * pricing.output
-                            + usage.cache_read as f64 / per_million
-                                * pricing.cache_read.unwrap_or(pricing.input)
-                            + usage.cache_write as f64 / per_million
-                                * pricing.cache_write.unwrap_or(pricing.input)
+                        pricing.estimate_tokens(
+                            usage.input,
+                            usage.output,
+                            usage.cache_read,
+                            usage.cache_write,
+                        )
                     })
                     .unwrap_or(0.0);
                 if let Some(chat) = self.chat_for_session_mut(session_id) {
@@ -10960,7 +10970,36 @@ impl App {
             .prefs_dao
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("preferences unavailable"))?;
-        crate::remote_mcp::remote_toggle_mcp_server(prefs, &mut self.mcp, name)
+        let servers = crate::remote_mcp::remote_toggle_mcp_server(prefs, &mut self.mcp, name)?;
+        let enabled = self
+            .mcp
+            .get(name)
+            .map(|server| server.enabled())
+            .unwrap_or(false);
+        if let Some(manager) = self.mcp_manager.clone() {
+            let name = name.to_string();
+            if enabled {
+                tokio::spawn(async move {
+                    let mut manager = manager.lock().await;
+                    let _ = manager.set_enabled(&name, true).await;
+                });
+            } else {
+                let dropped = manager
+                    .try_lock()
+                    .map(|mut guard| {
+                        guard.disable_sync(&name);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !dropped {
+                    tokio::spawn(async move {
+                        manager.lock().await.disable_sync(&name);
+                    });
+                }
+            }
+        }
+        self.refresh_mcp_summary();
+        Ok(servers)
     }
 
     pub fn remote_queued_message_previews(&self) -> Vec<String> {
@@ -15357,6 +15396,25 @@ mod tests {
         assert_eq!(
             app.session_usage_text(),
             "360 \u{00b7} last compact saved 97%"
+        );
+    }
+
+    #[test]
+    fn session_usage_text_uses_stored_usage_cost() {
+        let mut app = test_app();
+        let mut message = crate::session::types::Message::assistant("done");
+        message.token_count = Some(1_000);
+        message
+            .parts
+            .push(crate::session::types::MessagePart::usage(
+                1_000_000, 0, 0, 0, 1.25,
+            ));
+        app.chat_state.chat.add_message(message);
+
+        assert!(
+            app.session_usage_text().contains("$1.25"),
+            "footer should show stored usage cost, got {}",
+            app.session_usage_text()
         );
     }
 

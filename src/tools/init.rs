@@ -68,21 +68,36 @@ async fn register_mcp_tools(
     mcp_config: crate::config::configuration::McpConfig,
     workspace: std::path::PathBuf,
 ) {
-    if mcp_config.is_empty() || !mcp_config.values().any(|server| server.enabled()) {
-        return;
-    }
-    // Shared pool + background connect — never blocks chat on process spawn.
-    let manager = crate::mcp::McpManager::ensure(mcp_config, workspace);
-    sync_mcp_tools_from_manager(registry, manager).await;
+    apply_mcp_config_and_sync(registry, mcp_config, workspace).await;
 }
 
-/// Register any MCP tools that are already connected (no wait). Safe to call
-/// repeatedly — skips tools already present in the registry.
+/// Register currently enabled MCP tools and drop any that were disabled.
+/// Safe to call repeatedly.
 pub async fn sync_mcp_tools_from_manager(
     registry: &ToolRegistry,
     manager: std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpManager>>,
 ) {
     let tools = manager.lock().await.tools();
+    let live_ids = tools
+        .iter()
+        .map(|spec| spec.tool_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    crate::emit_log!(
+        "[mcp] exposing tools={} ids=[{}]",
+        live_ids.len(),
+        tools
+            .iter()
+            .map(|spec| spec.tool_id.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+
+    for id in registry.mcp_tool_ids().await {
+        if !live_ids.contains(&id) {
+            registry.unregister(&id).await;
+        }
+    }
+
     for spec in tools {
         if registry.get(&spec.tool_id).await.is_some() {
             continue;
@@ -96,17 +111,39 @@ pub async fn sync_mcp_tools_from_manager(
     }
 }
 
+async fn drop_mcp_tools(registry: &ToolRegistry) {
+    for id in registry.mcp_tool_ids().await {
+        registry.unregister(&id).await;
+    }
+}
+
 /// Best-effort: pick up MCP tools that finished connecting after the registry
-/// was first built. Never blocks on connect.
+/// was first built, and drop tools from servers that were toggled off.
+/// Never blocks on connect. Applies config under the manager lock *before*
+/// listing tools so a disabled server cannot race onto the next request.
 pub async fn refresh_mcp_tools(
     registry: &ToolRegistry,
     mcp_config: &crate::config::configuration::McpConfig,
     workspace: impl Into<std::path::PathBuf>,
 ) {
-    if mcp_config.is_empty() || !mcp_config.values().any(|server| server.enabled()) {
+    apply_mcp_config_and_sync(registry, mcp_config.clone(), workspace.into()).await;
+}
+
+async fn apply_mcp_config_and_sync(
+    registry: &ToolRegistry,
+    mcp_config: crate::config::configuration::McpConfig,
+    workspace: std::path::PathBuf,
+) {
+    if mcp_config.is_empty() {
+        drop_mcp_tools(registry).await;
         return;
     }
+
     let manager = crate::mcp::McpManager::ensure(mcp_config.clone(), workspace);
+    {
+        let mut manager = manager.lock().await;
+        manager.apply_config(mcp_config);
+    }
     sync_mcp_tools_from_manager(registry, manager).await;
 }
 
@@ -280,5 +317,34 @@ mod tests {
         assert!(scoped.get("apply_patch").await.is_none());
         assert!(scoped.get("write").await.is_none());
         assert!(scoped.get("edit").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_mcp_tools_with_empty_config_drops_stale_mcp_handlers() {
+        let registry = ToolRegistry::new();
+        let manager =
+            crate::mcp::McpManager::ensure(crate::config::configuration::McpConfig::new(), ".");
+        registry
+            .register(std::sync::Arc::new(crate::mcp::McpToolHandler::new(
+                manager,
+                crate::mcp::McpToolSpec {
+                    server: "cua-driver".to_string(),
+                    name: "browser".to_string(),
+                    tool_id: "cua-driver_browser".to_string(),
+                    description: "drive a browser".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                },
+            )))
+            .await;
+        assert!(registry.get("cua-driver_browser").await.is_some());
+
+        refresh_mcp_tools(
+            &registry,
+            &crate::config::configuration::McpConfig::new(),
+            ".",
+        )
+        .await;
+        assert!(registry.get("cua-driver_browser").await.is_none());
+        assert!(registry.get("read").await.is_none());
     }
 }

@@ -10,6 +10,7 @@ impl From<SessionMessage> for Message {
     fn from(msg: SessionMessage) -> Self {
         // Move the owned parts instead of cloning them: this conversion runs
         // for the whole transcript on every streaming snapshot.
+        let usage = msg.recorded_usage();
         let mut parts: Vec<PersistenceMessagePart> = if msg.parts.is_empty() {
             let mut parts = Vec::new();
             if !msg.content.is_empty() {
@@ -85,7 +86,10 @@ impl From<SessionMessage> for Message {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64,
-            tokens_used: msg.token_count.map(|c| c as i32).unwrap_or(0),
+            tokens_used: usage
+                .map(|usage| usage.tokens().min(i32::MAX as u64) as i32)
+                .or(msg.token_count.map(|c| c as i32))
+                .unwrap_or(0),
             model: msg.model.clone(),
             provider: msg.provider.clone(),
             agent_mode: msg.agent_mode.clone(),
@@ -299,5 +303,21 @@ mod tests {
         );
         assert_eq!(restored.reasoning.as_deref(), Some("thinking"));
         assert_eq!(restored.content, "I will inspect.\n\nDone.");
+    }
+
+    #[test]
+    fn usage_parts_set_tokens_used_from_billed_buckets() {
+        let mut session_message = SessionMessage::assistant("done");
+        session_message.token_count = Some(40);
+        session_message
+            .parts
+            .push(SessionMessagePart::usage(1_000, 200, 500, 50, 0.0123));
+
+        let persistence_message: Message = session_message.into();
+        assert_eq!(persistence_message.tokens_used, 1_750);
+        assert!(persistence_message
+            .parts
+            .iter()
+            .any(|part| part.part_type == "usage"));
     }
 }

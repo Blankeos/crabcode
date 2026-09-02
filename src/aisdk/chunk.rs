@@ -29,6 +29,10 @@ pub enum ChunkType {
     },
     Warning(String),
     Metadata(String),
+    /// Provider-billed token usage for the current step.
+    ///
+    /// `input` is non-cached prompt tokens. Cache hits/writes are separate so
+    /// hosts can price them at different rates.
     Usage(TokenUsage),
     End {
         reason: Option<FinishReason>,
@@ -37,6 +41,21 @@ pub enum ChunkType {
     Failed(String),
     Incomplete(String),
     NotSupported(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReasoningReplayItem {
+    pub id: Option<String>,
+    pub summary: String,
+    pub encrypted_content: Option<String>,
+}
+
+impl ReasoningReplayItem {
+    pub fn is_empty(&self) -> bool {
+        self.id.as_deref().is_none_or(str::is_empty)
+            && self.summary.is_empty()
+            && self.encrypted_content.as_deref().is_none_or(str::is_empty)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -52,20 +71,21 @@ impl TokenUsage {
     pub fn is_empty(self) -> bool {
         self.input == 0 && self.output == 0 && self.cache_read == 0 && self.cache_write == 0
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ReasoningReplayItem {
-    pub id: Option<String>,
-    pub summary: String,
-    pub encrypted_content: Option<String>,
-}
+    pub fn total(self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
 
-impl ReasoningReplayItem {
-    pub fn is_empty(&self) -> bool {
-        self.id.as_deref().is_none_or(str::is_empty)
-            && self.summary.is_empty()
-            && self.encrypted_content.as_deref().is_none_or(str::is_empty)
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            input: self.input.saturating_add(other.input),
+            output: self.output.saturating_add(other.output),
+            cache_read: self.cache_read.saturating_add(other.cache_read),
+            cache_write: self.cache_write.saturating_add(other.cache_write),
+        }
     }
 }
 

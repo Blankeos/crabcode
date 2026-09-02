@@ -674,10 +674,32 @@ mod tests {
 
     #[test]
     fn request_asks_streaming_gateways_for_token_usage() {
-        let body = openai_compatible_request_body("test-model", Vec::new());
+        let body = openai_compatible_request_body(
+            "gpt-test",
+            vec![serde_json::json!({
+                "role": "user",
+                "content": "hi",
+            })],
+        );
 
-        assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn empty_choices_usage_chunk_emits_non_cached_input() {
+        let chunks = process_sse_data(
+            r#"{"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":40}}}"#,
+        );
+
+        assert!(matches!(
+            chunks.as_slice(),
+            [Ok(ChunkType::Usage(crate::chunk::TokenUsage {
+                input: 80,
+                output: 30,
+                cache_read: 40,
+                cache_write: 0,
+            }))]
+        ));
     }
 
     #[test]

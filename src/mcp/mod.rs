@@ -163,13 +163,44 @@ impl McpManager {
     pub fn tools(&self) -> Vec<McpToolSpec> {
         self.servers
             .values()
+            .filter(|state| state.config.enabled())
             .flat_map(|state| state.tools.clone())
             .collect()
     }
 
+    /// Drop a server from the live tool list immediately (TUI `/mcp` toggle off).
+    ///
+    /// Does not wait on the background `ensure` apply_config task, which otherwise
+    /// can still expose disabled schemas on the next model request.
+    pub fn disable_sync(&mut self, name: &str) {
+        let Some(state) = self.servers.get_mut(name) else {
+            return;
+        };
+        state.config.set_enabled(false);
+        state.client = None;
+        state.tools.clear();
+        state.status = McpStatus::Disabled;
+    }
+
     /// Apply config changes under a short lock. Does not open connections —
     /// call `warm_connections` afterwards without holding the mutex.
-    fn apply_config(&mut self, config: McpConfig) {
+    pub(crate) fn apply_config(&mut self, config: McpConfig) {
+        let incoming: HashSet<String> = config.keys().cloned().collect();
+        let stale: Vec<String> = self
+            .servers
+            .keys()
+            .filter(|name| !incoming.contains(*name))
+            .cloned()
+            .collect();
+        for name in stale {
+            if let Some(state) = self.servers.get_mut(&name) {
+                state.client = None;
+                state.tools.clear();
+                state.status = McpStatus::Disabled;
+            }
+            self.servers.remove(&name);
+        }
+
         for (name, server_config) in config {
             match self.servers.get_mut(&name) {
                 Some(state) => {
@@ -623,6 +654,10 @@ impl ToolHandler for McpToolHandler {
         }
     }
 
+    fn mcp_server(&self) -> Option<&str> {
+        Some(self.spec.server.as_str())
+    }
+
     fn validate(&self, params: &Value) -> Result<(), ToolError> {
         if params.is_object() {
             Ok(())
@@ -838,5 +873,73 @@ mod tests {
         assert!(normalized
             .pointer("/properties/x")
             .is_some_and(|v| v.get("type").and_then(Value::as_str) == Some("string")));
+    }
+
+    fn remote_server(enabled: bool) -> McpServerConfig {
+        McpServerConfig::Remote(McpRemoteConfig {
+            url: "https://example.test/mcp".to_string(),
+            headers: HashMap::new(),
+            enabled,
+            timeout_ms: None,
+            oauth_enabled: false,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_scope: None,
+        })
+    }
+
+    fn manager_with_tool(server: &str, enabled: bool, tool_id: &str) -> McpManager {
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            server.to_string(),
+            McpServerState {
+                config: remote_server(enabled),
+                status: if enabled {
+                    McpStatus::Connected
+                } else {
+                    McpStatus::Disabled
+                },
+                client: None,
+                tools: vec![McpToolSpec {
+                    server: server.to_string(),
+                    name: "browser".to_string(),
+                    tool_id: tool_id.to_string(),
+                    description: "drive a browser".to_string(),
+                    input_schema: json!({"type": "object", "properties": {}}),
+                }],
+            },
+        );
+        McpManager {
+            workspace: PathBuf::from("."),
+            servers,
+        }
+    }
+
+    #[test]
+    fn tools_omits_disabled_servers_even_if_specs_linger() {
+        let manager = manager_with_tool("cua-driver", false, "cua-driver_browser");
+        assert!(manager.tools().is_empty());
+    }
+
+    #[test]
+    fn apply_config_clears_disabled_server_tools() {
+        let mut manager = manager_with_tool("cua-driver", true, "cua-driver_browser");
+        assert_eq!(manager.tools().len(), 1);
+
+        let mut config = McpConfig::new();
+        config.insert("cua-driver".to_string(), remote_server(false));
+        manager.apply_config(config);
+
+        assert!(manager.tools().is_empty());
+        assert_eq!(manager.status_of("cua-driver"), Some("disabled"));
+    }
+
+    #[test]
+    fn disable_sync_drops_tools_immediately() {
+        let mut manager = manager_with_tool("doop", true, "doop_generate");
+        assert_eq!(manager.tools().len(), 1);
+        manager.disable_sync("doop");
+        assert!(manager.tools().is_empty());
+        assert_eq!(manager.status_of("doop"), Some("disabled"));
     }
 }

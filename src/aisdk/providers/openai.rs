@@ -2499,6 +2499,29 @@ mod tests {
     }
 
     #[test]
+    fn response_completed_captures_usage_minus_cached_tokens() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.completed","response":{"id":"resp_123","usage":{"input_tokens":120,"output_tokens":30,"input_tokens_details":{"cached_tokens":40}}}}"#,
+        )
+        .expect("expected terminal chunk");
+
+        match chunk {
+            Ok(ChunkType::ResponseCompleted { usage, .. }) => {
+                assert_eq!(
+                    usage,
+                    Some(crate::chunk::TokenUsage {
+                        input: 80,
+                        output: 30,
+                        cache_read: 40,
+                        cache_write: 0,
+                    })
+                );
+            }
+            other => panic!("expected ResponseCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn retryable_failure_is_terminal_for_sse_eof_tracking() {
         let chunk = Ok(ChunkType::RetryableFailure(
             crate::retry::RetryError::from_message("stream error"),

@@ -132,6 +132,25 @@ pub struct Cost {
     pub cache_write: Option<f64>,
 }
 
+impl Cost {
+    /// Catalog estimate: USD for billed token buckets at models.dev rates.
+    pub fn estimate_tokens(
+        &self,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) -> f64 {
+        const PER_MILLION: f64 = 1_000_000.0;
+        let cache_read_rate = self.cache_read.unwrap_or(self.input);
+        let cache_write_rate = self.cache_write.unwrap_or(self.input);
+        (input as f64 / PER_MILLION) * self.input
+            + (output as f64 / PER_MILLION) * self.output
+            + (cache_read as f64 / PER_MILLION) * cache_read_rate
+            + (cache_write as f64 / PER_MILLION) * cache_write_rate
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Limit {
     #[serde(default)]
@@ -939,6 +958,27 @@ mod tests {
             std::process::id(),
             nanos
         ))
+    }
+
+    #[test]
+    fn estimate_tokens_uses_cache_rates_and_falls_back_to_input() {
+        let priced = Cost {
+            input: 3.0,
+            output: 15.0,
+            cache_read: Some(0.3),
+            cache_write: Some(3.75),
+        };
+        let cost = priced.estimate_tokens(1_000_000, 1_000_000, 1_000_000, 1_000_000);
+        assert!((cost - 22.05).abs() < 1e-9);
+
+        let fallback = Cost {
+            input: 3.0,
+            output: 15.0,
+            cache_read: None,
+            cache_write: None,
+        };
+        let cost = fallback.estimate_tokens(1_000_000, 0, 1_000_000, 0);
+        assert!((cost - 6.0).abs() < 1e-9);
     }
 
     #[tokio::test]

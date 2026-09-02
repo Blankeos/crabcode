@@ -459,7 +459,12 @@ impl HistoryDAO {
             ],
         )?;
 
-        self.update_session_stats(msg.session_id, msg.tokens_used, 0.0, msg.timestamp)?;
+        self.update_session_stats(
+            msg.session_id,
+            msg.tokens_used,
+            usage_cost_from_parts(&msg.parts),
+            msg.timestamp,
+        )?;
         Ok(())
     }
 
@@ -476,6 +481,7 @@ impl HistoryDAO {
         )?;
 
         let mut total_tokens: i64 = 0;
+        let mut total_cost = 0.0;
         let mut updated_at = chrono::Utc::now().timestamp();
 
         {
@@ -490,6 +496,7 @@ impl HistoryDAO {
             for msg in messages {
                 let parts_json = serde_json::to_string(&msg.parts)?;
                 total_tokens += msg.tokens_used as i64;
+                total_cost += usage_cost_from_parts(&msg.parts);
                 updated_at = msg.timestamp;
 
                 insert.execute(params![
@@ -525,13 +532,14 @@ impl HistoryDAO {
         tx.execute(
             "UPDATE sessions
              SET total_tokens = ?1,
-                 total_cost = 0,
-                 total_time_sec = ?2,
-                 avg_tokens_per_sec = ?3,
-                 updated_at = ?4
-             WHERE id = ?5",
+                 total_cost = ?2,
+                 total_time_sec = ?3,
+                 avg_tokens_per_sec = ?4,
+                 updated_at = ?5
+             WHERE id = ?6",
             params![
                 total_tokens,
+                total_cost,
                 total_time_sec,
                 avg_tokens_per_sec,
                 updated_at,
@@ -747,4 +755,43 @@ fn ensure_workspace(conn: &Connection, root_path: &str, display_name: &str) -> R
         params![root_path, display_name, next_sort_order],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+fn usage_cost_from_parts(parts: &[MessagePart]) -> f64 {
+    parts
+        .iter()
+        .filter(|part| part.part_type == "usage")
+        .filter_map(|part| part.data.get("cost")?.as_f64())
+        .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_cost_sums_usage_parts() {
+        let parts = vec![
+            MessagePart {
+                part_type: "text".to_string(),
+                data: serde_json::json!({ "text": "hi" }),
+            },
+            MessagePart {
+                part_type: "usage".to_string(),
+                data: serde_json::json!({
+                    "input": 1000,
+                    "output": 100,
+                    "cache_read": 500,
+                    "cache_write": 50,
+                    "cost": 0.01,
+                }),
+            },
+            MessagePart {
+                part_type: "usage".to_string(),
+                data: serde_json::json!({ "cost": 0.02 }),
+            },
+        ];
+
+        assert!((usage_cost_from_parts(&parts) - 0.03).abs() < f64::EPSILON);
+    }
 }

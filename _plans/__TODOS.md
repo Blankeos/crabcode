@@ -466,7 +466,7 @@ I think this is how the TUI works already anyway right?
   - [x] Rename product-leaky debug artifacts (e.g. `/tmp/crabcode_sse_debug.log` in compatible provider) or feature-gate them — **~8.5 → ~8.7**
   - [x] Strip or move crabcode-flavored comments/tests (subagent / OpenCode / Grok Build history) out of the SDK tree — **~8.7 → ~9**
 
-- [ ] More accurate token spend? It doesn't really think about how many loops, it's just an estimate. Is opencode more accurate or also just an estimation
+- [x] More accurate token spend? It doesn't really think about how many loops, it's just an estimate. Is opencode more accurate or also just an estimation
 - [x] compacting context but when done, it doesnt show the 'Context compacted (56.1K -> 19.2K, saved 66%)' message part in the UI scrollable part.. Only see it after I close and open. (fixed: soft-compaction marker is mid-history; after /compact we now scroll+highlight the marker live)
 
 - [x] Light mode themes + grok build theme (people like the monochrome aesthetic)
