@@ -990,6 +990,68 @@ mod tests {
     }
 
     #[test]
+    fn max_tokens_delta_emits_final_usage_then_incomplete() {
+        let value = serde_json::json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "max_tokens",
+            },
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 34,
+                "cache_read_input_tokens": 5,
+                "cache_creation_input_tokens": 2,
+            },
+        });
+        let mut pending = PartialAnthropicUsage::default();
+        let chunks = anthropic_stream_chunks("message_delta", &value, &mut pending);
+
+        assert!(matches!(
+            chunks.as_slice(),
+            [
+                Ok(ChunkType::Usage(crate::chunk::TokenUsage {
+                    input: 12,
+                    output: 34,
+                    cache_read: 5,
+                    cache_write: 2,
+                })),
+                Ok(ChunkType::Incomplete(_)),
+            ]
+        ));
+    }
+
+    #[test]
+    fn end_turn_delta_emits_final_usage_then_terminal_reason() {
+        let value = serde_json::json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "end_turn",
+            },
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 11,
+            },
+        });
+        let mut pending = PartialAnthropicUsage::default();
+        let chunks = anthropic_stream_chunks("message_delta", &value, &mut pending);
+
+        assert!(matches!(
+            chunks.as_slice(),
+            [
+                Ok(ChunkType::Usage(crate::chunk::TokenUsage {
+                    input: 7,
+                    output: 11,
+                    cache_read: 0,
+                    cache_write: 0,
+                })),
+                Ok(ChunkType::End {
+                    reason: Some(FinishReason::EndTurn)
+                }),
+            ]
+        ));
+    }
+
+    #[test]
     fn groups_adjacent_tool_calls_and_results() {
         let messages = vec![
             Message::user("hi"),

@@ -755,7 +755,7 @@ impl AcpService {
                             usage.output,
                             usage.cache_read,
                             usage.cache_write,
-                            0.0,
+                            estimate_session_usage_cost(&session, &usage),
                         ));
                     if usage.output > 0 {
                         assistant.output_tokens = Some(
@@ -990,6 +990,27 @@ fn model_reasoning_capability(
     .ok()
     .and_then(|discovery| discovery.get_model_reasoning_capability(provider, model_id))
     .filter(|capability| !capability.values().is_empty())
+}
+
+fn estimate_session_usage_cost(
+    session: &AcpSession,
+    usage: &crate::aisdk::chunk::TokenUsage,
+) -> f64 {
+    crate::model::discovery::Discovery::new_with_custom(Some(
+        session.config.merged_config.custom_providers.clone(),
+    ))
+    .ok()
+    .map(|discovery| {
+        discovery.estimate_usage_cost(
+            &session.provider,
+            &session.model,
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+        )
+    })
+    .unwrap_or(0.0)
 }
 
 fn model_context_window(config: &LoadedConfig, provider: &str, model: &str) -> Option<u32> {
@@ -1883,5 +1904,27 @@ mod tests {
                 ("max".to_string(), "Max".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn unknown_model_usage_cost_is_zero() {
+        let mut session = session_with_config(LoadedConfig {
+            merged_config: crate::config::configuration::MergedConfig::default(),
+            raw_merged: serde_json::Value::Null,
+            diagnostics: Default::default(),
+            inventory: Default::default(),
+            project_root: PathBuf::from("/tmp"),
+            cwd: PathBuf::from("/tmp"),
+            xdg_config_home: PathBuf::from("/tmp"),
+        });
+        session.provider = "no-such-provider".to_string();
+        session.model = "no-such-model".to_string();
+        let usage = crate::aisdk::chunk::TokenUsage {
+            input: 1_000,
+            output: 1_000,
+            cache_read: 0,
+            cache_write: 0,
+        };
+        assert_eq!(estimate_session_usage_cost(&session, &usage), 0.0);
     }
 }

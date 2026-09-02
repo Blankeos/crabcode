@@ -24,6 +24,7 @@ mod remote_mcp;
 mod session;
 mod skill;
 mod sound;
+mod stats;
 mod streaming;
 mod terminal_title;
 mod theme;
@@ -790,6 +791,25 @@ enum Command {
         target: Option<String>,
     },
 
+    /// Show token usage and cost statistics
+    Stats {
+        /// Show stats for the last N days (default: all time)
+        #[arg(long)]
+        days: Option<u64>,
+
+        /// Number of tools to show (default: all)
+        #[arg(long)]
+        tools: Option<usize>,
+
+        /// Show model statistics; optionally limit to the top N
+        #[arg(long, num_args = 0..=1, default_missing_value = "all")]
+        models: Option<String>,
+
+        /// Filter by project (default: all projects, empty string: current project)
+        #[arg(long, value_name = "PROJECT", num_args = 0..=1, default_missing_value = "")]
+        project: Option<String>,
+    },
+
     /// Manage survive-quit background jobs (list / logs / stop)
     Jobs {
         #[command(subcommand)]
@@ -1006,6 +1026,32 @@ async fn main() -> Result<()> {
         }
         Some(Command::Upgrade { target }) => {
             return crate::upgrade::upgrade(target.as_deref());
+        }
+        Some(Command::Stats {
+            days,
+            tools,
+            models,
+            project,
+        }) => {
+            let models = models
+                .as_deref()
+                .map(|value| {
+                    if value == "all" {
+                        Ok(None)
+                    } else {
+                        value
+                            .parse::<usize>()
+                            .map(Some)
+                            .context("--models must be a non-negative integer")
+                    }
+                })
+                .transpose()?;
+            return crate::stats::run(crate::stats::StatsOptions {
+                days: *days,
+                tools: *tools,
+                models,
+                project: project.clone(),
+            });
         }
         Some(Command::Jobs { command }) => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1308,6 +1354,47 @@ mod tests {
     }
 
     #[test]
+    fn parses_stats_command_and_compatible_options() {
+        let args = Args::try_parse_from([
+            "crabcode",
+            "stats",
+            "--days",
+            "7",
+            "--tools",
+            "5",
+            "--models",
+            "3",
+            "--project",
+            "",
+        ])
+        .unwrap();
+
+        match args.command {
+            Some(Command::Stats {
+                days,
+                tools,
+                models,
+                project,
+            }) => {
+                assert_eq!(days, Some(7));
+                assert_eq!(tools, Some(5));
+                assert_eq!(models.as_deref(), Some("3"));
+                assert_eq!(project.as_deref(), Some(""));
+            }
+            other => panic!("expected stats command, got {other:?}"),
+        }
+
+        let args = Args::try_parse_from(["crabcode", "stats", "--models"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Stats {
+                models: Some(ref models),
+                ..
+            }) if models == "all"
+        ));
+    }
+
+    #[test]
     fn generates_bash_completion() {
         let script = String::from_utf8(crate::completion::generate_script(Shell::Bash)).unwrap();
         assert!(script.contains("_crabcode"));
@@ -1352,6 +1439,8 @@ mod tests {
         assert!(help.contains("Usage: crabcode"));
         assert!(help.contains("completion"));
         assert!(help.contains("Generate or install shell completions"));
+        assert!(help.contains("stats"));
+        assert!(help.contains("Show token usage and cost statistics"));
         assert!(
             help.contains("serve        Host the current workspace for browser and CLI clients")
         );
