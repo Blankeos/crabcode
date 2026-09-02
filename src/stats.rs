@@ -375,9 +375,9 @@ fn render_overview(report: &StatsReport) -> String {
     render_table(
         "OVERVIEW",
         &[
-            ("Sessions", report.sessions.to_string()),
-            ("Messages", report.messages.to_string()),
-            ("Days", report.days.to_string()),
+            ("Sessions", comma_number(report.sessions as u64)),
+            ("Messages", comma_number(report.messages as u64)),
+            ("Days", comma_number(report.days as u64)),
         ],
     )
 }
@@ -413,7 +413,7 @@ fn render_models(models: &[(String, ModelStats)]) -> String {
     let mut lines = vec![top_border(), model_title_row(), middle_border()];
     for (index, (name, stats)) in models.iter().enumerate() {
         lines.push(text_row(&format!(" {name}")));
-        lines.push(metric_row("  Messages", &stats.messages.to_string()));
+        lines.push(metric_row("  Messages", &comma_number(stats.messages)));
         lines.push(metric_row(
             "  Input Tokens",
             &compact_number(stats.usage.input),
@@ -512,6 +512,18 @@ fn truncate(value: &str, width: usize) -> String {
         return value.chars().take(width).collect();
     }
     format!("{}..", value.chars().take(width - 2).collect::<String>())
+}
+
+fn comma_number(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
 }
 
 fn compact_number(value: u64) -> String {
@@ -641,6 +653,7 @@ mod tests {
         assert!(output.contains("│Sessions                                              2 │"));
         assert!(output.contains("│Output                                             2.0K │"));
         assert!(output.contains("│                      TOOL USAGE                        │"));
+        assert!(output.contains(" read               ████████████████████ 2 (66.7%)"));
         assert!(output
             .lines()
             .filter(|line| !line.is_empty())
@@ -654,5 +667,52 @@ mod tests {
         assert_eq!(compact_number(1_000), "1.0K");
         assert_eq!(compact_number(10_600_000), "10.6M");
         assert_eq!(compact_number(1_310_600_000), "1.3B");
+    }
+
+    #[test]
+    fn comma_numbers_group_thousands() {
+        assert_eq!(comma_number(0), "0");
+        assert_eq!(comma_number(121), "121");
+        assert_eq!(comma_number(999), "999");
+        assert_eq!(comma_number(1_000), "1,000");
+        assert_eq!(comma_number(4_499), "4,499");
+        assert_eq!(comma_number(30_446), "30,446");
+        assert_eq!(comma_number(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn overview_and_model_counts_use_commas_not_compact() {
+        let output = render(
+            &StatsReport {
+                sessions: 4_499,
+                messages: 30_446,
+                days: 121,
+                models: vec![(
+                    "openai/gpt-test".into(),
+                    ModelStats {
+                        messages: 12_345,
+                        usage: UsageTotals {
+                            input: 4_000,
+                            ..UsageTotals::default()
+                        },
+                    },
+                )],
+                tools: vec![("read".into(), 1234)],
+                tool_total: 1234,
+                ..StatsReport::default()
+            },
+            &StatsOptions {
+                models: Some(None),
+                ..StatsOptions::default()
+            },
+        );
+
+        assert!(output.contains("│Sessions                                          4,499 │"));
+        assert!(output.contains("│Messages                                         30,446 │"));
+        assert!(output.contains("│Days                                                121 │"));
+        assert!(output.contains("│  Messages                                       12,345 │"));
+        assert!(output.contains("│  Input Tokens                                     4.0K │"));
+        assert!(output.contains(" read               ████████████████████ 1234 (100.0%)"));
+        assert!(!output.contains("1,234 (100.0%)"));
     }
 }
