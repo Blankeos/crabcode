@@ -2,16 +2,17 @@ use crate::config::configuration::LoadedConfig;
 use crate::session::manager::SessionManager;
 use agent_client_protocol::schema::v1::{
     AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, ContentBlock, ContentChunk,
-    CreateElicitationRequest, ElicitationAction, ElicitationContentValue, ElicitationFormMode,
-    ElicitationSchema, ElicitationSessionScope, EmbeddedResourceResource, EnumOption,
-    ListSessionsResponse, LoadSessionResponse, McpServer, MultiSelectPropertySchema,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionResponse, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo,
-    SessionMode, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionResponse, StopReason, StringPropertySchema, ToolCall, ToolCallContent,
+    CreateElicitationRequest, CreateTerminalRequest, ElicitationAction, ElicitationContentValue,
+    ElicitationFormMode, ElicitationSchema, ElicitationSessionScope, EmbeddedResourceResource,
+    EnumOption, KillTerminalRequest, ListSessionsResponse, LoadSessionResponse, McpServer,
+    MultiSelectPropertySchema, NewSessionResponse, PermissionOption, PermissionOptionKind,
+    PromptResponse, ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    ResumeSessionResponse, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectGroup, SessionConfigSelectOption, SessionInfo, SessionMode,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionResponse,
+    StopReason, StringPropertySchema, Terminal, TerminalOutputRequest, ToolCall, ToolCallContent,
     ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    UnstructuredCommandInput, UsageUpdate,
+    UnstructuredCommandInput, UsageUpdate, WaitForTerminalExitRequest,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
 use base64::Engine as _;
@@ -503,6 +504,13 @@ impl AcpService {
             .and_then(|capabilities| capabilities.elicitation.clone())
             .and_then(|elicitation| elicitation.form)
             .is_some()
+    }
+
+    fn supports_terminals(&self) -> bool {
+        self.client_capabilities
+            .lock()
+            .ok()
+            .is_some_and(|capabilities| capabilities.terminal)
     }
 
     pub async fn available_commands(
@@ -1031,9 +1039,20 @@ impl AcpService {
                     let _ = response_tx.send(response);
                 }
                 crate::llm::ChunkMessage::TerminalSessionRequest(request) => {
-                    let _ = request
-                        .control_tx
-                        .send(crate::tools::TerminalSessionControl::Stop);
+                    if self.supports_terminals() {
+                        bridge_terminal_session(
+                            &connection,
+                            &session_id,
+                            &session.cwd,
+                            request,
+                            &cancellation,
+                        )
+                        .await;
+                    } else {
+                        let _ = request
+                            .control_tx
+                            .send(crate::tools::TerminalSessionControl::Stop);
+                    }
                 }
                 crate::llm::ChunkMessage::End => break,
                 _ => {}
@@ -1846,6 +1865,125 @@ async fn request_questions(
     acp_question_answers(&form.fields, response.action)
 }
 
+async fn bridge_terminal_session(
+    connection: &ConnectionTo<Client>,
+    session_id: &str,
+    session_cwd: &Path,
+    request: crate::tools::TerminalSessionRequest,
+    cancellation: &CancellationToken,
+) {
+    let start = request.start;
+    let control_tx = request.control_tx;
+    let cwd = start
+        .workdir
+        .as_deref()
+        .map(PathBuf::from)
+        .map(|path| absolute_tool_path(&path.to_string_lossy(), session_cwd))
+        .unwrap_or_else(|| session_cwd.to_path_buf());
+    let create = CreateTerminalRequest::new(session_id.to_string(), "bash")
+        .args(vec!["-c".to_string(), start.command.clone()])
+        .cwd(cwd)
+        .output_byte_limit(crate::tools::terminal_session::MAX_TRANSCRIPT_BYTES as u64);
+    let terminal_id = match connection.send_request(create).block_task().await {
+        Ok(response) => response.terminal_id,
+        Err(error) => {
+            let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalError(
+                format!("ACP client could not create terminal: {error}"),
+            ));
+            return;
+        }
+    };
+
+    let terminal_update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+        start.tool_call_id.clone(),
+        ToolCallUpdateFields::new().content(vec![ToolCallContent::Terminal(Terminal::new(
+            terminal_id.clone(),
+        ))]),
+    ));
+    if connection
+        .send_notification(SessionNotification::new(
+            session_id.to_string(),
+            terminal_update,
+        ))
+        .is_err()
+    {
+        let _ = connection
+            .send_request(ReleaseTerminalRequest::new(
+                session_id.to_string(),
+                terminal_id,
+            ))
+            .block_task()
+            .await;
+        let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalError(
+            "ACP client could not embed terminal".to_string(),
+        ));
+        return;
+    }
+
+    let wait = connection
+        .send_request(WaitForTerminalExitRequest::new(
+            session_id.to_string(),
+            terminal_id.clone(),
+        ))
+        .block_task();
+    tokio::pin!(wait);
+    let (stopped_by_user, exit_code, wait_error) = tokio::select! {
+        _ = cancellation.cancelled() => {
+            let _ = connection
+                .send_request(KillTerminalRequest::new(session_id.to_string(), terminal_id.clone()))
+                .block_task()
+                .await;
+            (true, None, None)
+        }
+        response = &mut wait => match response {
+            Ok(response) => (
+                false,
+                response.exit_status.exit_code.and_then(|code| i32::try_from(code).ok()),
+                None,
+            ),
+            Err(error) => (false, None, Some(error.to_string())),
+        }
+    };
+
+    let output = connection
+        .send_request(TerminalOutputRequest::new(
+            session_id.to_string(),
+            terminal_id.clone(),
+        ))
+        .block_task()
+        .await;
+    let _ = connection
+        .send_request(ReleaseTerminalRequest::new(
+            session_id.to_string(),
+            terminal_id,
+        ))
+        .block_task()
+        .await;
+
+    match (wait_error, output) {
+        (None, Ok(output)) => {
+            let result = crate::tools::terminal_session::external_terminal_result(
+                &start,
+                &output.output,
+                output.truncated,
+                exit_code,
+                stopped_by_user,
+            );
+            let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalResult(result));
+        }
+        (Some(error), _) => {
+            let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalError(
+                format!("ACP terminal wait failed: {error}"),
+            ));
+        }
+        (None, Err(error)) => {
+            let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalError(
+                format!("ACP terminal output failed: {error}"),
+            ));
+        }
+    }
+}
+
 fn permission_title(prompt: &crate::tools::PermissionPrompt) -> String {
     prompt
         .command
@@ -2152,6 +2290,17 @@ mod tests {
         assert_eq!(tool_kind("read"), ToolKind::Read);
         assert_eq!(tool_kind("apply_patch"), ToolKind::Edit);
         assert_eq!(tool_kind("unknown"), ToolKind::Other);
+    }
+
+    #[test]
+    fn terminal_support_tracks_client_capability() {
+        let service = AcpService::new(Path::new("/tmp")).unwrap();
+        assert!(!service.supports_terminals());
+
+        service.set_client_capabilities(
+            agent_client_protocol::schema::v1::ClientCapabilities::new().terminal(true),
+        );
+        assert!(service.supports_terminals());
     }
 
     #[test]
