@@ -75,21 +75,40 @@ impl ToolHandler for ApplyPatchTool {
         Ok(())
     }
 
-    async fn execute(&self, params: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let patch = get_string_param(&params, "patch")
             .ok_or_else(|| ToolError::Validation("patch is required".to_string()))?;
         let patch = clean_patch_input(&patch);
+        let paths = patch_paths_as_pathbufs(&params, ctx.workdir());
+        let before = paths
+            .iter()
+            .map(|path| (path.clone(), std::fs::read_to_string(path).ok()))
+            .collect::<Vec<_>>();
         let summary = if patch.trim_start().starts_with("*** Begin Patch") {
             apply_codex_patch(&patch)?
         } else {
             apply_unified_patch(&patch)?
         };
+        let changes = before
+            .into_iter()
+            .filter_map(|(path, old_text)| {
+                let new_text = std::fs::read_to_string(&path).ok();
+                (old_text != new_text).then(|| {
+                    serde_json::json!({
+                        "path": path,
+                        "old_text": old_text,
+                        "new_text": new_text.unwrap_or_default(),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
 
         Ok(ToolResult::new(
             "Apply patch",
             format!("Applied patch: {}", summary.describe()),
         )
-        .with_metadata("file_count", serde_json::json!(summary.touched())))
+        .with_metadata("file_count", serde_json::json!(summary.touched()))
+        .with_metadata("changes", serde_json::json!(changes)))
     }
 }
 
@@ -718,6 +737,12 @@ mod tests {
         assert_eq!(std::fs::read_to_string(second).unwrap(), "alpha\ngamma\n");
         assert!(result.output.contains("updated 2"));
         assert_eq!(result.metadata["file_count"], serde_json::json!(2));
+        let changes = result.metadata["changes"]
+            .as_array()
+            .expect("patch changes");
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0]["old_text"], "one\ntwo\n");
+        assert_eq!(changes[0]["new_text"], "one\nthree\n");
     }
 
     #[tokio::test]
