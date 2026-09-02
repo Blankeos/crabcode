@@ -86,30 +86,35 @@ pub fn clone_messages(
     let mut created = Vec::new();
     for message in &mut cloned {
         message.id = cuid2::create_id();
-        for image_path in &mut message.local_image_paths {
-            let source = PathBuf::from(&*image_path);
-            if !is_managed(&source) {
-                continue;
-            }
-            if std::fs::symlink_metadata(&source)?.file_type().is_symlink() {
-                return Err(anyhow!("managed attachment cannot be a symlink"));
-            }
-            let extension = source
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .ok_or_else(|| anyhow!("managed attachment has no extension"))?;
-            let data = std::fs::read(&source)
-                .with_context(|| format!("failed to read attachment {}", source.display()))?;
-            match write(destination_session_id, extension, &data) {
-                Ok(path) => {
-                    *image_path = path.to_string_lossy().into_owned();
-                    created.push(path);
+        for paths in [
+            &mut message.local_image_paths,
+            &mut message.local_audio_paths,
+        ] {
+            for attachment_path in paths {
+                let source = PathBuf::from(&*attachment_path);
+                if !is_managed(&source) {
+                    continue;
                 }
-                Err(error) => {
-                    for path in created {
-                        remove_file(&path);
+                if std::fs::symlink_metadata(&source)?.file_type().is_symlink() {
+                    return Err(anyhow!("managed attachment cannot be a symlink"));
+                }
+                let extension = source
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .ok_or_else(|| anyhow!("managed attachment has no extension"))?;
+                let data = std::fs::read(&source)
+                    .with_context(|| format!("failed to read attachment {}", source.display()))?;
+                match write(destination_session_id, extension, &data) {
+                    Ok(path) => {
+                        *attachment_path = path.to_string_lossy().into_owned();
+                        created.push(path);
                     }
-                    return Err(error);
+                    Err(error) => {
+                        for path in created {
+                            remove_file(&path);
+                        }
+                        return Err(error);
+                    }
                 }
             }
         }

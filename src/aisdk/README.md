@@ -39,5 +39,6 @@ Done for packaging/host hooks:
 - Product-flavored comments/tests scrubbed
 - Typed terminal stop reasons include normal completion, max tokens, refusal, hooks, and errors
 - Normalized provider usage events retain input, output, cache-read, and cache-write token accounting across multi-step turns
+- User messages support typed image and WAV/MP3 audio inputs; audio is serialized through verified Chat Completions `input_audio` content parts
 
 Keep app glue outside this tree (`src/tools/aisdk_bridge.rs`, `src/llm/*`).

@@ -2268,6 +2268,8 @@ impl Chat {
             std::mem::discriminant(&msg.role).hash(&mut h);
             msg.content.hash(&mut h);
             msg.reasoning.hash(&mut h);
+            msg.local_image_paths.hash(&mut h);
+            msg.local_audio_paths.hash(&mut h);
             for part in &msg.parts {
                 part.part_type.hash(&mut h);
                 part.data.to_string().hash(&mut h);

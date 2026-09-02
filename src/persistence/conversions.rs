@@ -18,6 +18,12 @@ impl From<SessionMessage> for Message {
                     data: serde_json::json!({ "text": msg.content }),
                 });
             }
+            for path in &msg.local_audio_paths {
+                parts.push(PersistenceMessagePart {
+                    part_type: "local_audio".to_string(),
+                    data: serde_json::json!({ "path": path }),
+                });
+            }
             parts
         } else {
             msg.parts
@@ -41,6 +47,12 @@ impl From<SessionMessage> for Message {
         for path in &msg.local_image_paths {
             parts.push(PersistenceMessagePart {
                 part_type: "local_image".to_string(),
+                data: serde_json::json!({ "path": path }),
+            });
+        }
+        for path in &msg.local_audio_paths {
+            parts.push(PersistenceMessagePart {
+                part_type: "local_audio".to_string(),
                 data: serde_json::json!({ "path": path }),
             });
         }
@@ -114,6 +126,15 @@ impl TryFrom<Message> for SessionMessage {
                 part_type: part.part_type.clone(),
                 data: part.data.clone(),
             })
+            .collect();
+        let local_audio_paths = session_parts
+            .iter()
+            .filter_map(|part| {
+                (part.part_type == "local_audio")
+                    .then(|| part.data.get("path").and_then(|value| value.as_str()))
+                    .flatten()
+            })
+            .map(str::to_string)
             .collect();
 
         let content = session_parts
@@ -229,6 +250,7 @@ impl TryFrom<Message> for SessionMessage {
             model: msg.model.clone(),
             provider: msg.provider.clone(),
             local_image_paths,
+            local_audio_paths,
             compaction_stats,
             was_interrupted,
         })
@@ -288,6 +310,15 @@ mod tests {
         assert_eq!(restored.cache_write_tokens, Some(10));
         assert_eq!(restored.cost, Some(0.0125));
         assert!(restored.usage_authoritative);
+    }
+
+    #[test]
+    fn audio_paths_round_trip_through_persistence() {
+        let mut session_message = SessionMessage::user("listen");
+        session_message.local_audio_paths = vec!["/tmp/audio.wav".to_string()];
+
+        let restored = SessionMessage::try_from(Message::from(session_message)).unwrap();
+        assert_eq!(restored.local_audio_paths, vec!["/tmp/audio.wav"]);
     }
 
     #[test]

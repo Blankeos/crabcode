@@ -186,6 +186,7 @@ pub struct Message {
     pub model: Option<String>,
     pub provider: Option<String>,
     pub local_image_paths: Vec<String>,
+    pub local_audio_paths: Vec<String>,
     pub compaction_stats: Option<CompactionStats>,
     pub was_interrupted: bool,
 }
@@ -239,6 +240,7 @@ impl Message {
             model: None,
             provider: None,
             local_image_paths: Vec::new(),
+            local_audio_paths: Vec::new(),
             compaction_stats: None,
             was_interrupted: false,
         }
@@ -293,6 +295,7 @@ impl Message {
             model: None,
             provider: None,
             local_image_paths: Vec::new(),
+            local_audio_paths: Vec::new(),
             compaction_stats: None,
             was_interrupted: false,
         }

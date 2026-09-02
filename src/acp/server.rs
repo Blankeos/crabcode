@@ -242,7 +242,12 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
 fn capabilities() -> AgentCapabilities {
     AgentCapabilities::new()
         .load_session(true)
-        .prompt_capabilities(PromptCapabilities::new().embedded_context(true).image(true))
+        .prompt_capabilities(
+            PromptCapabilities::new()
+                .embedded_context(true)
+                .image(true)
+                .audio(true),
+        )
         .mcp_capabilities(McpCapabilities::new().http(true).sse(true))
         .session_capabilities(
             SessionCapabilities::new()
@@ -251,4 +256,16 @@ fn capabilities() -> AgentCapabilities {
                 .fork(SessionForkCapabilities::new())
                 .close(SessionCloseCapabilities::new()),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertises_audio_prompt_support() {
+        let prompt = capabilities().prompt_capabilities;
+        assert!(prompt.audio);
+        assert!(prompt.image);
+    }
 }

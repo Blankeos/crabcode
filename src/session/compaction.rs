@@ -172,7 +172,6 @@ fn select_messages_with_budget(
             kept_tokens = kept_tokens.saturating_add(size);
         }
     }
-
     // OpenCode: if no keep, or keep would start at work index 0, summarize all.
     let tail_start_work = match tail_start_work {
         Some(0) | None => work_indices.len(),
@@ -550,6 +549,18 @@ fn message_content_for_prompt(message: &Message) -> String {
         }
         content.push_str("Attached local images:\n");
         for path in &message.local_image_paths {
+            content.push_str("- ");
+            content.push_str(path);
+            content.push('\n');
+        }
+    }
+
+    if !message.local_audio_paths.is_empty() {
+        if !content.trim().is_empty() {
+            content.push('\n');
+        }
+        content.push_str("Attached local audio:\n");
+        for path in &message.local_audio_paths {
             content.push_str("- ");
             content.push_str(path);
             content.push('\n');

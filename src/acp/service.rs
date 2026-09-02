@@ -30,6 +30,39 @@ pub struct AcpService {
     client_capabilities: Arc<Mutex<agent_client_protocol::schema::v1::ClientCapabilities>>,
 }
 
+fn write_prompt_audio(
+    session_id: &str,
+    audio: &agent_client_protocol::schema::v1::AudioContent,
+) -> Result<String, Error> {
+    const MAX_AUDIO_BYTES: usize = 20 * 1024 * 1024;
+    let media_type = audio.mime_type.trim().to_ascii_lowercase();
+    let extension = match media_type.as_str() {
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        _ => {
+            return Err(Error::invalid_params()
+                .data(format!("unsupported audio MIME type: {}", audio.mime_type)));
+        }
+    };
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(audio.data.trim())
+        .map_err(|error| Error::invalid_params().data(format!("invalid audio data: {error}")))?;
+    if data.len() > MAX_AUDIO_BYTES {
+        return Err(Error::invalid_params().data("audio exceeds the 20 MiB size limit"));
+    }
+    let path = crate::persistence::attachments::write(session_id, extension, &data)
+        .map_err(|_| internal_error())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn model_supports_audio(config: &LoadedConfig, provider: &str, model: &str) -> bool {
+    crate::model::discovery::Discovery::new_with_custom(Some(
+        config.merged_config.custom_providers.clone(),
+    ))
+    .ok()
+    .is_some_and(|discovery| discovery.model_supports_input_modality(provider, model, "audio"))
+}
+
 struct ManagedAttachmentGuard {
     paths: Vec<String>,
     committed: bool,
@@ -896,9 +929,18 @@ impl AcpService {
             }
             return self.compact_session(&session_id, session, connection).await;
         }
-        let (prompt, local_image_paths) =
-            prompt_content(prompt, supports_images, &session_id, &session)?;
-        let mut attachment_guard = ManagedAttachmentGuard::new(local_image_paths.clone());
+        let supports_audio =
+            model_supports_audio(&session.config, &session.provider, &session.model);
+        let (prompt, local_image_paths, local_audio_paths) = prompt_content(
+            prompt,
+            supports_images,
+            supports_audio,
+            &session_id,
+            &session,
+        )?;
+        let mut managed_paths = local_image_paths.clone();
+        managed_paths.extend(local_audio_paths.clone());
+        let mut attachment_guard = ManagedAttachmentGuard::new(managed_paths);
         let prompt = expand_slash_command(&session, &prompt).await?;
         if prompt.trim().is_empty() {
             return Err(Error::invalid_params().data("prompt must include text content"));
@@ -924,6 +966,7 @@ impl AcpService {
         };
         let mut user_message = crate::session::types::Message::user(&prompt);
         user_message.local_image_paths = local_image_paths;
+        user_message.local_audio_paths = local_audio_paths;
         user_message.provider = Some(session.provider.clone());
         user_message.model = Some(session.model.clone());
         user_message.agent_mode = Some(session.agent.clone());
@@ -1556,11 +1599,13 @@ fn workspace_path(path: &Path) -> Result<PathBuf, Error> {
 fn prompt_content(
     parts: Vec<ContentBlock>,
     supports_images: bool,
+    supports_audio: bool,
     session_id: &str,
     session: &AcpSession,
-) -> Result<(String, Vec<String>), Error> {
+) -> Result<(String, Vec<String>, Vec<String>), Error> {
     let mut text = String::new();
     let mut local_image_paths = Vec::new();
+    let mut local_audio_paths = Vec::new();
     for part in parts {
         match part {
             ContentBlock::Text(content) => text.push_str(&content.text),
@@ -1593,16 +1638,37 @@ fn prompt_content(
                     }
                 }
             }
-            ContentBlock::Audio(_) => {
-                return Err(Error::invalid_params().data("audio ACP prompts are not supported yet"));
+            ContentBlock::Audio(audio) => {
+                if !supports_audio {
+                    for path in local_image_paths.iter().chain(local_audio_paths.iter()) {
+                        crate::persistence::attachments::remove_file(Path::new(path));
+                    }
+                    return Err(Error::invalid_params().data(format!(
+                        "model {}/{} does not support audio input",
+                        session.provider, session.model
+                    )));
+                }
+                match write_prompt_audio(session_id, &audio) {
+                    Ok(path) => local_audio_paths.push(path),
+                    Err(error) => {
+                        for path in local_image_paths.iter().chain(local_audio_paths.iter()) {
+                            crate::persistence::attachments::remove_file(Path::new(path));
+                        }
+                        return Err(error);
+                    }
+                }
             }
             _ => {}
         }
     }
-    if text.is_empty() && !local_image_paths.is_empty() {
-        text.push_str("[Image attached]");
+    if text.is_empty() {
+        if !local_image_paths.is_empty() {
+            text.push_str("[Image attached]");
+        } else if !local_audio_paths.is_empty() {
+            text.push_str("[Audio attached]");
+        }
     }
-    Ok((text, local_image_paths))
+    Ok((text, local_image_paths, local_audio_paths))
 }
 
 fn prompt_text(parts: Vec<ContentBlock>) -> Result<String, Error> {
@@ -2706,6 +2772,34 @@ mod tests {
     }
 
     #[test]
+    fn writes_supported_acp_audio_to_managed_session_storage() {
+        let session_id = format!("acp-audio-{}", cuid2::create_id());
+        let audio = agent_client_protocol::schema::v1::AudioContent::new("YXVkaW8=", "audio/wav");
+        let path = write_prompt_audio(&session_id, &audio).expect("audio file");
+
+        assert!(path.ends_with(".wav"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"audio");
+        crate::persistence::attachments::cleanup_session(&session_id).unwrap();
+    }
+
+    #[test]
+    fn rejects_audio_for_models_without_audio_modality() {
+        let session_id = format!("acp-audio-{}", cuid2::create_id());
+        let result = prompt_content(
+            vec![ContentBlock::Audio(
+                agent_client_protocol::schema::v1::AudioContent::new("YXVkaW8=", "audio/wav"),
+            )],
+            false,
+            false,
+            &session_id,
+            &test_session(),
+        );
+
+        assert!(result.is_err());
+        crate::persistence::attachments::cleanup_session(&session_id).unwrap();
+    }
+
+    #[test]
     fn writes_acp_clipboard_image_data_uri_to_managed_storage() {
         let session_id = format!("acp-image-{}", cuid2::create_id());
         let image = agent_client_protocol::schema::v1::ImageContent::new(
@@ -2734,6 +2828,7 @@ mod tests {
                 )),
             ],
             true,
+            false,
             &session_id,
             &test_session(),
         );

@@ -238,7 +238,7 @@ impl Provider for OpenAICompatible {
 }
 
 fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
-    if user.images.is_empty() {
+    if user.images.is_empty() && user.audios.is_empty() {
         return serde_json::json!(user.content);
     }
 
@@ -254,6 +254,15 @@ fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_j
             "type": "image_url",
             "image_url": {
                 "url": image.data_url,
+            },
+        })
+    }));
+    parts.extend(user.audios.iter().map(|audio| {
+        serde_json::json!({
+            "type": "input_audio",
+            "input_audio": {
+                "data": audio.data,
+                "format": audio.format,
             },
         })
     }));
@@ -659,6 +668,27 @@ mod tests {
             .expect("api key should be optional");
 
         assert!(provider.api_key.is_empty());
+    }
+
+    #[test]
+    fn serializes_audio_input_content_part() {
+        let user = crate::message::UserMessage {
+            content: "Describe this".to_string(),
+            images: Vec::new(),
+            audios: vec![crate::message::AudioContent {
+                data: "YXVkaW8=".to_string(),
+                format: "wav".to_string(),
+                media_type: "audio/wav".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            openai_compatible_user_content(&user),
+            serde_json::json!([
+                {"type": "text", "text": "Describe this"},
+                {"type": "input_audio", "input_audio": {"data": "YXVkaW8=", "format": "wav"}}
+            ])
+        );
     }
 
     #[test]
