@@ -52,7 +52,7 @@ Configure a provider in the Crabcode TUI with `/connect` before starting an ACP 
 | Commands and skills | Session updates publish project custom slash commands, workspace skills, and built-in `/skills`, `/mcp`, and `/compact`. Template commands expand before model turns; `/compact` rewrites persisted model context without adding a literal user message. | Other TUI-only commands are not ACP-available; unknown `/…` lines pass through as plain text. | Add more built-in commands and richer command input schemas. |
 | MCP | Project MCP from Crabcode config runs as usual. Editors may also pass MCP servers on `session/new`; those servers are merged into the session config (stdio, HTTP, and SSE). | HTTP and SSE client MCP are advertised; stdio client MCP is accepted and merged even though it is not a separate advertised capability flag. | Surface richer MCP connection status and OAuth for remote client servers. |
 | Terminals | — | ACP terminal embedding is not implemented. | Add a client-terminal adapter for long-running shell sessions. |
-| Questions | — | Interactive question prompts from the agent are not forwarded over ACP; the runtime skips them rather than blocking the editor. | Map Crabcode questions to ACP permission-style or dedicated question requests. |
+| Questions | Agent questions are forwarded as ACP form elicitations with ordered single-select, multi-select, and custom-text answers when the editor advertises form elicitation support. | ACP elicitation is currently unstable; editors without form support receive a safe skipped response instead of blocking the turn. | Adopt the stable elicitation capability when ACP finalizes it and surface richer validation or defaults. |
 | Usage | Estimated context-window usage is emitted when the selected model exposes a context limit. | Provider-authoritative token and cost accounting is not complete; usage is omitted when no context limit is known. | Retain provider input, output, cache, context, and cost data for authoritative usage updates. |
 
 ## Session behavior
@@ -63,8 +63,10 @@ Configure a provider in the Crabcode TUI with `/connect` before starting an ACP 
 
 Crabcode applies the same configured permission rules in ACP as it does in the TUI. When a tool needs approval, the editor receives an ACP permission request. If the editor cannot respond or disconnects, Crabcode denies the request rather than continuing unattended.
 
+Question forms are only sent to editors that advertise ACP form elicitation support. Declining, cancelling, disconnecting, or using an editor without that capability returns empty answers to the agent so the session can continue without waiting indefinitely.
+
 Client-supplied MCP servers run with the same trust as project-configured MCP: stdio servers can execute local processes, and remote servers can send the headers and credentials the editor provides. Only attach MCP servers you trust for that workspace.
 
 Image attachments are decoded under a size limit and written to temporary files under the system temp directory (`…/crabcode/acp-images/`) for the model turn. Prefer cleaning those files after long ACP sessions until automatic cleanup lands.
 
-The capability matrix matches what the ACP server implements today. Crabcode only advertises protocol capability flags it handles (`loadSession`, image and embedded-context prompts, HTTP/SSE MCP, and list/resume/fork/close session ops).
+The capability matrix matches what the ACP server implements today. Crabcode only advertises protocol capability flags it handles (`loadSession`, image and embedded-context prompts, HTTP/SSE MCP, and list/resume/fork/close session ops). Client-side form elicitation is capability-gated during initialization before Crabcode sends question requests.

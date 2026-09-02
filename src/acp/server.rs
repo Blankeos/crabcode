@@ -30,12 +30,14 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
     })?;
     let service = crate::acp::service::AcpService::new(&workspace)
         .map_err(|_| anyhow::anyhow!("failed to initialize ACP session storage"))?;
+    let initialize_service = service.clone();
 
     Agent
         .builder()
         .name("crabcode-acp")
         .on_receive_request(
             async move |request: InitializeRequest, responder, _connection| {
+                initialize_service.set_client_capabilities(request.client_capabilities.clone());
                 let response = InitializeResponse::new(request.protocol_version)
                     .agent_capabilities(capabilities())
                     .agent_info(Implementation::new("crabcode", env!("CARGO_PKG_VERSION")));

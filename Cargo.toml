@@ -43,7 +43,7 @@ json5 = "0.4"
 schemars = "1.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
-agent-client-protocol = { version = "=2.0.0", features = ["unstable_session_fork"] }
+agent-client-protocol = { version = "=2.0.0", features = ["unstable_elicitation", "unstable_session_fork"] }
 clap_complete = "4.5"
 ignore = "0.4"
 copypasta = "0.10"

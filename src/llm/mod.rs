@@ -35,6 +35,7 @@ pub enum ChunkMessage {
     },
     PermissionRequest(crate::tools::PermissionPrompt),
     QuestionRequest {
+        tool_call_id: Option<String>,
         questions: serde_json::Value,
         response_tx: tokio::sync::oneshot::Sender<serde_json::Value>,
     },

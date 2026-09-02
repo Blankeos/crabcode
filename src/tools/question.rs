@@ -385,6 +385,7 @@ impl ToolHandler for QuestionTool {
 
         sender
             .send(crate::llm::ChunkMessage::QuestionRequest {
+                tool_call_id: ctx.call_id.clone(),
                 questions: questions.clone(),
                 response_tx,
             })
@@ -588,5 +589,43 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Do not call the question tool again"));
+    }
+
+    #[tokio::test]
+    async fn question_request_preserves_tool_call_id_and_answers() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let tool = QuestionTool::new().with_sender(sender);
+        let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
+        let ctx = ToolContext::new("session", "message", "Build", abort_rx)
+            .with_call_id("question_call_1");
+        let task = tokio::spawn(async move {
+            tool.execute(
+                json!({
+                    "questions": [{
+                        "question": "Pick one",
+                        "header": "Choice",
+                        "options": [{"label": "A", "description": "First"}]
+                    }]
+                }),
+                &ctx,
+            )
+            .await
+        });
+
+        let Some(crate::llm::ChunkMessage::QuestionRequest {
+            tool_call_id,
+            questions,
+            response_tx,
+        }) = receiver.recv().await
+        else {
+            panic!("question request");
+        };
+        assert_eq!(tool_call_id.as_deref(), Some("question_call_1"));
+        assert_eq!(questions[0]["question"], "Pick one");
+        response_tx.send(json!([["A"]])).expect("question response");
+
+        let result = task.await.expect("question task").expect("tool result");
+        assert!(result.output.contains("\"status\":\"answered\""));
+        assert_eq!(result.metadata["answers"], json!([["A"]]));
     }
 }

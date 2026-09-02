@@ -9820,6 +9820,7 @@ impl App {
             crate::llm::ChunkMessage::QuestionRequest {
                 questions,
                 response_tx,
+                ..
             } => {
                 self.maybe_persist_streaming_snapshot_for_session(session_id, true);
                 let _ = self.session_manager.set_session_status(
