@@ -5,7 +5,7 @@ use crate::tools::{
 };
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub struct ApplyPatchTool;
@@ -170,6 +170,259 @@ pub(crate) fn patch_paths_as_pathbufs(params: &Value, workdir: &Path) -> Vec<Pat
             }
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PatchPreview {
+    pub path: PathBuf,
+    pub old_text: Option<String>,
+    pub new_text: String,
+}
+
+#[derive(Default)]
+struct PatchPreviewState {
+    original: HashMap<PathBuf, Option<String>>,
+    current: HashMap<PathBuf, Option<String>>,
+    order: Vec<PathBuf>,
+}
+
+impl PatchPreviewState {
+    fn resolve(workdir: &Path, path: &str) -> PathBuf {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            path
+        } else {
+            workdir.join(path)
+        }
+    }
+
+    fn load(&mut self, path: &Path) -> Result<Option<String>, ToolError> {
+        if let Some(content) = self.current.get(path) {
+            return Ok(content.clone());
+        }
+        let content = match std::fs::read(path) {
+            Ok(bytes) => Some(decode_utf8(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(ToolError::Execution(format!(
+                    "Failed to read {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        self.original.insert(path.to_path_buf(), content.clone());
+        self.current.insert(path.to_path_buf(), content.clone());
+        self.order.push(path.to_path_buf());
+        Ok(content)
+    }
+
+    fn required(&mut self, path: &Path) -> Result<String, ToolError> {
+        self.load(path)?.ok_or_else(|| {
+            ToolError::NotFound(format!("Patch source file not found: {}", path.display()))
+        })
+    }
+
+    fn create(&mut self, path: PathBuf, content: String) -> Result<(), ToolError> {
+        if self.load(&path)?.is_some() {
+            return Err(ToolError::Execution(format!(
+                "Refusing to overwrite existing file: {}",
+                path.display()
+            )));
+        }
+        self.current.insert(path, Some(content));
+        Ok(())
+    }
+
+    fn write(&mut self, path: PathBuf, content: String) -> Result<(), ToolError> {
+        self.required(&path)?;
+        self.current.insert(path, Some(content));
+        Ok(())
+    }
+
+    fn delete(&mut self, path: PathBuf) -> Result<(), ToolError> {
+        self.required(&path)?;
+        self.current.insert(path, None);
+        Ok(())
+    }
+
+    fn finish(self) -> Vec<PatchPreview> {
+        self.order
+            .into_iter()
+            .filter_map(|path| {
+                let old_text = self.original.get(&path).cloned().flatten();
+                let new_text = self.current.get(&path).cloned().flatten();
+                (old_text != new_text).then_some(PatchPreview {
+                    path,
+                    old_text,
+                    new_text: new_text.unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+}
+
+pub(crate) fn preview_patch(
+    params: &Value,
+    workdir: &Path,
+) -> Result<Vec<PatchPreview>, ToolError> {
+    let patch = get_string_param(params, "patch")
+        .ok_or_else(|| ToolError::Validation("patch is required".to_string()))?;
+    let patch = clean_patch_input(&patch);
+    let mut state = PatchPreviewState::default();
+    if patch.trim_start().starts_with("*** Begin Patch") {
+        preview_codex_patch(&patch, workdir, &mut state)?;
+    } else {
+        preview_unified_patch(&patch, workdir, &mut state)?;
+    }
+    let changes = state.finish();
+    if changes.is_empty() {
+        return Err(ToolError::Validation(
+            "Patch did not contain any file changes".to_string(),
+        ));
+    }
+    Ok(changes)
+}
+
+fn preview_unified_patch(
+    patch: &str,
+    workdir: &Path,
+    state: &mut PatchPreviewState,
+) -> Result<(), ToolError> {
+    let lines: Vec<&str> = patch.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        if !lines[index].starts_with("--- ") {
+            index += 1;
+            continue;
+        }
+        let old_path = normalize_diff_path(lines[index].trim_start_matches("--- "));
+        index += 1;
+        if index >= lines.len() || !lines[index].starts_with("+++ ") {
+            return Err(ToolError::Validation(
+                "Unified diff file header must include a +++ path".to_string(),
+            ));
+        }
+        let new_path = normalize_diff_path(lines[index].trim_start_matches("+++ "));
+        index += 1;
+        let source =
+            (old_path != "/dev/null").then(|| PatchPreviewState::resolve(workdir, &old_path));
+        let target =
+            (new_path != "/dev/null").then(|| PatchPreviewState::resolve(workdir, &new_path));
+        let mut content = match &source {
+            Some(path) => state.required(path)?,
+            None => String::new(),
+        };
+        while index < lines.len()
+            && !lines[index].starts_with("--- ")
+            && !lines[index].starts_with("diff --git ")
+        {
+            if !lines[index].starts_with("@@") {
+                index += 1;
+                continue;
+            }
+            index += 1;
+            let (old_text, new_text, next_index) = collect_hunk(&lines, index);
+            content = replace_hunk(&content, &old_text, &new_text)?;
+            index = next_index;
+        }
+        match (source, target) {
+            (None, Some(target)) => state.create(target, content)?,
+            (Some(source), None) => state.delete(source)?,
+            (Some(source), Some(target)) if source == target => state.write(source, content)?,
+            (Some(source), Some(target)) => {
+                state.create(target, content)?;
+                state.delete(source)?;
+            }
+            (None, None) => {
+                return Err(ToolError::Validation(
+                    "Patch cannot use /dev/null for both paths".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preview_codex_patch(
+    patch: &str,
+    workdir: &Path,
+    state: &mut PatchPreviewState,
+) -> Result<(), ToolError> {
+    let lines: Vec<&str> = patch.lines().collect();
+    let mut index = 0;
+    if lines.get(index).map(|line| line.trim()) != Some("*** Begin Patch") {
+        return Err(ToolError::Validation(
+            "Codex patch must start with *** Begin Patch".to_string(),
+        ));
+    }
+    index += 1;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if line == "*** End Patch" {
+            break;
+        }
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            index += 1;
+            let mut file_lines = Vec::new();
+            while index < lines.len() && !lines[index].starts_with("*** ") {
+                let Some(content) = lines[index].strip_prefix('+') else {
+                    return Err(ToolError::Validation(
+                        "Add File lines must start with +".to_string(),
+                    ));
+                };
+                file_lines.push(content.to_string());
+                index += 1;
+            }
+            state.create(
+                PatchPreviewState::resolve(workdir, path),
+                join_hunk_lines(&file_lines),
+            )?;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            state.delete(PatchPreviewState::resolve(workdir, path))?;
+            index += 1;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            let source = PatchPreviewState::resolve(workdir, path);
+            let mut content = state.required(&source)?;
+            index += 1;
+            let move_to = lines
+                .get(index)
+                .and_then(|line| line.trim().strip_prefix("*** Move to: "))
+                .map(str::to_string);
+            if move_to.is_some() {
+                index += 1;
+            }
+            while index < lines.len() && !lines[index].starts_with("*** ") {
+                if !lines[index].starts_with("@@") {
+                    index += 1;
+                    continue;
+                }
+                index += 1;
+                let (old_text, new_text, next_index) = collect_hunk(&lines, index);
+                content = replace_hunk(&content, &old_text, &new_text)?;
+                index = next_index;
+            }
+            if let Some(target) = move_to {
+                let target = PatchPreviewState::resolve(workdir, &target);
+                if target == source {
+                    state.write(source, content)?;
+                } else {
+                    state.create(target, content)?;
+                    state.delete(source)?;
+                }
+            } else {
+                state.write(source, content)?;
+            }
+            continue;
+        }
+        return Err(ToolError::Validation(format!(
+            "Unsupported patch directive: {line}"
+        )));
+    }
+    Ok(())
 }
 
 fn clean_patch_input(raw: &str) -> String {
@@ -743,6 +996,48 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0]["old_text"], "one\ntwo\n");
         assert_eq!(changes[0]["new_text"], "one\nthree\n");
+    }
+
+    #[test]
+    fn preview_patch_builds_full_file_changes_without_mutating_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.txt");
+        let deleted = dir.path().join("deleted.txt");
+        std::fs::write(&source, "one\ntwo\n").unwrap();
+        std::fs::write(&deleted, "remove me\n").unwrap();
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: {}\n*** Move to: moved.txt\n@@\n one\n-two\n+three\n*** Delete File: {}\n*** Add File: added.txt\n+new file\n*** End Patch\n",
+            source.display(),
+            deleted.display()
+        );
+
+        let changes = preview_patch(&serde_json::json!({ "patch": patch }), dir.path()).unwrap();
+
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().any(|change| {
+            change.path == source
+                && change.old_text.as_deref() == Some("one\ntwo\n")
+                && change.new_text.is_empty()
+        }));
+        assert!(changes.iter().any(|change| {
+            change.path == dir.path().join("moved.txt")
+                && change.old_text.is_none()
+                && change.new_text == "one\nthree\n"
+        }));
+        assert!(changes.iter().any(|change| {
+            change.path == deleted
+                && change.old_text.as_deref() == Some("remove me\n")
+                && change.new_text.is_empty()
+        }));
+        assert!(changes.iter().any(|change| {
+            change.path == dir.path().join("added.txt")
+                && change.old_text.is_none()
+                && change.new_text == "new file\n"
+        }));
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "one\ntwo\n");
+        assert_eq!(std::fs::read_to_string(&deleted).unwrap(), "remove me\n");
+        assert!(!dir.path().join("moved.txt").exists());
+        assert!(!dir.path().join("added.txt").exists());
     }
 
     #[tokio::test]

@@ -446,8 +446,14 @@ fn debug_log(msg: &str) {
 /// Looks for `prompt_tokens_details.cached_tokens` and Anthropic-style fields
 /// that some gateways forward.
 fn openai_compatible_usage(usage: &serde_json::Value) -> Option<crate::chunk::LanguageModelUsage> {
-    let prompt = usage.get("prompt_tokens").and_then(|v| v.as_u64());
-    let completion = usage.get("completion_tokens").and_then(|v| v.as_u64());
+    let prompt = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|v| v.as_u64());
+    let completion = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|v| v.as_u64());
     let cached = usage
         .pointer("/prompt_tokens_details/cached_tokens")
         .and_then(|v| v.as_u64())
@@ -459,6 +465,7 @@ fn openai_compatible_usage(usage: &serde_json::Value) -> Option<crate::chunk::La
         .unwrap_or(0);
     let cache_creation = usage
         .get("cache_creation_input_tokens")
+        .or_else(|| usage.get("cache_write_input_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
@@ -689,6 +696,22 @@ mod tests {
                 {"type": "input_audio", "input_audio": {"data": "YXVkaW8=", "format": "wav"}}
             ])
         );
+    }
+
+    #[test]
+    fn responses_style_usage_aliases_are_normalized() {
+        let chunks = process_sse_data(
+            r#"{"choices":[],"usage":{"input_tokens":120,"output_tokens":30,"cached_tokens":80,"cache_write_input_tokens":10}}"#,
+        );
+        assert!(matches!(
+            chunks.as_slice(),
+            [Ok(ChunkType::Usage(crate::chunk::LanguageModelUsage {
+                input_tokens: 120,
+                output_tokens: 30,
+                cache_read_tokens: 80,
+                cache_write_tokens: 10,
+            }))]
+        ));
     }
 
     #[test]

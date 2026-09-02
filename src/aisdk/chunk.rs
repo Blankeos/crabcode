@@ -122,6 +122,7 @@ impl FinishReason {
             "tool_calls" | "function_call" => Self::ToolCalls,
             "length" => Self::Length,
             "content_filter" => Self::ContentFilter,
+            "refusal" => Self::Refusal,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -158,5 +159,18 @@ impl FinishReason {
     /// provider message boundary, not a Codex-style final-answer phase.
     pub fn is_final_assistant_stop(&self) -> bool {
         matches!(self, Self::Stop | Self::StopSequence)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FinishReason;
+
+    #[test]
+    fn compatible_refusal_is_typed() {
+        assert_eq!(
+            FinishReason::from_openai_compatible("refusal"),
+            FinishReason::Refusal
+        );
     }
 }

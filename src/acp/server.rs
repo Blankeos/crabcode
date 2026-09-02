@@ -1,11 +1,12 @@
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse,
-    ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, LoadSessionRequest, McpCapabilities, NewSessionRequest,
-    PromptCapabilities, PromptRequest, ResumeSessionRequest, SessionCapabilities,
-    SessionCloseCapabilities, SessionForkCapabilities, SessionListCapabilities,
-    SessionNotification, SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, SetSessionModeResponse,
+    DeleteSessionRequest, DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse,
+    Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
+    McpCapabilities, NewSessionRequest, PromptCapabilities, PromptRequest, ResumeSessionRequest,
+    SessionCapabilities, SessionCloseCapabilities, SessionDeleteCapabilities,
+    SessionForkCapabilities, SessionListCapabilities, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    SetSessionModeResponse,
 };
 use agent_client_protocol::{Agent, Stdio};
 use anyhow::{Context, Result};
@@ -48,16 +49,39 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
         .on_receive_request(
             {
                 let service = service.clone();
-                async move |request: ForkSessionRequest, responder, _connection| {
-                    let result = service
-                        .fork_session(request.session_id.to_string(), request.cwd)
-                        .await
-                        .map(|response| {
-                            ForkSessionResponse::new(response.session_id)
+                async move |request: DeleteSessionRequest, responder, _connection| {
+                    responder.respond_with_result(
+                        service
+                            .delete_session(&request.session_id.to_string())
+                            .await
+                            .map(|_| DeleteSessionResponse::new()),
+                    )
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let service = service.clone();
+                async move |request: ForkSessionRequest, responder, connection| {
+                    let service = service.clone();
+                    let task_connection = connection.clone();
+                    connection.spawn(async move {
+                        let response = service
+                            .fork_session(request.session_id.to_string(), request.cwd)
+                            .await?;
+                        let session_id = response.session_id.clone();
+                        let commands = service.available_commands(&session_id.to_string()).await?;
+                        responder.respond(
+                            ForkSessionResponse::new(session_id.clone())
                                 .modes(response.modes)
-                                .config_options(response.config_options)
-                        });
-                    responder.respond_with_result(result)
+                                .config_options(response.config_options),
+                        )?;
+                        task_connection.send_notification(SessionNotification::new(
+                            session_id,
+                            SessionUpdate::AvailableCommandsUpdate(commands),
+                        ))
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -190,7 +214,9 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
             {
                 let service = service.clone();
                 async move |request: ListSessionsRequest, responder, _connection| {
-                    responder.respond_with_result(service.list_sessions(request.cwd).await)
+                    responder.respond_with_result(
+                        service.list_sessions(request.cwd, request.cursor).await,
+                    )
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -254,7 +280,8 @@ fn capabilities() -> AgentCapabilities {
                 .list(SessionListCapabilities::new())
                 .resume(SessionResumeCapabilities::new())
                 .fork(SessionForkCapabilities::new())
-                .close(SessionCloseCapabilities::new()),
+                .close(SessionCloseCapabilities::new())
+                .delete(SessionDeleteCapabilities::new()),
         )
 }
 
@@ -264,8 +291,10 @@ mod tests {
 
     #[test]
     fn advertises_audio_prompt_support() {
-        let prompt = capabilities().prompt_capabilities;
+        let capabilities = capabilities();
+        let prompt = capabilities.prompt_capabilities;
         assert!(prompt.audio);
         assert!(prompt.image);
+        assert!(capabilities.session_capabilities.delete.is_some());
     }
 }

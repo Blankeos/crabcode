@@ -18,16 +18,11 @@ impl From<SessionMessage> for Message {
                     data: serde_json::json!({ "text": msg.content }),
                 });
             }
-            for path in &msg.local_audio_paths {
-                parts.push(PersistenceMessagePart {
-                    part_type: "local_audio".to_string(),
-                    data: serde_json::json!({ "path": path }),
-                });
-            }
             parts
         } else {
             msg.parts
                 .into_iter()
+                .filter(|part| part.part_type != "local_image" && part.part_type != "local_audio")
                 .map(|part| PersistenceMessagePart {
                     part_type: part.part_type,
                     data: part.data,
@@ -135,7 +130,12 @@ impl TryFrom<Message> for SessionMessage {
                     .flatten()
             })
             .map(str::to_string)
-            .collect();
+            .fold(Vec::new(), |mut paths, path| {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+                paths
+            });
 
         let content = session_parts
             .iter()
@@ -172,7 +172,12 @@ impl TryFrom<Message> for SessionMessage {
                 }
             })
             .map(|path| path.to_string())
-            .collect();
+            .fold(Vec::new(), |mut paths, path| {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+                paths
+            });
 
         let compaction_stats = session_parts
             .iter()
@@ -317,7 +322,53 @@ mod tests {
         let mut session_message = SessionMessage::user("listen");
         session_message.local_audio_paths = vec!["/tmp/audio.wav".to_string()];
 
-        let restored = SessionMessage::try_from(Message::from(session_message)).unwrap();
+        let persisted = Message::from(session_message);
+        assert_eq!(
+            persisted
+                .parts
+                .iter()
+                .filter(|part| part.part_type == "local_audio")
+                .count(),
+            1
+        );
+        let restored = SessionMessage::try_from(persisted).unwrap();
+        assert_eq!(restored.local_audio_paths, vec!["/tmp/audio.wav"]);
+    }
+
+    #[test]
+    fn duplicate_legacy_attachment_parts_are_deduplicated() {
+        let message = Message {
+            id: "message".to_string(),
+            session_id: 1,
+            role: "user".to_string(),
+            parts: vec![
+                PersistenceMessagePart {
+                    part_type: "local_audio".to_string(),
+                    data: serde_json::json!({ "path": "/tmp/audio.wav" }),
+                },
+                PersistenceMessagePart {
+                    part_type: "local_audio".to_string(),
+                    data: serde_json::json!({ "path": "/tmp/audio.wav" }),
+                },
+            ],
+            timestamp: 0,
+            tokens_used: 0,
+            model: None,
+            provider: None,
+            agent_mode: None,
+            duration_ms: 0,
+            t0_ms: None,
+            t1_ms: None,
+            tn_ms: None,
+            output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost: None,
+            usage_authoritative: false,
+        };
+
+        let restored = SessionMessage::try_from(message).unwrap();
         assert_eq!(restored.local_audio_paths, vec!["/tmp/audio.wav"]);
     }
 

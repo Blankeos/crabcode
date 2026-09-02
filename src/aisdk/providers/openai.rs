@@ -49,14 +49,16 @@ fn responses_incomplete_chunk(value: &serde_json::Value) -> ChunkType {
         .and_then(|response| response.get("incomplete_details"))
         .and_then(|details| details.get("reason"))
         .and_then(serde_json::Value::as_str);
-    if matches!(reason, Some("max_output_tokens" | "max_tokens")) {
-        ChunkType::End {
+    match reason {
+        Some("max_output_tokens" | "max_tokens") => ChunkType::End {
             reason: Some(crate::chunk::FinishReason::Length),
-        }
-    } else {
-        ChunkType::RetryableFailure(RetryError::from_message(responses_incomplete_message(
+        },
+        Some("content_filter" | "refusal" | "safety") => ChunkType::End {
+            reason: Some(crate::chunk::FinishReason::Refusal),
+        },
+        _ => ChunkType::RetryableFailure(RetryError::from_message(responses_incomplete_message(
             value,
-        )))
+        ))),
     }
 }
 
@@ -2511,6 +2513,22 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn response_incomplete_safety_reasons_emit_refusal() {
+        for reason in ["refusal", "content_filter", "safety"] {
+            let chunk = response_sse_data_to_chunk(&format!(
+                r#"{{"type":"response.incomplete","response":{{"incomplete_details":{{"reason":"{reason}"}}}}}}"#
+            ))
+            .expect("expected incomplete chunk");
+            assert!(matches!(
+                chunk,
+                Ok(ChunkType::End {
+                    reason: Some(crate::chunk::FinishReason::Refusal)
+                })
+            ));
+        }
     }
 
     #[test]

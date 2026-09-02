@@ -247,6 +247,28 @@ impl SessionManager {
                 let _ = dao.replace_messages(db_id, &persistence_messages);
             }
 
+            if let Some(migration) =
+                crate::persistence::attachments::migrate_messages(&hydrated.messages, id)?
+            {
+                let persistence_messages: Vec<crate::persistence::Message> = migration
+                    .messages
+                    .iter()
+                    .cloned()
+                    .map(|message| {
+                        let mut db_message: crate::persistence::Message = message.into();
+                        db_message.session_id = db_id;
+                        db_message
+                    })
+                    .collect();
+                if let Err(error) = dao.replace_messages(db_id, &persistence_messages) {
+                    for path in migration.created {
+                        crate::persistence::attachments::remove_file(&path);
+                    }
+                    return Err(SessionError::PersistenceError(error.to_string()));
+                }
+                hydrated.messages = migration.messages;
+            }
+
             *existing = hydrated;
             self.message_counts
                 .insert(id.to_string(), existing.messages.len());
@@ -758,19 +780,15 @@ impl SessionManager {
         session_id: &str,
         messages: Vec<crate::session::types::Message>,
     ) -> Result<(), SessionError> {
-        if let Some(session) = self.sessions.get_mut(session_id) {
-            session.messages = messages.clone();
-            session.updated_at = SystemTime::now();
-            self.message_counts
-                .insert(session_id.to_string(), session.messages.len());
-        } else {
+        if !self.sessions.contains_key(session_id) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
 
         if let Some(ref dao) = self.history_dao {
             if let Some(db_id) = self.id_mapping.get(session_id) {
                 let persistence_messages: Vec<crate::persistence::Message> = messages
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(|message| {
                         let mut db_message: crate::persistence::Message = message.into();
                         db_message.session_id = *db_id;
@@ -782,6 +800,15 @@ impl SessionManager {
                     .map_err(|e| SessionError::PersistenceError(e.to_string()))?;
             }
         }
+
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+        session.messages = messages;
+        session.updated_at = SystemTime::now();
+        self.message_counts
+            .insert(session_id.to_string(), session.messages.len());
 
         Ok(())
     }
@@ -948,9 +975,17 @@ impl SessionManager {
     }
 
     pub fn delete_session(&mut self, id: &str) -> bool {
+        self.try_delete_session(id).unwrap_or_else(|error| {
+            crate::emit_log!("Failed to delete session {}: {:?}", id, error);
+            false
+        })
+    }
+
+    pub fn try_delete_session(&mut self, id: &str) -> Result<bool, SessionError> {
         if let Some(db_id) = self.id_mapping.get(id) {
             if let Some(ref dao) = self.history_dao {
-                let _ = dao.delete_session(*db_id);
+                dao.delete_session(*db_id)
+                    .map_err(|error| SessionError::PersistenceError(error.to_string()))?;
             }
         }
 
@@ -975,9 +1010,9 @@ impl SessionManager {
             if let Err(error) = crate::persistence::attachments::cleanup_session(id) {
                 crate::emit_log!("Failed to clean session attachments for {}: {}", id, error);
             }
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 }

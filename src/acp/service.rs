@@ -30,6 +30,58 @@ pub struct AcpService {
     client_capabilities: Arc<Mutex<agent_client_protocol::schema::v1::ClientCapabilities>>,
 }
 
+fn command_text(parts: &[ContentBlock]) -> String {
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            ContentBlock::Text(content) => text.push_str(&content.text),
+            ContentBlock::ResourceLink(link) => text.push_str(&format!("[{}]", link.uri)),
+            ContentBlock::Resource(resource) => match &resource.resource {
+                EmbeddedResourceResource::TextResourceContents(resource) => {
+                    text.push_str(&format!("[{}]\n{}", resource.uri, resource.text));
+                }
+                EmbeddedResourceResource::BlobResourceContents(resource) => {
+                    text.push_str(&format!("[{}]", resource.uri));
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    text
+}
+
+fn acp_session_info(
+    session: crate::session::manager::SessionInfo,
+    root_id: Option<String>,
+) -> SessionInfo {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "crabcode".to_string(),
+        serde_json::json!({
+            "parentSessionId": session.parent_id,
+            "rootSessionId": root_id,
+        }),
+    );
+    SessionInfo::new(session.id, session.workspace_path)
+        .title(session.title)
+        .updated_at(system_time_to_iso8601(session.updated_at))
+        .meta(meta)
+}
+
+fn session_page(
+    cursor: Option<&str>,
+    total: usize,
+) -> Result<(usize, usize, Option<String>), Error> {
+    let offset = cursor
+        .unwrap_or("0")
+        .parse::<usize>()
+        .map_err(|_| Error::invalid_params().data("invalid session list cursor"))?;
+    let end = offset.saturating_add(100).min(total);
+    let next_cursor = (end < total).then(|| end.to_string());
+    Ok((offset.min(total), end, next_cursor))
+}
+
 fn mcp_native_tool_content(metadata: &serde_json::Value) -> Vec<ToolCallContent> {
     metadata
         .get("mcp_result")
@@ -43,10 +95,19 @@ fn mcp_native_tool_content(metadata: &serde_json::Value) -> Vec<ToolCallContent>
                 Some("text")
             )
         })
-        .filter_map(|block| {
+        .map(|block| {
             serde_json::from_value::<ContentBlock>(block.clone())
-                .ok()
                 .map(ToolCallContent::from)
+                .unwrap_or_else(|_| {
+                    let kind = block
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    ToolCallContent::from(format!(
+                        "[MCP {kind} content]\n{}",
+                        serde_json::to_string_pretty(block).unwrap_or_else(|_| block.to_string())
+                    ))
+                })
         })
         .collect()
 }
@@ -95,6 +156,15 @@ fn permission_tool_content(
             .collect(),
         "edit" => permission_edit_diff(&prompt.raw_input, cwd)
             .into_iter()
+            .collect(),
+        "apply_patch" => crate::tools::patch::preview_patch(&prompt.raw_input, cwd)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|change| {
+                agent_client_protocol::schema::v1::Diff::new(change.path, change.new_text)
+                    .old_text(change.old_text)
+                    .into()
+            })
             .collect(),
         _ => Vec::new(),
     }
@@ -345,19 +415,19 @@ fn acp_question_answers(
             .map(|field| {
                 let mut answers = Vec::new();
                 match content.get(&field.selection) {
-                    Some(ElicitationContentValue::String(value)) => {
+                    Some(ElicitationContentValue::String(value)) if !field.multiple => {
                         if let Some(label) = field.labels.get(value) {
                             answers.push(serde_json::Value::String(label.clone()));
                         }
                     }
-                    Some(ElicitationContentValue::StringArray(values)) => {
-                        answers.extend(values.iter().filter_map(|value| {
-                            field
-                                .labels
-                                .get(value)
-                                .cloned()
-                                .map(serde_json::Value::String)
-                        }));
+                    Some(ElicitationContentValue::StringArray(values)) if field.multiple => {
+                        for value in values {
+                            if let Some(label) = field.labels.get(value) {
+                                if !answers.iter().any(|answer| answer.as_str() == Some(label)) {
+                                    answers.push(serde_json::Value::String(label.clone()));
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -367,7 +437,9 @@ fn acp_question_answers(
                         if !field.multiple {
                             answers.clear();
                         }
-                        answers.push(serde_json::Value::String(custom.to_string()));
+                        answers.push(serde_json::Value::String(
+                            custom.chars().take(8_192).collect(),
+                        ));
                     }
                 }
                 serde_json::Value::Array(answers)
@@ -431,19 +503,15 @@ fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
         .merged_config
         .commands
         .iter()
-        .filter(|command| command.name != "compact")
+        .filter(|command| !matches!(command.name.as_str(), "compact" | "skills" | "mcp"))
         .map(|command| {
             let description = command
                 .description
                 .clone()
                 .unwrap_or_else(|| format!("Run /{}", command.name));
-            let mut available = AvailableCommand::new(command.name.clone(), description);
-            if command.template.contains("$ARGUMENTS") {
-                available = available.input(AvailableCommandInput::Unstructured(
-                    UnstructuredCommandInput::new("Arguments"),
-                ));
-            }
-            available
+            AvailableCommand::new(command.name.clone(), description).input(
+                AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("Arguments")),
+            )
         })
         .collect();
     commands.extend(
@@ -451,7 +519,7 @@ fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
             .skills
             .all()
             .into_iter()
-            .filter(|skill| skill.name != "compact")
+            .filter(|skill| !matches!(skill.name.as_str(), "compact" | "skills" | "mcp"))
             .map(|skill| {
                 AvailableCommand::new(
                     skill.name.clone(),
@@ -482,36 +550,32 @@ fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
     commands
 }
 
-async fn expand_slash_command(session: &AcpSession, prompt: &str) -> Result<String, Error> {
+#[derive(Debug, PartialEq, Eq)]
+enum SlashExpansion {
+    Prompt {
+        prompt: String,
+        agent: Option<String>,
+        model: Option<String>,
+    },
+    LocalResult(String),
+}
+
+async fn expand_slash_command(session: &AcpSession, prompt: &str) -> Result<SlashExpansion, Error> {
     let Some(command_line) = prompt.strip_prefix('/') else {
-        return Ok(prompt.to_string());
+        return Ok(SlashExpansion::Prompt {
+            prompt: prompt.to_string(),
+            agent: None,
+            model: None,
+        });
     };
     let (name, args) = command_line
         .split_once(char::is_whitespace)
         .map(|(name, args)| (name, args.trim_start()))
         .unwrap_or((command_line, ""));
-    if let Some(command) = session
-        .config
-        .merged_config
-        .commands
-        .iter()
-        .find(|command| command.name == name)
-    {
-        return command
-            .render(args)
-            .await
-            .map(|rendered| rendered.prompt)
-            .map_err(|_| internal_error());
-    }
-    if let Some(skill) = session.skills.get(name) {
-        let mut expanded = skill.content.clone();
-        if !args.is_empty() {
-            expanded.push_str("\n\nUser task/context:\n");
-            expanded.push_str(args);
-        }
-        return Ok(expanded);
-    }
     if name == "skills" {
+        if !args.is_empty() {
+            return Err(Error::invalid_params().data("Usage: /skills"));
+        }
         let skills = session
             .skills
             .all()
@@ -524,38 +588,72 @@ async fn expand_slash_command(session: &AcpSession, prompt: &str) -> Result<Stri
                 )
             })
             .collect::<Vec<_>>();
-        return Ok(if skills.is_empty() {
+        return Ok(SlashExpansion::LocalResult(if skills.is_empty() {
             "No skills are available in this workspace.".to_string()
         } else {
-            format!("Available workspace skills:\n{}", skills.join("\n"))
-        });
+            format!("Available skills:\n{}", skills.join("\n"))
+        }));
     }
     if name == "mcp" {
-        let servers = session
-            .config
-            .merged_config
-            .mcp
-            .iter()
-            .map(|(name, server)| {
+        if !args.is_empty() {
+            return Err(Error::invalid_params().data("Usage: /mcp"));
+        }
+        let manager = crate::mcp::McpManager::ensure(
+            session.config.merged_config.mcp.clone(),
+            session.cwd.clone(),
+        );
+        let servers = manager
+            .lock()
+            .await
+            .views()
+            .into_iter()
+            .map(|server| {
+                let detail = server
+                    .detail
+                    .map(|detail| format!(": {detail}"))
+                    .unwrap_or_default();
                 format!(
-                    "- {} ({}, {})",
-                    name,
-                    server.kind(),
-                    if server.enabled() {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
+                    "- {} ({}, {}){}",
+                    server.name, server.kind, server.status, detail
                 )
             })
             .collect::<Vec<_>>();
-        return Ok(if servers.is_empty() {
+        return Ok(SlashExpansion::LocalResult(if servers.is_empty() {
             "No MCP servers are configured for this workspace.".to_string()
         } else {
-            format!("Configured MCP servers:\n{}", servers.join("\n"))
+            format!("MCP servers:\n{}", servers.join("\n"))
+        }));
+    }
+    if let Some(command) = session
+        .config
+        .merged_config
+        .commands
+        .iter()
+        .find(|command| command.name == name)
+    {
+        return command
+            .render(args)
+            .await
+            .map_err(|_| internal_error())
+            .map(|rendered| SlashExpansion::Prompt {
+                prompt: rendered.prompt,
+                agent: rendered.agent,
+                model: rendered.model,
+            });
+    }
+    if let Some(skill) = session.skills.get(name) {
+        let mut expanded = skill.content.clone();
+        if !args.is_empty() {
+            expanded.push_str("\n\nUser task/context:\n");
+            expanded.push_str(args);
+        }
+        return Ok(SlashExpansion::Prompt {
+            prompt: expanded,
+            agent: None,
+            model: None,
         });
     }
-    Ok(prompt.to_string())
+    Err(Error::invalid_params().data(format!("Unknown ACP command: /{name}")))
 }
 
 fn merge_acp_mcp_servers(config: &mut LoadedConfig, servers: Vec<McpServer>) {
@@ -757,13 +855,17 @@ impl AcpService {
             .config_options(session_config_options(&session)))
     }
 
-    pub async fn list_sessions(&self, cwd: Option<PathBuf>) -> Result<ListSessionsResponse, Error> {
+    pub async fn list_sessions(
+        &self,
+        cwd: Option<PathBuf>,
+        cursor: Option<String>,
+    ) -> Result<ListSessionsResponse, Error> {
         let cwd = cwd.as_deref().map(workspace_path).transpose()?;
         let manager = self.session_manager.lock().map_err(|_| internal_error())?;
         let mut sessions = manager
             .list_sessions()
             .into_iter()
-            .filter(|session| session.parent_id.is_none() && session.archived_at.is_none())
+            .filter(|session| session.archived_at.is_none())
             .filter(|session| {
                 cwd.as_ref()
                     .is_none_or(|cwd| session.workspace_path == cwd.to_string_lossy())
@@ -771,17 +873,19 @@ impl AcpService {
             .collect::<Vec<_>>();
         sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
 
+        let (offset, end, next_cursor) = session_page(cursor.as_deref(), sessions.len())?;
         Ok(ListSessionsResponse::new(
             sessions
                 .into_iter()
-                .take(100)
+                .skip(offset)
+                .take(end.saturating_sub(offset))
                 .map(|session| {
-                    SessionInfo::new(session.id, session.workspace_path)
-                        .title(session.title)
-                        .updated_at(system_time_to_iso8601(session.updated_at))
+                    let root_id = manager.root_session_id_for(&session.id);
+                    acp_session_info(session, root_id)
                 })
                 .collect(),
-        ))
+        )
+        .next_cursor(next_cursor))
     }
 
     pub async fn load_session(
@@ -816,10 +920,14 @@ impl AcpService {
         let (source, messages) = self.attach_persisted_session(&session_id, cwd).await?;
         let fork_id = {
             let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
+            let source_title = manager
+                .get_session(&session_id)
+                .map(|session| session.title.clone())
+                .unwrap_or_else(|| session_id.clone());
             manager
                 .switch_current_workspace_path(&source.cwd.to_string_lossy())
                 .map_err(|_| internal_error())?;
-            let fork_id = manager.create_session(Some(format!("{} (fork)", session_id)));
+            let fork_id = manager.create_session(Some(format!("{source_title} (fork)")));
             let messages =
                 match crate::persistence::attachments::clone_messages(&messages, &fork_id) {
                     Ok(messages) => messages,
@@ -851,6 +959,16 @@ impl AcpService {
             if let Some(cancellation) = session.cancellation {
                 cancellation.cancel();
             }
+        }
+    }
+
+    pub async fn delete_session(&self, session_id: &str) -> Result<(), Error> {
+        self.close_session(session_id).await;
+        let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
+        match manager.try_delete_session(session_id) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Error::invalid_params().data("unknown session")),
+            Err(_) => Err(internal_error()),
         }
     }
 
@@ -1004,25 +1122,14 @@ impl AcpService {
         prompt: Vec<ContentBlock>,
         connection: ConnectionTo<Client>,
     ) -> Result<PromptResponse, Error> {
-        let session = self
+        let mut session = self
             .sessions
             .lock()
             .await
             .get(&session_id)
             .cloned()
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
-        let supports_images = session
-            .models
-            .iter()
-            .find(|model| model.provider_id == session.provider && model.id == session.model)
-            .is_some_and(|model| model.attachment);
-        let compact_text = prompt
-            .iter()
-            .filter_map(|part| match part {
-                ContentBlock::Text(content) => Some(content.text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
+        let compact_text = command_text(&prompt);
         if compact_command(&compact_text)? {
             if prompt
                 .iter()
@@ -1032,19 +1139,76 @@ impl AcpService {
             }
             return self.compact_session(&session_id, session, connection).await;
         }
+        let expansion = if compact_text.trim_start().starts_with('/') {
+            Some(expand_slash_command(&session, &compact_text).await?)
+        } else {
+            None
+        };
+        let expanded_prompt = match expansion {
+            Some(SlashExpansion::LocalResult(text)) => {
+                if prompt
+                    .iter()
+                    .any(|part| !matches!(part, ContentBlock::Text(_)))
+                {
+                    return Err(Error::invalid_params()
+                        .data("local ACP commands do not accept attachments"));
+                }
+                let message_id = cuid2::create_id();
+                send_replay_text(&connection, &session_id, &message_id, &text, false, false)?;
+                return Ok(PromptResponse::new(StopReason::EndTurn));
+            }
+            Some(SlashExpansion::Prompt {
+                prompt,
+                agent,
+                model,
+            }) => {
+                if let Some(agent) = agent {
+                    if session
+                        .config
+                        .merged_config
+                        .agent_registry
+                        .get(&agent)
+                        .is_none()
+                    {
+                        return Err(Error::invalid_params()
+                            .data(format!("custom command references unknown agent: {agent}")));
+                    }
+                    session.agent = agent;
+                }
+                if let Some(model_ref) = model {
+                    let (provider, model) = crate::app::parse_model_ref(&model_ref);
+                    let canonical = format!("{provider}/{model}");
+                    let model = find_selectable_model(&session.models, &canonical)?;
+                    session.provider.clone_from(&model.provider_id);
+                    session.model.clone_from(&model.id);
+                    session.reasoning = resolved_reasoning(&session, session.reasoning_selection);
+                    session.context_window =
+                        model_context_window(&session.config, &session.provider, &session.model);
+                }
+                Some(prompt)
+            }
+            None => None,
+        };
+        let supports_images = session
+            .models
+            .iter()
+            .find(|model| model.provider_id == session.provider && model.id == session.model)
+            .is_some_and(|model| model.attachment);
         let supports_audio =
             model_supports_audio(&session.config, &session.provider, &session.model);
-        let (prompt, local_image_paths, local_audio_paths) = prompt_content(
+        let (mut prompt, local_image_paths, local_audio_paths) = prompt_content(
             prompt,
             supports_images,
             supports_audio,
             &session_id,
             &session,
         )?;
+        if let Some(expanded_prompt) = expanded_prompt {
+            prompt = expanded_prompt;
+        }
         let mut managed_paths = local_image_paths.clone();
         managed_paths.extend(local_audio_paths.clone());
         let mut attachment_guard = ManagedAttachmentGuard::new(managed_paths);
-        let prompt = expand_slash_command(&session, &prompt).await?;
         if prompt.trim().is_empty() {
             return Err(Error::invalid_params().data("prompt must include text content"));
         }
@@ -1128,6 +1292,7 @@ impl AcpService {
             &session,
             base_context_tokens,
             (base_cost > 0.0).then_some(base_cost),
+            None,
         )?;
 
         let stream_session_id = session_id.clone();
@@ -1216,6 +1381,7 @@ impl AcpService {
                         &session,
                         base_context_tokens.saturating_add(token_count),
                         cost.map(|turn_cost| base_cost + turn_cost),
+                        usage,
                     )?;
                 }
                 crate::llm::ChunkMessage::Cancelled => cancelled = true,
@@ -1488,6 +1654,7 @@ fn compacted_messages(
 fn acp_stop_reason(reason: Option<crate::llm::TurnStopReason>) -> StopReason {
     match reason {
         Some(crate::llm::TurnStopReason::MaxTokens) => StopReason::MaxTokens,
+        Some(crate::llm::TurnStopReason::MaxTurnRequests) => StopReason::MaxTurnRequests,
         Some(crate::llm::TurnStopReason::Refusal) => StopReason::Refusal,
         None => StopReason::EndTurn,
     }
@@ -2128,7 +2295,19 @@ async fn bridge_terminal_session(
         .args(vec!["-c".to_string(), start.command.clone()])
         .cwd(cwd)
         .output_byte_limit(crate::tools::terminal_session::MAX_TRANSCRIPT_BYTES as u64);
-    let terminal_id = match connection.send_request(create).block_task().await {
+    let create_request = connection.send_request(create).block_task();
+    tokio::pin!(create_request);
+    let terminal_id = match tokio::select! {
+        _ = cancellation.cancelled() => {
+            let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalResult(
+                crate::tools::terminal_session::external_terminal_result(
+                    &start, "", false, None, true,
+                ),
+            ));
+            return;
+        }
+        response = &mut create_request => response,
+    } {
         Ok(response) => response.terminal_id,
         Err(error) => {
             let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalError(
@@ -2271,17 +2450,40 @@ fn send_usage(
     session: &AcpSession,
     used: usize,
     cost: Option<f64>,
+    usage: Option<crate::aisdk::chunk::LanguageModelUsage>,
 ) -> Result<(), Error> {
-    let Some(size) = session.context_window else {
-        return Ok(());
-    };
-    let update = SessionUpdate::UsageUpdate(
-        UsageUpdate::new(used as u64, size as u64)
-            .cost(cost.map(|amount| AcpCost::new(amount, "USD"))),
-    );
+    let update = SessionUpdate::UsageUpdate(usage_update(session, used, cost, usage));
     connection
         .send_notification(SessionNotification::new(session_id.to_string(), update))
         .map_err(|_| internal_error())
+}
+
+fn usage_update(
+    session: &AcpSession,
+    used: usize,
+    cost: Option<f64>,
+    usage: Option<crate::aisdk::chunk::LanguageModelUsage>,
+) -> UsageUpdate {
+    let size = session
+        .context_window
+        .map(u64::from)
+        .unwrap_or_else(|| (used as u64).max(1));
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "crabcode".to_string(),
+        serde_json::json!({
+            "contextWindowKnown": session.context_window.is_some(),
+            "usage": usage.map(|usage| serde_json::json!({
+                "inputTokens": usage.input_tokens,
+                "outputTokens": usage.output_tokens,
+                "cacheReadTokens": usage.cache_read_tokens,
+                "cacheWriteTokens": usage.cache_write_tokens,
+            })),
+        }),
+    );
+    UsageUpdate::new(used as u64, size)
+        .cost(cost.map(|amount| AcpCost::new(amount, "USD")))
+        .meta(meta)
 }
 
 fn replay_messages(
@@ -2542,12 +2744,63 @@ mod tests {
 
     #[test]
     fn acp_usage_update_includes_cumulative_usd_cost() {
-        let update = UsageUpdate::new(1_000, 200_000).cost(AcpCost::new(0.125, "USD"));
+        let usage = crate::aisdk::chunk::LanguageModelUsage {
+            input_tokens: 800,
+            output_tokens: 200,
+            cache_read_tokens: 500,
+            cache_write_tokens: 100,
+        };
+        let update = usage_update(&test_session(), 1_000, Some(0.125), Some(usage));
         assert_eq!(update.cost.as_ref().map(|cost| cost.amount), Some(0.125));
         assert_eq!(
             update.cost.as_ref().map(|cost| cost.currency.as_str()),
             Some("USD")
         );
+        assert_eq!(update.size, 1_000);
+        let meta = update.meta.expect("usage metadata");
+        assert_eq!(meta["crabcode"]["contextWindowKnown"], false);
+        assert_eq!(meta["crabcode"]["usage"]["inputTokens"], 800);
+        assert_eq!(meta["crabcode"]["usage"]["cacheWriteTokens"], 100);
+    }
+
+    #[test]
+    fn session_info_includes_hierarchy_metadata() {
+        let now = std::time::SystemTime::now();
+        let info = acp_session_info(
+            crate::session::manager::SessionInfo {
+                id: "child".to_string(),
+                parent_id: Some("parent".to_string()),
+                title: "Child".to_string(),
+                created_at: now,
+                updated_at: now,
+                message_count: 0,
+                workspace_id: 1,
+                workspace_path: "/tmp".to_string(),
+                workspace_name: "tmp".to_string(),
+                workspace_sort_order: 0,
+                status: crate::session::types::SessionStatus::Idle,
+                pinned_at: None,
+                archived_at: None,
+            },
+            Some("root".to_string()),
+        );
+        let meta = info.meta.expect("session metadata");
+        assert_eq!(meta["crabcode"]["parentSessionId"], "parent");
+        assert_eq!(meta["crabcode"]["rootSessionId"], "root");
+    }
+
+    #[test]
+    fn session_list_cursor_pages_all_sessions() {
+        assert_eq!(
+            session_page(None, 250).unwrap(),
+            (0, 100, Some("100".to_string()))
+        );
+        assert_eq!(
+            session_page(Some("100"), 250).unwrap(),
+            (100, 200, Some("200".to_string()))
+        );
+        assert_eq!(session_page(Some("200"), 250).unwrap(), (200, 250, None));
+        assert!(session_page(Some("invalid"), 250).is_err());
     }
 
     #[test]
@@ -2708,6 +2961,41 @@ mod tests {
     }
 
     #[test]
+    fn acp_permission_apply_patch_includes_preflight_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let prompt = crate::tools::PermissionPrompt {
+            tool_call_id: Some("call_patch".to_string()),
+            tool_id: "apply_patch".to_string(),
+            action: crate::tools::PermissionAction::Write,
+            permission: "edit".to_string(),
+            patterns: vec![path.to_string_lossy().into_owned()],
+            target: Some(path.to_string_lossy().into_owned()),
+            command: None,
+            workdir: None,
+            workspace: dir.path().to_string_lossy().into_owned(),
+            reason: "approval".to_string(),
+            raw_input: serde_json::json!({
+                "patch": format!(
+                    "*** Begin Patch\n*** Update File: {}\n@@\n-before\n+after\n*** End Patch\n",
+                    path.display()
+                )
+            }),
+            response_tx,
+        };
+
+        let content = permission_tool_content(&prompt, dir.path());
+        let ToolCallContent::Diff(diff) = &content[0] else {
+            panic!("expected apply_patch preflight diff");
+        };
+        assert_eq!(diff.path, path);
+        assert_eq!(diff.old_text.as_deref(), Some("before\n"));
+        assert_eq!(diff.new_text, "after\n");
+    }
+
+    #[test]
     fn acp_question_form_preserves_single_multi_custom_and_scope() {
         let form = acp_question_form(
             "session_1",
@@ -2829,6 +3117,14 @@ mod tests {
         assert_eq!(
             acp_stop_reason(Some(crate::llm::TurnStopReason::Refusal)),
             StopReason::Refusal
+        );
+        assert_eq!(
+            acp_stop_reason(Some(crate::llm::TurnStopReason::MaxTurnRequests)),
+            StopReason::MaxTurnRequests
+        );
+        assert_eq!(
+            acp_stop_reason(Some(crate::llm::TurnStopReason::MaxTurnRequests)),
+            StopReason::MaxTurnRequests
         );
         assert_eq!(acp_stop_reason(None), StopReason::EndTurn);
     }
@@ -3108,14 +3404,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn acp_tool_result_restores_mcp_audio_and_preserves_unknown_blocks() {
+        let metadata = serde_json::json!({
+            "mcp_result": {
+                "content": [
+                    { "type": "audio", "data": "YXVkaW8=", "mimeType": "audio/wav" },
+                    { "type": "future_media", "payload": { "value": 1 } }
+                ]
+            }
+        });
+        let content = mcp_native_tool_content(&metadata);
+        assert!(matches!(
+            &content[0],
+            ToolCallContent::Content(content)
+                if matches!(&content.content, ContentBlock::Audio(audio)
+                    if audio.data == "YXVkaW8=" && audio.mime_type == "audio/wav")
+        ));
+        assert!(matches!(
+            &content[1],
+            ToolCallContent::Content(content)
+                if matches!(&content.content, ContentBlock::Text(text)
+                    if text.text.contains("future_media") && text.text.contains("payload"))
+        ));
+    }
+
     #[tokio::test]
     async fn expands_custom_slash_command_before_prompting() {
         let config = config_with_command(crate::command::custom::CustomCommand {
             name: "review".to_string(),
             description: None,
             template: "Review this carefully: $ARGUMENTS".to_string(),
-            agent: None,
-            model: None,
+            agent: Some("build".to_string()),
+            model: Some("openai/gpt-5".to_string()),
             subtask: Some(false),
             source: crate::command::custom::CustomCommandSource::Config(PathBuf::from(
                 "/tmp/opencode.jsonc",
@@ -3128,7 +3449,14 @@ mod tests {
             .await
             .expect("expanded command");
 
-        assert_eq!(prompt, "Review this carefully: src/acp/service.rs");
+        assert_eq!(
+            prompt,
+            SlashExpansion::Prompt {
+                prompt: "Review this carefully: src/acp/service.rs".to_string(),
+                agent: Some("build".to_string()),
+                model: Some("openai/gpt-5".to_string()),
+            }
+        );
     }
 
     #[tokio::test]
@@ -3163,6 +3491,9 @@ mod tests {
         let prompt = expand_slash_command(&session, "/reviewer src/lib.rs")
             .await
             .expect("expanded skill");
+        let SlashExpansion::Prompt { prompt, .. } = prompt else {
+            panic!("expected skill prompt");
+        };
         assert!(prompt.contains("Inspect correctness and risks."));
         assert!(prompt.contains("src/lib.rs"));
     }
@@ -3198,7 +3529,10 @@ mod tests {
         let prompt = expand_slash_command(&session, "/mcp")
             .await
             .expect("mcp status");
-        assert!(prompt.contains("filesystem (local, enabled)"));
+        let SlashExpansion::LocalResult(prompt) = prompt else {
+            panic!("expected local MCP result");
+        };
+        assert!(prompt.contains("filesystem (local, connecting)"));
     }
 
     #[test]

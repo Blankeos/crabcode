@@ -50,13 +50,20 @@ struct ProviderRequestConfig {
     gateway_caching_auto: bool,
 }
 
+fn messages_have_user_audio(messages: &[crate::session::types::Message]) -> bool {
+    messages.iter().any(|message| {
+        message.role == crate::session::types::MessageRole::User
+            && !message.local_audio_paths.is_empty()
+    })
+}
+
 fn provider_kind_for_model(
     provider_name: &str,
     npm_package: &str,
-    supports_audio_input: bool,
+    has_audio_input: bool,
 ) -> ProviderKind {
     let kind = ProviderKind::from_provider(provider_name, npm_package);
-    if supports_audio_input && kind == ProviderKind::OpenAI {
+    if has_audio_input && kind == ProviderKind::OpenAI {
         ProviderKind::OpenAICompatible
     } else {
         kind
@@ -92,6 +99,7 @@ fn usage_cost(
 fn turn_stop_reason(stop_reason: Option<&StopReason>) -> Option<crate::llm::TurnStopReason> {
     match stop_reason {
         Some(StopReason::MaxTokens) => Some(crate::llm::TurnStopReason::MaxTokens),
+        Some(StopReason::Hook) => Some(crate::llm::TurnStopReason::MaxTurnRequests),
         Some(StopReason::Refusal) => Some(crate::llm::TurnStopReason::Refusal),
         _ => None,
     }
@@ -657,8 +665,14 @@ pub async fn stream_llm_with_cancellation(
         messages.len()
     );
     let ui_model = model.clone();
-    let request_config =
-        prepare_request_config(&provider_name, model, reasoning_effort, &sender).await?;
+    let request_config = prepare_request_config(
+        &provider_name,
+        model,
+        reasoning_effort,
+        messages_have_user_audio(&messages),
+        &sender,
+    )
+    .await?;
     let mut request_config = request_config;
     let model_mismatch_warning =
         ui_vs_request_model_mismatch_warning(&ui_model, &request_config.model_name);
@@ -949,7 +963,7 @@ pub async fn build_subagent_llm_session(
     sender: &crate::llm::ChunkSender,
 ) -> Result<crate::agent::config::LlmSessionConfig, DynError> {
     let request_config =
-        prepare_request_config(provider_name, model, reasoning_effort, sender).await?;
+        prepare_request_config(provider_name, model, reasoning_effort, false, sender).await?;
     Ok(crate::agent::config::LlmSessionConfig {
         provider_name: request_config.provider_name,
         model: request_config.model_name,
@@ -987,8 +1001,14 @@ pub async fn summarize_for_compaction(
     }
 
     let (warning_sender, _warning_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let request_config =
-        prepare_request_config(&provider_name, model, reasoning_effort, &warning_sender).await?;
+    let request_config = prepare_request_config(
+        &provider_name,
+        model,
+        reasoning_effort,
+        false,
+        &warning_sender,
+    )
+    .await?;
     let messages = vec![AisdkMessage::user(prompt)];
     let mut response = stream_provider_request(
         &request_config,
@@ -1061,7 +1081,7 @@ pub async fn generate_session_title(
 ) -> Result<String, DynError> {
     let (warning_sender, _warning_receiver) = tokio::sync::mpsc::unbounded_channel();
     let request_config =
-        prepare_request_config(&provider_name, model, None, &warning_sender).await?;
+        prepare_request_config(&provider_name, model, None, false, &warning_sender).await?;
     let prompt = format!(
         "Generate a concise chat title for this user request.\n\nRules:\n- Return only the title, no quotes or punctuation wrapper.\n- 3 to 7 words.\n- Use title case only when natural.\n- Do not end with a period.\n\nUser request:\n{}",
         user_message.trim()
@@ -1135,6 +1155,7 @@ async fn prepare_request_config(
     provider_name: &str,
     model: String,
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
+    has_audio_input: bool,
     sender: &crate::llm::ChunkSender,
 ) -> Result<ProviderRequestConfig, DynError> {
     let auth_dao = crate::persistence::AuthDAO::new()?;
@@ -1157,12 +1178,21 @@ async fn prepare_request_config(
 
     let supports_image_input = model_supports_image_input(&model, provider.models.get(&model));
     let supports_audio_input = model_supports_audio_input(provider.models.get(&model));
+    if has_audio_input
+        && matches!(
+            auth_config,
+            Some(crate::persistence::AuthConfig::OAuth { .. })
+        )
+        && matches!(provider_name, "openai" | "xai")
+    {
+        return Err(anyhow::anyhow!(
+            "Audio input for {provider_name} requires API-key Chat Completions transport; the configured OAuth Responses transport does not support audio input"
+        )
+        .into());
+    }
     let model_route = resolve_model_route(&provider, model);
-    let provider_kind = provider_kind_for_model(
-        provider_name,
-        &model_route.npm_package,
-        supports_audio_input,
-    );
+    let provider_kind =
+        provider_kind_for_model(provider_name, &model_route.npm_package, has_audio_input);
     let base_url = if provider_name == "xai" && model_route.api.trim().is_empty() {
         // models.dev currently ships empty api for xAI; default to the public endpoint.
         "https://api.x.ai".to_string()
@@ -3971,6 +4001,10 @@ fn maps_runtime_stop_reasons_to_turn_events() {
     assert_eq!(
         turn_stop_reason(Some(&StopReason::Refusal)),
         Some(crate::llm::TurnStopReason::Refusal)
+    );
+    assert_eq!(
+        turn_stop_reason(Some(&StopReason::Hook)),
+        Some(crate::llm::TurnStopReason::MaxTurnRequests)
     );
     assert_eq!(turn_stop_reason(Some(&StopReason::Finish)), None);
 }
