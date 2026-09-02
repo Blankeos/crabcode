@@ -2946,6 +2946,7 @@ mod tests {
                         end_turn: None,
                         reasoning_items: Vec::new(),
                         doom_loop_triggers: vec!["tail_repetition:8@thinking".to_string()],
+                        usage: None,
                     }),
                 ],
                 1 => vec![

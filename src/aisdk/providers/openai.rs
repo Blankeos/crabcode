@@ -817,7 +817,7 @@ impl OpenAI {
                                     progress.record_chunk(chunk);
                                 }
                                 if tx.send(chunk).is_err() {
-                                    return None;
+                                    return;
                                 }
                                 if is_completed {
                                     let mut state = websocket_state.lock().await;
@@ -1604,7 +1604,7 @@ fn openai_responses_usage(usage: &serde_json::Value) -> Option<crate::chunk::Tok
         .unwrap_or(0);
 
     if input.is_none() && output.is_none() && cached == 0 {
-        return;
+        return None;
     }
 
     let input_v = input.unwrap_or(0);
