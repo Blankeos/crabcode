@@ -2834,6 +2834,19 @@ impl App {
             .map(|effort| effort.as_str().to_string())
     }
 
+    fn active_reasoning_effort_explicit(&self) -> bool {
+        self.reasoning_effort_override_for_model(&self.provider_name, &self.model)
+            .is_some()
+    }
+
+    fn selected_model_reasoning_effort_explicit(&self) -> bool {
+        let Some(selected) = self.models_dialog_state.dialog.get_selected() else {
+            return false;
+        };
+        self.reasoning_effort_override_for_model(&selected.provider_id, &selected.id)
+            .is_some()
+    }
+
     fn model_name_for_display(&self, provider_id: &str, model_id: &str) -> String {
         self.discovery
             .as_ref()
@@ -11612,6 +11625,7 @@ impl App {
         let status_cwd = self.active_workspace_path();
         let branch = self.current_git_branch(&status_cwd);
         let reasoning_effort = self.active_reasoning_effort_label();
+        let reasoning_effort_explicit = self.active_reasoning_effort_explicit();
         self.refresh_mcp_summary();
         let mcp_summary = self.mcp_summary;
         let model_name = self.model_name_for_display(&self.provider_name, &self.model);
@@ -11631,6 +11645,7 @@ impl App {
                     model_name,
                     provider_name,
                     reasoning_effort.clone(),
+                    reasoning_effort_explicit,
                     mcp_summary,
                     &colors,
                     usage_text,
@@ -11691,6 +11706,7 @@ impl App {
                     display_model_name,
                     display_provider_name,
                     reasoning_effort,
+                    reasoning_effort_explicit,
                     &colors,
                     is_streaming,
                     is_compacting,
@@ -11735,12 +11751,14 @@ impl App {
             && self.models_dialog_state.dialog.is_visible()
         {
             let reasoning_effort = self.selected_model_reasoning_control_label();
+            let reasoning_effort_explicit = self.selected_model_reasoning_effort_explicit();
             render_models_dialog(
                 f,
                 &mut self.models_dialog_state,
                 size,
                 colors,
                 reasoning_effort.as_deref(),
+                reasoning_effort_explicit,
             );
         }
 

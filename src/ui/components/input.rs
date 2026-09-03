@@ -421,6 +421,7 @@ impl Input {
         model: &str,
         provider_name: &str,
         reasoning_effort: Option<&str>,
+        reasoning_effort_explicit: bool,
         colors: &ThemeColors,
         show_terminal_cursor: bool,
     ) {
@@ -515,11 +516,18 @@ impl Input {
 
         if let Some(reasoning_effort) = reasoning_effort {
             info_spans.push(ratatui::text::Span::raw("  "));
-            info_spans.push(ratatui::text::Span::styled(
-                reasoning_effort.to_string(),
+            let effort_style = if reasoning_effort_explicit {
                 Style::default()
                     .fg(colors.warning)
-                    .add_modifier(ratatui::style::Modifier::BOLD),
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(colors.warning)
+                    .add_modifier(ratatui::style::Modifier::DIM)
+            };
+            info_spans.push(ratatui::text::Span::styled(
+                reasoning_effort.to_string(),
+                effort_style,
             ));
         }
 
@@ -2559,6 +2567,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -2582,6 +2591,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -2618,6 +2628,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -2664,6 +2675,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -2828,6 +2840,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -2862,6 +2875,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -2891,6 +2905,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -3087,6 +3102,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -3127,6 +3143,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -3153,6 +3170,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );
@@ -3344,6 +3362,7 @@ mod tests {
                     "model",
                     "provider",
                     None,
+                    false,
                     &colors,
                     true,
                 );

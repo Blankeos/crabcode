@@ -497,4 +497,4 @@ I think this is how the TUI works already anyway right?
 
 - [x] Bug: Fix the questions.. There's too much gap between 1-3 choices and the "Type your own answer". Because we always want type your own to be visible. Just amke them in the same container, no justification in the middle and if overflowing, just make it scroll the entire question dialog.
 
-- [ ] "default" thinking effort, make it dimmer when it's showing as what the default thinking effort is.. i.e. "medium" but default, make it dimmer. Only stay the same if it's explicit.
+- [x] "default" thinking effort, make it dimmer when it's showing as what the default thinking effort is.. i.e. "medium" but default, make it dimmer. Only stay the same if it's explicit.

@@ -86,6 +86,7 @@ pub fn render_home(
     model: String,
     provider_name: String,
     reasoning_effort: Option<String>,
+    reasoning_effort_explicit: bool,
     mcp_summary: McpSummary,
     colors: &ThemeColors,
     usage_text: &str,
@@ -236,6 +237,7 @@ pub fn render_home(
         &model,
         &provider_name,
         reasoning_effort.as_deref(),
+        reasoning_effort_explicit,
         colors,
         true,
     );
