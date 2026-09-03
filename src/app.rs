@@ -1708,17 +1708,18 @@ impl App {
             msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
         })?;
 
+        // Upstream formula (opencode #46108): billed output / decode time,
+        // 250ms floor, no inter-token adjustment.
         let format_tps = |precomputed: Option<f64>, tokens: usize, decode_ms: u64| -> Option<f64> {
             if let Some(tps) = precomputed {
                 if tps.is_finite() && tps > 0.0 {
                     return Some(tps);
                 }
             }
-            // OpenCode inter-token: (n - 1) / duration; need >1 token.
-            if decode_ms == 0 || tokens < 2 {
+            if tokens == 0 || decode_ms < 250 {
                 return None;
             }
-            let tps = ((tokens - 1) as f64) / (decode_ms as f64 / 1000.0);
+            let tps = tokens as f64 / (decode_ms as f64 / 1000.0);
             if tps.is_finite() && tps > 0.0 {
                 Some(tps)
             } else {
@@ -1727,7 +1728,9 @@ impl App {
         };
 
         if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
-            let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
+            // t/s inputs are output tokens only — `token_count` is the billed
+            // total and would inflate the rate on reloaded sessions.
+            let output_tokens = message.output_tokens.unwrap_or(0);
             let ttft_ms = t1.saturating_sub(t0);
             let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
             let total_ms = ttft_ms.saturating_add(decode_ms);
@@ -1741,13 +1744,21 @@ impl App {
             return Some(format!("{:.1}s", total_sec));
         }
 
-        if let (Some(token_count), Some(duration_ms)) = (message.token_count, message.duration_ms) {
+        if let (Some(output_tokens), Some(duration_ms)) =
+            (message.output_tokens, message.duration_ms)
+        {
             let duration_sec = duration_ms as f64 / 1000.0;
             if let Some(tokens_per_sec) =
-                format_tps(message.tokens_per_sec, token_count, duration_ms)
+                format_tps(message.tokens_per_sec, output_tokens, duration_ms)
             {
                 return Some(format!("{:.1}s | {:.0}t/s", duration_sec, tokens_per_sec));
             }
+            return Some(format!("{:.1}s", duration_sec));
+        }
+
+        if message.duration_ms.is_some() {
+            // Total-only legacy row: duration without t/s.
+            let duration_sec = message.duration_ms.unwrap_or(0) as f64 / 1000.0;
             return Some(format!("{:.1}s", duration_sec));
         }
 
