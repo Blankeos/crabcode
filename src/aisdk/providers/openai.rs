@@ -191,7 +191,15 @@ impl OpenAIBuilder {
         let responses_path = {
             let trimmed = self.responses_path.trim();
             if trimmed.is_empty() {
-                "/v1/responses".to_string()
+                // Gateways often ship base URLs that already include a version
+                // segment (e.g. https://opencode.ai/zen/go/v1). Appending the
+                // default `/v1/responses` there produces a duplicated
+                // `/v1/v1/...` path that 404s.
+                if super::base_url_has_version_segment(base_url.trim_end_matches('/')) {
+                    "/responses".to_string()
+                } else {
+                    "/v1/responses".to_string()
+                }
             } else if trimmed.starts_with('/') {
                 trimmed.to_string()
             } else {
@@ -2274,7 +2282,7 @@ fn build_openai_messages(
     strip_system: bool,
     responses_lite: bool,
 ) -> Vec<serde_json::Value> {
-    messages
+    let items = messages
         .iter()
         .filter_map(|msg| {
             if strip_system {
@@ -2332,7 +2340,67 @@ fn build_openai_messages(
                 })),
             }
         })
-        .collect()
+        .collect();
+    dedupe_responses_call_ids(items)
+}
+
+/// Rewrite duplicate `function_call` / `function_call_output` call ids in the
+/// Responses `input` items.
+///
+/// Some OpenAI-compatible relays mint per-request call ids (`call_1`,
+/// `call_2`, ...) that restart on every request. The Responses API requires
+/// every call_id to be unique across the conversation input, so a history that
+/// reuses an id fails with "Duplicate function_call_output". Remap each
+/// repeated call — and its matching output — to a unique id; ids are opaque.
+fn dedupe_responses_call_ids(mut items: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    // Occurrence k of a call_id pairs with occurrence k of its output, so
+    // track counts per call_id instead of assuming strict call/output order.
+    let mut call_occurrences: HashMap<String, usize> = HashMap::new();
+    let mut output_occurrences: HashMap<String, usize> = HashMap::new();
+
+    for item in items.iter_mut() {
+        match item.get("type").and_then(|value| value.as_str()) {
+            Some("function_call") => {
+                let Some(call_id) = item
+                    .get("call_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                let occurrence = call_occurrences.entry(call_id.clone()).or_insert(0);
+                *occurrence += 1;
+                if *occurrence == 1 {
+                    continue;
+                }
+                let new_id = format!("{call_id}_dup{occurrence}");
+                item["call_id"] = serde_json::Value::String(new_id);
+                // The item id belongs to the original response; drop it so the
+                // rewritten pair cannot collide on item ids either.
+                if let Some(obj) = item.as_object_mut() {
+                    obj.remove("id");
+                }
+            }
+            Some("function_call_output") => {
+                let Some(call_id) = item
+                    .get("call_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                let occurrence = output_occurrences.entry(call_id.clone()).or_insert(0);
+                *occurrence += 1;
+                if *occurrence > 1 {
+                    item["call_id"] =
+                        serde_json::Value::String(format!("{call_id}_dup{occurrence}"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    items
 }
 
 fn responses_lite_message(role: &str, text_type: &str, text: String) -> serde_json::Value {
@@ -2434,6 +2502,45 @@ mod tests {
             .expect("api key should be optional");
 
         assert!(provider.api_key.is_empty());
+    }
+
+    #[test]
+    fn default_responses_path_does_not_duplicate_v1_in_base_url() {
+        // Models.dev routes some gateway models (e.g. opencode-go /
+        // muse-spark-1.3-contributor) through `@ai-sdk/openai` while their
+        // base URL already ends in a version segment. The default Responses
+        // path must not append another `/v1` (which produced
+        // `/v1/v1/responses` 404s).
+        let provider = OpenAI::builder()
+            .base_url("https://opencode.ai/zen/go/v1")
+            .model_name("muse-spark-1.3-contributor")
+            .build()
+            .unwrap();
+        assert_eq!(provider.responses_path, "/responses");
+
+        let provider = OpenAI::builder()
+            .base_url("https://api.openai.com")
+            .model_name("gpt-test")
+            .build()
+            .unwrap();
+        assert_eq!(provider.responses_path, "/v1/responses");
+    }
+
+    #[test]
+    fn default_responses_path_handles_non_v1_version_segments() {
+        let provider = OpenAI::builder()
+            .base_url("https://gateway.example.com/v2")
+            .model_name("gpt-test")
+            .build()
+            .unwrap();
+        assert_eq!(provider.responses_path, "/responses");
+
+        let provider = OpenAI::builder()
+            .base_url("https://gateway.example.com/v2/")
+            .model_name("gpt-test")
+            .build()
+            .unwrap();
+        assert_eq!(provider.responses_path, "/responses");
     }
 
     #[test]
@@ -2845,6 +2952,44 @@ mod tests {
         assert_eq!(input[1]["type"], "function_call_output");
         assert_eq!(input[1]["call_id"], "call_edit");
         assert_eq!(input[1]["output"], "Replaced at line 7");
+    }
+
+    #[test]
+    fn dedupes_repeated_call_ids_across_turns_for_responses_input() {
+        // Relays that mint per-request ids (call_1, ...) restart numbering on
+        // every request; the stored history then repeats ids across turns.
+        let input = build_openai_messages(
+            &[
+                Message::user("list files"),
+                Message::tool_call("call_1", "glob", "{}"),
+                Message::tool_output("call_1", "glob", "src/main.rs", false),
+                Message::tool_call("call_1", "read", "{}"),
+                Message::tool_output("call_1", "read", "fn main() {}", false),
+                Message::tool_call("call_1", "grep", "{}"),
+                Message::tool_output("call_1", "grep", "no matches", false),
+            ],
+            false,
+            false,
+        );
+
+        let call_ids: Vec<&str> = input
+            .iter()
+            .filter(|item| item.get("call_id").is_some())
+            .map(|item| item["call_id"].as_str().expect("call_id"))
+            .collect();
+        assert_eq!(
+            call_ids,
+            [
+                "call_1",
+                "call_1",
+                "call_1_dup2",
+                "call_1_dup2",
+                "call_1_dup3",
+                "call_1_dup3"
+            ]
+        );
+        // Rewritten calls must not keep a stale response item id.
+        assert!(input[3].get("id").is_none());
     }
 
     #[test]
