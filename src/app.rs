@@ -362,6 +362,44 @@ enum TitleGenerationTaskMessage {
     Generated { session_id: String, title: String },
 }
 
+/// Answer to a `/btw` side question. Kept out of `chat_state.chat.messages`
+/// (and session persistence) so the aside never leaks into the main turn.
+/// `session_id` is `None` on the home page.
+#[derive(Debug, Clone)]
+pub struct BtwEntry {
+    pub session_id: Option<String>,
+    pub question: String,
+    pub answer: Option<String>,
+    pub error: Option<String>,
+}
+
+impl BtwEntry {
+    pub fn pending(session_id: Option<String>, question: String) -> Self {
+        Self {
+            session_id,
+            question,
+            answer: None,
+            error: None,
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.answer.is_none() && self.error.is_none()
+    }
+}
+
+#[derive(Debug)]
+enum BtwTaskMessage {
+    Answered {
+        session_id: Option<String>,
+        answer: String,
+    },
+    Failed {
+        session_id: Option<String>,
+        error: String,
+    },
+}
+
 #[derive(Debug, Clone)]
 struct SmallModelConfig {
     provider: String,
@@ -890,6 +928,12 @@ pub struct App {
     models_dialog_provider_ids: Option<Vec<String>>,
     title_generation_receiver:
         Option<tokio::sync::mpsc::UnboundedReceiver<TitleGenerationTaskMessage>>,
+    btw_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<BtwTaskMessage>>,
+    btw_entries: Vec<BtwEntry>,
+    /// Lines scrolled down from the top inside the `/btw` panel (0 = top).
+    btw_scroll: usize,
+    /// Last-rendered `/btw` panel rect, for mouse-wheel hit-testing.
+    btw_panel_area: Option<ratatui::layout::Rect>,
     pub prefs_dao: Option<crate::persistence::PrefsDAO>,
     pub agent: String,
     pub agent_registry: crate::agent::definition::AgentRegistry,
@@ -1151,6 +1195,10 @@ impl App {
             models_receiver: None,
             models_dialog_provider_ids: None,
             title_generation_receiver: None,
+            btw_receiver: None,
+            btw_entries: Vec::new(),
+            btw_scroll: 0,
+            btw_panel_area: None,
             prefs_dao,
             agent,
             agent_registry: crate::agent::definition::AgentRegistry::default(),
@@ -3486,6 +3534,14 @@ impl App {
     }
 
     pub fn handle_coalesced_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) {
+        // The /btw panel scrolls independently (home and chat alike).
+        if matches!(
+            self.overlay_focus,
+            OverlayFocus::None | OverlayFocus::FindBar
+        ) && self.handle_btw_mouse_scroll(mouse, notches)
+        {
+            return;
+        }
         if matches!(
             self.overlay_focus,
             OverlayFocus::None | OverlayFocus::FindBar
@@ -4430,6 +4486,11 @@ impl App {
             KeyCode::Esc => {
                 // If text is selected, clear selection first
                 if self.clear_selection() {
+                    self.reset_esc_primed_state();
+                    return true;
+                }
+                // Close the /btw side panel first (works while streaming too).
+                if self.input.is_empty() && self.dismiss_btw_panel() {
                     self.reset_esc_primed_state();
                     return true;
                 }
@@ -6812,6 +6873,10 @@ impl App {
                     self.handle_fork_command(&parsed.args);
                     return;
                 }
+                if self.command_matches(&parsed.name, "btw") {
+                    self.handle_btw_command(&parsed);
+                    return;
+                }
                 if self.reject_chat_only_command_outside_chat(&parsed.name) {
                     return;
                 }
@@ -7054,6 +7119,10 @@ impl App {
         }
         if self.command_matches(&parsed.name, "fork") && self.base_focus == BaseFocus::Chat {
             self.handle_fork_command(&parsed.args);
+            return;
+        }
+        if self.command_matches(&parsed.name, "btw") {
+            self.handle_btw_command(&parsed);
             return;
         }
         if self.reject_chat_only_command_outside_chat(&parsed.name) {
@@ -9407,6 +9476,189 @@ impl App {
         }
     }
 
+    /// Fire a `/btw` side question: lightweight no-tools call that bypasses the
+    /// main streaming turn. Works on home and chat, and while the agent is busy;
+    /// the Q&A stays out of `chat_state.chat.messages` so it never leaks into
+    /// the main turn.
+    fn handle_btw_command(&mut self, parsed: &crate::command::parser::ParsedCommand) {
+        let question = parsed.raw_args().trim().to_string();
+        if question.is_empty() {
+            self.push_command_error("Usage: /btw <question>");
+            return;
+        }
+        // No active session on the home page — key the entry to `None` there.
+        let session_id = self.session_manager.get_current_session_id().cloned();
+        if self.btw_receiver.is_some() {
+            push_toast(Toast::new(
+                "Already answering a /btw question...",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
+            return;
+        }
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.btw_receiver = Some(receiver);
+        self.btw_entries
+            .push(BtwEntry::pending(session_id.clone(), question.clone()));
+        // Pin to the top of the fresh panel.
+        self.btw_scroll = 0;
+        self.note_user_activity();
+
+        let provider = self.provider_name.clone();
+        let model = self.model.clone();
+        // Snapshot history for context (Grok resolves history server-side via
+        // session_id; we attach the optimized slice client-side).
+        let history: Vec<crate::session::types::Message> = session_id
+            .as_deref()
+            .and_then(|id| self.chat_for_session(id))
+            .map(|chat| chat.messages.clone())
+            .unwrap_or_default();
+        tokio::spawn(async move {
+            let message =
+                match crate::llm::client::generate_btw_answer(provider, model, question, history)
+                    .await
+                {
+                    Ok(answer) => BtwTaskMessage::Answered { session_id, answer },
+                    Err(err) => BtwTaskMessage::Failed {
+                        session_id,
+                        error: err.to_string(),
+                    },
+                };
+            let _ = sender.send(message);
+        });
+    }
+
+    /// Latest `/btw` entry for the current context (home or active session).
+    pub fn current_btw_entry(&self) -> Option<&BtwEntry> {
+        let session_id = self.session_manager.get_current_session_id().cloned();
+        self.btw_entries
+            .iter()
+            .rev()
+            .find(|entry| entry.session_id == session_id)
+    }
+
+    /// Close the `/btw` panel for the current context (Esc). A late reply to
+    /// an already-closed panel is dropped.
+    pub fn dismiss_btw_panel(&mut self) -> bool {
+        let session_id = self.session_manager.get_current_session_id().cloned();
+        let before = self.btw_entries.len();
+        self.btw_entries
+            .retain(|entry| entry.session_id != session_id);
+        if before == self.btw_entries.len() {
+            return false;
+        }
+        // Drop the in-flight receiver too so a late reply is discarded and a
+        // fresh /btw can start immediately.
+        self.btw_receiver = None;
+        self.btw_scroll = 0;
+        true
+    }
+
+    /// Max scroll offset (in body lines) for the current `/btw` panel.
+    /// Derived from the panel's actual rendered area (not a width guess) so
+    /// the wrap and the viewport always match, even on small terminals.
+    fn btw_scroll_max(&self, colors: &crate::theme::ThemeColors) -> usize {
+        let Some(area) = self.btw_panel_area else {
+            return 0;
+        };
+        let Some(entry) = self.current_btw_entry() else {
+            return 0;
+        };
+        let total = crate::views::chat::btw_body_lines(
+            entry,
+            crate::views::chat::btw_body_width(area.width),
+            colors,
+        )
+        .len()
+        .max(1);
+        total.saturating_sub(crate::views::chat::btw_body_viewport(area.height))
+    }
+
+    /// Mouse-wheel scroll inside the `/btw` panel. Returns true when consumed.
+    fn handle_btw_mouse_scroll(&mut self, mouse: MouseEvent, notches: usize) -> bool {
+        if !matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            return false;
+        }
+        if self.current_btw_entry().is_none() {
+            return false;
+        }
+        let Some(area) = self.btw_panel_area else {
+            return false;
+        };
+        if !area.contains(Position::new(mouse.column, mouse.row)) {
+            return false;
+        }
+        let colors = self.get_current_theme_colors();
+        let max = self.btw_scroll_max(&colors);
+        let step = notches.max(1) * 3;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.btw_scroll = self.btw_scroll.saturating_sub(step).min(max);
+            }
+            _ => {
+                self.btw_scroll = self.btw_scroll.saturating_add(step).min(max);
+            }
+        }
+        true
+    }
+
+    fn process_btw_events(&mut self) {
+        let mut events = Vec::new();
+        let mut disconnected = false;
+        if let Some(receiver) = &mut self.btw_receiver {
+            while let Ok(event) = receiver.try_recv() {
+                events.push(event);
+            }
+        } else {
+            return;
+        }
+        if let Some(receiver) = &self.btw_receiver {
+            disconnected = receiver.is_closed() && receiver.is_empty();
+        }
+
+        if disconnected {
+            self.btw_receiver = None;
+        }
+
+        for event in events {
+            match event {
+                BtwTaskMessage::Answered { session_id, answer } => {
+                    if let Some(entry) = self
+                        .btw_entries
+                        .iter_mut()
+                        .rev()
+                        .find(|entry| entry.session_id == session_id && entry.is_pending())
+                    {
+                        entry.answer = Some(answer);
+                    }
+                    self.btw_receiver = None;
+                    self.play_sound_event(crate::sound::SoundEvent::Complete);
+                }
+                BtwTaskMessage::Failed { session_id, error } => {
+                    if let Some(entry) = self
+                        .btw_entries
+                        .iter_mut()
+                        .rev()
+                        .find(|entry| entry.session_id == session_id && entry.is_pending())
+                    {
+                        entry.error = Some(error.clone());
+                    }
+                    self.btw_receiver = None;
+                    self.play_sound_event(crate::sound::SoundEvent::Error);
+                    push_toast(Toast::new(
+                        format!("btw failed: {}", error),
+                        ToastLevel::Error,
+                        Some(std::time::Duration::from_secs(4)),
+                    ));
+                }
+            }
+        }
+    }
+
     fn cleanup_streaming(&mut self) {
         if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
             self.cleanup_streaming_for_session(&session_id);
@@ -9685,6 +9937,7 @@ impl App {
         self.process_storage_events();
         self.process_models_events();
         self.process_title_generation_events();
+        self.process_btw_events();
 
         let drained = {
             let mut receivers = Vec::new();
@@ -11645,6 +11898,8 @@ impl App {
 
         match self.base_focus {
             BaseFocus::Home => {
+                // Clone: render_home takes &mut self.input below.
+                let btw_entry = self.current_btw_entry().cloned();
                 render_home(
                     f,
                     &mut self.input,
@@ -11660,6 +11915,9 @@ impl App {
                     mcp_summary,
                     &colors,
                     usage_text,
+                    btw_entry.as_ref(),
+                    self.btw_scroll,
+                    &mut self.btw_panel_area,
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -11705,6 +11963,9 @@ impl App {
                 let is_streaming = self.is_streaming;
                 let is_compacting = self.compaction_receiver.is_some();
                 let esc_cancel_primed = is_streaming && self.esc_is_primed();
+                // Clone: render_chat takes &mut self fields below, and the panel
+                // must never alias the main chat messages anyway.
+                let btw_entry = self.current_btw_entry().cloned();
                 render_chat(
                     f,
                     &mut self.chat_state,
@@ -11726,6 +11987,9 @@ impl App {
                     usage_text,
                     subagent_tabs,
                     &queued_messages,
+                    btw_entry.as_ref(),
+                    self.btw_scroll,
+                    &mut self.btw_panel_area,
                     &mut self.find_bar,
                     self.overlay_focus == OverlayFocus::None,
                     self.session_manager
@@ -12412,6 +12676,10 @@ mod tests {
             models_receiver: None,
             models_dialog_provider_ids: None,
             title_generation_receiver: None,
+            btw_receiver: None,
+            btw_entries: Vec::new(),
+            btw_scroll: 0,
+            btw_panel_area: None,
             prefs_dao: None,
             agent: "Build".to_string(),
             agent_registry: crate::agent::definition::AgentRegistry::default(),
@@ -15662,6 +15930,119 @@ mod tests {
                 .map(|session| session.title.as_str()),
             Some("First prompt")
         );
+    }
+
+    #[test]
+    fn btw_panel_tracks_current_session_and_closes() {
+        // Isolate XDG_STATE_HOME: create_new_session persists via HistoryDAO.
+        let _state = crate::jobs::test_env::TempState::new();
+        let mut app = test_app();
+        app.create_new_session(Some("btw session".to_string()));
+        assert!(app.current_btw_entry().is_none());
+
+        let session_id = app
+            .session_manager
+            .get_current_session_id()
+            .cloned()
+            .expect("session");
+        app.btw_entries.push(BtwEntry::pending(
+            Some(session_id.clone()),
+            "also check error handling".to_string(),
+        ));
+        assert_eq!(
+            app.current_btw_entry().map(|entry| entry.question.as_str()),
+            Some("also check error handling")
+        );
+
+        // Late reply fills the pending entry without touching main chat.
+        let chat_len = app.chat_state.chat.messages.len();
+        app.btw_receiver = None;
+        app.btw_entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.session_id == Some(session_id.clone()) && entry.is_pending())
+            .expect("pending btw")
+            .answer = Some("looks fine".to_string());
+        assert_eq!(app.chat_state.chat.messages.len(), chat_len);
+
+        assert!(app.dismiss_btw_panel());
+        assert!(app.current_btw_entry().is_none());
+        assert!(!app.dismiss_btw_panel());
+    }
+
+    #[test]
+    fn btw_panel_scrolls_with_mouse_wheel_and_clamps() {
+        let mut app = test_app();
+        let mut entry = BtwEntry::pending(None, "long answer".to_string());
+        entry.answer = Some(
+            (1..=30)
+                .map(|n| format!("para {n}"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+        app.btw_entries.push(entry);
+        // Pretend the panel was rendered above the input at full height.
+        app.btw_panel_area = Some(ratatui::layout::Rect::new(0, 10, 80, 13));
+
+        let colors = app.get_current_theme_colors();
+        let max = app.btw_scroll_max(&colors);
+        assert!(max > 0);
+
+        assert!(app.handle_btw_mouse_scroll(mouse(MouseEventKind::ScrollDown, 40, 12), 1));
+        assert_eq!(app.btw_scroll, 3.min(max));
+        // Outside the panel → not consumed, offset untouched.
+        assert!(!app.handle_btw_mouse_scroll(mouse(MouseEventKind::ScrollDown, 40, 2), 1));
+        assert_eq!(app.btw_scroll, 3.min(max));
+        // Scrolling far down clamps at max.
+        assert!(app.handle_btw_mouse_scroll(mouse(MouseEventKind::ScrollDown, 40, 12), 100));
+        assert_eq!(app.btw_scroll, max);
+        // Scroll back up clamps at the top.
+        assert!(app.handle_btw_mouse_scroll(mouse(MouseEventKind::ScrollUp, 40, 12), 100));
+        assert_eq!(app.btw_scroll, 0);
+    }
+
+    #[test]
+    fn btw_scroll_clamp_matches_short_panel_render() {
+        let mut app = test_app();
+        let mut entry = BtwEntry::pending(None, "long answer".to_string());
+        entry.answer = Some(
+            (1..=17)
+                .map(|n| format!("para {n}"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+        app.btw_entries.push(entry);
+        // Shrunken panel: only 5 body lines actually visible.
+        app.btw_panel_area = Some(ratatui::layout::Rect::new(0, 18, 80, 8));
+
+        let colors = app.get_current_theme_colors();
+        let total = crate::views::chat::btw_body_lines(
+            app.current_btw_entry().expect("entry"),
+            crate::views::chat::btw_body_width(80),
+            &colors,
+        )
+        .len();
+        // 17 paragraphs render with blank separators: 17 + 16 = 33 lines.
+        assert_eq!(total, 33);
+        // 33 - 5 visible = 28, so the last line is always reachable.
+        assert_eq!(app.btw_scroll_max(&colors), 28);
+    }
+
+    #[test]
+    fn btw_panel_works_on_home_without_session() {
+        let mut app = test_app();
+        assert!(app.session_manager.get_current_session_id().is_none());
+        assert!(app.current_btw_entry().is_none());
+
+        app.btw_entries
+            .push(BtwEntry::pending(None, "what is crabcode?".to_string()));
+        assert_eq!(
+            app.current_btw_entry().map(|entry| entry.question.as_str()),
+            Some("what is crabcode?")
+        );
+
+        assert!(app.dismiss_btw_panel());
+        assert!(app.current_btw_entry().is_none());
     }
 
     #[test]
