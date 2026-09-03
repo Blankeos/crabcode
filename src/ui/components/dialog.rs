@@ -25,6 +25,35 @@ const SEARCH_AREA_HEIGHT: u16 = 2;
 const PROVIDER_EXACT_MATCH_BOOST: u32 = 1_000_000;
 const PROVIDER_PREFIX_MATCH_BOOST: u32 = 900_000;
 
+/// Dim everything outside `dialog_area` to mimic a semi-transparent
+/// backdrop (cf. opencode `RGBA(0,0,0,150)`, ~59% toward black).
+/// Terminals have no alpha channel, so each cell's `Rgb` background
+/// (~40% kept) and foreground (~50% kept) are scaled toward black and
+/// `DIM` is set. `Reset` channels are left alone so transparent mode
+/// keeps showing the terminal through.
+pub fn dim_backdrop(frame: &mut Frame, area: Rect, dialog_area: Rect) {
+    use ratatui::layout::Position;
+    fn scale(v: u8, num: u16, den: u16) -> u8 {
+        ((v as u16 * num) / den).min(255) as u8
+    }
+    let buf = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if dialog_area.contains(Position::new(x, y)) {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                if let Color::Rgb(r, g, b) = cell.bg {
+                    cell.bg = Color::Rgb(scale(r, 2, 5), scale(g, 2, 5), scale(b, 2, 5));
+                }
+                if let Color::Rgb(r, g, b) = cell.fg {
+                    cell.fg = Color::Rgb(scale(r, 1, 2), scale(g, 1, 2), scale(b, 1, 2));
+                }
+                cell.modifier.insert(Modifier::DIM);
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilterSelectionMode {
     Preserve,
@@ -1645,6 +1674,7 @@ impl Dialog {
             }
         }
 
+        dim_backdrop(frame, area, self.dialog_area);
         frame.render_widget(Clear, self.dialog_area);
 
         self.content_area = self.padded_content_area();
