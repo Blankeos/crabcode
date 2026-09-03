@@ -18,6 +18,18 @@ pub use prefs::PrefsDAO;
 pub use prompt_history::PromptHistoryCache;
 
 pub fn get_data_dir() -> PathBuf {
+    // Unit tests (`cfg(test)`) and `CRABCODE_TEST_MODE` runs must never touch
+    // the real `~/.local/state/crabcode/data.db`: `SessionManager::create_session`
+    // calls `ensure_history()`, so even pure in-memory tests would otherwise
+    // insert rows into the production DB.
+    if cfg!(test) || std::env::var("CRABCODE_TEST_MODE").is_ok() {
+        if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+            if !xdg.is_empty() {
+                return PathBuf::from(xdg).join("crabcode");
+            }
+        }
+        return PathBuf::from("/tmp/crabcode_test_data");
+    }
     state_home().join("crabcode")
 }
 
