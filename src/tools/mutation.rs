@@ -332,18 +332,13 @@ mod tests {
 
     #[test]
     fn write_supports_relative_file_in_current_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
+        let file_name = format!("crabcode-mutation-test-{}.txt", std::process::id());
+        let path = PathBuf::from(&file_name);
+        let _ = fs::remove_file(&path);
 
-        let result = FileMutation::write("plain.txt", b"content");
-        std::env::set_current_dir(old).unwrap();
-
-        result.unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("plain.txt")).unwrap(),
-            "content"
-        );
+        FileMutation::write(&path, b"content").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "content");
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

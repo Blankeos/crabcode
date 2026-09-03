@@ -284,7 +284,7 @@ pub fn test_cache_lock() -> std::sync::MutexGuard<'static, ()> {
     TEST_CACHE_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("ollama test cache lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

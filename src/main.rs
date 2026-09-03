@@ -18,6 +18,7 @@ mod mcp;
 mod model;
 mod notify;
 mod persistence;
+mod plugin;
 mod prompt;
 mod remote;
 mod remote_mcp;
@@ -785,6 +786,13 @@ enum Command {
     /// List remembered remote hosts
     Hosts,
 
+    /// Install a plugin and add it to the shared global OpenCode configuration
+    #[command(alias = "plug")]
+    Plugin {
+        /// npm package specifier, for example `@dietrichgebert/ponytail@latest`
+        module: String,
+    },
+
     /// Upgrade crabcode to the latest (or a specific) version
     Upgrade {
         /// Target version (e.g. `0.0.12`) or `latest`
@@ -1020,6 +1028,10 @@ async fn main() -> Result<()> {
         Some(Command::Attach { target }) => {
             return crate::remote::attach(target).await;
         }
+        Some(Command::Plugin { module }) => {
+            crate::plugin::installer::install_plugin(module)?;
+            return Ok(());
+        }
         Some(Command::Hosts) => {
             crate::remote::list_hosts()?;
             return Ok(());
@@ -1157,6 +1169,32 @@ async fn main() -> Result<()> {
     }
 
     let mut app = App::new_with_model_override(args.model.as_deref(), args.agent.as_deref())?;
+    let plugins_enabled = std::env::var("CRABCODE_ENABLE_OPENCODE_PLUGINS")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let mut plugin_host = None;
+    if plugins_enabled {
+        // Plugin configuration is loaded during startup hydration. Hydrate early only
+        // when the experimental plugin host has been explicitly enabled.
+        app.ensure_startup_hydrated()?;
+        if !app.plugin_specs.is_empty() {
+            let cache_dir = crate::persistence::get_data_dir().join("cache");
+            match crate::plugin::PluginHost::start(&cache_dir, &app.project_root).await {
+                Ok(mut host) => match host.load_plugins(&app.plugin_specs).await {
+                    Ok(result) => {
+                        crate::startup_diag!("Plugins: {}", result);
+                        plugin_host = Some(host);
+                    }
+                    Err(error) => {
+                        crate::startup_diag!("Plugin warning: failed to load plugins: {}", error);
+                        let _ = host.shutdown().await;
+                    }
+                },
+                Err(error) => {
+                    crate::startup_diag!("Plugin warning: failed to start Bun sidecar: {}", error);
+                }
+            }
+        }
+    }
     // Keep herdr authority until this guard drops (normal exit or panic).
     let _herdr = crate::herdr::Session::start();
 
@@ -1222,6 +1260,12 @@ async fn main() -> Result<()> {
 
     restore_terminal_modes(terminal.backend_mut(), keyboard_enhancement)?;
     terminal.show_cursor()?;
+
+    if let Some(host) = plugin_host {
+        if let Err(error) = host.shutdown().await {
+            eprintln!("Plugin warning: failed to stop sidecar: {error}");
+        }
+    }
 
     if let Some(request) = remote_launch_request {
         if let Err(err) = result {
