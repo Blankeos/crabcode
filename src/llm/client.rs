@@ -914,13 +914,57 @@ fn resolve_api_key(
     configured_api_key(auth_config).or(custom_provider_api_key)
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CompactionSummary {
+    pub text: String,
+    pub usage: crate::aisdk::chunk::TokenUsage,
+}
+
+fn apply_compaction_stream_chunk(
+    summary: &mut String,
+    usage: &mut crate::aisdk::chunk::TokenUsage,
+    chunk: ChunkType,
+) -> Result<(), DynError> {
+    match chunk {
+        ChunkType::Text(text) => summary.push_str(&text),
+        ChunkType::Failed(err) => {
+            return Err(anyhow::anyhow!("Compaction failed: {}", err).into());
+        }
+        ChunkType::NotSupported(msg) => {
+            return Err(anyhow::anyhow!("Compaction unsupported: {}", msg).into());
+        }
+        ChunkType::Usage(chunk_usage) => {
+            *usage = usage.saturating_add(chunk_usage);
+        }
+        ChunkType::StreamRollback { text, .. } => {
+            if summary.ends_with(&text) {
+                summary.truncate(summary.len() - text.len());
+            }
+        }
+        ChunkType::Reasoning(_)
+        | ChunkType::ReasoningItem(_)
+        | ChunkType::ToolCall(_)
+        | ChunkType::ProviderToolCall(_)
+        | ChunkType::End { .. }
+        | ChunkType::AssistantMessagePhase { .. }
+        | ChunkType::ResponseCompleted { .. }
+        | ChunkType::Retry(_)
+        | ChunkType::RetryableFailure(_)
+        | ChunkType::Warning(_)
+        | ChunkType::Metadata(_)
+        | ChunkType::Start
+        | ChunkType::Incomplete(_) => {}
+    }
+    Ok(())
+}
+
 pub async fn summarize_for_compaction(
     provider_name: String,
     model: String,
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
     prompt: String,
     cancel_token: CancellationToken,
-) -> Result<String, DynError> {
+) -> Result<CompactionSummary, DynError> {
     if cancel_token.is_cancelled() {
         return Err(anyhow::anyhow!("Compaction cancelled by user").into());
     }
@@ -939,6 +983,7 @@ pub async fn summarize_for_compaction(
     .await?;
 
     let mut summary = String::new();
+    let mut usage = crate::aisdk::chunk::TokenUsage::default();
     loop {
         let chunk = tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -951,34 +996,7 @@ pub async fn summarize_for_compaction(
             break;
         };
 
-        match chunk {
-            ChunkType::Text(text) => summary.push_str(&text),
-            ChunkType::Failed(err) => {
-                return Err(anyhow::anyhow!("Compaction failed: {}", err).into());
-            }
-            ChunkType::NotSupported(msg) => {
-                return Err(anyhow::anyhow!("Compaction unsupported: {}", msg).into());
-            }
-            ChunkType::Reasoning(_)
-            | ChunkType::ReasoningItem(_)
-            | ChunkType::ToolCall(_)
-            | ChunkType::ProviderToolCall(_)
-            | ChunkType::End { .. }
-            | ChunkType::AssistantMessagePhase { .. }
-            | ChunkType::ResponseCompleted { .. }
-            | ChunkType::Retry(_)
-            | ChunkType::RetryableFailure(_)
-            | ChunkType::Warning(_)
-            | ChunkType::Metadata(_)
-            | ChunkType::Usage(_)
-            | ChunkType::Start
-            | ChunkType::Incomplete(_) => {}
-            ChunkType::StreamRollback { text, .. } => {
-                if summary.ends_with(&text) {
-                    summary.truncate(summary.len() - text.len());
-                }
-            }
-        }
+        apply_compaction_stream_chunk(&mut summary, &mut usage, chunk)?;
     }
 
     if cancel_token.is_cancelled() {
@@ -990,7 +1008,10 @@ pub async fn summarize_for_compaction(
         return Err(anyhow::anyhow!("Compaction returned an empty summary").into());
     }
 
-    Ok(summary)
+    Ok(CompactionSummary {
+        text: summary,
+        usage,
+    })
 }
 
 pub async fn generate_session_title(
@@ -2602,15 +2623,70 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_provider_request_defaults, convert_messages, convert_messages_for_model,
-        is_openai_oauth_model_allowed, maybe_apply_unauthenticated_free_provider_key,
-        model_supports_image_input, openai_oauth_default_originator,
-        openai_oauth_model_uses_responses_lite, openai_request_instructions, resolve_api_key,
-        resolve_model_route, ui_vs_request_model_mismatch_warning, vlm_agent_has_model,
-        AisdkMessage, OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
+        apply_compaction_stream_chunk, apply_provider_request_defaults, convert_messages,
+        convert_messages_for_model, is_openai_oauth_model_allowed,
+        maybe_apply_unauthenticated_free_provider_key, model_supports_image_input,
+        openai_oauth_default_originator, openai_oauth_model_uses_responses_lite,
+        openai_request_instructions, resolve_api_key, resolve_model_route,
+        ui_vs_request_model_mismatch_warning, vlm_agent_has_model, AisdkMessage,
+        OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
     };
+    use crate::aisdk::core::chunk::ChunkType;
 
     use crate::persistence::AuthConfig;
+
+    #[test]
+    fn compaction_stream_accumulates_usage_and_text() {
+        let mut summary = String::new();
+        let mut usage = crate::aisdk::chunk::TokenUsage::default();
+
+        apply_compaction_stream_chunk(&mut summary, &mut usage, ChunkType::Text("hello ".into()))
+            .unwrap();
+        apply_compaction_stream_chunk(
+            &mut summary,
+            &mut usage,
+            ChunkType::Usage(crate::aisdk::chunk::TokenUsage {
+                input: 1_000,
+                output: 40,
+                cache_read: 200,
+                cache_write: 10,
+            }),
+        )
+        .unwrap();
+        apply_compaction_stream_chunk(
+            &mut summary,
+            &mut usage,
+            ChunkType::Usage(crate::aisdk::chunk::TokenUsage {
+                input: 50,
+                output: 10,
+                cache_read: 0,
+                cache_write: 0,
+            }),
+        )
+        .unwrap();
+        apply_compaction_stream_chunk(&mut summary, &mut usage, ChunkType::Text("world".into()))
+            .unwrap();
+        apply_compaction_stream_chunk(
+            &mut summary,
+            &mut usage,
+            ChunkType::StreamRollback {
+                text: "world".into(),
+                reasoning: String::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary, "hello ");
+        assert_eq!(
+            usage,
+            crate::aisdk::chunk::TokenUsage {
+                input: 1_050,
+                output: 50,
+                cache_read: 200,
+                cache_write: 10,
+            }
+        );
+    }
 
     #[test]
     fn stored_auth_takes_precedence_over_custom_provider_api_key() {

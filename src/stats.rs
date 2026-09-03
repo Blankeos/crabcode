@@ -611,6 +611,38 @@ mod tests {
     }
 
     #[test]
+    fn compaction_summary_usage_counts_toward_totals() {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO messages
+             (id, session_id, role, parts, timestamp, tokens_used, output_tokens, model, provider)
+             VALUES
+             ('m4', 1, 'user', ?1, 1002, 92400, 400, 'gpt-test', 'openai')",
+            params![
+                r#"[{"type":"text","text":"Another language model started to solve this problem"},{"type":"usage","input":80000,"output":400,"cache_read":12000,"cache_write":0,"cost":0.42}]"#
+            ],
+        )
+        .unwrap();
+
+        let report = collect(
+            &conn,
+            &StatsOptions {
+                models: Some(None),
+                ..StatsOptions::default()
+            },
+            100_000,
+        )
+        .unwrap();
+
+        assert_eq!(report.usage.input, 84_000);
+        assert_eq!(report.usage.output, 2_400);
+        assert_eq!(report.usage.cache_read, 15_000);
+        assert!((report.usage.cost - 0.545).abs() < 1e-9);
+        assert_eq!(report.models[0].1.messages, 3);
+        assert_eq!(report.models[0].1.usage.input, 84_000);
+    }
+
+    #[test]
     fn days_filter_counts_only_active_sessions_and_uses_requested_days() {
         let report = collect(
             &test_db(),
