@@ -6537,6 +6537,9 @@ impl App {
         let agent = self.agent.clone();
         let original_messages = messages;
         let task_session_id = session_id.to_string();
+        let compaction_pricing = self.discovery.as_ref().and_then(|discovery| {
+            discovery.get_model_pricing(&self.provider_name.to_lowercase(), &self.model)
+        });
 
         tokio::spawn(async move {
             let result = crate::llm::client::summarize_for_compaction(
@@ -6557,7 +6560,7 @@ impl App {
                 let mut messages = crate::session::compaction::apply_soft_compaction(
                     &original_messages,
                     &selection,
-                    &summary,
+                    &summary.text,
                     Some(model),
                     Some(provider_name),
                     Some(agent),
@@ -6566,6 +6569,27 @@ impl App {
                         after_tokens: 0,
                         before_messages,
                         after_messages: 0,
+                    },
+                );
+                let cost = compaction_pricing
+                    .as_ref()
+                    .map(|pricing| {
+                        pricing.estimate_tokens(
+                            summary.usage.input,
+                            summary.usage.output,
+                            summary.usage.cache_read,
+                            summary.usage.cache_write,
+                        )
+                    })
+                    .unwrap_or(0.0);
+                crate::session::compaction::attach_summary_usage(
+                    &mut messages,
+                    crate::session::types::RecordedUsage {
+                        input: summary.usage.input,
+                        output: summary.usage.output,
+                        cache_read: summary.usage.cache_read,
+                        cache_write: summary.usage.cache_write,
+                        cost,
                     },
                 );
                 // Count post-boundary context only (new layout:

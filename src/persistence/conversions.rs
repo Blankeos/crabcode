@@ -11,6 +11,7 @@ impl From<SessionMessage> for Message {
         // Move the owned parts instead of cloning them: this conversion runs
         // for the whole transcript on every streaming snapshot.
         let usage = msg.recorded_usage();
+        let is_compaction_summary = crate::session::compaction::is_compaction_summary(&msg);
         let mut parts: Vec<PersistenceMessagePart> = if msg.parts.is_empty() {
             let mut parts = Vec::new();
             if !msg.content.is_empty() {
@@ -71,6 +72,20 @@ impl From<SessionMessage> for Message {
             });
         }
 
+        // Compaction summaries store billed prompt/completion on a usage part
+        // for stats/cost. `tokens_used` is the context estimate (summary text),
+        // not billed buckets — otherwise reload inflates the model window.
+        let tokens_used = if is_compaction_summary {
+            msg.token_count
+                .map(|count| count.min(i32::MAX as usize) as i32)
+                .unwrap_or(0)
+        } else {
+            usage
+                .map(|usage| usage.tokens().min(i32::MAX as u64) as i32)
+                .or(msg.token_count.map(|c| c as i32))
+                .unwrap_or(0)
+        };
+
         Message {
             id: cuid2::create_id(),
             session_id: 0,
@@ -86,10 +101,7 @@ impl From<SessionMessage> for Message {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64,
-            tokens_used: usage
-                .map(|usage| usage.tokens().min(i32::MAX as u64) as i32)
-                .or(msg.token_count.map(|c| c as i32))
-                .unwrap_or(0),
+            tokens_used,
             model: msg.model.clone(),
             provider: msg.provider.clone(),
             agent_mode: msg.agent_mode.clone(),
@@ -319,5 +331,31 @@ mod tests {
             .parts
             .iter()
             .any(|part| part.part_type == "usage"));
+    }
+
+    #[test]
+    fn compaction_summary_keeps_context_token_count_not_billed_usage() {
+        let mut summary = SessionMessage::user(format!(
+            "{}\n{}",
+            crate::session::compaction::SUMMARY_PREFIX,
+            "handoff summary"
+        ));
+        summary.token_count = Some(40);
+        summary
+            .parts
+            .push(SessionMessagePart::usage(80_000, 400, 12_000, 1_000, 0.42));
+
+        let persistence_message: Message = summary.into();
+        assert_eq!(persistence_message.tokens_used, 40);
+        assert!(persistence_message
+            .parts
+            .iter()
+            .any(|part| part.part_type == "usage"));
+
+        let restored = SessionMessage::try_from(persistence_message).unwrap();
+        assert_eq!(restored.token_count, Some(40));
+        let usage = restored.recorded_usage().unwrap();
+        assert_eq!(usage.input, 80_000);
+        assert_eq!(usage.output, 400);
     }
 }
