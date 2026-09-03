@@ -110,6 +110,7 @@ impl From<SessionMessage> for Message {
             t1_ms: msg.t1_ms.map(|v| v as i64),
             tn_ms: msg.tn_ms.map(|v| v as i64),
             output_tokens: msg.output_tokens.map(|v| v as i64),
+            tokens_per_sec: msg.tokens_per_sec,
         }
     }
 }
@@ -185,6 +186,31 @@ impl TryFrom<Message> for SessionMessage {
             _ => return Err(anyhow::anyhow!("Unknown role: {}", msg.role)),
         };
 
+        // Billed output buckets are exact; prefer them over the persisted
+        // text estimate when backfilling rows stored before output_tokens
+        // existed. Never derive output tokens from `tokens_used` (total).
+        let billed_output: Option<usize> = {
+            let mut total = 0u64;
+            let mut found = false;
+            for part in &session_parts {
+                if part.part_type == "usage" {
+                    if let Some(output) = part.data.get("output").and_then(|v| v.as_u64()) {
+                        total = total.saturating_add(output);
+                        found = true;
+                    }
+                }
+            }
+            if found && total > 0 && total <= usize::MAX as u64 {
+                Some(total as usize)
+            } else {
+                None
+            }
+        };
+        let persisted_output_tokens: Option<usize> =
+            msg.output_tokens
+                .and_then(|v| if v > 0 { Some(v as usize) } else { None });
+        let output_tokens = persisted_output_tokens.or(billed_output);
+
         Ok(SessionMessage {
             role,
             content,
@@ -213,10 +239,8 @@ impl TryFrom<Message> for SessionMessage {
             tn_ms: msg
                 .tn_ms
                 .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
-            output_tokens: msg
-                .output_tokens
-                .and_then(|v| if v > 0 { Some(v as usize) } else { None }),
-            tokens_per_sec: None,
+            output_tokens,
+            tokens_per_sec: msg.tokens_per_sec.filter(|v| v.is_finite() && *v > 0.0),
             model: msg.model.clone(),
             provider: msg.provider.clone(),
             local_image_paths,
@@ -357,5 +381,56 @@ mod tests {
         let usage = restored.recorded_usage().unwrap();
         assert_eq!(usage.input, 80_000);
         assert_eq!(usage.output, 400);
+    }
+
+    #[test]
+    fn precomputed_tps_round_trips_through_persistence() {
+        let mut session_message = SessionMessage::assistant("done");
+        session_message.output_tokens = Some(390);
+        session_message.tokens_per_sec = Some(145.0);
+
+        let persistence_message: Message = session_message.into();
+        assert_eq!(persistence_message.tokens_per_sec, Some(145.0));
+
+        let restored = SessionMessage::try_from(persistence_message).unwrap();
+        assert_eq!(restored.tokens_per_sec, Some(145.0));
+        assert_eq!(restored.output_tokens, Some(390));
+    }
+
+    #[test]
+    fn billed_output_backfills_output_tokens_not_total() {
+        // Legacy row stored before output_tokens existed: tokens_used is the
+        // billed total (in+out+cache), usage part carries exact buckets.
+        let mut legacy = Message {
+            id: "legacy".to_string(),
+            session_id: 1,
+            role: "assistant".to_string(),
+            parts: vec![PersistenceMessagePart {
+                part_type: "text".to_string(),
+                data: serde_json::json!({ "text": "done" }),
+            }],
+            timestamp: 0,
+            tokens_used: 8000,
+            model: None,
+            provider: None,
+            agent_mode: None,
+            duration_ms: 2600,
+            t0_ms: Some(1000),
+            t1_ms: Some(10_000),
+            tn_ms: Some(12_600),
+            output_tokens: None,
+            tokens_per_sec: None,
+        };
+        legacy.parts.push(PersistenceMessagePart {
+            part_type: "usage".to_string(),
+            data: serde_json::json!({
+                "input": 7000, "output": 390,
+                "cache_read": 500, "cache_write": 110, "cost": 0.01,
+            }),
+        });
+
+        let restored = SessionMessage::try_from(legacy).unwrap();
+        // Output bucket (390), never the billed total (8000).
+        assert_eq!(restored.output_tokens, Some(390));
     }
 }

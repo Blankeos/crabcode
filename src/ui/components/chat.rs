@@ -6627,7 +6627,11 @@ impl Chat {
         // preferring the precomputed sample aggregate on the message.
         if include_metrics {
             if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
-                let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
+                // t/s inputs are output tokens only. `token_count` is the
+                // billed total (prompt + completion + cache) and must never
+                // feed the throughput fallback — that inflated reloaded
+                // sessions (e.g. 145t/s live vs 3292t/s on reopen).
+                let output_tokens = message.output_tokens.unwrap_or(0);
 
                 let ttft_ms = t1.saturating_sub(t0);
                 let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
@@ -6653,8 +6657,8 @@ impl Chat {
                         Style::default().fg(colors.text_weak),
                     ));
                 }
-            } else if let (Some(token_count), Some(duration_ms)) =
-                (message.token_count, message.duration_ms)
+            } else if let (Some(output_tokens), Some(duration_ms)) =
+                (message.output_tokens, message.duration_ms)
             {
                 // Backward-compatible fallback: duration_ms reflects decode time.
                 let duration_sec = duration_ms as f64 / 1000.0;
@@ -6663,13 +6667,21 @@ impl Chat {
                     Style::default().fg(colors.text_weak),
                 ));
                 if let Some(tokens_per_sec) =
-                    message_tokens_per_sec(message.tokens_per_sec, token_count, duration_ms)
+                    message_tokens_per_sec(message.tokens_per_sec, output_tokens, duration_ms)
                 {
                     spans.push(Span::styled(
                         format!(" • {:.0}t/s", tokens_per_sec),
                         Style::default().fg(colors.text_weak),
                     ));
                 }
+            } else if let Some(duration_ms) = message.duration_ms {
+                // Total-only legacy row: show duration without t/s rather
+                // than dividing the billed total by decode time.
+                let duration_sec = duration_ms as f64 / 1000.0;
+                spans.push(Span::styled(
+                    format!(" • {:.1}s", duration_sec),
+                    Style::default().fg(colors.text_weak),
+                ));
             }
         }
 
