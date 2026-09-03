@@ -1708,17 +1708,18 @@ impl App {
             msg.role == crate::session::types::MessageRole::Assistant && msg.is_complete
         })?;
 
+        // Upstream formula (opencode #46108): billed output / decode time,
+        // 250ms floor, no inter-token adjustment.
         let format_tps = |precomputed: Option<f64>, tokens: usize, decode_ms: u64| -> Option<f64> {
             if let Some(tps) = precomputed {
                 if tps.is_finite() && tps > 0.0 {
                     return Some(tps);
                 }
             }
-            // OpenCode inter-token: (n - 1) / duration; need >1 token.
-            if decode_ms == 0 || tokens < 2 {
+            if tokens == 0 || decode_ms < 250 {
                 return None;
             }
-            let tps = ((tokens - 1) as f64) / (decode_ms as f64 / 1000.0);
+            let tps = tokens as f64 / (decode_ms as f64 / 1000.0);
             if tps.is_finite() && tps > 0.0 {
                 Some(tps)
             } else {

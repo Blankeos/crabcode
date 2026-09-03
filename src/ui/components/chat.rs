@@ -455,7 +455,26 @@ impl GenerationSample {
     }
 }
 
-/// Prefer precomputed OpenCode TPS; fall back to inter-token formula.
+/// Upstream TPS formula (opencode #46108 `packages/core/src/session/tokens.ts`):
+/// billed output tokens over decode time (`completed - firstToken`),
+/// 250ms floor, no inter-token adjustment. Provider `output` already
+/// counts reasoning tokens, so no separate bucket is needed.
+fn upstream_tokens_per_sec(generated_tokens: u64, decode_ms: u64) -> Option<f64> {
+    if generated_tokens == 0 {
+        return None;
+    }
+    if decode_ms < MIN_TOKENS_PER_SECOND_ELAPSED_MS as u64 {
+        return None;
+    }
+    let tps = generated_tokens as f64 / (decode_ms as f64 / 1000.0);
+    if tps.is_finite() && tps > 0.0 {
+        Some(tps)
+    } else {
+        None
+    }
+}
+
+/// Prefer precomputed TPS; fall back to the upstream formula.
 fn message_tokens_per_sec(
     precomputed: Option<f64>,
     output_tokens: usize,
@@ -466,15 +485,7 @@ fn message_tokens_per_sec(
             return Some(tps);
         }
     }
-    if decode_ms == 0 || output_tokens < MIN_TPS_SAMPLE_TOKENS {
-        return None;
-    }
-    let tps = ((output_tokens - 1) as f64) / (decode_ms as f64 / 1000.0);
-    if tps.is_finite() && tps > 0.0 {
-        Some(tps)
-    } else {
-        None
-    }
+    upstream_tokens_per_sec(output_tokens as u64, decode_ms)
 }
 
 const MIN_MOUSE_WHEEL_LINES: usize = 1;
@@ -2646,15 +2657,26 @@ impl Chat {
             }
         };
 
-        // Final TPS from completed samples only.
-        let final_tps = Self::aggregate_generation_tps(&self.generation_samples, None);
-        self.cached_tokens_per_sec = final_tps;
+        // Sample-based estimate kept as fallback when the provider reported
+        // no billed usage.
+        let sample_tps = Self::aggregate_generation_tps(&self.generation_samples, None);
 
         if let Some(idx) = self
             .messages
             .iter()
             .rposition(|m| m.role == MessageRole::Assistant)
         {
+            // Upstream-style final rate (opencode #46108): billed output
+            // over decode time. Billed usage accumulates across every
+            // provider step (tool-call steps included), so reloads
+            // recompute identically instead of drifting from estimates.
+            let billed_output = self.messages[idx]
+                .recorded_usage()
+                .map(|usage| usage.output)
+                .unwrap_or(0);
+            let final_tps =
+                upstream_tokens_per_sec(billed_output, decode_duration_ms).or(sample_tps);
+            self.cached_tokens_per_sec = final_tps;
             if let Some(msg) = self.messages.get_mut(idx) {
                 msg.output_tokens = Some(msg.output_tokens.unwrap_or(token_count));
                 msg.token_count = msg.output_tokens;
@@ -6623,8 +6645,8 @@ impl Chat {
         ));
 
         // Timing + throughput metrics are shown only once the stream is done.
-        // TPS uses OpenCode inter-token rate: (tokens - 1) / generation_duration,
-        // preferring the precomputed sample aggregate on the message.
+        // TPS uses the upstream rate (billed output / decode time),
+        // preferring the precomputed value persisted on the message.
         if include_metrics {
             if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
                 // t/s inputs are output tokens only. `token_count` is the
@@ -10027,8 +10049,8 @@ codex exec --skip-git-repo-check \
 
         assert!(metadata.contains("1.0s"));
         assert!(metadata.contains("ttft 0.2s"));
-        // OpenCode inter-token: (40 - 1) / 0.8s = 48.75 → rounds to 49t/s
-        assert!(metadata.contains("49t/s"));
+        // Upstream formula: 40 / 0.8s = 50t/s
+        assert!(metadata.contains("50t/s"));
     }
 
     #[test]
@@ -10115,7 +10137,7 @@ codex exec --skip-git-repo-check \
             message.tn_ms = Some(12_000);
             message.output_tokens = Some(100);
             message.token_count = Some(100);
-            // 1s decode, OpenCode inter-token: (100 - 1) / 1s = 99 t/s
+            // 1s decode, upstream formula: 100 / 1s = 100 t/s
             message.duration_ms = Some(1_000);
         }
 
@@ -10124,8 +10146,8 @@ codex exec --skip-git-repo-check \
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
 
         assert!(
-            rendered.contains("99t/s"),
-            "metadata should use inter-token TPS (n-1)/duration:\n{}",
+            rendered.contains("100t/s"),
+            "metadata should use upstream TPS tokens/duration:\n{}",
             rendered
         );
         assert!(
@@ -10242,6 +10264,38 @@ codex exec --skip-git-repo-check \
         assert!(
             sample_sum + 200 < wall_ms,
             "sample_sum ({sample_sum}) should be well below wall ({wall_ms}) by tool time"
+        );
+    }
+
+    #[test]
+    fn test_finalize_prefers_billed_output_over_sample_estimate() {
+        use std::time::Duration;
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+        // Tiny visible text: the sample estimate would be ~10t/s.
+        chat.append_to_last_assistant("hi");
+        // ...but billed output says 300 tokens over ~0.3s ≈ 1000t/s.
+        chat.record_usage(0, 300, 0, 0, 0.0);
+        std::thread::sleep(Duration::from_millis(300));
+        chat.mark_streaming_end();
+        chat.finalize_streaming_metrics();
+
+        let msg = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("assistant message");
+        let tps = msg.tokens_per_sec.expect("expected billed TPS");
+        assert!(
+            tps > 500.0,
+            "final TPS should come from billed output, not the text estimate: got {tps}"
         );
     }
 
