@@ -116,7 +116,7 @@ impl Provider for OpenAICompatible {
         _headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
         let base = self.base_url.trim_end_matches('/');
-        let url = if has_version_segment(base) {
+        let url = if super::base_url_has_version_segment(base) {
             format!("{}/chat/completions", base)
         } else {
             format!("{}/v1/chat/completions", base)
@@ -976,26 +976,4 @@ fn is_sse_metadata_line(line: &str) -> bool {
         || line.starts_with("event:")
         || line.starts_with("id:")
         || line.starts_with("retry:")
-}
-
-fn has_version_segment(base_url: &str) -> bool {
-    // Check if the URL path already contains a /vN segment (e.g., /v4, /v1)
-    if let Some(pos) = base_url.find("://") {
-        let after_scheme = &base_url[pos + 3..];
-        if let Some(path_start) = after_scheme.find('/') {
-            let path = &after_scheme[path_start..];
-            // Match /vN where N is one or more digits, followed by / or end of string
-            let bytes = path.as_bytes();
-            for i in 0..bytes.len().saturating_sub(2) {
-                if bytes[i] == b'/'
-                    && bytes[i + 1] == b'v'
-                    && bytes[i + 2].is_ascii_digit()
-                    && (i + 3 >= bytes.len() || bytes[i + 3] == b'/')
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }

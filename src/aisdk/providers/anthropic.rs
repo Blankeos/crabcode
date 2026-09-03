@@ -95,7 +95,8 @@ impl Provider for Anthropic {
         tools: &[Tool],
         _headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
-        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let base = self.base_url.trim_end_matches('/');
+        let url = anthropic_messages_url(base);
 
         let system_prompts: Vec<serde_json::Value> = messages
             .iter()
@@ -733,6 +734,18 @@ fn anthropic_user_content(user: &crate::message::UserMessage) -> serde_json::Val
 
 /// Convert internal messages into Anthropic Messages API history.
 ///
+/// Join the `/messages` endpoint onto a base URL without duplicating a
+/// version segment: bases that already contain `/vN` (e.g. gateways ending
+/// in `/v1`) get `/messages`, others get `/v1/messages`.
+fn anthropic_messages_url(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if super::base_url_has_version_segment(base) {
+        format!("{base}/messages")
+    } else {
+        format!("{base}/v1/messages")
+    }
+}
+
 /// Adjacent `ToolCall`s are merged into one assistant message with multiple
 /// `tool_use` blocks; adjacent `ToolOutput`s become one user message with
 /// multiple `tool_result` blocks. Anthropic (and Kimi coding) reject
@@ -810,6 +823,27 @@ fn anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     flush_tool_uses(&mut pending_tool_uses, &mut out);
     flush_tool_results(&mut pending_tool_results, &mut out);
     out
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn messages_url_does_not_duplicate_version_segment() {
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://gateway.example.com/v1"),
+            "https://gateway.example.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://gateway.example.com/v1/"),
+            "https://gateway.example.com/v1/messages"
+        );
+    }
 }
 
 #[cfg(test)]
