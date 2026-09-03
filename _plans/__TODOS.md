@@ -491,7 +491,7 @@ I think this is how the TUI works already anyway right?
 
 - [ ] Extra padding in non compact mode. Or idk. controllable in tui? field? Right now it's close to the edge and it only looks good in some terminals.
 
-- [ ] /btw command
+- [x] /btw command
 
 - [x] wanna add tinyfish and monid (free search apis)
 
@@ -502,3 +502,5 @@ I think this is how the TUI works already anyway right?
 - [ ] multiple accounts
 
 - [x] dialog backdrop
+
+- [ ] the prompt history cycler has some bugs, sometimes when crabcode crashes, I press `up` and it actually rewinded to the oldest prompt i had???

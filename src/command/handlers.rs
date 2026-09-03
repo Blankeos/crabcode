@@ -666,6 +666,23 @@ pub fn handle_compact_mode<'a>(
     })
 }
 
+pub fn handle_btw<'a>(
+    parsed: &'a ParsedCommand,
+    _sm: &'a mut SessionManager,
+) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
+    let question = parsed.raw_args().to_string();
+
+    Box::pin(async move {
+        if question.trim().is_empty() {
+            return CommandResult::Error("Usage: /btw <question>".to_string());
+        }
+
+        // The app intercepts /btw because it needs the active provider/model
+        // and must run outside the main streaming turn.
+        CommandResult::Success(String::new())
+    })
+}
+
 pub fn handle_fork<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
@@ -1047,6 +1064,14 @@ pub fn register_all_commands(registry: &mut Registry) {
     });
 
     registry.register(Command {
+        name: "btw".to_string(),
+        description: "Ask a side question without interrupting the current task".to_string(),
+        handler: handle_btw,
+        hidden_tokens: vec![],
+        chat_only: false,
+    });
+
+    registry.register(Command {
         name: "fork".to_string(),
         description: "Fork the current session".to_string(),
         handler: handle_fork,
@@ -1096,6 +1121,46 @@ mod tests {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
         registry
+    }
+
+    #[tokio::test]
+    async fn test_handle_btw_requires_question() {
+        let parsed = ParsedCommand {
+            name: "btw".to_string(),
+            args: vec![],
+            raw: "/btw".to_string(),
+            prefs_data: None,
+            active_model_id: None,
+        };
+        let mut session_manager = SessionManager::new();
+        let result = handle_btw(&parsed, &mut session_manager).await;
+        assert_eq!(
+            result,
+            CommandResult::Error("Usage: /btw <question>".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_btw_with_question_defers_to_app() {
+        let parsed = ParsedCommand {
+            name: "btw".to_string(),
+            args: vec!["also".to_string(), "check".to_string()],
+            raw: "/btw also check".to_string(),
+            prefs_data: None,
+            active_model_id: None,
+        };
+        let mut session_manager = SessionManager::new();
+        let result = handle_btw(&parsed, &mut session_manager).await;
+        // The app intercepts /btw (needs provider/model + side-channel turn).
+        assert_eq!(result, CommandResult::Success(String::new()));
+    }
+
+    #[test]
+    fn test_btw_registered_for_home_and_chat() {
+        let registry = create_registry();
+        let command = registry.get("btw").expect("/btw registered");
+        assert!(!registry.is_chat_only("btw"));
+        assert!(!command.description.is_empty());
     }
 
     #[tokio::test]
@@ -1433,7 +1498,8 @@ mod tests {
     async fn test_registry_has_all_commands() {
         let registry = create_registry();
         let names = registry.get_command_names();
-        assert_eq!(names.len(), 22);
+        assert_eq!(names.len(), 23);
+        assert!(names.contains(&"btw".to_string()));
         assert!(names.contains(&"exit".to_string()));
         assert!(names.contains(&"sessions".to_string()));
         assert!(names.contains(&"new".to_string()));
@@ -1456,6 +1522,7 @@ mod tests {
         assert!(names.contains(&"status".to_string()));
         assert!(registry.is_chat_only("compact"));
         assert!(registry.is_chat_only("fork"));
+        assert!(!registry.is_chat_only("btw"));
         assert!(registry.is_chat_only("move"));
         assert!(registry.is_chat_only("branch"));
         assert_eq!(registry.get("branch").unwrap().name, "fork");

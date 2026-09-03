@@ -1069,6 +1069,130 @@ pub async fn generate_session_title(
     Ok(title)
 }
 
+/// Max history tokens attached to a `/btw` side question. Keeps the aside
+/// cheap: newest turns plus the compaction summary (compressed history).
+const BTW_HISTORY_MAX_TOKENS: usize = 8_000;
+
+/// Build `/btw` context from session history with the usual harness
+/// optimizations: compaction boundary (post-summary slice only), drop
+/// in-flight partials, newest-first token budget. The leading compaction
+/// summary is always preserved when present since it *is* the compressed
+/// history.
+fn btw_context_messages(
+    history: &[crate::session::types::Message],
+) -> Vec<crate::session::types::Message> {
+    let complete: Vec<crate::session::types::Message> = history
+        .iter()
+        .filter(|message| message.is_complete)
+        .cloned()
+        .collect();
+    let context = crate::session::compaction::filter_messages_for_context(&complete);
+    let (summary, rest) = match context.first() {
+        Some(first) if crate::session::compaction::is_compaction_summary(first) => {
+            (Some(first.clone()), &context[1..])
+        }
+        _ => (None, &context[..]),
+    };
+    let summary_tokens = summary
+        .as_ref()
+        .map(crate::session::compaction::message_context_tokens)
+        .unwrap_or(0);
+    let mut budget = BTW_HISTORY_MAX_TOKENS.saturating_sub(summary_tokens);
+    let mut kept: Vec<crate::session::types::Message> = Vec::new();
+    for message in rest.iter().rev() {
+        let tokens = crate::session::compaction::message_context_tokens(message);
+        if tokens > budget && !kept.is_empty() {
+            break;
+        }
+        budget = budget.saturating_sub(tokens.min(budget));
+        kept.push(message.clone());
+    }
+    kept.reverse();
+    match summary {
+        Some(summary) => std::iter::once(summary).chain(kept).collect(),
+        None => kept,
+    }
+}
+
+/// Lightweight side answer for `/btw`: no tools, but with session history.
+///
+/// Like [`generate_session_title`], this bypasses the main streaming turn so it
+/// can run while the agent is busy. The question and answer are never added to
+/// the main turn — callers must keep them out of `chat_state.chat.messages`.
+pub async fn generate_btw_answer(
+    provider_name: String,
+    model: String,
+    question: String,
+    history: Vec<crate::session::types::Message>,
+) -> Result<String, DynError> {
+    let (warning_sender, _warning_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let request_config =
+        prepare_request_config(&provider_name, model, None, &warning_sender).await?;
+    let context = btw_context_messages(&history);
+    crate::emit_log!(
+        "BTW history_messages={} context_messages={} question_chars={}",
+        history.len(),
+        context.len(),
+        question.trim().len()
+    );
+    let mut messages =
+        convert_messages_for_model(&context, request_config.supports_image_input, false);
+    messages.push(AisdkMessage::system(
+        "You are answering a quick side question about the ongoing conversation. Be concise. No tools are available; answer from the conversation context and general knowledge.",
+    ));
+    if context.is_empty() {
+        messages.push(AisdkMessage::user(format!(
+            "Side question:\n{}",
+            question.trim()
+        )));
+    } else {
+        messages.push(AisdkMessage::user(format!(
+            "Side question about the conversation above:\n{}",
+            question.trim()
+        )));
+    }
+    let mut response =
+        stream_provider_request(&request_config, messages, Vec::new(), None, None).await?;
+
+    let mut answer = String::new();
+    while let Some(chunk) = response.stream.next().await {
+        match chunk {
+            ChunkType::Text(text) => answer.push_str(&text),
+            ChunkType::Failed(err) => {
+                return Err(anyhow::anyhow!("btw request failed: {}", err).into());
+            }
+            ChunkType::NotSupported(msg) => {
+                return Err(anyhow::anyhow!("btw request unsupported: {}", msg).into());
+            }
+            ChunkType::Reasoning(_)
+            | ChunkType::ReasoningItem(_)
+            | ChunkType::ToolCall(_)
+            | ChunkType::ProviderToolCall(_)
+            | ChunkType::End { .. }
+            | ChunkType::AssistantMessagePhase { .. }
+            | ChunkType::ResponseCompleted { .. }
+            | ChunkType::Retry(_)
+            | ChunkType::RetryableFailure(_)
+            | ChunkType::Warning(_)
+            | ChunkType::Metadata(_)
+            | ChunkType::Usage(_)
+            | ChunkType::Start
+            | ChunkType::Incomplete(_) => {}
+            ChunkType::StreamRollback { text, .. } => {
+                if answer.ends_with(&text) {
+                    answer.truncate(answer.len() - text.len());
+                }
+            }
+        }
+    }
+
+    let answer = answer.trim().to_string();
+    if answer.is_empty() {
+        return Err(anyhow::anyhow!("btw request returned an empty answer").into());
+    }
+    Ok(answer)
+}
+
 fn sanitize_generated_title(raw: &str) -> String {
     let mut title = raw
         .trim()
@@ -2623,8 +2747,8 @@ fn normalize_anthropic_base_url(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_compaction_stream_chunk, apply_provider_request_defaults, convert_messages,
-        convert_messages_for_model, is_openai_oauth_model_allowed,
+        apply_compaction_stream_chunk, apply_provider_request_defaults, btw_context_messages,
+        convert_messages, convert_messages_for_model, is_openai_oauth_model_allowed,
         maybe_apply_unauthenticated_free_provider_key, model_supports_image_input,
         openai_oauth_default_originator, openai_oauth_model_uses_responses_lite,
         openai_request_instructions, resolve_api_key, resolve_model_route,
@@ -2634,6 +2758,23 @@ mod tests {
     use crate::aisdk::core::chunk::ChunkType;
 
     use crate::persistence::AuthConfig;
+
+    #[test]
+    fn btw_context_drops_incomplete_and_keeps_newest() {
+        use crate::session::types::Message;
+        let history = vec![
+            Message::user("old question"),
+            Message::assistant("old answer"),
+            Message::incomplete("partial streaming..."),
+        ];
+        let context = btw_context_messages(&history);
+        assert_eq!(context.len(), 2);
+        assert!(context.iter().all(|message| message.is_complete));
+        assert_eq!(
+            context.last().map(|m| m.content.as_str()),
+            Some("old answer")
+        );
+    }
 
     #[test]
     fn compaction_stream_accumulates_usage_and_text() {
