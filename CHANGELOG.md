@@ -2,6 +2,56 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.12] - 2026-09-03
+
+### Bug Fixes
+
+- Keep tests from touching the production data dir by @Blankeos
+- Persist precomputed t/s so reloaded sessions match live rate (#47) by @Blankeos in [#47](https://github.com/Blankeos/crabcode/pull/47)
+- Opencode zen gateway compat for muse-spark via opencode-go sub (#46) by @Blankeos in [#46](https://github.com/Blankeos/crabcode/pull/46)
+- Drop disabled server tools from requests and prune gating by @Blankeos
+- Resample empty provider responses like Grok Build to prevent premature session completion (#42) by @Blankeos in [#42](https://github.com/Blankeos/crabcode/pull/42)
+- Order of the new copy opt by @Blankeos
+- Kill process group when bash task aborts (#41) by @yan-ad in [#41](https://github.com/Blankeos/crabcode/pull/41)
+- Questions when it overflows by @Blankeos
+- Replay Responses encrypted reasoning across tool steps by @Blankeos
+- Xai grok-4.6 silently downgraded to 4.5 by @Blankeos
+- Double render of x_search by @Blankeos
+- Defensive normalization for tool params by @Blankeos
+- Anchor action bar to selection instead of viewport top by @Blankeos
+
+### Chores
+
+- Refuse tagging unless on main (#38) by @Blankeos in [#38](https://github.com/Blankeos/crabcode/pull/38)
+
+### Features
+
+- Add /btw side question command (#48) by @Blankeos in [#48](https://github.com/Blankeos/crabcode/pull/48)
+- Add dimmed backdrop behind dialogs by @Blankeos
+- Dim reasoning effort shown as model default by @Blankeos
+- Persist billed compaction usage on summaries (#45) by @Blankeos in [#45](https://github.com/Blankeos/crabcode/pull/45)
+- Add stats command (#40) by @yan-ad in [#40](https://github.com/Blankeos/crabcode/pull/40)
+- Surface real provider token usage instead of estimates by @Blankeos
+- Grok-style clap completions with tiny rc hook (#37) by @Blankeos in [#37](https://github.com/Blankeos/crabcode/pull/37)
+- Add provider/model id copy action and allow /copy outside chat by @Blankeos
+- Add thinking effort, mcp status, and tab agent hints (#39) by @yan-ad in [#39](https://github.com/Blankeos/crabcode/pull/39)
+- Mcp works more like opencode by @Blankeos
+- Add editor.open config for clicked file paths by @Blankeos
+- Matching doomloop and pruning as grok (BEST FIX) by @Blankeos
+- Add compaction hint headers for Grok 4.5/4.6 models by @Blankeos
+- Monid and tinyfish added as websearch alternatives by @Blankeos
+- Better bash for background execution and interactive (#35) by @Blankeos in [#35](https://github.com/Blankeos/crabcode/pull/35)
+- Add provider-native hosted search tools and local search providers (#33) by @Blankeos in [#33](https://github.com/Blankeos/crabcode/pull/33)
+- Add submenu support to which-key and scroll-to-top/bottom shortcuts by @Blankeos
+
+### Refactor
+
+- Never make the same mistake of mismatching models ever again by @Blankeos
+
+### Doc
+
+- Updated relation to opencode in docs by @Blankeos
+
 ## [0.0.11] - 2026-08-25
 
 ### Bug Fixes
