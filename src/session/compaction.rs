@@ -411,6 +411,12 @@ pub fn message_context_tokens(message: &Message) -> usize {
         return 0;
     }
 
+    // Billed compaction usage can be persisted on the summary. Context is the
+    // summary text, never those billed prompt tokens.
+    if is_compaction_summary(message) {
+        return estimate_tokens(&message.content);
+    }
+
     let part_tokens = message_parts_context_tokens(message);
     if part_tokens > 0 {
         return message
@@ -1049,6 +1055,25 @@ mod tests {
         assert!((usage.cost - 0.42).abs() < f64::EPSILON);
         assert_eq!(total_context_tokens(&soft), before);
         assert!(message_context_tokens(summary) < 80_000);
+
+        let persisted: Vec<crate::persistence::Message> = soft
+            .iter()
+            .cloned()
+            .map(crate::persistence::Message::from)
+            .collect();
+        let restored: Vec<Message> = persisted
+            .into_iter()
+            .map(|message| Message::try_from(message).expect("restore"))
+            .collect();
+        let restored_summary = restored
+            .iter()
+            .find(|message| is_compaction_summary(message))
+            .expect("restored summary");
+        let restored_usage = restored_summary.recorded_usage().expect("usage part");
+        assert_eq!(restored_usage.input, 80_000);
+        assert!((restored_usage.cost - 0.42).abs() < f64::EPSILON);
+        assert_eq!(total_context_tokens(&restored), before);
+        assert!(message_context_tokens(restored_summary) < 80_000);
     }
 
     #[test]
