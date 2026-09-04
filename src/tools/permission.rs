@@ -98,6 +98,7 @@ pub type PermissionRules = Vec<PermissionRule>;
 
 #[derive(Debug)]
 pub struct PermissionPrompt {
+    pub tool_call_id: Option<String>,
     pub tool_id: String,
     pub action: PermissionAction,
     pub permission: String,
@@ -105,7 +106,9 @@ pub struct PermissionPrompt {
     pub target: Option<String>,
     pub command: Option<String>,
     pub workdir: Option<String>,
+    pub workspace: String,
     pub reason: String,
+    pub raw_input: Value,
     pub response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
 }
 
@@ -324,6 +327,18 @@ impl ToolPermissions {
         params: &Value,
         sender: Option<&ChunkSender>,
     ) -> Result<(), ToolError> {
+        self.preflight_for_call(agent_mode, tool_id, params, None, sender)
+            .await
+    }
+
+    pub async fn preflight_for_call(
+        &self,
+        agent_mode: &str,
+        tool_id: &str,
+        params: &Value,
+        tool_call_id: Option<&str>,
+        sender: Option<&ChunkSender>,
+    ) -> Result<(), ToolError> {
         if !self.is_tool_allowed_for_agent(agent_mode, tool_id) {
             return Err(ToolError::Permission(format!(
                 "Tool '{}' is not available in {} mode",
@@ -363,6 +378,8 @@ impl ToolPermissions {
                         PermissionReasonKind::ConfiguredAsk,
                         path.as_deref(),
                         command.clone(),
+                        params,
+                        tool_call_id,
                         sender,
                     )
                     .await;
@@ -407,6 +424,8 @@ impl ToolPermissions {
                     reason_kind,
                     reason_path.as_deref().or(path.as_deref()),
                     command.clone(),
+                    params,
+                    tool_call_id,
                     sender,
                 )
                 .await;
@@ -442,6 +461,8 @@ impl ToolPermissions {
                             reason_kind,
                             path.as_deref(),
                             command,
+                            params,
+                            tool_call_id,
                             sender,
                         )
                         .await;
@@ -459,6 +480,8 @@ impl ToolPermissions {
         reason_kind: PermissionReasonKind,
         path: Option<&Path>,
         command: Option<String>,
+        params: &Value,
+        tool_call_id: Option<&str>,
         sender: Option<&ChunkSender>,
     ) -> Result<(), ToolError> {
         let target = path
@@ -515,6 +538,7 @@ impl ToolPermissions {
 
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let prompt = PermissionPrompt {
+            tool_call_id: tool_call_id.map(str::to_string),
             tool_id: tool_id.to_string(),
             action,
             permission: grant.permission.clone(),
@@ -522,7 +546,9 @@ impl ToolPermissions {
             target: prompt_target,
             command,
             workdir,
+            workspace: self.workdir.to_string_lossy().into_owned(),
             reason: reason_text,
+            raw_input: params.clone(),
             response_tx,
         };
 
@@ -1289,6 +1315,39 @@ mod tests {
                 PathBuf::from("/tmp/workspace/src/b.ts")
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn permission_prompt_retains_originating_tool_call_id() {
+        let perms = ToolPermissions::new("/tmp/workspace");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = serde_json::json!({ "file_path": "/tmp/elsewhere/file.txt" });
+
+        let pending = tokio::spawn({
+            let perms = perms.clone();
+            let tx = tx.clone();
+            async move {
+                perms
+                    .preflight_for_call("build", "read", &params, Some("call_123"), Some(&tx))
+                    .await
+            }
+        });
+
+        let prompt = match rx.recv().await {
+            Some(ChunkMessage::PermissionRequest(prompt)) => prompt,
+            _ => panic!("Expected permission prompt"),
+        };
+        assert_eq!(prompt.tool_call_id.as_deref(), Some("call_123"));
+        assert_eq!(
+            prompt.raw_input,
+            serde_json::json!({ "file_path": "/tmp/elsewhere/file.txt" })
+        );
+        assert_eq!(prompt.workspace, "/tmp/workspace");
+        let _ = prompt.response_tx.send(PermissionResponse::Deny);
+        assert!(pending
+            .await
+            .expect("preflight task should complete")
+            .is_err());
     }
 
     #[tokio::test]

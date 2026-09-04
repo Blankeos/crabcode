@@ -35,6 +35,25 @@ const OPENAI_WEBSOCKET_IO_TIMEOUT: Duration = Duration::from_secs(300);
 const OPENAI_WEBSOCKET_STREAM_RETRIES: usize = 1;
 const OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK: usize = 5;
 
+fn responses_incomplete_chunk(value: &serde_json::Value) -> ChunkType {
+    let reason = value
+        .get("response")
+        .and_then(|response| response.get("incomplete_details"))
+        .and_then(|details| details.get("reason"))
+        .and_then(serde_json::Value::as_str);
+    match reason {
+        Some("max_output_tokens" | "max_tokens") => ChunkType::End {
+            reason: Some(crate::chunk::FinishReason::Length),
+        },
+        Some("content_filter" | "refusal" | "safety") => ChunkType::End {
+            reason: Some(crate::chunk::FinishReason::Refusal),
+        },
+        _ => ChunkType::RetryableFailure(RetryError::from_message(responses_incomplete_message(
+            value,
+        ))),
+    }
+}
+
 #[async_trait]
 pub trait HttpResponseRetryPolicy: Send + Sync + std::fmt::Debug {
     async fn retry_headers(
@@ -1571,9 +1590,7 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
                 "doom_loop_check triggers={triggers}"
             ))))
         }
-        "response.incomplete" => Some(Ok(ChunkType::RetryableFailure(RetryError::from_message(
-            responses_incomplete_message(&value),
-        )))),
+        "response.incomplete" => Some(Ok(responses_incomplete_chunk(&value))),
         "response.failed" | "error" => Some(Ok(responses_error_chunk(&value, event_type))),
         _ => {
             if let Some(reasoning_item) = responses_reasoning_item_chunk(&value) {
@@ -2626,6 +2643,37 @@ mod tests {
             }
             other => panic!("expected ResponseCompleted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn response_incomplete_safety_reasons_emit_refusal() {
+        for reason in ["refusal", "content_filter", "safety"] {
+            let chunk = response_sse_data_to_chunk(&format!(
+                r#"{{"type":"response.incomplete","response":{{"incomplete_details":{{"reason":"{reason}"}}}}}}"#
+            ))
+            .expect("expected incomplete chunk");
+            assert!(matches!(
+                chunk,
+                Ok(ChunkType::End {
+                    reason: Some(crate::chunk::FinishReason::Refusal)
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn response_incomplete_max_output_tokens_emits_terminal_reason() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}"#,
+        )
+        .expect("expected incomplete chunk");
+
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::End {
+                reason: Some(crate::chunk::FinishReason::Length)
+            })
+        ));
     }
 
     #[test]

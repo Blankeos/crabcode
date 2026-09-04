@@ -15,6 +15,84 @@ pub struct Workspace {
     pub last_opened_at: i64,
 }
 
+fn message_cost(message: &Message) -> f64 {
+    message
+        .cost
+        .unwrap_or_else(|| usage_cost_from_parts(&message.parts))
+}
+
+#[cfg(test)]
+mod usage_part_tests {
+    use super::*;
+
+    fn test_dao() -> HistoryDAO {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let workspace_id = ensure_workspace(&conn, "/tmp/workspace", "workspace").unwrap();
+        HistoryDAO {
+            conn,
+            current_workspace_id: workspace_id,
+            current_workspace_path: "/tmp/workspace".to_string(),
+            current_workspace_name: "workspace".to_string(),
+        }
+    }
+
+    #[test]
+    fn authoritative_usage_updates_message_and_session_totals() {
+        let dao = test_dao();
+        let session_id = dao
+            .create_session("session", "Session".to_string())
+            .unwrap();
+        let message = Message {
+            id: "message".to_string(),
+            session_id,
+            role: "assistant".to_string(),
+            parts: Vec::new(),
+            timestamp: chrono::Utc::now().timestamp(),
+            tokens_used: 5,
+            model: Some("model".to_string()),
+            provider: Some("provider".to_string()),
+            agent_mode: None,
+            duration_ms: 10,
+            t0_ms: None,
+            t1_ms: None,
+            tn_ms: None,
+            output_tokens: Some(25),
+            input_tokens: Some(100),
+            cache_read_tokens: Some(60),
+            cache_write_tokens: Some(10),
+            cost: Some(0.0125),
+            usage_authoritative: true,
+            tokens_per_sec: Some(50.0),
+        };
+
+        dao.add_message(&message).unwrap();
+        let restored = dao.get_messages(session_id).unwrap();
+        assert_eq!(restored[0].input_tokens, Some(100));
+        assert_eq!(restored[0].output_tokens, Some(25));
+        assert_eq!(restored[0].cache_read_tokens, Some(60));
+        assert_eq!(restored[0].cache_write_tokens, Some(10));
+        assert_eq!(restored[0].cost, Some(0.0125));
+        assert!(restored[0].usage_authoritative);
+        assert_eq!(restored[0].tokens_per_sec, Some(50.0));
+        let session = dao.get_session(session_id).unwrap().unwrap();
+        assert_eq!(session.total_tokens, 125);
+        assert!((session.total_cost - 0.0125).abs() < f64::EPSILON);
+    }
+}
+
+fn message_total_tokens(message: &Message) -> i32 {
+    if message.usage_authoritative {
+        let total = message
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_add(message.output_tokens.unwrap_or(0));
+        i32::try_from(total).unwrap_or(i32::MAX)
+    } else {
+        message.tokens_used
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: i64,
@@ -62,6 +140,11 @@ pub struct Message {
     pub t1_ms: Option<i64>,
     pub tn_ms: Option<i64>,
     pub output_tokens: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub cost: Option<f64>,
+    pub usage_authoritative: bool,
     pub tokens_per_sec: Option<f64>,
 }
 
@@ -439,9 +522,10 @@ impl HistoryDAO {
         self.conn.execute(
             "INSERT INTO messages (
                  id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
-                 t0_ms, t1_ms, tn_ms, output_tokens, tokens_per_sec
+                 t0_ms, t1_ms, tn_ms, output_tokens, input_tokens, cache_read_tokens,
+                 cache_write_tokens, cost, usage_authoritative, tokens_per_sec
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 &msg.id,
                 msg.session_id,
@@ -457,16 +541,17 @@ impl HistoryDAO {
                 msg.t1_ms,
                 msg.tn_ms,
                 msg.output_tokens,
+                msg.input_tokens,
+                msg.cache_read_tokens,
+                msg.cache_write_tokens,
+                msg.cost,
+                msg.usage_authoritative,
                 msg.tokens_per_sec,
             ],
         )?;
 
-        self.update_session_stats(
-            msg.session_id,
-            msg.tokens_used,
-            usage_cost_from_parts(&msg.parts),
-            msg.timestamp,
-        )?;
+        let tokens = message_total_tokens(msg);
+        self.update_session_stats(msg.session_id, tokens, message_cost(msg), msg.timestamp)?;
         Ok(())
     }
 
@@ -490,15 +575,16 @@ impl HistoryDAO {
             let mut insert = tx.prepare_cached(
                 "INSERT INTO messages (
                      id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
-                     t0_ms, t1_ms, tn_ms, output_tokens, tokens_per_sec
+                     t0_ms, t1_ms, tn_ms, output_tokens, input_tokens, cache_read_tokens,
+                     cache_write_tokens, cost, usage_authoritative, tokens_per_sec
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             )?;
 
             for msg in messages {
                 let parts_json = serde_json::to_string(&msg.parts)?;
-                total_tokens += msg.tokens_used as i64;
-                total_cost += usage_cost_from_parts(&msg.parts);
+                total_tokens += i64::from(message_total_tokens(msg));
+                total_cost += message_cost(msg);
                 updated_at = msg.timestamp;
 
                 insert.execute(params![
@@ -516,6 +602,11 @@ impl HistoryDAO {
                     msg.t1_ms,
                     msg.tn_ms,
                     msg.output_tokens,
+                    msg.input_tokens,
+                    msg.cache_read_tokens,
+                    msg.cache_write_tokens,
+                    msg.cost,
+                    msg.usage_authoritative,
                     msg.tokens_per_sec,
                 ])?;
             }
@@ -534,12 +625,12 @@ impl HistoryDAO {
 
         tx.execute(
             "UPDATE sessions
-             SET total_tokens = ?1,
-                 total_cost = ?2,
-                 total_time_sec = ?3,
-                 avg_tokens_per_sec = ?4,
-                 updated_at = ?5
-             WHERE id = ?6",
+              SET total_tokens = ?1,
+                  total_cost = ?2,
+                  total_time_sec = ?3,
+                  avg_tokens_per_sec = ?4,
+                  updated_at = ?5
+              WHERE id = ?6",
             params![
                 total_tokens,
                 total_cost,
@@ -558,7 +649,8 @@ impl HistoryDAO {
     pub fn get_messages(&self, session_id: i64) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
-                    t0_ms, t1_ms, tn_ms, output_tokens, tokens_per_sec
+                    t0_ms, t1_ms, tn_ms, output_tokens, input_tokens, cache_read_tokens,
+                    cache_write_tokens, cost, usage_authoritative, tokens_per_sec
              FROM messages WHERE session_id = ?1 ORDER BY timestamp ASC, rowid ASC",
         )?;
 
@@ -581,7 +673,12 @@ impl HistoryDAO {
                 t1_ms: row.get(11)?,
                 tn_ms: row.get(12)?,
                 output_tokens: row.get(13)?,
-                tokens_per_sec: row.get(14).unwrap_or(None),
+                input_tokens: row.get(14)?,
+                cache_read_tokens: row.get(15)?,
+                cache_write_tokens: row.get(16)?,
+                cost: row.get(17)?,
+                usage_authoritative: row.get(18)?,
+                tokens_per_sec: row.get(19)?,
             })
         })?;
 

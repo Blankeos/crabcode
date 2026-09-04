@@ -155,7 +155,10 @@ impl ToolHandler for EditTool {
                     format!("Replaced at line {}", line_num.unwrap_or(1))
                 },
             )
-            .with_metadata("replace_count", serde_json::json!(count));
+            .with_metadata("replace_count", serde_json::json!(count))
+            .with_metadata("path", serde_json::json!(file_path))
+            .with_metadata("old_text", serde_json::json!(content))
+            .with_metadata("new_text", serde_json::json!(new_content));
 
             if let Some(line_num) = line_num {
                 result = result.with_metadata("line_number", serde_json::json!(line_num));

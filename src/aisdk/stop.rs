@@ -3,6 +3,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum StopReason {
     Finish,
+    MaxTokens,
+    Refusal,
     Hook,
     Error(String),
     Other(String),

@@ -7628,9 +7628,23 @@ impl App {
             .map(|session| fork_title_from_session_title(&session.title))
             .unwrap_or_else(|| fork_title_from_session_title("fork"));
 
-        let _ = self.create_new_session(Some(fork_title));
-        for msg in &messages_to_fork {
-            let _ = self.session_manager.add_message_to_current_session(msg);
+        let fork_id = self.create_new_session(Some(fork_title));
+        let messages_to_fork =
+            match crate::persistence::attachments::clone_messages(&messages_to_fork, &fork_id) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    self.session_manager.delete_session(&fork_id);
+                    self.push_command_error(format!("Failed to copy fork attachments: {error}"));
+                    return false;
+                }
+            };
+        if let Err(error) = self
+            .session_manager
+            .replace_session_messages(&fork_id, messages_to_fork.clone())
+        {
+            self.session_manager.delete_session(&fork_id);
+            self.push_command_error(format!("Failed to persist fork: {error:?}"));
+            return false;
         }
 
         self.chat_state.chat.clear();
@@ -10079,7 +10093,21 @@ impl App {
                 self.cancelled_streaming_session(session_id);
                 false
             }
-            crate::llm::ChunkMessage::Metrics { .. } => true,
+            crate::llm::ChunkMessage::Metrics {
+                duration_ms,
+                usage,
+                cost,
+                ..
+            } => {
+                if let Some(usage) = usage {
+                    if let Some(chat) = self.chat_for_session_mut(session_id) {
+                        chat.apply_streaming_usage(usage, cost, duration_ms);
+                    }
+                    self.mark_streaming_snapshot_pending(session_id);
+                }
+                true
+            }
+            crate::llm::ChunkMessage::TurnStopReason(_) => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.set_session_retry_status(session_id, None);
                 // Close the generation sample as a tool-calls finish (excluded from
@@ -10158,6 +10186,7 @@ impl App {
             crate::llm::ChunkMessage::QuestionRequest {
                 questions,
                 response_tx,
+                ..
             } => {
                 self.maybe_persist_streaming_snapshot_for_session(session_id, true);
                 let _ = self.session_manager.set_session_status(
@@ -12855,6 +12884,7 @@ mod tests {
         let mut app = test_app();
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -12862,7 +12892,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
@@ -12886,6 +12918,7 @@ mod tests {
         let mut app = test_app();
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -12893,7 +12926,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
@@ -13511,6 +13546,7 @@ mod tests {
         app.chat_state.chat.scroll_offset = 0;
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -13518,7 +13554,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         app.overlay_focus = OverlayFocus::PermissionDialog;

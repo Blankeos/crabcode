@@ -817,6 +817,31 @@ impl Discovery {
         model.limit.as_ref().map(|l| l.context)
     }
 
+    pub fn model_supports_input_modality(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        modality: &str,
+    ) -> bool {
+        if self
+            .custom_providers
+            .as_ref()
+            .and_then(|providers| providers.get(&provider_id.trim().to_ascii_lowercase()))
+            .and_then(|provider| provider.models.get(model_id))
+            .and_then(|model| model.modalities.as_ref())
+            .is_some_and(|modalities| modalities.input.iter().any(|input| input == modality))
+        {
+            return true;
+        }
+        self.load_cache_entry()
+            .ok()
+            .flatten()
+            .and_then(|entry| entry.data.get(provider_id).cloned())
+            .and_then(|provider| provider.models.get(model_id).cloned())
+            .and_then(|model| model.modalities)
+            .is_some_and(|modalities| modalities.input.iter().any(|input| input == modality))
+    }
+
     pub fn get_model_name(&self, provider_id: &str, model_id: &str) -> Option<String> {
         if let Some(name) = self
             .custom_providers
@@ -1315,6 +1340,40 @@ mod tests {
             Some(128000)
         );
         assert_eq!(model.limit.as_ref().map(|limit| limit.output), Some(8192));
+    }
+
+    #[test]
+    fn custom_model_modalities_enable_audio_input_lookup() {
+        let custom_providers = HashMap::from([(
+            "openai".to_string(),
+            CustomProviderConfig {
+                name: None,
+                npm: Some("@ai-sdk/openai-compatible".to_string()),
+                base_url: Some("https://api.openai.com/v1".to_string()),
+                api_key: None,
+                models: HashMap::from([(
+                    "audio-model".to_string(),
+                    CustomModelConfig {
+                        name: None,
+                        context_window: None,
+                        max_tokens: None,
+                        attachment: None,
+                        reasoning: None,
+                        reasoning_options: None,
+                        temperature: None,
+                        tool_call: None,
+                        modalities: Some(CustomModelModalities {
+                            input: vec!["text".to_string(), "audio".to_string()],
+                            output: vec!["text".to_string()],
+                        }),
+                        launch: false,
+                    },
+                )]),
+            },
+        )]);
+        let discovery = Discovery::new_with_custom(Some(custom_providers)).unwrap();
+
+        assert!(discovery.model_supports_input_modality("openai", "audio-model", "audio"));
     }
 
     #[test]

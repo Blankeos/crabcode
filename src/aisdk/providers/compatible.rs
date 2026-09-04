@@ -248,7 +248,7 @@ fn openai_compatible_request_body(
 }
 
 fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
-    if user.images.is_empty() {
+    if user.images.is_empty() && user.audios.is_empty() {
         return serde_json::json!(user.content);
     }
 
@@ -264,6 +264,15 @@ fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_j
             "type": "image_url",
             "image_url": {
                 "url": image.data_url,
+            },
+        })
+    }));
+    parts.extend(user.audios.iter().map(|audio| {
+        serde_json::json!({
+            "type": "input_audio",
+            "input_audio": {
+                "data": audio.data,
+                "format": audio.format,
             },
         })
     }));
@@ -447,8 +456,13 @@ fn debug_log(msg: &str) {
 /// Looks for `prompt_tokens_details.cached_tokens` and Anthropic-style fields
 /// that some gateways forward.
 fn openai_compatible_usage(usage: &serde_json::Value) -> Option<crate::chunk::TokenUsage> {
-    let prompt = usage.get("prompt_tokens").and_then(|v| v.as_u64());
-    let completion = usage.get("completion_tokens").and_then(|v| v.as_u64());
+    let prompt_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64());
+    let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
+    let prompt = prompt_tokens.or(input_tokens);
+    let completion = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|v| v.as_u64());
     let cached = usage
         .pointer("/prompt_tokens_details/cached_tokens")
         .and_then(|v| v.as_u64())
@@ -460,6 +474,7 @@ fn openai_compatible_usage(usage: &serde_json::Value) -> Option<crate::chunk::To
         .unwrap_or(0);
     let cache_creation = usage
         .get("cache_creation_input_tokens")
+        .or_else(|| usage.get("cache_write_input_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
@@ -500,8 +515,16 @@ fn openai_compatible_usage(usage: &serde_json::Value) -> Option<crate::chunk::To
         hit_pct
     ));
 
+    // Chat Completions prompt_tokens and Responses-style input_tokens paired
+    // with cached_tokens include cache hits. Anthropic-shaped input_tokens is
+    // already non-cached and must not have cache_read subtracted again.
+    let non_cached_input = if prompt_tokens.is_some() || cached > 0 {
+        prompt_v.saturating_sub(effective_cached)
+    } else {
+        prompt_v
+    };
     Some(crate::chunk::TokenUsage {
-        input: prompt_v.saturating_sub(effective_cached),
+        input: non_cached_input,
         output: completion.unwrap_or(0),
         cache_read: effective_cached,
         cache_write: cache_creation,
@@ -683,6 +706,43 @@ mod tests {
         );
 
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn serializes_audio_input_content_part() {
+        let user = crate::message::UserMessage {
+            content: "Describe this".to_string(),
+            images: Vec::new(),
+            audios: vec![crate::message::AudioContent {
+                data: "YXVkaW8=".to_string(),
+                format: "wav".to_string(),
+                media_type: "audio/wav".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            openai_compatible_user_content(&user),
+            serde_json::json!([
+                {"type": "text", "text": "Describe this"},
+                {"type": "input_audio", "input_audio": {"data": "YXVkaW8=", "format": "wav"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn responses_style_usage_aliases_are_normalized() {
+        let chunks = process_sse_data(
+            r#"{"choices":[],"usage":{"input_tokens":120,"output_tokens":30,"cached_tokens":80,"cache_write_input_tokens":10}}"#,
+        );
+        assert!(matches!(
+            chunks.as_slice(),
+            [Ok(ChunkType::Usage(crate::chunk::TokenUsage {
+                input: 40,
+                output: 30,
+                cache_read: 80,
+                cache_write: 10,
+            }))]
+        ));
     }
 
     #[test]
