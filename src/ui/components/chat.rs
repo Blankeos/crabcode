@@ -455,7 +455,26 @@ impl GenerationSample {
     }
 }
 
-/// Prefer precomputed OpenCode TPS; fall back to inter-token formula.
+/// Upstream TPS formula (opencode #46108 `packages/core/src/session/tokens.ts`):
+/// billed output tokens over decode time (`completed - firstToken`),
+/// 250ms floor, no inter-token adjustment. Provider `output` already
+/// counts reasoning tokens, so no separate bucket is needed.
+fn upstream_tokens_per_sec(generated_tokens: u64, decode_ms: u64) -> Option<f64> {
+    if generated_tokens == 0 {
+        return None;
+    }
+    if decode_ms < MIN_TOKENS_PER_SECOND_ELAPSED_MS as u64 {
+        return None;
+    }
+    let tps = generated_tokens as f64 / (decode_ms as f64 / 1000.0);
+    if tps.is_finite() && tps > 0.0 {
+        Some(tps)
+    } else {
+        None
+    }
+}
+
+/// Prefer precomputed TPS; fall back to the upstream formula.
 fn message_tokens_per_sec(
     precomputed: Option<f64>,
     output_tokens: usize,
@@ -466,15 +485,7 @@ fn message_tokens_per_sec(
             return Some(tps);
         }
     }
-    if decode_ms == 0 || output_tokens < MIN_TPS_SAMPLE_TOKENS {
-        return None;
-    }
-    let tps = ((output_tokens - 1) as f64) / (decode_ms as f64 / 1000.0);
-    if tps.is_finite() && tps > 0.0 {
-        Some(tps)
-    } else {
-        None
-    }
+    upstream_tokens_per_sec(output_tokens as u64, decode_ms)
 }
 
 const MIN_MOUSE_WHEEL_LINES: usize = 1;
@@ -1688,6 +1699,69 @@ fn plan_update_display(
 }
 
 impl Chat {
+    pub fn record_usage(
+        &mut self,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+        cost: f64,
+    ) {
+        if self.streaming_assistant_idx().is_none() {
+            self.messages.push(Message::incomplete(""));
+        }
+        let Some(message) = self
+            .messages
+            .iter_mut()
+            .rfind(|message| message.role == MessageRole::Assistant && !message.is_complete)
+        else {
+            return;
+        };
+
+        if let Some(part) = message
+            .parts
+            .iter_mut()
+            .find(|part| part.part_type == "usage")
+        {
+            if let Some(current) = part.recorded_usage() {
+                let total = current.saturating_add(crate::session::types::RecordedUsage {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                    cost,
+                });
+                *part = crate::session::types::MessagePart::usage(
+                    total.input,
+                    total.output,
+                    total.cache_read,
+                    total.cache_write,
+                    total.cost,
+                );
+            }
+        } else {
+            message
+                .parts
+                .push(crate::session::types::MessagePart::usage(
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                    cost,
+                ));
+        }
+
+        if output > 0 {
+            message.output_tokens = Some(
+                message
+                    .output_tokens
+                    .unwrap_or(0)
+                    .saturating_add(output as usize),
+            );
+            message.token_count = message.output_tokens;
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             messages: Vec::new(),
@@ -1862,7 +1936,7 @@ impl Chat {
 
     pub fn apply_streaming_usage(
         &mut self,
-        usage: crate::aisdk::chunk::LanguageModelUsage,
+        usage: crate::aisdk::chunk::TokenUsage,
         cost: Option<f64>,
         duration_ms: u64,
     ) {
@@ -1871,7 +1945,14 @@ impl Chat {
             .iter_mut()
             .rfind(|message| message.role == MessageRole::Assistant)
         {
-            message.apply_usage(usage, cost);
+            message.input_tokens = Some(usize::try_from(usage.input).unwrap_or(usize::MAX));
+            message.output_tokens = Some(usize::try_from(usage.output).unwrap_or(usize::MAX));
+            message.cache_read_tokens =
+                Some(usize::try_from(usage.cache_read).unwrap_or(usize::MAX));
+            message.cache_write_tokens =
+                Some(usize::try_from(usage.cache_write).unwrap_or(usize::MAX));
+            message.cost = cost;
+            message.usage_authoritative = true;
             message.duration_ms = Some(duration_ms);
         }
     }
@@ -2601,20 +2682,31 @@ impl Chat {
             }
         };
 
-        // Final TPS from completed samples only.
-        let final_tps = Self::aggregate_generation_tps(&self.generation_samples, None);
-        self.cached_tokens_per_sec = final_tps;
+        // Sample-based estimate kept as fallback when the provider reported
+        // no billed usage.
+        let sample_tps = Self::aggregate_generation_tps(&self.generation_samples, None);
 
         if let Some(idx) = self
             .messages
             .iter()
             .rposition(|m| m.role == MessageRole::Assistant)
         {
+            // Upstream-style final rate (opencode #46108): billed output
+            // over decode time. Billed usage accumulates across every
+            // provider step (tool-call steps included), so reloads
+            // recompute identically instead of drifting from estimates.
+            let billed_output = self.messages[idx]
+                .recorded_usage()
+                .map(|usage| usage.output)
+                .unwrap_or(0);
+            let final_tps =
+                upstream_tokens_per_sec(billed_output, decode_duration_ms).or(sample_tps);
+            self.cached_tokens_per_sec = final_tps;
             if let Some(msg) = self.messages.get_mut(idx) {
                 if !msg.usage_authoritative {
-                    msg.output_tokens = Some(token_count);
+                    msg.output_tokens = Some(msg.output_tokens.unwrap_or(token_count));
                 }
-                msg.token_count = Some(token_count);
+                msg.token_count = msg.output_tokens;
                 msg.duration_ms = Some(decode_duration_ms);
                 msg.tokens_per_sec = final_tps;
                 msg.finish_reasoning_timer(finalized_at);
@@ -6580,11 +6672,15 @@ impl Chat {
         ));
 
         // Timing + throughput metrics are shown only once the stream is done.
-        // TPS uses OpenCode inter-token rate: (tokens - 1) / generation_duration,
-        // preferring the precomputed sample aggregate on the message.
+        // TPS uses the upstream rate (billed output / decode time),
+        // preferring the precomputed value persisted on the message.
         if include_metrics {
             if let (Some(t0), Some(t1), Some(tn)) = (message.t0_ms, message.t1_ms, message.tn_ms) {
-                let output_tokens = message.output_tokens.or(message.token_count).unwrap_or(0);
+                // t/s inputs are output tokens only. `token_count` is the
+                // billed total (prompt + completion + cache) and must never
+                // feed the throughput fallback — that inflated reloaded
+                // sessions (e.g. 145t/s live vs 3292t/s on reopen).
+                let output_tokens = message.output_tokens.unwrap_or(0);
 
                 let ttft_ms = t1.saturating_sub(t0);
                 let decode_ms = message.duration_ms.unwrap_or_else(|| tn.saturating_sub(t1));
@@ -6610,8 +6706,8 @@ impl Chat {
                         Style::default().fg(colors.text_weak),
                     ));
                 }
-            } else if let (Some(token_count), Some(duration_ms)) =
-                (message.token_count, message.duration_ms)
+            } else if let (Some(output_tokens), Some(duration_ms)) =
+                (message.output_tokens, message.duration_ms)
             {
                 // Backward-compatible fallback: duration_ms reflects decode time.
                 let duration_sec = duration_ms as f64 / 1000.0;
@@ -6620,13 +6716,21 @@ impl Chat {
                     Style::default().fg(colors.text_weak),
                 ));
                 if let Some(tokens_per_sec) =
-                    message_tokens_per_sec(message.tokens_per_sec, token_count, duration_ms)
+                    message_tokens_per_sec(message.tokens_per_sec, output_tokens, duration_ms)
                 {
                     spans.push(Span::styled(
                         format!(" • {:.0}t/s", tokens_per_sec),
                         Style::default().fg(colors.text_weak),
                     ));
                 }
+            } else if let Some(duration_ms) = message.duration_ms {
+                // Total-only legacy row: show duration without t/s rather
+                // than dividing the billed total by decode time.
+                let duration_sec = duration_ms as f64 / 1000.0;
+                spans.push(Span::styled(
+                    format!(" • {:.1}s", duration_sec),
+                    Style::default().fg(colors.text_weak),
+                ));
             }
         }
 
@@ -8096,6 +8200,23 @@ mod tests {
         chat.append_to_last_assistant(" assistant");
         assert_eq!(chat.messages.len(), 3);
         assert_eq!(chat.messages[2].content, " assistant");
+    }
+
+    #[test]
+    fn record_usage_accumulates_provider_steps_on_streaming_assistant() {
+        let mut chat = Chat::new();
+
+        chat.record_usage(1_000, 100, 500, 50, 0.01);
+        chat.record_usage(2_000, 200, 750, 25, 0.02);
+
+        let message = chat.messages.last().unwrap();
+        let usage = message.recorded_usage().unwrap();
+        assert_eq!(usage.input, 3_000);
+        assert_eq!(usage.output, 300);
+        assert_eq!(usage.cache_read, 1_250);
+        assert_eq!(usage.cache_write, 75);
+        assert!((usage.cost - 0.03).abs() < f64::EPSILON);
+        assert_eq!(message.output_tokens, Some(300));
     }
 
     #[test]
@@ -9955,8 +10076,8 @@ codex exec --skip-git-repo-check \
 
         assert!(metadata.contains("1.0s"));
         assert!(metadata.contains("ttft 0.2s"));
-        // OpenCode inter-token: (40 - 1) / 0.8s = 48.75 → rounds to 49t/s
-        assert!(metadata.contains("49t/s"));
+        // Upstream formula: 40 / 0.8s = 50t/s
+        assert!(metadata.contains("50t/s"));
     }
 
     #[test]
@@ -10043,7 +10164,7 @@ codex exec --skip-git-repo-check \
             message.tn_ms = Some(12_000);
             message.output_tokens = Some(100);
             message.token_count = Some(100);
-            // 1s decode, OpenCode inter-token: (100 - 1) / 1s = 99 t/s
+            // 1s decode, upstream formula: 100 / 1s = 100 t/s
             message.duration_ms = Some(1_000);
         }
 
@@ -10052,8 +10173,8 @@ codex exec --skip-git-repo-check \
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
 
         assert!(
-            rendered.contains("99t/s"),
-            "metadata should use inter-token TPS (n-1)/duration:\n{}",
+            rendered.contains("100t/s"),
+            "metadata should use upstream TPS tokens/duration:\n{}",
             rendered
         );
         assert!(
@@ -10170,6 +10291,38 @@ codex exec --skip-git-repo-check \
         assert!(
             sample_sum + 200 < wall_ms,
             "sample_sum ({sample_sum}) should be well below wall ({wall_ms}) by tool time"
+        );
+    }
+
+    #[test]
+    fn test_finalize_prefers_billed_output_over_sample_estimate() {
+        use std::time::Duration;
+
+        let mut chat = Chat::new();
+        chat.add_assistant_message("");
+        if let Some(last) = chat.messages.last_mut() {
+            last.is_complete = false;
+        }
+
+        chat.begin_streaming_turn();
+        // Tiny visible text: the sample estimate would be ~10t/s.
+        chat.append_to_last_assistant("hi");
+        // ...but billed output says 300 tokens over ~0.3s ≈ 1000t/s.
+        chat.record_usage(0, 300, 0, 0, 0.0);
+        std::thread::sleep(Duration::from_millis(300));
+        chat.mark_streaming_end();
+        chat.finalize_streaming_metrics();
+
+        let msg = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("assistant message");
+        let tps = msg.tokens_per_sec.expect("expected billed TPS");
+        assert!(
+            tps > 500.0,
+            "final TPS should come from billed output, not the text estimate: got {tps}"
         );
     }
 

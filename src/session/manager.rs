@@ -367,7 +367,15 @@ impl SessionManager {
         parent_id: Option<String>,
         make_current: bool,
     ) -> String {
-        let _ = self.ensure_history();
+        // In unit tests / CRABCODE_TEST_MODE, stay in-memory unless the caller
+        // explicitly opted into persistence via `with_history()`. Otherwise the
+        // lazy attach below would open the on-disk DB and `load_sessions_from_db`
+        // would merge unrelated rows into the manager (flaky counts, prod
+        // pollution). All production call sites attach explicitly
+        // (`App::new_shell`, `acp`), so this only affects tests.
+        if !(cfg!(test) || std::env::var("CRABCODE_TEST_MODE").is_ok()) {
+            let _ = self.ensure_history();
+        }
         self.session_counter += 1;
         let title = name
             .clone()

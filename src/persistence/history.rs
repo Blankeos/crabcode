@@ -15,8 +15,14 @@ pub struct Workspace {
     pub last_opened_at: i64,
 }
 
+fn message_cost(message: &Message) -> f64 {
+    message
+        .cost
+        .unwrap_or_else(|| usage_cost_from_parts(&message.parts))
+}
+
 #[cfg(test)]
-mod tests {
+mod usage_part_tests {
     use super::*;
 
     fn test_dao() -> HistoryDAO {
@@ -57,12 +63,18 @@ mod tests {
             cache_write_tokens: Some(10),
             cost: Some(0.0125),
             usage_authoritative: true,
+            tokens_per_sec: Some(50.0),
         };
 
         dao.add_message(&message).unwrap();
         let restored = dao.get_messages(session_id).unwrap();
         assert_eq!(restored[0].input_tokens, Some(100));
+        assert_eq!(restored[0].output_tokens, Some(25));
+        assert_eq!(restored[0].cache_read_tokens, Some(60));
+        assert_eq!(restored[0].cache_write_tokens, Some(10));
         assert_eq!(restored[0].cost, Some(0.0125));
+        assert!(restored[0].usage_authoritative);
+        assert_eq!(restored[0].tokens_per_sec, Some(50.0));
         let session = dao.get_session(session_id).unwrap().unwrap();
         assert_eq!(session.total_tokens, 125);
         assert!((session.total_cost - 0.0125).abs() < f64::EPSILON);
@@ -133,6 +145,7 @@ pub struct Message {
     pub cache_write_tokens: Option<i64>,
     pub cost: Option<f64>,
     pub usage_authoritative: bool,
+    pub tokens_per_sec: Option<f64>,
 }
 
 pub struct HistoryDAO {
@@ -510,9 +523,9 @@ impl HistoryDAO {
             "INSERT INTO messages (
                  id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
                  t0_ms, t1_ms, tn_ms, output_tokens, input_tokens, cache_read_tokens,
-                 cache_write_tokens, cost, usage_authoritative
+                 cache_write_tokens, cost, usage_authoritative, tokens_per_sec
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 &msg.id,
                 msg.session_id,
@@ -533,16 +546,12 @@ impl HistoryDAO {
                 msg.cache_write_tokens,
                 msg.cost,
                 msg.usage_authoritative,
+                msg.tokens_per_sec,
             ],
         )?;
 
         let tokens = message_total_tokens(msg);
-        self.update_session_stats(
-            msg.session_id,
-            tokens,
-            msg.cost.unwrap_or(0.0),
-            msg.timestamp,
-        )?;
+        self.update_session_stats(msg.session_id, tokens, message_cost(msg), msg.timestamp)?;
         Ok(())
     }
 
@@ -567,15 +576,15 @@ impl HistoryDAO {
                 "INSERT INTO messages (
                      id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
                      t0_ms, t1_ms, tn_ms, output_tokens, input_tokens, cache_read_tokens,
-                     cache_write_tokens, cost, usage_authoritative
+                     cache_write_tokens, cost, usage_authoritative, tokens_per_sec
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             )?;
 
             for msg in messages {
                 let parts_json = serde_json::to_string(&msg.parts)?;
                 total_tokens += i64::from(message_total_tokens(msg));
-                total_cost += msg.cost.unwrap_or(0.0);
+                total_cost += message_cost(msg);
                 updated_at = msg.timestamp;
 
                 insert.execute(params![
@@ -598,6 +607,7 @@ impl HistoryDAO {
                     msg.cache_write_tokens,
                     msg.cost,
                     msg.usage_authoritative,
+                    msg.tokens_per_sec,
                 ])?;
             }
         }
@@ -615,7 +625,7 @@ impl HistoryDAO {
 
         tx.execute(
             "UPDATE sessions
-             SET total_tokens = ?1,
+              SET total_tokens = ?1,
                   total_cost = ?2,
                   total_time_sec = ?3,
                   avg_tokens_per_sec = ?4,
@@ -640,7 +650,7 @@ impl HistoryDAO {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, role, parts, timestamp, tokens_used, model, provider, agent_mode, duration_ms,
                     t0_ms, t1_ms, tn_ms, output_tokens, input_tokens, cache_read_tokens,
-                    cache_write_tokens, cost, usage_authoritative
+                    cache_write_tokens, cost, usage_authoritative, tokens_per_sec
              FROM messages WHERE session_id = ?1 ORDER BY timestamp ASC, rowid ASC",
         )?;
 
@@ -668,6 +678,7 @@ impl HistoryDAO {
                 cache_write_tokens: row.get(16)?,
                 cost: row.get(17)?,
                 usage_authoritative: row.get(18)?,
+                tokens_per_sec: row.get(19)?,
             })
         })?;
 
@@ -845,4 +856,43 @@ fn ensure_workspace(conn: &Connection, root_path: &str, display_name: &str) -> R
         params![root_path, display_name, next_sort_order],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+fn usage_cost_from_parts(parts: &[MessagePart]) -> f64 {
+    parts
+        .iter()
+        .filter(|part| part.part_type == "usage")
+        .filter_map(|part| part.data.get("cost")?.as_f64())
+        .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_cost_sums_usage_parts() {
+        let parts = vec![
+            MessagePart {
+                part_type: "text".to_string(),
+                data: serde_json::json!({ "text": "hi" }),
+            },
+            MessagePart {
+                part_type: "usage".to_string(),
+                data: serde_json::json!({
+                    "input": 1000,
+                    "output": 100,
+                    "cache_read": 500,
+                    "cache_write": 50,
+                    "cost": 0.01,
+                }),
+            },
+            MessagePart {
+                part_type: "usage".to_string(),
+                data: serde_json::json!({ "cost": 0.02 }),
+            },
+        ];
+
+        assert!((usage_cost_from_parts(&parts) - 0.03).abs() < f64::EPSILON);
+    }
 }

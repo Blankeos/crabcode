@@ -58,7 +58,7 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 
 ## MCP notes
 
-Use the OpenCode MCP docs for the config shape. crabcode reads the same top-level `mcp` map from OpenCode and crabcode config files, supports local stdio servers and remote HTTP servers, and registers discovered MCP tools into the normal tool list.
+Use the OpenCode MCP docs for the config shape. crabcode reads the same top-level `mcp` map from OpenCode and crabcode config files, supports local stdio servers and remote HTTP servers, and registers discovered MCP tools into the normal tool list. Only **enabled** servers are exposed to the model; the `/mcp` toggle (and `enabled: false` in config) drops those schemas from the next request.
 
 MCP OAuth works like OpenCode (`crabcode mcp auth <name>`, or `a` in `/mcp`). Tokens are stored in `~/.local/state/crabcode/mcp-auth.json`.
 

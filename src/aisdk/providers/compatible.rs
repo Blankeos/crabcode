@@ -116,7 +116,7 @@ impl Provider for OpenAICompatible {
         _headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
         let base = self.base_url.trim_end_matches('/');
-        let url = if has_version_segment(base) {
+        let url = if super::base_url_has_version_segment(base) {
             format!("{}/chat/completions", base)
         } else {
             format!("{}/v1/chat/completions", base)
@@ -151,11 +151,7 @@ impl Provider for OpenAICompatible {
             }
         }
 
-        let mut body = serde_json::json!({
-            "model": self.model_name,
-            "messages": chat_messages,
-            "stream": true,
-        });
+        let mut body = openai_compatible_request_body(&self.model_name, chat_messages);
 
         if !tool_params.is_empty() {
             body["tools"] = serde_json::Value::Array(tool_params);
@@ -235,6 +231,20 @@ impl Provider for OpenAICompatible {
 
         Ok(stream)
     }
+}
+
+fn openai_compatible_request_body(
+    model_name: &str,
+    messages: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "model": model_name,
+        "messages": messages,
+        "stream": true,
+        "stream_options": {
+            "include_usage": true
+        }
+    })
 }
 
 fn openai_compatible_user_content(user: &crate::message::UserMessage) -> serde_json::Value {
@@ -445,11 +455,10 @@ fn debug_log(msg: &str) {
 /// Log OpenAI-compatible / AI Gateway usage via the host logger.
 /// Looks for `prompt_tokens_details.cached_tokens` and Anthropic-style fields
 /// that some gateways forward.
-fn openai_compatible_usage(usage: &serde_json::Value) -> Option<crate::chunk::LanguageModelUsage> {
-    let prompt = usage
-        .get("prompt_tokens")
-        .or_else(|| usage.get("input_tokens"))
-        .and_then(|v| v.as_u64());
+fn openai_compatible_usage(usage: &serde_json::Value) -> Option<crate::chunk::TokenUsage> {
+    let prompt_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64());
+    let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
+    let prompt = prompt_tokens.or(input_tokens);
     let completion = usage
         .get("completion_tokens")
         .or_else(|| usage.get("output_tokens"))
@@ -506,26 +515,24 @@ fn openai_compatible_usage(usage: &serde_json::Value) -> Option<crate::chunk::La
         hit_pct
     ));
 
-    let anthropic_shape = cached == 0 && (cache_read > 0 || cache_creation > 0);
-    let input_tokens = if anthropic_shape {
-        prompt
-            .unwrap_or(0)
-            .saturating_add(cache_read)
-            .saturating_add(cache_creation)
+    // Chat Completions prompt_tokens and Responses-style input_tokens paired
+    // with cached_tokens include cache hits. Anthropic-shaped input_tokens is
+    // already non-cached and must not have cache_read subtracted again.
+    let non_cached_input = if prompt_tokens.is_some() || cached > 0 {
+        prompt_v.saturating_sub(effective_cached)
     } else {
-        prompt.unwrap_or(0)
+        prompt_v
     };
-    Some(crate::chunk::LanguageModelUsage {
-        input_tokens,
-        output_tokens: completion.unwrap_or(0),
-        cache_read_tokens: effective_cached,
-        cache_write_tokens: cache_creation,
+    Some(crate::chunk::TokenUsage {
+        input: non_cached_input,
+        output: completion.unwrap_or(0),
+        cache_read: effective_cached,
+        cache_write: cache_creation,
     })
 }
 
 fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     let data = data.trim();
-    let mut chunks = Vec::new();
 
     if data == "[DONE]" {
         debug_log("[SSE] Terminal: [DONE]");
@@ -534,7 +541,7 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
 
     if data.is_empty() || is_sse_metadata_line(data) {
         debug_log("[SSE] Ignored: empty or metadata/comment");
-        return chunks;
+        return vec![];
     }
 
     debug_log(&format!("[SSE] Raw data: {}", data));
@@ -559,25 +566,30 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
     // Final usage often arrives on a choices-empty (or choices-missing) chunk.
     // Log cache-related fields so gateway Anthropic hits are verifiable.
     let usage = value.get("usage").and_then(openai_compatible_usage);
-    if let Some(usage) = usage {
-        chunks.push(Ok(ChunkType::Usage(usage)));
-    }
 
     let Some(choices) = value["choices"].as_array() else {
         debug_log(&format!(
             "[SSE] No choices array. JSON keys: {:?}",
             value.as_object().map(|o| o.keys().collect::<Vec<_>>())
         ));
-        return chunks;
+        return usage
+            .map(|usage| vec![Ok(ChunkType::Usage(usage))])
+            .unwrap_or_default();
     };
 
     if choices.is_empty() {
         debug_log("[SSE] choices array is empty");
-        return chunks;
+        return usage
+            .map(|usage| vec![Ok(ChunkType::Usage(usage))])
+            .unwrap_or_default();
     }
 
     let choice = &choices[0];
     let finish_reason = choice["finish_reason"].as_str().unwrap_or("");
+    let mut chunks = usage
+        .map(|usage| vec![Ok(ChunkType::Usage(usage))])
+        .unwrap_or_default();
+
     // Log the full choice structure for debugging
     debug_log(&format!(
         "[SSE] Choice JSON: {}",
@@ -636,6 +648,12 @@ fn process_sse_data(data: &str) -> Vec<Result<ChunkType>> {
 
     match finish_reason {
         "" => {}
+        "length" => chunks.push(Ok(ChunkType::Incomplete(
+            "finish_reason=length".to_string(),
+        ))),
+        "content_filter" => chunks.push(Ok(ChunkType::Failed(
+            "finish_reason=content_filter".to_string(),
+        ))),
         _ => chunks.push(Ok(ChunkType::End {
             reason: Some(FinishReason::from_openai_compatible(finish_reason)),
         })),
@@ -678,6 +696,19 @@ mod tests {
     }
 
     #[test]
+    fn request_asks_streaming_gateways_for_token_usage() {
+        let body = openai_compatible_request_body(
+            "gpt-test",
+            vec![serde_json::json!({
+                "role": "user",
+                "content": "hi",
+            })],
+        );
+
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
     fn serializes_audio_input_content_part() {
         let user = crate::message::UserMessage {
             content: "Describe this".to_string(),
@@ -705,28 +736,28 @@ mod tests {
         );
         assert!(matches!(
             chunks.as_slice(),
-            [Ok(ChunkType::Usage(crate::chunk::LanguageModelUsage {
-                input_tokens: 120,
-                output_tokens: 30,
-                cache_read_tokens: 80,
-                cache_write_tokens: 10,
+            [Ok(ChunkType::Usage(crate::chunk::TokenUsage {
+                input: 40,
+                output: 30,
+                cache_read: 80,
+                cache_write: 10,
             }))]
         ));
     }
 
     #[test]
-    fn usage_only_chunk_emits_normalized_usage() {
+    fn empty_choices_usage_chunk_emits_non_cached_input() {
         let chunks = process_sse_data(
-            r#"{"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":80}}}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":40}}}"#,
         );
 
         assert!(matches!(
             chunks.as_slice(),
-            [Ok(ChunkType::Usage(crate::chunk::LanguageModelUsage {
-                input_tokens: 120,
-                output_tokens: 30,
-                cache_read_tokens: 80,
-                cache_write_tokens: 0,
+            [Ok(ChunkType::Usage(crate::chunk::TokenUsage {
+                input: 80,
+                output: 30,
+                cache_read: 40,
+                cache_write: 0,
             }))]
         ));
     }
@@ -860,17 +891,14 @@ mod tests {
     }
 
     #[test]
-    fn length_finish_reason_emits_terminal_reason() {
+    fn length_finish_reason_emits_incomplete_chunk() {
         let data = r#"{"choices":[{"index":0,"finish_reason":"length","delta":{"role":"assistant","content":""}}]}"#;
 
         let chunks = process_sse_data(data);
 
-        assert!(chunks.iter().any(|chunk| matches!(
-            chunk,
-            Ok(ChunkType::End {
-                reason: Some(FinishReason::Length)
-            })
-        )));
+        assert!(chunks
+            .iter()
+            .any(|chunk| matches!(chunk, Ok(ChunkType::Incomplete(_)))));
     }
 
     #[test]
@@ -1008,26 +1036,4 @@ fn is_sse_metadata_line(line: &str) -> bool {
         || line.starts_with("event:")
         || line.starts_with("id:")
         || line.starts_with("retry:")
-}
-
-fn has_version_segment(base_url: &str) -> bool {
-    // Check if the URL path already contains a /vN segment (e.g., /v4, /v1)
-    if let Some(pos) = base_url.find("://") {
-        let after_scheme = &base_url[pos + 3..];
-        if let Some(path_start) = after_scheme.find('/') {
-            let path = &after_scheme[path_start..];
-            // Match /vN where N is one or more digits, followed by / or end of string
-            let bytes = path.as_bytes();
-            for i in 0..bytes.len().saturating_sub(2) {
-                if bytes[i] == b'/'
-                    && bytes[i + 1] == b'v'
-                    && bytes[i + 2].is_ascii_digit()
-                    && (i + 3 >= bytes.len() || bytes[i + 3] == b'/')
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }

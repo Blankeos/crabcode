@@ -175,6 +175,7 @@ pub fn render_models_dialog(
     area: Rect,
     colors: ThemeColors,
     reasoning_effort: Option<&str>,
+    reasoning_effort_explicit: bool,
 ) {
     if dialog_state.loading {
         dialog_state.dialog.actions.clear();
@@ -191,7 +192,13 @@ pub fn render_models_dialog(
     dialog_state.dialog.render(f, area, colors);
 
     if let Some(reasoning_effort) = reasoning_effort {
-        render_reasoning_control(f, &dialog_state.dialog, colors, reasoning_effort);
+        render_reasoning_control(
+            f,
+            &dialog_state.dialog,
+            colors,
+            reasoning_effort,
+            reasoning_effort_explicit,
+        );
     }
 }
 
@@ -213,6 +220,7 @@ fn render_reasoning_control(
     dialog: &Dialog,
     colors: ThemeColors,
     reasoning_effort: &str,
+    reasoning_effort_explicit: bool,
 ) {
     let gap_height = 3;
     if dialog.content_area.height < gap_height + dialog.footer_height() {
@@ -235,7 +243,12 @@ fn render_reasoning_control(
         width: gap_area.width,
         height: 1,
     };
-    let line = reasoning_control_line(reasoning_effort, control_area.width, colors);
+    let line = reasoning_control_line(
+        reasoning_effort,
+        control_area.width,
+        colors,
+        reasoning_effort_explicit,
+    );
 
     f.render_widget(
         Paragraph::new(line).alignment(Alignment::Left),
@@ -247,26 +260,35 @@ fn reasoning_control_line<'a>(
     reasoning_effort: &'a str,
     width: u16,
     colors: ThemeColors,
+    explicit: bool,
 ) -> Line<'a> {
     let width = width as usize;
     let effort_width = reasoning_effort.len();
+    let effort_style = Style::default()
+        .fg(colors.text)
+        .add_modifier(Modifier::BOLD);
 
-    if width <= effort_width + 2 {
-        return Line::from(vec![Span::styled(
-            reasoning_effort.to_string(),
-            Style::default()
-                .fg(colors.text)
-                .add_modifier(Modifier::BOLD),
-        )]);
+    let suffix = if explicit { "" } else { " (default)" };
+    let center_width = effort_width + suffix.len();
+    let suffix_style = Style::default()
+        .fg(colors.text_weak)
+        .add_modifier(Modifier::DIM);
+
+    if width <= center_width + 2 {
+        let mut spans = vec![Span::styled(reasoning_effort.to_string(), effort_style)];
+        if !explicit {
+            spans.push(Span::styled(" (default)", suffix_style));
+        }
+        return Line::from(spans);
     }
 
-    let effort_start = width.saturating_sub(effort_width) / 2;
+    let effort_start = width.saturating_sub(center_width) / 2;
     let right_start = width.saturating_sub(1);
     let spaces_after_left = effort_start.saturating_sub(1);
-    let used_through_effort = 1 + spaces_after_left + effort_width;
+    let used_through_effort = 1 + spaces_after_left + center_width;
     let spaces_after_effort = right_start.saturating_sub(used_through_effort);
 
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             "<",
             Style::default()
@@ -274,20 +296,19 @@ fn reasoning_control_line<'a>(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(spaces_after_left)),
-        Span::styled(
-            reasoning_effort.to_string(),
-            Style::default()
-                .fg(colors.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(spaces_after_effort)),
-        Span::styled(
-            ">",
-            Style::default()
-                .fg(colors.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])
+        Span::styled(reasoning_effort.to_string(), effort_style),
+    ];
+    if !explicit {
+        spans.push(Span::styled(" (default)", suffix_style));
+    }
+    spans.push(Span::raw(" ".repeat(spaces_after_effort)));
+    spans.push(Span::styled(
+        ">",
+        Style::default()
+            .fg(colors.primary)
+            .add_modifier(Modifier::BOLD),
+    ));
+    Line::from(spans)
 }
 
 pub fn handle_models_dialog_key_event(
@@ -551,7 +572,7 @@ mod tests {
     #[test]
     fn reasoning_control_line_spreads_arrows_and_value() {
         let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
-        let line = reasoning_control_line("xhigh", 21, colors);
+        let line = reasoning_control_line("xhigh", 21, colors, true);
         let rendered = line
             .spans
             .iter()
@@ -587,6 +608,7 @@ mod tests {
                     Rect::new(0, 0, 80, 30),
                     colors,
                     Some("high"),
+                    true,
                 );
             })
             .unwrap();
@@ -638,6 +660,7 @@ mod tests {
                     Rect::new(0, 0, 80, 30),
                     colors,
                     Some("high"),
+                    true,
                 );
             })
             .unwrap();
@@ -669,7 +692,14 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_models_dialog(frame, &mut state, Rect::new(0, 0, 80, 30), colors, None);
+                render_models_dialog(
+                    frame,
+                    &mut state,
+                    Rect::new(0, 0, 80, 30),
+                    colors,
+                    None,
+                    false,
+                );
             })
             .unwrap();
 

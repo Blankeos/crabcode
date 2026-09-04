@@ -1,4 +1,4 @@
-use crate::session::types::{CompactionStats, Message, MessageRole};
+use crate::session::types::{CompactionStats, Message, MessagePart, MessageRole, RecordedUsage};
 
 /// Max recent user turns considered for the preserved tail.
 /// Actual tail is also capped by [`DEFAULT_PRESERVE_RECENT_TOKENS`].
@@ -372,6 +372,31 @@ pub fn apply_soft_compaction(
     result
 }
 
+/// Persist billed compaction tokens/cost on the synthetic summary message.
+///
+/// OpenCode stores this on the `summary:true` assistant message. Crabcode's
+/// summary is a user message; attaching a usage part here is what `stats` and
+/// the session footer already sum.
+pub fn attach_summary_usage(messages: &mut [Message], usage: RecordedUsage) {
+    if usage.tokens() == 0 {
+        return;
+    }
+
+    if let Some(summary) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| is_compaction_summary(message))
+    {
+        summary.parts.push(MessagePart::usage(
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+            usage.cost,
+        ));
+    }
+}
+
 /// Token count for the active model context (post-boundary), not full UI history.
 pub fn total_context_tokens(messages: &[Message]) -> usize {
     filter_messages_for_context(messages)
@@ -383,6 +408,14 @@ pub fn total_context_tokens(messages: &[Message]) -> usize {
 pub fn message_context_tokens(message: &Message) -> usize {
     if is_compaction_marker(message) {
         return 0;
+    }
+
+    // Billed compaction usage can be persisted on the summary. Context is the
+    // summary text, never those billed prompt tokens.
+    if is_compaction_summary(message) {
+        return message
+            .token_count
+            .unwrap_or_else(|| estimate_tokens(&message.content));
     }
 
     let part_tokens = message_parts_context_tokens(message);
@@ -982,5 +1015,85 @@ mod tests {
         assert!(prompt.contains("keep this"));
         assert!(!prompt.contains("<image_description"));
         assert!(!prompt.contains("Permission denied"));
+    }
+
+    #[test]
+    fn summary_usage_is_persisted_without_inflating_context_tokens() {
+        let mut a1 = Message::assistant("a1");
+        a1.token_count = Some(3_000);
+        let messages = vec![
+            Message::user("u1"),
+            a1,
+            Message::user("u2"),
+            Message::assistant("a2"),
+        ];
+        let selection = select_messages_for_compaction(&messages, 1).expect("selection");
+        let stats = CompactionStats {
+            before_tokens: 1_000,
+            after_tokens: 100,
+            before_messages: 4,
+            after_messages: 3,
+        };
+        let mut soft = apply_soft_compaction(
+            &messages,
+            &selection,
+            "handoff summary",
+            Some("gpt-test".into()),
+            Some("openai".into()),
+            None,
+            stats,
+        );
+        let before = total_context_tokens(&soft);
+
+        attach_summary_usage(
+            &mut soft,
+            RecordedUsage {
+                input: 80_000,
+                output: 400,
+                cache_read: 12_000,
+                cache_write: 1_000,
+                cost: 0.42,
+            },
+        );
+
+        let summary = soft
+            .iter()
+            .find(|message| is_compaction_summary(message))
+            .expect("summary");
+        let usage = summary.recorded_usage().expect("usage part");
+        assert_eq!(usage.input, 80_000);
+        assert_eq!(usage.output, 400);
+        assert_eq!(usage.cache_read, 12_000);
+        assert_eq!(usage.cache_write, 1_000);
+        assert!((usage.cost - 0.42).abs() < f64::EPSILON);
+        assert_eq!(total_context_tokens(&soft), before);
+        assert!(message_context_tokens(summary) < 80_000);
+
+        let persisted: Vec<crate::persistence::Message> = soft
+            .iter()
+            .cloned()
+            .map(crate::persistence::Message::from)
+            .collect();
+        let restored: Vec<Message> = persisted
+            .into_iter()
+            .map(|message| Message::try_from(message).expect("restore"))
+            .collect();
+        let restored_summary = restored
+            .iter()
+            .find(|message| is_compaction_summary(message))
+            .expect("restored summary");
+        let restored_usage = restored_summary.recorded_usage().expect("usage part");
+        assert_eq!(restored_usage.input, 80_000);
+        assert!((restored_usage.cost - 0.42).abs() < f64::EPSILON);
+        assert_eq!(total_context_tokens(&restored), before);
+        assert!(message_context_tokens(restored_summary) < 80_000);
+    }
+
+    #[test]
+    fn empty_summary_usage_is_not_attached() {
+        let compacted = build_compacted_messages("summary", Vec::new(), None, None, None, None);
+        let mut compacted = compacted;
+        attach_summary_usage(&mut compacted, RecordedUsage::default());
+        assert!(compacted[0].recorded_usage().is_none());
     }
 }

@@ -20,6 +20,10 @@ pub fn run_migrations(db: &mut Connection) -> Result<()> {
         migrate_to_v4(db)?;
     }
 
+    if current_version < 5 {
+        migrate_to_v5(db)?;
+    }
+
     Ok(())
 }
 
@@ -27,26 +31,60 @@ pub fn run_migrations(db: &mut Connection) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn migration_v4_adds_authoritative_usage_columns() {
-        let mut db = Connection::open_in_memory().unwrap();
-        run_migrations(&mut db).unwrap();
-
-        let columns = db
-            .prepare("PRAGMA table_info(messages)")
+    fn columns(db: &Connection) -> Vec<String> {
+        db.prepare("PRAGMA table_info(messages)")
             .unwrap()
             .query_map([], |row| row.get::<_, String>(1))
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
+            .unwrap()
+    }
+
+    #[test]
+    fn migration_v5_adds_timing_and_authoritative_usage_columns() {
+        let mut db = Connection::open_in_memory().unwrap();
+        run_migrations(&mut db).unwrap();
+
+        let columns = columns(&db);
         for column in [
             "input_tokens",
             "cache_read_tokens",
             "cache_write_tokens",
             "cost",
             "usage_authoritative",
+            "tokens_per_sec",
         ] {
             assert!(columns.iter().any(|candidate| candidate == column));
+        }
+    }
+
+    #[test]
+    fn migration_v5_converges_both_historical_v4_schemas() {
+        for extra_columns in [
+            "tokens_per_sec REAL",
+            "input_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER, cost REAL, usage_authoritative INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let mut db = Connection::open_in_memory().unwrap();
+            db.execute_batch(&format!(
+                "CREATE TABLE messages (id TEXT PRIMARY KEY, {extra_columns});
+                 CREATE TABLE migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+                 INSERT INTO migrations (version, applied_at) VALUES (4, 0);"
+            ))
+            .unwrap();
+
+            run_migrations(&mut db).unwrap();
+            let columns = columns(&db);
+            for column in [
+                "tokens_per_sec",
+                "input_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "cost",
+                "usage_authoritative",
+            ] {
+                assert!(columns.iter().any(|candidate| candidate == column));
+            }
+            assert_eq!(get_current_version(&db).unwrap(), 5);
         }
     }
 }
@@ -95,6 +133,7 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
             t1_ms INTEGER,
             tn_ms INTEGER,
             output_tokens INTEGER,
+            tokens_per_sec REAL,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         );
 
@@ -142,6 +181,23 @@ fn migrate_to_v1(db: &mut Connection) -> Result<()> {
 
 fn migrate_to_v4(db: &mut Connection) -> Result<()> {
     let tx = db.transaction()?;
+    // Precomputed inter-token TPS so a reloaded session shows the same t/s
+    // as the live stream instead of recomputing from token estimates.
+    let _ = tx.execute("ALTER TABLE messages ADD COLUMN tokens_per_sec REAL", []);
+    tx.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at) VALUES (4, strftime('%s', 'now'))",
+        params![],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_v5(db: &mut Connection) -> Result<()> {
+    let tx = db.transaction()?;
+    // v4 existed independently on the ACP branch (usage accounting) and on
+    // main (precomputed TPS). Ensure databases produced by either history
+    // converge on the complete schema.
+    let _ = tx.execute("ALTER TABLE messages ADD COLUMN tokens_per_sec REAL", []);
     let _ = tx.execute("ALTER TABLE messages ADD COLUMN input_tokens INTEGER", []);
     let _ = tx.execute(
         "ALTER TABLE messages ADD COLUMN cache_read_tokens INTEGER",
@@ -157,7 +213,7 @@ fn migrate_to_v4(db: &mut Connection) -> Result<()> {
         [],
     );
     tx.execute(
-        "INSERT OR IGNORE INTO migrations (version, applied_at) VALUES (4, strftime('%s', 'now'))",
+        "INSERT OR IGNORE INTO migrations (version, applied_at) VALUES (5, strftime('%s', 'now'))",
         params![],
     )?;
     tx.commit()?;

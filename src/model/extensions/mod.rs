@@ -303,15 +303,27 @@ fn merge_catalog(
 
         for (model_id, extension_model) in extension_models {
             let Some(existing) = provider.models.get_mut(model_id) else {
-                // Brand-new model: insert the extension spec as-is.
-                let Ok(model) = serde_json::from_value::<Model>(extension_model.clone()) else {
-                    crate::emit_log!(
-                        "Failed to deserialize catalog extension model {provider_id}/{model_id}"
-                    );
-                    continue;
-                };
-                provider.models.insert(model_id.clone(), model);
-                changed = true;
+                // Brand-new model: insert the extension spec as-is. New-model
+                // specs must be complete (not a patch fragment): inventing
+                // `id`/`name` for a `{"attachment": true}`-style fragment
+                // would fabricate a hollow entry with wrong defaults
+                // (tool_call=false, no limits/cost). Skip it so the next
+                // models.dev refresh or a completed spec resolves it instead
+                // of silently shipping a broken model.
+                match serde_json::from_value::<Model>(extension_model.clone()) {
+                    Ok(model) => {
+                        provider.models.insert(model_id.clone(), model);
+                        changed = true;
+                    }
+                    Err(err) => {
+                        crate::emit_log!(
+                            "Skipping catalog extension model {}/{}: incomplete new-model spec ({})",
+                            provider_id,
+                            model_id,
+                            err
+                        );
+                    }
+                }
                 continue;
             };
 
@@ -326,7 +338,9 @@ fn merge_catalog(
             }
             let Ok(model) = serde_json::from_value::<Model>(merged) else {
                 crate::emit_log!(
-                    "Failed to deserialize merged catalog extension model {provider_id}/{model_id}"
+                    "Failed to deserialize merged catalog extension model {}/{}",
+                    provider_id,
+                    model_id
                 );
                 continue;
             };
@@ -397,6 +411,39 @@ mod tests {
         assert!(models.get("deepseek-v4-flash").is_some());
         assert!(models.get("greg-1-mini").is_some());
         assert!(models.get("kimi-k2.5-lightning").is_some());
+    }
+
+    #[test]
+    fn catalog_extensions_patch_fragment_for_unknown_model_is_skipped() {
+        // A patch-style fragment (no `id`/`name`) for a model absent from
+        // models.dev must NOT fabricate a hollow entry: that would ship
+        // wrong defaults (tool_call=false, no limits/cost). It is skipped
+        // until models.dev carries the model or the spec is completed.
+        let mut providers = HashMap::new();
+        providers.insert(
+            "crof".to_string(),
+            Provider {
+                id: "crof".to_string(),
+                name: "Crof".to_string(),
+                api: String::new(),
+                doc: String::new(),
+                env: vec!["CROF_API_KEY".to_string()],
+                npm: "@ai-sdk/openai-compatible".to_string(),
+                models: HashMap::new(),
+            },
+        );
+        let mut extensions = serde_json::Map::new();
+        extensions.insert(
+            "crof".to_string(),
+            serde_json::json!({
+                "models": {
+                    "kimi-k2.5-lightning": { "attachment": true }
+                }
+            }),
+        );
+
+        assert!(!merge_catalog(&mut providers, &extensions));
+        assert!(!providers["crof"].models.contains_key("kimi-k2.5-lightning"));
     }
 
     #[test]

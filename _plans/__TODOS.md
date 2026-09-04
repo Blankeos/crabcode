@@ -466,7 +466,7 @@ I think this is how the TUI works already anyway right?
   - [x] Rename product-leaky debug artifacts (e.g. `/tmp/crabcode_sse_debug.log` in compatible provider) or feature-gate them — **~8.5 → ~8.7**
   - [x] Strip or move crabcode-flavored comments/tests (subagent / OpenCode / Grok Build history) out of the SDK tree — **~8.7 → ~9**
 
-- [ ] More accurate token spend? It doesn't really think about how many loops, it's just an estimate. Is opencode more accurate or also just an estimation
+- [x] More accurate token spend? It doesn't really think about how many loops, it's just an estimate. Is opencode more accurate or also just an estimation
 - [x] compacting context but when done, it doesnt show the 'Context compacted (56.1K -> 19.2K, saved 66%)' message part in the UI scrollable part.. Only see it after I close and open. (fixed: soft-compaction marker is mid-history; after /compact we now scroll+highlight the marker live)
 
 - [x] Light mode themes + grok build theme (people like the monochrome aesthetic)
@@ -491,8 +491,16 @@ I think this is how the TUI works already anyway right?
 
 - [ ] Extra padding in non compact mode. Or idk. controllable in tui? field? Right now it's close to the edge and it only looks good in some terminals.
 
-- [ ] /btw command
+- [x] /btw command
 
 - [x] wanna add tinyfish and monid (free search apis)
 
 - [x] Bug: Fix the questions.. There's too much gap between 1-3 choices and the "Type your own answer". Because we always want type your own to be visible. Just amke them in the same container, no justification in the middle and if overflowing, just make it scroll the entire question dialog.
+
+- [x] "default" thinking effort, make it dimmer when it's showing as what the default thinking effort is.. i.e. "medium" but default, make it dimmer. Only stay the same if it's explicit.
+
+- [ ] multiple accounts
+
+- [x] dialog backdrop
+
+- [ ] the prompt history cycler has some bugs, sometimes when crabcode crashes, I press `up` and it actually rewinded to the oldest prompt i had???

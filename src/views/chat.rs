@@ -16,6 +16,7 @@ use crate::ui::components::find::FindBar;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
 use crate::ui::components::wave_spinner::WaveSpinner;
+use crate::ui::markdown::streaming::render_markdown;
 use crate::ui::selection::non_selectable_style;
 
 pub const SUBAGENT_FOOTER_HEIGHT: u16 = 3;
@@ -146,6 +147,7 @@ pub fn render_chat(
     model_display: String,
     provider_name: String,
     reasoning_effort: Option<String>,
+    reasoning_effort_explicit: bool,
     colors: &ThemeColors,
     is_streaming: bool,
     is_compacting: bool,
@@ -154,6 +156,9 @@ pub fn render_chat(
     usage_text: &str,
     subagent_tabs: Option<SubagentTabs>,
     queued_messages: &[String],
+    btw_entry: Option<&crate::app::BtwEntry>,
+    btw_scroll: usize,
+    btw_panel_area: &mut Option<Rect>,
     find_bar: &mut FindBar,
     show_terminal_cursor: bool,
     session_title: Option<&str>,
@@ -182,6 +187,11 @@ pub fn render_chat(
     } else {
         queued_messages_height(queued_messages)
     };
+    let btw_height = if is_subagent_view {
+        0
+    } else {
+        btw_panel_height(btw_entry, size.width, colors)
+    };
     let above_status_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -189,7 +199,7 @@ pub fn render_chat(
                 Constraint::Length(0), // Reserved subagent header removed
                 Constraint::Min(0),    // Chat content
                 Constraint::Length(0), // Bottom padding
-                Constraint::Length(queue_height),
+                Constraint::Length(queue_height + btw_height),
                 Constraint::Length(input_height),
                 Constraint::Length(help_height),
                 Constraint::Length(1),
@@ -451,9 +461,27 @@ pub fn render_chat(
             );
         }
     } else {
+        let above_input = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(
+                [
+                    Constraint::Length(btw_height),
+                    Constraint::Length(queue_height),
+                ]
+                .as_ref(),
+            )
+            .split(above_status_chunks[3]);
+        render_btw_panel(
+            f,
+            above_input[0],
+            btw_entry,
+            btw_scroll,
+            btw_panel_area,
+            colors,
+        );
         render_queued_messages(
             f,
-            above_status_chunks[3],
+            above_input[1],
             queued_messages,
             &agent,
             colors,
@@ -467,6 +495,7 @@ pub fn render_chat(
             &model_display,
             &provider_name,
             reasoning_effort.as_deref(),
+            reasoning_effort_explicit,
             colors,
             show_terminal_cursor,
         );
@@ -1083,14 +1112,14 @@ fn render_queued_messages(
     }
 
     let mut lines = Vec::new();
-    let hint = if esc_cancel_primed {
-        "esc again to interrupt and send immediately"
+    let hint_prefix = if esc_cancel_primed {
+        "esc again to "
     } else {
-        "esc interrupt and send immediately"
+        "esc "
     };
-    let title = "Messages to submit after next tool call";
+    let hint_width = UnicodeWidthStr::width(hint_prefix) + UnicodeWidthStr::width("steer");
+    let title = "Queued message";
     let title_width = 2 + UnicodeWidthStr::width(title);
-    let hint_width = UnicodeWidthStr::width(hint);
     let show_hint = content_area.width as usize >= title_width + hint_width + 4;
 
     let mut header_spans = vec![
@@ -1109,8 +1138,16 @@ fn render_queued_messages(
             .saturating_sub((title_width + hint_width) as u16);
         header_spans.push(Span::raw(" ".repeat(spacer_width as usize)));
         header_spans.push(Span::styled(
-            hint,
-            cancel_hint_style(colors, esc_cancel_primed),
+            hint_prefix,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+        header_spans.push(Span::styled(
+            "steer",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     lines.push(Line::from(header_spans));
@@ -1196,6 +1233,263 @@ fn truncate_to_width(value: &str, max_width: usize) -> String {
     }
     rendered.push_str(ellipsis);
     rendered
+}
+
+pub(crate) const BTW_MAX_BODY_LINES: usize = 10;
+const BTW_TOP_PADDING: u16 = 1;
+const BTW_BOTTOM_PADDING: u16 = 1;
+/// Lines scrolled per mouse-wheel notch inside the `/btw` panel.
+const BTW_SCROLL_STEP: usize = 3;
+
+/// Text width available for the `/btw` answer body: panel width minus the
+/// left border (1), content inset (3) and the 2-space body indent.
+///
+/// Keep in sync with the layout in [`render_btw_panel`]: the content area
+/// there is `inner(2 + 1 wide)`, and the body is laid out at
+/// `content_area.width - 2`.
+pub(crate) fn btw_body_width(panel_width: u16) -> usize {
+    content_width_for_area_width(panel_width)
+}
+
+fn content_width_for_area_width(panel_width: u16) -> usize {
+    (panel_width as usize).saturating_sub(1 + 3 + 2).max(10)
+}
+
+/// Body viewport (visible answer lines) for a panel of the given height.
+/// Shared by the mouse-scroll clamp ([`App::btw_scroll_max`]) and render so
+/// the scroll window always matches the space that was actually allocated —
+/// critical when the terminal is too short for the full 10-line cap.
+pub(crate) fn btw_body_viewport(panel_height: u16) -> usize {
+    (panel_height as usize)
+        .saturating_sub((BTW_TOP_PADDING + BTW_BOTTOM_PADDING + 1) as usize)
+        .max(1)
+}
+
+/// Rendered `/btw` answer body: full markdown like the main transcript.
+/// Pending and error states stay plain styled text.
+pub(crate) fn btw_body_lines(
+    entry: &crate::app::BtwEntry,
+    content_width: usize,
+    colors: &ThemeColors,
+) -> Vec<Line<'static>> {
+    if let Some(answer) = entry.answer.as_deref() {
+        let mut lines = render_markdown(answer, content_width.max(10), colors);
+        if lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        return lines;
+    }
+    if let Some(error) = entry.error.as_deref() {
+        let style = Style::default().fg(colors.error);
+        let mut lines = Vec::new();
+        for source_line in format!("error: {error}").lines() {
+            for wrapped in wrap_plain_text_line(source_line, content_width.max(10)) {
+                lines.push(Line::styled(wrapped, style));
+            }
+        }
+        if lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        return lines;
+    }
+    vec![Line::styled(
+        "thinking…",
+        Style::default()
+            .fg(colors.text_weak)
+            .add_modifier(Modifier::DIM),
+    )]
+}
+
+/// Height of the `/btw` side-answer panel above the input (0 when absent).
+/// Capped at header + [`BTW_MAX_BODY_LINES`] + padding; longer answers
+/// scroll inside the panel instead of growing it.
+pub(crate) fn btw_panel_height(
+    entry: Option<&crate::app::BtwEntry>,
+    width: u16,
+    colors: &ThemeColors,
+) -> u16 {
+    let Some(entry) = entry else {
+        return 0;
+    };
+    if width == 0 {
+        return 0;
+    }
+    let total = btw_body_lines(entry, btw_body_width(width), colors)
+        .len()
+        .max(1);
+    let visible = total.min(BTW_MAX_BODY_LINES);
+    BTW_TOP_PADDING + (1 + visible) as u16 + BTW_BOTTOM_PADDING
+}
+
+fn wrap_plain_text_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for word in line.split_whitespace() {
+        let word_width = UnicodeWidthStr::width(word);
+        let separator_width = usize::from(!current.is_empty());
+        if !current.is_empty() && current_width + separator_width + word_width <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_width += separator_width + word_width;
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        if word_width <= width {
+            current.push_str(word);
+            current_width = word_width;
+        } else {
+            // Split overlong words on char boundaries.
+            let mut chunk = String::new();
+            let mut chunk_width = 0usize;
+            for ch in word.chars() {
+                let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if chunk_width + char_width > width && !chunk.is_empty() {
+                    lines.push(std::mem::take(&mut chunk));
+                    chunk_width = 0;
+                }
+                chunk.push(ch);
+                chunk_width += char_width;
+            }
+            current = chunk;
+            current_width = chunk_width;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+pub(crate) fn render_btw_panel(
+    f: &mut Frame,
+    area: Rect,
+    entry: Option<&crate::app::BtwEntry>,
+    scroll_offset: usize,
+    panel_area_out: &mut Option<Rect>,
+    colors: &ThemeColors,
+) {
+    let Some(entry) = entry else {
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    // Hit-test target for mouse-wheel scrolling over the panel.
+    *panel_area_out = Some(area);
+
+    let border_set = border::Set {
+        vertical_left: "┃",
+        ..border::PLAIN
+    };
+    let border = Block::new()
+        .borders(Borders::LEFT)
+        .border_set(border_set)
+        .border_style(Style::default().fg(colors.info));
+    let inner_area = border.inner(area);
+    let panel_bg = queued_messages_background(colors);
+    let bg = Block::default().style(Style::default().bg(panel_bg));
+    f.render_widget(bg, area);
+    f.render_widget(border, area);
+
+    let content_area = Rect {
+        x: inner_area.x.saturating_add(2),
+        y: inner_area.y.saturating_add(BTW_TOP_PADDING),
+        width: inner_area.width.saturating_sub(3),
+        height: inner_area
+            .height
+            .saturating_sub(BTW_TOP_PADDING + BTW_BOTTOM_PADDING),
+    };
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+
+    let mut lines = Vec::new();
+    // The panel is always laid out at the width `btw_panel_height` computed
+    // for, and its viewport is the actual allocated body height — never the
+    // 10-line cap. Both must match render or the wrap (total) and the max
+    // offset drift apart on small terminals.
+    let viewport = btw_body_viewport(area.height);
+    let content_width = content_width_for_area_width(area.width);
+    let body_all = btw_body_lines(entry, content_width, colors);
+    let total = body_all.len().max(1);
+    let max_offset = total.saturating_sub(viewport);
+    let start = scroll_offset.min(max_offset);
+    let end = (start + viewport).min(total);
+
+    let mut hint_text = String::from("esc dismiss");
+    if max_offset > 0 {
+        hint_text.push_str(&format!(" · ↑↓ {end}/{total}"));
+    }
+    let hint_width = UnicodeWidthStr::width(hint_text.as_str());
+    let title = format!("◐ btw — {}", entry.question);
+    let title = truncate_to_width(&title, content_area.width as usize);
+    let title_width = 2 + UnicodeWidthStr::width(title.as_str());
+    let show_hint = content_area.width as usize >= title_width + hint_width + 4;
+
+    let mut header_spans = vec![
+        Span::styled("•", Style::default().fg(colors.info)),
+        Span::raw(" "),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if show_hint {
+        let spacer_width = content_area
+            .width
+            .saturating_sub((title_width + hint_width) as u16);
+        header_spans.push(Span::raw(" ".repeat(spacer_width as usize)));
+        header_spans.push(Span::styled(
+            "esc ",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        ));
+        header_spans.push(Span::styled(
+            "dismiss",
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::BOLD),
+        ));
+        if max_offset > 0 {
+            header_spans.push(Span::styled(
+                format!(" · ↑↓ {end}/{total}"),
+                Style::default()
+                    .fg(colors.text_weak)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+    }
+    lines.push(Line::from(header_spans));
+
+    for mut body_line in body_all.into_iter().skip(start).take(viewport) {
+        // Keep the 2-space body indent; preserve each line's own style.
+        let mut spans = Vec::with_capacity(body_line.spans.len() + 1);
+        spans.push(Span::raw("  "));
+        spans.append(&mut body_line.spans);
+        let mut line = Line::from(spans);
+        line.style = body_line.style;
+        lines.push(line);
+    }
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).style(Style::default().bg(panel_bg)),
+        content_area,
+    );
 }
 
 fn render_subagent_footer(
@@ -1399,12 +1693,13 @@ fn centered_subagent_footer_content(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_status_layout_widths, compact_transcript_layout, display_agent_name,
-        natural_sticky_index, paint_sticky_overlay, render_chat, render_subagent_spinner_only,
-        resolve_sticky_display, sticky_overlay_height_for_span, sticky_overlay_rect,
-        streaming_status_spans, subagent_nav_width, subagent_streaming_status_spans,
-        user_message_body_end, ChatState, ChatStatusLayoutWidths, STICKY_UP_HYSTERESIS,
-        STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
+        btw_body_lines, btw_body_width, btw_panel_height, chat_status_layout_widths,
+        compact_transcript_layout, display_agent_name, natural_sticky_index, paint_sticky_overlay,
+        render_chat, render_subagent_spinner_only, resolve_sticky_display,
+        sticky_overlay_height_for_span, sticky_overlay_rect, streaming_status_spans,
+        subagent_nav_width, subagent_streaming_status_spans, user_message_body_end,
+        wrap_plain_text_line, ChatState, ChatStatusLayoutWidths, BTW_MAX_BODY_LINES,
+        STICKY_UP_HYSTERESIS, STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
     };
     use crate::theme::ThemeColors;
     use crate::ui::components::{
@@ -2137,6 +2432,7 @@ mod tests {
                     "model".into(),
                     "provider".into(),
                     None,
+                    false,
                     &colors,
                     false,
                     false,
@@ -2145,6 +2441,9 @@ mod tests {
                     "",
                     None,
                     &[],
+                    None,
+                    0,
+                    &mut None,
                     &mut find_bar,
                     true,
                     Some("Session"),
@@ -2195,6 +2494,7 @@ mod tests {
                     "model".into(),
                     "provider".into(),
                     None,
+                    false,
                     &colors,
                     false,
                     false,
@@ -2203,6 +2503,9 @@ mod tests {
                     "",
                     None,
                     &[],
+                    None,
+                    0,
+                    &mut None,
                     &mut find_bar,
                     true,
                     Some("Session"),
@@ -2273,6 +2576,7 @@ mod tests {
                     "model".into(),
                     "provider".into(),
                     None,
+                    false,
                     &colors,
                     false,
                     false,
@@ -2281,6 +2585,9 @@ mod tests {
                     "",
                     None,
                     &[],
+                    None,
+                    0,
+                    &mut None,
                     &mut find_bar,
                     true,
                     Some("Session"),
@@ -2299,5 +2606,71 @@ mod tests {
         assert!(chat_state.sticky_click_target.is_none());
         // Overlay helpers agree: no sticky height → no overlay rect.
         assert!(sticky_overlay_rect(chat_area, 0).is_none());
+    }
+
+    #[test]
+    fn btw_panel_height_is_zero_without_entry() {
+        assert_eq!(btw_panel_height(None, 80, &test_colors()), 0);
+    }
+
+    #[test]
+    fn btw_panel_height_grows_with_wrapped_answer() {
+        let colors = test_colors();
+        let pending =
+            crate::app::BtwEntry::pending(Some("s1".to_string()), "what broke?".to_string());
+        assert!(pending.is_pending());
+        let pending_height = btw_panel_height(Some(&pending), 80, &colors);
+        // Header + 1 body line + padding.
+        assert_eq!(pending_height, 1 + (1 + 1) + 1);
+
+        let mut answered =
+            crate::app::BtwEntry::pending(Some("s1".to_string()), "what broke?".to_string());
+        answered.answer = Some("one two three four five".to_string());
+        // Narrow width forces the answer onto 3 lines.
+        assert_eq!(
+            btw_panel_height(Some(&answered), 18, &colors),
+            1 + (1 + 3) + 1
+        );
+    }
+
+    #[test]
+    fn btw_panel_height_caps_long_answers() {
+        let colors = test_colors();
+        let mut answered =
+            crate::app::BtwEntry::pending(Some("s1".to_string()), "long answer".to_string());
+        answered.answer = Some(
+            (1..=30)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+        // Header + capped viewport + padding, regardless of total lines.
+        assert_eq!(
+            btw_panel_height(Some(&answered), 80, &colors),
+            1 + (1 + BTW_MAX_BODY_LINES) as u16 + 1
+        );
+        let lines = btw_body_lines(&answered, btw_body_width(80), &colors);
+        assert!(lines.len() > BTW_MAX_BODY_LINES);
+    }
+
+    #[test]
+    fn btw_body_renders_markdown_formatting() {
+        let colors = test_colors();
+        let mut answered =
+            crate::app::BtwEntry::pending(Some("s1".to_string()), "format me".to_string());
+        answered.answer = Some("Hello **bold** and `code`".to_string());
+        let lines = btw_body_lines(&answered, btw_body_width(80), &colors);
+        assert_eq!(lines.len(), 1);
+        // Bold + code produce multiple styled spans, not one plain span.
+        assert!(lines[0].spans.len() > 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("bold") && text.contains("code"));
+    }
+
+    #[test]
+    fn wrap_plain_text_line_splits_long_words() {
+        let lines = wrap_plain_text_line("abcdefghij", 4);
+        assert_eq!(lines, vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrap_plain_text_line("", 10), vec![String::new()]);
     }
 }

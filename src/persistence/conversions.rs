@@ -10,6 +10,8 @@ impl From<SessionMessage> for Message {
     fn from(msg: SessionMessage) -> Self {
         // Move the owned parts instead of cloning them: this conversion runs
         // for the whole transcript on every streaming snapshot.
+        let usage = msg.recorded_usage();
+        let is_compaction_summary = crate::session::compaction::is_compaction_summary(&msg);
         let mut parts: Vec<PersistenceMessagePart> = if msg.parts.is_empty() {
             let mut parts = Vec::new();
             if !msg.content.is_empty() {
@@ -77,6 +79,20 @@ impl From<SessionMessage> for Message {
             });
         }
 
+        // Compaction summaries store billed prompt/completion on a usage part
+        // for stats/cost. `tokens_used` is the context estimate (summary text),
+        // not billed buckets — otherwise reload inflates the model window.
+        let tokens_used = if is_compaction_summary {
+            msg.token_count
+                .map(|count| count.min(i32::MAX as usize) as i32)
+                .unwrap_or(0)
+        } else {
+            usage
+                .map(|usage| usage.tokens().min(i32::MAX as u64) as i32)
+                .or(msg.token_count.map(|c| c as i32))
+                .unwrap_or(0)
+        };
+
         Message {
             id: msg.id,
             session_id: 0,
@@ -92,7 +108,7 @@ impl From<SessionMessage> for Message {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64,
-            tokens_used: msg.token_count.map(|c| c as i32).unwrap_or(0),
+            tokens_used,
             model: msg.model.clone(),
             provider: msg.provider.clone(),
             agent_mode: msg.agent_mode.clone(),
@@ -106,6 +122,7 @@ impl From<SessionMessage> for Message {
             cache_write_tokens: msg.cache_write_tokens.map(|v| v as i64),
             cost: msg.cost,
             usage_authoritative: msg.usage_authoritative,
+            tokens_per_sec: msg.tokens_per_sec,
         }
     }
 }
@@ -200,6 +217,31 @@ impl TryFrom<Message> for SessionMessage {
             _ => return Err(anyhow::anyhow!("Unknown role: {}", msg.role)),
         };
 
+        // Billed output buckets are exact; prefer them over the persisted
+        // text estimate when backfilling rows stored before output_tokens
+        // existed. Never derive output tokens from `tokens_used` (total).
+        let billed_output: Option<usize> = {
+            let mut total = 0u64;
+            let mut found = false;
+            for part in &session_parts {
+                if part.part_type == "usage" {
+                    if let Some(output) = part.data.get("output").and_then(|v| v.as_u64()) {
+                        total = total.saturating_add(output);
+                        found = true;
+                    }
+                }
+            }
+            if found && total > 0 && total <= usize::MAX as u64 {
+                Some(total as usize)
+            } else {
+                None
+            }
+        };
+        let persisted_output_tokens: Option<usize> =
+            msg.output_tokens
+                .and_then(|v| if v > 0 { Some(v as usize) } else { None });
+        let output_tokens = persisted_output_tokens.or(billed_output);
+
         Ok(SessionMessage {
             id: msg.id,
             role,
@@ -229,9 +271,7 @@ impl TryFrom<Message> for SessionMessage {
             tn_ms: msg
                 .tn_ms
                 .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
-            output_tokens: msg
-                .output_tokens
-                .and_then(|v| if v > 0 { Some(v as usize) } else { None }),
+            output_tokens,
             input_tokens: msg
                 .input_tokens
                 .and_then(|v| if v > 0 { Some(v as usize) } else { None }),
@@ -251,7 +291,7 @@ impl TryFrom<Message> for SessionMessage {
             }),
             cost: msg.cost,
             usage_authoritative: msg.usage_authoritative,
-            tokens_per_sec: None,
+            tokens_per_sec: msg.tokens_per_sec.filter(|v| v.is_finite() && *v > 0.0),
             model: msg.model.clone(),
             provider: msg.provider.clone(),
             local_image_paths,
@@ -299,14 +339,15 @@ mod tests {
     fn authoritative_usage_round_trips_through_persistence() {
         let mut session_message = SessionMessage::assistant("hello");
         session_message.apply_usage(
-            crate::aisdk::chunk::LanguageModelUsage {
-                input_tokens: 100,
-                output_tokens: 25,
-                cache_read_tokens: 60,
-                cache_write_tokens: 10,
+            crate::aisdk::chunk::TokenUsage {
+                input: 100,
+                output: 25,
+                cache_read: 60,
+                cache_write: 10,
             },
             Some(0.0125),
         );
+        session_message.tokens_per_sec = Some(80.0);
 
         let restored = SessionMessage::try_from(Message::from(session_message)).unwrap();
         assert_eq!(restored.input_tokens, Some(100));
@@ -315,6 +356,7 @@ mod tests {
         assert_eq!(restored.cache_write_tokens, Some(10));
         assert_eq!(restored.cost, Some(0.0125));
         assert!(restored.usage_authoritative);
+        assert_eq!(restored.tokens_per_sec, Some(80.0));
     }
 
     #[test]
@@ -366,6 +408,7 @@ mod tests {
             cache_write_tokens: None,
             cost: None,
             usage_authoritative: false,
+            tokens_per_sec: None,
         };
 
         let restored = SessionMessage::try_from(message).unwrap();
@@ -440,5 +483,103 @@ mod tests {
         );
         assert_eq!(restored.reasoning.as_deref(), Some("thinking"));
         assert_eq!(restored.content, "I will inspect.\n\nDone.");
+    }
+
+    #[test]
+    fn usage_parts_set_tokens_used_from_billed_buckets() {
+        let mut session_message = SessionMessage::assistant("done");
+        session_message.token_count = Some(40);
+        session_message
+            .parts
+            .push(SessionMessagePart::usage(1_000, 200, 500, 50, 0.0123));
+
+        let persistence_message: Message = session_message.into();
+        assert_eq!(persistence_message.tokens_used, 1_750);
+        assert!(persistence_message
+            .parts
+            .iter()
+            .any(|part| part.part_type == "usage"));
+    }
+
+    #[test]
+    fn compaction_summary_keeps_context_token_count_not_billed_usage() {
+        let mut summary = SessionMessage::user(format!(
+            "{}\n{}",
+            crate::session::compaction::SUMMARY_PREFIX,
+            "handoff summary"
+        ));
+        summary.token_count = Some(40);
+        summary
+            .parts
+            .push(SessionMessagePart::usage(80_000, 400, 12_000, 1_000, 0.42));
+
+        let persistence_message: Message = summary.into();
+        assert_eq!(persistence_message.tokens_used, 40);
+        assert!(persistence_message
+            .parts
+            .iter()
+            .any(|part| part.part_type == "usage"));
+
+        let restored = SessionMessage::try_from(persistence_message).unwrap();
+        assert_eq!(restored.token_count, Some(40));
+        let usage = restored.recorded_usage().unwrap();
+        assert_eq!(usage.input, 80_000);
+        assert_eq!(usage.output, 400);
+    }
+
+    #[test]
+    fn precomputed_tps_round_trips_through_persistence() {
+        let mut session_message = SessionMessage::assistant("done");
+        session_message.output_tokens = Some(390);
+        session_message.tokens_per_sec = Some(145.0);
+
+        let persistence_message: Message = session_message.into();
+        assert_eq!(persistence_message.tokens_per_sec, Some(145.0));
+
+        let restored = SessionMessage::try_from(persistence_message).unwrap();
+        assert_eq!(restored.tokens_per_sec, Some(145.0));
+        assert_eq!(restored.output_tokens, Some(390));
+    }
+
+    #[test]
+    fn billed_output_backfills_output_tokens_not_total() {
+        // Legacy row stored before output_tokens existed: tokens_used is the
+        // billed total (in+out+cache), usage part carries exact buckets.
+        let mut legacy = Message {
+            id: "legacy".to_string(),
+            session_id: 1,
+            role: "assistant".to_string(),
+            parts: vec![PersistenceMessagePart {
+                part_type: "text".to_string(),
+                data: serde_json::json!({ "text": "done" }),
+            }],
+            timestamp: 0,
+            tokens_used: 8000,
+            model: None,
+            provider: None,
+            agent_mode: None,
+            duration_ms: 2600,
+            t0_ms: Some(1000),
+            t1_ms: Some(10_000),
+            tn_ms: Some(12_600),
+            output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost: None,
+            usage_authoritative: false,
+            tokens_per_sec: None,
+        };
+        legacy.parts.push(PersistenceMessagePart {
+            part_type: "usage".to_string(),
+            data: serde_json::json!({
+                "input": 7000, "output": 390,
+                "cache_read": 500, "cache_write": 110, "cost": 0.01,
+            }),
+        });
+
+        let restored = SessionMessage::try_from(legacy).unwrap();
+        // Output bucket (390), never the billed total (8000).
+        assert_eq!(restored.output_tokens, Some(390));
     }
 }

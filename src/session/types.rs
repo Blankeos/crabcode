@@ -88,6 +88,52 @@ impl MessagePart {
         }
     }
 
+    pub fn usage(input: u64, output: u64, cache_read: u64, cache_write: u64, cost: f64) -> Self {
+        Self {
+            part_type: "usage".to_string(),
+            data: serde_json::json!({
+                "input": input,
+                "output": output,
+                "cache_read": cache_read,
+                "cache_write": cache_write,
+                "cost": cost,
+            }),
+        }
+    }
+
+    pub fn recorded_usage(&self) -> Option<RecordedUsage> {
+        if self.part_type != "usage" {
+            return None;
+        }
+        Some(RecordedUsage {
+            input: self
+                .data
+                .get("input")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0),
+            output: self
+                .data
+                .get("output")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0),
+            cache_read: self
+                .data
+                .get("cache_read")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0),
+            cache_write: self
+                .data
+                .get("cache_write")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0),
+            cost: self
+                .data
+                .get("cost")
+                .and_then(JsonValue::as_f64)
+                .unwrap_or(0.0),
+        })
+    }
+
     pub fn text_value(&self) -> Option<&str> {
         self.data.get("text").and_then(|value| value.as_str())
     }
@@ -156,6 +202,34 @@ impl CompactionStats {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RecordedUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cost: f64,
+}
+
+impl RecordedUsage {
+    pub fn tokens(self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
+
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            input: self.input.saturating_add(other.input),
+            output: self.output.saturating_add(other.output),
+            cache_read: self.cache_read.saturating_add(other.cache_read),
+            cache_write: self.cache_write.saturating_add(other.cache_write),
+            cost: self.cost + other.cost,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub id: String,
@@ -192,17 +266,11 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn apply_usage(
-        &mut self,
-        usage: crate::aisdk::chunk::LanguageModelUsage,
-        cost: Option<f64>,
-    ) {
-        self.input_tokens = Some(usize::try_from(usage.input_tokens).unwrap_or(usize::MAX));
-        self.output_tokens = Some(usize::try_from(usage.output_tokens).unwrap_or(usize::MAX));
-        self.cache_read_tokens =
-            Some(usize::try_from(usage.cache_read_tokens).unwrap_or(usize::MAX));
-        self.cache_write_tokens =
-            Some(usize::try_from(usage.cache_write_tokens).unwrap_or(usize::MAX));
+    pub fn apply_usage(&mut self, usage: crate::aisdk::chunk::TokenUsage, cost: Option<f64>) {
+        self.input_tokens = Some(usize::try_from(usage.input).unwrap_or(usize::MAX));
+        self.output_tokens = Some(usize::try_from(usage.output).unwrap_or(usize::MAX));
+        self.cache_read_tokens = Some(usize::try_from(usage.cache_read).unwrap_or(usize::MAX));
+        self.cache_write_tokens = Some(usize::try_from(usage.cache_write).unwrap_or(usize::MAX));
         self.cost = cost;
         self.usage_authoritative = true;
     }
@@ -299,6 +367,22 @@ impl Message {
             compaction_stats: None,
             was_interrupted: false,
         }
+    }
+
+    pub fn recorded_usage(&self) -> Option<RecordedUsage> {
+        let mut total = RecordedUsage::default();
+        let mut found = false;
+        for part in &self.parts {
+            if let Some(usage) = part.recorded_usage() {
+                total = total.saturating_add(usage);
+                found = true;
+            }
+        }
+        found.then_some(total)
+    }
+
+    pub fn usage_cost(&self) -> f64 {
+        self.recorded_usage().map(|usage| usage.cost).unwrap_or(0.0)
     }
 
     pub fn append(&mut self, chunk: impl AsRef<str>) {
@@ -834,6 +918,24 @@ mod tests {
         let mut msg = Message::incomplete("test");
         msg.mark_complete();
         assert!(msg.is_complete);
+    }
+
+    #[test]
+    fn recorded_usage_sums_all_usage_parts() {
+        let mut msg = Message::assistant("done");
+        msg.parts
+            .push(MessagePart::usage(1_000, 100, 500, 50, 0.01));
+        msg.parts
+            .push(MessagePart::usage(2_000, 200, 750, 25, 0.02));
+
+        let usage = msg.recorded_usage().unwrap();
+        assert_eq!(usage.input, 3_000);
+        assert_eq!(usage.output, 300);
+        assert_eq!(usage.cache_read, 1_250);
+        assert_eq!(usage.cache_write, 75);
+        assert!((usage.cost - 0.03).abs() < f64::EPSILON);
+        assert_eq!(usage.tokens(), 4_625);
+        assert!((msg.usage_cost() - 0.03).abs() < f64::EPSILON);
     }
 
     #[test]
