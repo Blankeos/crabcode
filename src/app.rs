@@ -7782,11 +7782,15 @@ impl App {
                     return;
                 }
 
-                let undone_message: Option<crate::session::types::Message> = {
+                let (undone_message, removed_count): (
+                    Option<crate::session::types::Message>,
+                    usize,
+                ) = {
                     if let Some(session) = self.session_manager.get_current_session() {
+                        let len = session.messages.len();
                         let message = session.messages.get(idx).cloned();
                         session.messages.truncate(idx);
-                        message
+                        (message, len.saturating_sub(idx))
                     } else {
                         return;
                     }
@@ -7815,7 +7819,7 @@ impl App {
                 }
 
                 push_toast(Toast::new(
-                    format!("Removed {} message(s)", idx),
+                    format!("Removed {} message(s)", removed_count),
                     ToastLevel::Info,
                     None,
                 ));
