@@ -4373,6 +4373,10 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         self.chat_state.chat.toggle_thinking_visible();
                     }
+                    crate::views::which_key::WhichKeyAction::ShowCopyDialog => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.open_copy_actions_dialog();
+                    }
                     crate::views::which_key::WhichKeyAction::GoChild => {
                         self.overlay_focus = OverlayFocus::None;
                         let _ = self.switch_to_latest_child_session();
@@ -6307,6 +6311,12 @@ impl App {
                     description: "Full conversation as Markdown".to_string(),
                 },
                 ActionDialogItem {
+                    id: "input".to_string(),
+                    key: 'c',
+                    label: "Copy current chat input".to_string(),
+                    description: "Current draft in the input box".to_string(),
+                },
+                ActionDialogItem {
                     id: "id".to_string(),
                     key: 'i',
                     label: "Copy session id".to_string(),
@@ -6336,6 +6346,7 @@ impl App {
                 self.copy_text_with_toast(&text, "Provider+model id copied to clipboard");
             }
             "transcript" => self.copy_session_transcript(),
+            "input" => self.copy_current_chat_input(),
             "id" => {
                 let Some(id) = self.session_manager.get_current_session_id().cloned() else {
                     self.play_sound_event(crate::sound::SoundEvent::Error);
@@ -6370,6 +6381,20 @@ impl App {
         }
 
         self.close_copy_actions_dialog();
+    }
+
+    fn copy_current_chat_input(&mut self) {
+        let text = self.input.submission_text();
+        if text.trim().is_empty() {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "No chat input to copy",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+        self.copy_text_with_toast(&text, "Chat input copied to clipboard");
     }
 
     fn copy_text_with_toast(&mut self, text: &str, success_message: &'static str) {
