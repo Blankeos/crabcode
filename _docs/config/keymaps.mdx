@@ -1,0 +1,58 @@
+---
+title: Terminal Keymaps
+description: Line jumps, word jumps, and keyboard selection per terminal.
+---
+
+# Make your terminal keys behave
+
+To get a better keyboard experience on your terminal, map a few keys once. This is a good setup for other TUI apps as well.
+
+Built in: `Shift` + arrows selects, `y` copies, `esc` dismisses. `Opt` + arrows jumps by word, `Opt` + `Shift` selects by word.
+
+## WezTerm
+
+Use `wezterm@nightly` (stable is frozen at 2024) and enable kitty keyboard so `esc` registers instantly in TUIs instead of lagging ([known `esc` encoding bug](https://github.com/wezterm/wezterm/issues/7787)):
+
+```lua title=".wezterm.lua"
+config.enable_kitty_keyboard = true
+```
+
+```sh
+brew install --cask wezterm@nightly
+```
+
+### Optional: nicer keys everywhere else
+
+Not needed for crabcode — kitty already covers it. Recommended anyway for a good WezTerm experience in shells and other TUIs (`Ctrl-A` / `Ctrl-E` / `Ctrl-U` are readline standards for line start / end / delete to start; `ALT-b/f` for word jumps):
+
+```lua title=".wezterm.lua"
+{ key = "LeftArrow", mods = "CMD", action = wezterm.action.SendKey({ key = "a", mods = "CTRL" }) },
+{ key = "RightArrow", mods = "CMD", action = wezterm.action.SendKey({ key = "e", mods = "CTRL" }) },
+{ key = "Backspace", mods = "CMD", action = wezterm.action.SendKey({ key = "u", mods = "CTRL" }) },
+```
+
+`Ctrl-A` / `Ctrl-E` can't carry `Shift`, so select via `Shift` + `Home` / `End`:
+
+```lua title=".wezterm.lua"
+{ key = "LeftArrow", mods = "CMD|SHIFT", action = wezterm.action.SendKey({ key = "Home", mods = "SHIFT" }) },
+{ key = "RightArrow", mods = "CMD|SHIFT", action = wezterm.action.SendKey({ key = "End", mods = "SHIFT" }) },
+```
+
+Word jumps for shells:
+
+```lua title=".wezterm.lua"
+{ key = "LeftArrow", mods = "OPT", action = wezterm.action.SendKey({ key = "b", mods = "ALT" }) },
+{ key = "RightArrow", mods = "OPT", action = wezterm.action.SendKey({ key = "f", mods = "ALT" }) },
+```
+
+## Ghostty
+
+No config needed. Ghostty sends `Cmd` + `Shift` + arrows through as-is, so line selection works out of the box.
+
+## Debugging keys
+
+```sh
+CRABCODE_KEY_TRACE=1 crabcode
+```
+
+Shows each key as a toast. Wrong modifiers = fix your terminal config, not crabcode.

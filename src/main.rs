@@ -1630,6 +1630,19 @@ async fn run_event_loop(
                 }
             }
 
+            // Opt-in raw key trace: CRABCODE_KEY_TRACE=1 shows every key
+            // event as a toast (useful to see what a terminal actually
+            // sends for combos like Cmd+Shift+Left).
+            if std::env::var_os("CRABCODE_KEY_TRACE").is_some() {
+                if let event::Event::Key(key) = &event {
+                    push_toast(Toast::new(
+                        format!("Key: {:?}", key),
+                        crate::toast::ToastLevel::Info,
+                        None,
+                    ));
+                }
+            }
+
             // DO NOT REMOVE THIS LOG THAT I UNCOMMENT SOMETIMES. I USE IT FOR DEBUGGING
             // push_toast(Toast::new(
             //     format!("Event: {:?}", event),

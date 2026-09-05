@@ -3361,6 +3361,35 @@ impl App {
         had_selection
     }
 
+    /// Shift+navigation extends (or shrinks) the input selection instead of
+    /// clearing it, so the copy tooltip must stay alive across these keys.
+    fn is_selection_extend_key(key: KeyEvent) -> bool {
+        key.modifiers.contains(event::KeyModifiers::SHIFT)
+            && matches!(
+                key.code,
+                KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Home
+                    | KeyCode::End
+            )
+    }
+
+    /// Mirror the mouse-drag behavior for keyboard selections: show the `y`
+    /// copy bar as soon as Shift+arrows select text, hide it once the
+    /// selection is gone.
+    fn sync_input_selection_action_bar(&mut self) {
+        if self.input.has_selection() && !self.input.get_selected_text().is_empty() {
+            self.show_selection_action_bar_for(SelectionActionTarget::Input);
+        } else if matches!(
+            self.selection_action_bar,
+            Some(state) if state.target == SelectionActionTarget::Input
+        ) {
+            self.selection_action_bar = None;
+        }
+    }
+
     fn add_selection_to_prompt(&mut self, target: SelectionActionTarget) -> bool {
         if target != SelectionActionTarget::Chat {
             return false;
@@ -3740,6 +3769,7 @@ impl App {
                 } else {
                     let input_handled = self.input.handle_event(key);
                     self.update_suggestions();
+                    self.sync_input_selection_action_bar();
                     input_handled
                 }
             }
@@ -4727,7 +4757,17 @@ impl App {
     }
 
     fn handle_input_and_app_keys(&mut self, key: KeyEvent) {
-        if self.selection_action_bar.is_some() {
+        if Self::is_selection_extend_key(key) {
+            // Shift+arrows extend the input selection: clear any chat-side
+            // selection/bar but never the input selection itself.
+            self.chat_state.chat.selection.clear();
+            if !matches!(
+                self.selection_action_bar,
+                Some(state) if state.target == SelectionActionTarget::Input
+            ) {
+                self.selection_action_bar = None;
+            }
+        } else if self.selection_action_bar.is_some() {
             self.dismiss_selection_actions();
         } else {
             self.chat_state.chat.selection.clear();
@@ -4736,6 +4776,7 @@ impl App {
         if self.is_subagent_session_active() {
             if Self::is_input_navigation_key(key) {
                 self.input.handle_event(key);
+                self.sync_input_selection_action_bar();
             }
             clear_suggestions(&mut self.suggestions_popup_state);
             self.overlay_focus = OverlayFocus::None;
@@ -4797,11 +4838,13 @@ impl App {
                         self.input.clear();
                     }
                     self.clear_suggestions_and_blur();
+                    self.sync_input_selection_action_bar();
                 }
             }
             _ => {
                 self.input.handle_event(key);
                 self.update_suggestions();
+                self.sync_input_selection_action_bar();
             }
         }
     }

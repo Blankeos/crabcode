@@ -208,11 +208,13 @@ impl Input {
         }
     }
 
-    fn move_to_line_start(&mut self) {
+    fn move_to_line_start(&mut self, extend: bool) {
         self.reveal_cursor_after_key_input();
         self.preferred_visual_col = None;
+        self.begin_extend_or_cancel(extend);
         let (row, _) = self.textarea.cursor();
         self.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
+        self.cancel_empty_selection();
     }
 
     fn line_end_col(&self, row: usize) -> usize {
@@ -223,13 +225,55 @@ impl Input {
             .unwrap_or(0)
     }
 
-    fn move_to_line_end(&mut self) {
+    fn move_to_line_end(&mut self, extend: bool) {
         self.reveal_cursor_after_key_input();
         self.preferred_visual_col = None;
+        self.begin_extend_or_cancel(extend);
         let (row, _) = self.textarea.cursor();
         let col = self.line_end_col(row);
         self.textarea
             .move_cursor(CursorMove::Jump(row as u16, col as u16));
+        self.cancel_empty_selection();
+    }
+
+    /// Selection plumbing shared by Cmd/Opt+Arrow jumps: with `extend`
+    /// (Shift held) start/continue the selection, otherwise clear it.
+    fn begin_extend_or_cancel(&mut self, extend: bool) {
+        if extend {
+            if !self.textarea.is_selecting() {
+                self.textarea.start_selection();
+            }
+        } else {
+            self.textarea.cancel_selection();
+        }
+    }
+
+    /// Option+Arrow word jump (mirrors tui-textarea's Ctrl+Arrow handling,
+    /// which terminals don't send for macOS Option). With `extend`, behaves
+    /// like Shift+Arrow: starts/continues the selection instead of clearing.
+    fn move_word_with_selection(&mut self, forward: bool, extend: bool) {
+        self.reveal_cursor_after_key_input();
+        self.preferred_visual_col = None;
+        self.begin_extend_or_cancel(extend);
+        self.textarea.move_cursor(if forward {
+            CursorMove::WordForward
+        } else {
+            CursorMove::WordBack
+        });
+        self.cancel_empty_selection();
+    }
+
+    /// Option+Up/Down paragraph jump (mirrors Ctrl+Up/Down in tui-textarea).
+    fn move_paragraph_with_selection(&mut self, forward: bool, extend: bool) {
+        self.reveal_cursor_after_key_input();
+        self.preferred_visual_col = None;
+        self.begin_extend_or_cancel(extend);
+        self.textarea.move_cursor(if forward {
+            CursorMove::ParagraphForward
+        } else {
+            CursorMove::ParagraphBack
+        });
+        self.cancel_empty_selection();
     }
 
     fn delete_to_line_start(&mut self) {
@@ -701,11 +745,11 @@ impl Input {
             }
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
             KeyCode::Char('a') if event.modifiers == KeyModifiers::CONTROL => {
-                self.move_to_line_start();
+                self.move_to_line_start(false);
                 true
             }
             KeyCode::Char('e') if event.modifiers == KeyModifiers::CONTROL => {
-                self.move_to_line_end();
+                self.move_to_line_end(false);
                 true
             }
             KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
@@ -715,11 +759,37 @@ impl Input {
                 true
             }
             KeyCode::Left if has_command_modifier(event.modifiers) => {
-                self.move_to_line_start();
+                self.move_to_line_start(event.modifiers.contains(KeyModifiers::SHIFT));
                 true
             }
             KeyCode::Right if has_command_modifier(event.modifiers) => {
-                self.move_to_line_end();
+                self.move_to_line_end(event.modifiers.contains(KeyModifiers::SHIFT));
+                true
+            }
+            // macOS Option(+Shift)+Arrow: tui-textarea only word-jumps on
+            // Ctrl+Arrow, while terminals report Option as ALT. Handle it
+            // here so Opt+Left/Right moves by word and Opt+Shift extends
+            // the selection by word (ditto paragraphs for Up/Down).
+            KeyCode::Left if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_word_with_selection(false, event.modifiers.contains(KeyModifiers::SHIFT));
+                true
+            }
+            KeyCode::Right if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_word_with_selection(true, event.modifiers.contains(KeyModifiers::SHIFT));
+                true
+            }
+            KeyCode::Up if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_paragraph_with_selection(
+                    false,
+                    event.modifiers.contains(KeyModifiers::SHIFT),
+                );
+                true
+            }
+            KeyCode::Down if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_paragraph_with_selection(
+                    true,
+                    event.modifiers.contains(KeyModifiers::SHIFT),
+                );
                 true
             }
             KeyCode::Tab => false,
@@ -3401,5 +3471,55 @@ mod tests {
             buffer.cell(general_pos).expect("general cell").style().fg,
             Some(colors.success)
         );
+    }
+
+    #[test]
+    fn test_alt_shift_left_extends_selection_by_word() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        // Cursor at end; Opt+Shift+Left should select "world".
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Left,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert_eq!(input.get_selected_text(), "world");
+    }
+
+    #[test]
+    fn test_alt_shift_right_extends_selection_by_word() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        input.textarea.move_cursor(CursorMove::Jump(0, 0));
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Right,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert_eq!(input.get_selected_text(), "hello ");
+    }
+
+    #[test]
+    fn test_alt_left_without_shift_moves_by_word_without_selection() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        assert!(input.handle_event(modified_key_event(KeyCode::Left, KeyModifiers::ALT)));
+        assert!(!input.has_selection());
+        assert_eq!(input.textarea.cursor(), (0, 6));
+    }
+
+    #[test]
+    fn test_cmd_shift_left_selects_to_line_start() {
+        // Ghostty sends the real combo (SUPER+SHIFT); WezTerm remaps to
+        // Shift+Home instead. Both must select to line start.
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Left,
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert_eq!(input.get_selected_text(), "hello world");
+        assert_eq!(input.textarea.cursor(), (0, 0));
     }
 }
