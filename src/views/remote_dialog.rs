@@ -245,6 +245,28 @@ pub fn render_remote_dialog(
     );
     f.render_widget(&state.pin_textarea, state.pin_area);
 
+    // Hardware cursor follows the focused text field so terminal cursor
+    // effects (e.g. ghostty shaders) and IME popups track typing.
+    {
+        use unicode_width::UnicodeWidthStr;
+        let (area, textarea) = match state.focus {
+            RemoteDialogFocus::Bind => (state.bind_area, &state.bind_textarea),
+            RemoteDialogFocus::Pin => (state.pin_area, &state.pin_textarea),
+        };
+        if area.width > 0 && area.height > 0 {
+            let (row, col) = textarea.cursor();
+            let line = textarea.lines().get(row).cloned().unwrap_or_default();
+            let prefix: String = line.chars().take(col).collect();
+            let x = area
+                .x
+                .saturating_add((prefix.width() as u16).min(area.width.saturating_sub(1)));
+            let y = area
+                .y
+                .saturating_add((row as u16).min(area.height.saturating_sub(1)));
+            f.set_cursor_position((x, y));
+        }
+    }
+
     let footer = if submit_enabled {
         Line::from(vec![
             Span::styled(

@@ -202,6 +202,27 @@ pub fn render_session_rename_dialog(
 
     f.render_widget(&dialog_state.input_textarea, chunks[3]);
 
+    // Hardware cursor follows the text field so terminal cursor effects
+    // (e.g. ghostty shaders) and IME popups track typing.
+    if chunks[3].width > 0 && chunks[3].height > 0 {
+        use unicode_width::UnicodeWidthStr;
+        let (row, col) = dialog_state.input_textarea.cursor();
+        let line = dialog_state
+            .input_textarea
+            .lines()
+            .get(row)
+            .cloned()
+            .unwrap_or_default();
+        let prefix: String = line.chars().take(col).collect();
+        let x = chunks[3]
+            .x
+            .saturating_add((prefix.width() as u16).min(chunks[3].width.saturating_sub(1)));
+        let y = chunks[3]
+            .y
+            .saturating_add((row as u16).min(chunks[3].height.saturating_sub(1)));
+        f.set_cursor_position((x, y));
+    }
+
     let footer_line = Line::from(vec![Span::styled(
         "enter submit",
         Style::default()

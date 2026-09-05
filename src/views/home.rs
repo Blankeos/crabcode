@@ -94,6 +94,7 @@ pub fn render_home(
     btw_entry: Option<&crate::app::BtwEntry>,
     btw_scroll: usize,
     btw_panel_area: &mut Option<ratatui::layout::Rect>,
+    show_terminal_cursor: bool,
 ) {
     let size = f.area();
 
@@ -245,7 +246,7 @@ pub fn render_home(
         reasoning_effort.as_deref(),
         reasoning_effort_explicit,
         colors,
-        true,
+        show_terminal_cursor,
     );
     render_btw_panel(
         f,

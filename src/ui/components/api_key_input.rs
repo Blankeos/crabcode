@@ -166,6 +166,23 @@ impl ApiKeyInput {
 
         frame.render_widget(&self.text_area, chunks[1]);
 
+        // Hardware cursor follows the text field so terminal cursor effects
+        // (e.g. ghostty shaders) and IME popups track typing, instead of
+        // staying stuck on the chat input behind the dialog.
+        if chunks[1].width > 0 && chunks[1].height > 0 {
+            use unicode_width::UnicodeWidthStr;
+            let (row, col) = self.text_area.cursor();
+            let line = self.text_area.lines().get(row).cloned().unwrap_or_default();
+            let prefix: String = line.chars().take(col).collect();
+            let x = chunks[1]
+                .x
+                .saturating_add((prefix.width() as u16).min(chunks[1].width.saturating_sub(1)));
+            let y = chunks[1]
+                .y
+                .saturating_add((row as u16).min(chunks[1].height.saturating_sub(1)));
+            frame.set_cursor_position((x, y));
+        }
+
         let footer_line = Line::from(vec![
             Span::styled(
                 "enter",

@@ -12007,6 +12007,10 @@ impl App {
                     btw_entry.as_ref(),
                     self.btw_scroll,
                     &mut self.btw_panel_area,
+                    matches!(
+                        self.overlay_focus,
+                        OverlayFocus::None | OverlayFocus::SuggestionsPopup
+                    ),
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -12080,7 +12084,10 @@ impl App {
                     self.btw_scroll,
                     &mut self.btw_panel_area,
                     &mut self.find_bar,
-                    self.overlay_focus == OverlayFocus::None,
+                    matches!(
+                        self.overlay_focus,
+                        OverlayFocus::None | OverlayFocus::SuggestionsPopup
+                    ),
                     self.session_manager
                         .get_current_session()
                         .map(|s| s.title.as_str()),

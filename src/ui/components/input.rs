@@ -543,7 +543,7 @@ impl Input {
 
         let visible_lines = v_chunks[1].height as usize;
         self.update_viewport(visible_lines, wrap_width);
-        self.render_wrapped_textarea(frame, v_chunks[1], colors);
+        self.render_wrapped_textarea(frame, v_chunks[1], colors, show_terminal_cursor);
 
         // Set the physical terminal cursor position to the textarea's cursor
         // location so that the IME candidate window appears at the correct position.
@@ -1520,16 +1520,28 @@ impl Input {
         frame: &mut ratatui::Frame,
         area: Rect,
         colors: &ThemeColors,
+        show_cursor: bool,
     ) {
         if area.width == 0 || area.height == 0 {
             return;
         }
 
         let text_style = self.textarea.style();
-        let cursor_style = self.textarea.cursor_style();
+        let cursor_style = if show_cursor {
+            self.textarea.cursor_style()
+        } else {
+            text_style
+        };
         let selection_style = self.textarea.selection_style();
         let selection_range = self.textarea.selection_range();
-        let cursor = self.textarea.cursor();
+        // When unfocused (dialog overlay open) suppress the fake block cursor
+        // so it doesn't linger behind/near the dialog. The hardware cursor is
+        // also hidden/moved elsewhere in that case.
+        let cursor = if show_cursor {
+            self.textarea.cursor()
+        } else {
+            (usize::MAX, usize::MAX)
+        };
         let visual_lines = self.visual_lines(area.width as usize);
 
         let text = if self.is_empty() && !self.textarea.placeholder_text().is_empty() {
