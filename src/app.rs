@@ -16295,13 +16295,11 @@ mod tests {
         assert!(app.switch_to_session(&deleted_id));
 
         app.handle_keys(KeyEvent::new(
-            KeyCode::Char('d'),
+            KeyCode::Char('o'),
             event::KeyModifiers::CONTROL,
         ));
-        app.handle_keys(KeyEvent::new(
-            KeyCode::Char('d'),
-            event::KeyModifiers::CONTROL,
-        ));
+        app.handle_keys(KeyEvent::new(KeyCode::Char('d'), event::KeyModifiers::NONE));
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE));
 
         assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
         assert!(app.sessions_dialog_state.dialog.is_visible());
@@ -16324,13 +16322,11 @@ mod tests {
         app.open_sessions_dialog();
 
         app.handle_keys(KeyEvent::new(
-            KeyCode::Char('d'),
+            KeyCode::Char('o'),
             event::KeyModifiers::CONTROL,
         ));
-        app.handle_keys(KeyEvent::new(
-            KeyCode::Char('d'),
-            event::KeyModifiers::CONTROL,
-        ));
+        app.handle_keys(KeyEvent::new(KeyCode::Char('d'), event::KeyModifiers::NONE));
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE));
 
         assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
         assert!(app.sessions_dialog_state.dialog.is_visible());
@@ -16359,9 +16355,10 @@ mod tests {
         assert!(app.switch_to_session(&archived_id));
 
         app.handle_keys(KeyEvent::new(
-            KeyCode::Char('a'),
+            KeyCode::Char('o'),
             event::KeyModifiers::CONTROL,
         ));
+        app.handle_keys(KeyEvent::new(KeyCode::Char('a'), event::KeyModifiers::NONE));
 
         assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
         assert!(app.sessions_dialog_state.dialog.is_visible());

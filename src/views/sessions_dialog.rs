@@ -58,6 +58,7 @@ pub fn session_loading_glyph(frame: usize) -> &'static str {
 pub struct SessionsDialogState {
     pub dialog: Dialog,
     pub pending_delete: Option<String>,
+    pub item_menu: Option<SessionsItemMenu>,
     pub filter: SessionsDialogFilter,
     workspace_group_ids: HashMap<String, i64>,
     current_workspace_id: Option<i64>,
@@ -69,6 +70,7 @@ impl SessionsDialogState {
         Self {
             dialog,
             pending_delete: None,
+            item_menu: None,
             filter: SessionsDialogFilter::All,
             workspace_group_ids: HashMap::new(),
             current_workspace_id: None,
@@ -84,6 +86,7 @@ impl SessionsDialogState {
         Self {
             dialog: with_sessions_actions(dialog, SessionsDialogFilter::All, false),
             pending_delete: None,
+            item_menu: None,
             filter: SessionsDialogFilter::All,
             workspace_group_ids: HashMap::new(),
             current_workspace_id: None,
@@ -92,6 +95,11 @@ impl SessionsDialogState {
     }
 
     pub fn refresh_items(&mut self, items: Vec<DialogItem>) {
+        // The item menu acts on a snapshot of the selected row; rebuilds can
+        // move or remove that row, so never keep a stale menu (or an armed
+        // delete nothing can confirm) across a refresh.
+        self.item_menu = None;
+        self.pending_delete = None;
         let previous_dialog = self.dialog.clone();
         let title = self.dialog.title.clone();
         let was_visible = self.dialog.is_visible();
@@ -251,6 +259,10 @@ pub fn render_sessions_dialog(
             with_sessions_actions(dialog_state.dialog.clone(), dialog_state.filter, false);
     }
     dialog_state.dialog.render(f, area, colors);
+    if let Some(menu) = dialog_state.item_menu.clone() {
+        let delete_armed = dialog_state.pending_delete.as_ref() == Some(&menu.session_id);
+        render_item_menu(f, &menu, delete_armed, area, colors);
+    }
 }
 
 pub fn handle_sessions_dialog_key_event(
@@ -259,7 +271,26 @@ pub fn handle_sessions_dialog_key_event(
 ) -> SessionsDialogAction {
     let was_visible = dialog_state.dialog.is_visible();
 
-    if event.code == KeyCode::Char('n') && event.modifiers == KeyModifiers::CONTROL {
+    // Modal item menu (ctrl+o) takes all keys while open, lazygit-style.
+    if dialog_state.item_menu.is_some() {
+        return handle_item_menu_key_event(dialog_state, event);
+    }
+
+    if event.code == KeyCode::Char('o') && event.modifiers == KeyModifiers::CONTROL {
+        if open_item_menu(dialog_state) {
+            return SessionsDialogAction::Handled;
+        }
+        return SessionsDialogAction::NotHandled;
+    }
+
+    // While the user is typing in search, ctrl+n must move the cursor down
+    // instead of opening the new-session flow.
+    let search_typing = !dialog_state.dialog.search_query.is_empty();
+
+    if !search_typing
+        && event.code == KeyCode::Char('n')
+        && event.modifiers == KeyModifiers::CONTROL
+    {
         return SessionsDialogAction::NewSession;
     }
 
@@ -306,43 +337,9 @@ pub fn handle_sessions_dialog_key_event(
         }
     }
 
-    if event.code == KeyCode::Char('p') && event.modifiers == KeyModifiers::CONTROL {
-        if let Some(selected) = dialog_state.dialog.get_selected() {
-            return SessionsDialogAction::TogglePin(selected.id.clone());
-        }
-    }
-
-    if event.code == KeyCode::Char('a') && event.modifiers == KeyModifiers::CONTROL {
-        if let Some(selected) = dialog_state.dialog.get_selected() {
-            return SessionsDialogAction::Archive(selected.id.clone());
-        }
-    }
-
-    if event.code == KeyCode::Char('d') && event.modifiers == KeyModifiers::CONTROL {
-        if let Some(selected) = dialog_state.dialog.get_selected() {
-            if dialog_state.pending_delete.as_ref() == Some(&selected.id) {
-                dialog_state.pending_delete = None;
-                return SessionsDialogAction::Delete(selected.id.clone());
-            }
-            dialog_state.pending_delete = Some(selected.id.clone());
-            return SessionsDialogAction::PendingDelete(selected.id.clone());
-        }
-    }
-
     if event.code == KeyCode::Esc && dialog_state.pending_delete.is_some() {
         dialog_state.pending_delete = None;
         return SessionsDialogAction::Handled;
-    }
-
-    if event.code == KeyCode::Char('r') && event.modifiers == KeyModifiers::CONTROL {
-        if let Some(selected) = dialog_state.dialog.get_selected() {
-            let title = if selected.provider_id.is_empty() {
-                selected.name.clone()
-            } else {
-                selected.provider_id.clone()
-            };
-            return SessionsDialogAction::Rename(selected.id.clone(), title);
-        }
     }
 
     let handled = match event.code {
@@ -383,6 +380,10 @@ pub fn handle_sessions_dialog_mouse_event(
     dialog_state: &mut SessionsDialogState,
     event: MouseEvent,
 ) -> SessionsDialogAction {
+    // Modal item menu: clicks neither select nor dismiss behind it.
+    if dialog_state.item_menu.is_some() {
+        return SessionsDialogAction::Handled;
+    }
     let was_visible = dialog_state.dialog.is_visible();
     let previous_index = dialog_state.dialog.selected_index;
 
@@ -479,7 +480,7 @@ fn with_sessions_actions(
         return dialog.with_actions(vec![
             FooterAction {
                 label: "Confirm".to_string(),
-                key: "ctrl+d".to_string(),
+                key: "enter".to_string(),
             },
             FooterAction {
                 label: "Cancel".to_string(),
@@ -498,22 +499,427 @@ fn with_sessions_actions(
             key: "ctrl+n".to_string(),
         },
         FooterAction {
-            label: "Pin".to_string(),
-            key: "ctrl+p".to_string(),
-        },
-        FooterAction {
-            label: "Archive".to_string(),
-            key: "ctrl+a".to_string(),
-        },
-        FooterAction {
-            label: "Delete".to_string(),
-            key: "ctrl+d".to_string(),
-        },
-        FooterAction {
-            label: "Rename".to_string(),
-            key: "ctrl+r".to_string(),
+            label: "Options".to_string(),
+            key: "ctrl+o".to_string(),
         },
     ])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemMenuEntry {
+    Pin,
+    Archive,
+    Unarchive,
+    Rename,
+    Delete,
+}
+
+impl ItemMenuEntry {
+    const ALL: [Self; 5] = [
+        Self::Pin,
+        Self::Archive,
+        Self::Unarchive,
+        Self::Rename,
+        Self::Delete,
+    ];
+
+    fn shortcut(self) -> char {
+        match self {
+            Self::Pin => 'p',
+            Self::Archive => 'a',
+            Self::Unarchive => 'u',
+            Self::Rename => 'r',
+            Self::Delete => 'd',
+        }
+    }
+}
+
+/// Lazygit-style per-item options menu opened with ctrl+o. Inapplicable rows
+/// stay visible but disabled (dimmed + crossed out, skipped in navigation),
+/// so it's always clear why an option can't run here.
+#[derive(Debug, Clone)]
+pub struct SessionsItemMenu {
+    session_id: String,
+    session_title: String,
+    pinned: bool,
+    archived: bool,
+    selected: usize,
+}
+
+impl SessionsItemMenu {
+    fn is_enabled(&self, entry: ItemMenuEntry) -> bool {
+        match entry {
+            ItemMenuEntry::Pin | ItemMenuEntry::Rename | ItemMenuEntry::Delete => true,
+            ItemMenuEntry::Archive => !self.archived,
+            ItemMenuEntry::Unarchive => self.archived,
+        }
+    }
+
+    fn disabled_reason(&self, entry: ItemMenuEntry) -> Option<&'static str> {
+        match entry {
+            ItemMenuEntry::Archive if self.archived => Some("already archived"),
+            ItemMenuEntry::Unarchive if !self.archived => Some("not archived"),
+            _ => None,
+        }
+    }
+
+    fn label(&self, entry: ItemMenuEntry, delete_armed: bool) -> String {
+        match entry {
+            ItemMenuEntry::Pin => {
+                if self.pinned {
+                    "Unpin".to_string()
+                } else {
+                    "Pin".to_string()
+                }
+            }
+            ItemMenuEntry::Archive => "Archive".to_string(),
+            ItemMenuEntry::Unarchive => "Unarchive".to_string(),
+            ItemMenuEntry::Rename => "Rename".to_string(),
+            ItemMenuEntry::Delete => {
+                if delete_armed {
+                    "Confirm delete".to_string()
+                } else {
+                    "Delete".to_string()
+                }
+            }
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let mut index = self.selected as isize;
+        loop {
+            index += delta;
+            if index < 0 || index >= ItemMenuEntry::ALL.len() as isize {
+                break;
+            }
+            if self.is_enabled(ItemMenuEntry::ALL[index as usize]) {
+                self.selected = index as usize;
+                break;
+            }
+        }
+    }
+}
+
+fn open_item_menu(dialog_state: &mut SessionsDialogState) -> bool {
+    let Some(selected) = dialog_state.dialog.get_selected() else {
+        return false;
+    };
+    let id = selected.id.clone();
+    let title = if selected.provider_id.is_empty() {
+        selected.name.clone()
+    } else {
+        selected.provider_id.clone()
+    };
+    let pinned = dialog_state
+        .last_list_signature
+        .as_ref()
+        .and_then(|signature| {
+            signature
+                .rows
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.pinned)
+        })
+        .unwrap_or_else(|| selected.name.contains('★'));
+    dialog_state.item_menu = Some(SessionsItemMenu {
+        session_id: id,
+        session_title: title,
+        pinned,
+        archived: dialog_state.filter == SessionsDialogFilter::Archived,
+        selected: 0,
+    });
+    true
+}
+
+fn close_item_menu(dialog_state: &mut SessionsDialogState) {
+    dialog_state.item_menu = None;
+    dialog_state.pending_delete = None;
+}
+
+fn run_item_menu_entry(
+    dialog_state: &mut SessionsDialogState,
+    entry: ItemMenuEntry,
+) -> SessionsDialogAction {
+    let Some(menu) = dialog_state.item_menu.clone() else {
+        return SessionsDialogAction::Handled;
+    };
+    if !menu.is_enabled(entry) {
+        return SessionsDialogAction::Handled;
+    }
+    let id = menu.session_id.clone();
+    match entry {
+        ItemMenuEntry::Pin => {
+            close_item_menu(dialog_state);
+            SessionsDialogAction::TogglePin(id)
+        }
+        ItemMenuEntry::Archive | ItemMenuEntry::Unarchive => {
+            close_item_menu(dialog_state);
+            SessionsDialogAction::Archive(id)
+        }
+        ItemMenuEntry::Rename => {
+            close_item_menu(dialog_state);
+            SessionsDialogAction::Rename(id, menu.session_title.clone())
+        }
+        ItemMenuEntry::Delete => {
+            if dialog_state.pending_delete.as_ref() == Some(&id) {
+                close_item_menu(dialog_state);
+                SessionsDialogAction::Delete(id)
+            } else {
+                dialog_state.pending_delete = Some(id.clone());
+                if let Some(menu) = dialog_state.item_menu.as_mut() {
+                    // Park selection on Delete so Enter confirms the armed delete.
+                    menu.selected = ItemMenuEntry::ALL
+                        .iter()
+                        .position(|entry| *entry == ItemMenuEntry::Delete)
+                        .unwrap_or(menu.selected);
+                }
+                SessionsDialogAction::PendingDelete(id)
+            }
+        }
+    }
+}
+
+fn handle_item_menu_key_event(
+    dialog_state: &mut SessionsDialogState,
+    event: KeyEvent,
+) -> SessionsDialogAction {
+    if event.code == KeyCode::Esc
+        || (event.code == KeyCode::Char('o') && event.modifiers == KeyModifiers::CONTROL)
+    {
+        close_item_menu(dialog_state);
+        return SessionsDialogAction::Handled;
+    }
+
+    // Modal: anything with ctrl/alt/super (except the ctrl+o toggle above)
+    // is swallowed so search emacs keys can't leak into item actions.
+    if event.modifiers != KeyModifiers::NONE && event.modifiers != KeyModifiers::SHIFT {
+        return SessionsDialogAction::Handled;
+    }
+
+    match event.code {
+        KeyCode::Up => {
+            if let Some(menu) = dialog_state.item_menu.as_mut() {
+                menu.move_selection(-1);
+            }
+            SessionsDialogAction::Handled
+        }
+        KeyCode::Down => {
+            if let Some(menu) = dialog_state.item_menu.as_mut() {
+                menu.move_selection(1);
+            }
+            SessionsDialogAction::Handled
+        }
+        KeyCode::Enter => {
+            let entry = dialog_state
+                .item_menu
+                .as_ref()
+                .map(|menu| ItemMenuEntry::ALL[menu.selected]);
+            match entry {
+                Some(entry) => run_item_menu_entry(dialog_state, entry),
+                None => SessionsDialogAction::Handled,
+            }
+        }
+        KeyCode::Char(c) => match c.to_ascii_lowercase() {
+            'j' => {
+                if let Some(menu) = dialog_state.item_menu.as_mut() {
+                    menu.move_selection(1);
+                }
+                SessionsDialogAction::Handled
+            }
+            'k' => {
+                if let Some(menu) = dialog_state.item_menu.as_mut() {
+                    menu.move_selection(-1);
+                }
+                SessionsDialogAction::Handled
+            }
+            shortcut => match ItemMenuEntry::ALL
+                .iter()
+                .find(|entry| entry.shortcut() == shortcut)
+            {
+                Some(entry) => run_item_menu_entry(dialog_state, *entry),
+                None => SessionsDialogAction::Handled,
+            },
+        },
+        _ => SessionsDialogAction::Handled,
+    }
+}
+
+fn render_item_menu(
+    f: &mut Frame,
+    menu: &SessionsItemMenu,
+    delete_armed: bool,
+    area: Rect,
+    colors: ThemeColors,
+) {
+    use ratatui::{
+        layout::{Alignment, Constraint, Direction, Layout},
+        style::{Modifier, Style},
+        text::{Line, Span},
+        widgets::{Clear, Paragraph},
+    };
+    use unicode_width::UnicodeWidthStr;
+
+    let rows: Vec<(ItemMenuEntry, String, bool, Option<&str>)> = ItemMenuEntry::ALL
+        .iter()
+        .map(|entry| {
+            (
+                *entry,
+                menu.label(*entry, delete_armed),
+                menu.is_enabled(*entry),
+                menu.disabled_reason(*entry),
+            )
+        })
+        .collect();
+
+    let label_width = rows
+        .iter()
+        .map(|(_, label, _, _)| label.width())
+        .max()
+        .unwrap_or(0);
+    let reason_width = rows
+        .iter()
+        .filter_map(|(_, _, enabled, reason)| {
+            if *enabled {
+                None
+            } else {
+                reason.map(|reason| reason.width() + 3)
+            }
+        })
+        .max()
+        .unwrap_or(0);
+    // Marker + key chip + label + optional " (reason)".
+    let content_width = 2 + 5 + 1 + label_width + reason_width;
+    let title = format!("Options · {}", menu.session_title);
+    let footer = "↑↓ navigate · enter run · esc close";
+
+    let popup_width = (content_width + 6).min(area.width as usize).max(20) as u16;
+    let popup_height = (rows.len() + 6).min(area.height as usize).max(7) as u16;
+    let popup_area = Rect {
+        x: area.x + area.width.saturating_sub(popup_width) / 2,
+        y: area.y + area.height.saturating_sub(popup_height) / 2,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    f.render_widget(Clear, popup_area);
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(colors.dialog_background)),
+        popup_area,
+    );
+
+    let content_area = Rect {
+        x: popup_area.x + 3,
+        y: popup_area.y + 1,
+        width: popup_area.width.saturating_sub(6),
+        height: popup_area.height.saturating_sub(2),
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(content_area);
+
+    let max_title_width = content_area.width as usize;
+    let title_text = if title.width() > max_title_width {
+        let mut truncated = String::new();
+        let mut width = 0;
+        for char in title.chars() {
+            let char_width = unicode_width::UnicodeWidthChar::width(char).unwrap_or(0);
+            if width + char_width > max_title_width.saturating_sub(1) {
+                break;
+            }
+            truncated.push(char);
+            width += char_width;
+        }
+        format!("{truncated}…")
+    } else {
+        title
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            title_text,
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .alignment(Alignment::Left),
+        chunks[0],
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, (entry, label, enabled, reason)) in rows.iter().enumerate() {
+        let is_selected = index == menu.selected;
+        let marker = if is_selected { "▸ " } else { "  " };
+        let key_text = format!(" {} ", entry.shortcut());
+
+        if *enabled {
+            let marker_style = if is_selected {
+                Style::default()
+                    .fg(colors.primary)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(colors.text_weak)
+            };
+            let label_style = if is_selected {
+                Style::default()
+                    .fg(colors.text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(colors.text)
+            };
+            let padding = " ".repeat(label_width.saturating_sub(label.width()));
+            lines.push(Line::from(vec![
+                Span::styled(marker, marker_style),
+                Span::styled(
+                    key_text,
+                    Style::default()
+                        .fg(colors.primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(label.clone(), label_style),
+                Span::raw(padding),
+            ]));
+        } else {
+            let disabled_style = Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM | Modifier::CROSSED_OUT);
+            let padding = " ".repeat(label_width.saturating_sub(label.width()));
+            let mut spans = vec![
+                Span::styled(marker, Style::default().fg(colors.text_weak)),
+                Span::styled(key_text, Style::default().fg(colors.text_weak)),
+                Span::raw(" "),
+                Span::styled(label.clone(), disabled_style),
+                Span::raw(padding),
+            ];
+            if let Some(reason) = reason {
+                spans.push(Span::styled(
+                    format!(" ({reason})"),
+                    Style::default()
+                        .fg(colors.text_weak)
+                        .add_modifier(Modifier::DIM),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), chunks[2]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            footer,
+            Style::default()
+                .fg(colors.text_weak)
+                .add_modifier(Modifier::DIM),
+        )]))
+        .alignment(Alignment::Left),
+        chunks[4],
+    );
 }
 
 #[cfg(test)]
@@ -629,14 +1035,70 @@ mod tests {
     }
 
     #[test]
-    fn esc_cancels_pending_delete_without_closing_sessions_dialog() {
+    fn ctrl_a_no_longer_archives_cmd_left_goes_to_search() {
         let mut state =
             init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
         state.dialog.show();
 
         let action = handle_sessions_dialog_key_event(
             &mut state,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+
+        assert_ne!(
+            action,
+            SessionsDialogAction::Archive("session-1".to_string())
+        );
+        assert_eq!(state.pending_delete, None);
+    }
+
+    #[test]
+    fn ctrl_a_edits_search_instead_of_archiving_while_searching() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+        state.dialog.set_search_query("First");
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(action, SessionsDialogAction::Handled);
+    }
+
+    #[test]
+    fn ctrl_d_does_not_arm_delete_while_searching() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+        state.dialog.set_search_query("First");
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert_eq!(state.pending_delete, None);
+    }
+
+    #[test]
+    fn esc_closes_item_menu_and_cancels_armed_delete() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert!(state.item_menu.is_some());
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
         );
         assert_eq!(
             action,
@@ -652,7 +1114,158 @@ mod tests {
 
         assert_eq!(action, SessionsDialogAction::Handled);
         assert_eq!(state.pending_delete, None);
+        assert!(state.item_menu.is_none());
         assert!(state.dialog.is_visible());
+    }
+
+    #[test]
+    fn item_menu_archive_shortcut_archives_unarchived_session() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            action,
+            SessionsDialogAction::Archive("session-1".to_string())
+        );
+        assert!(state.item_menu.is_none());
+    }
+
+    #[test]
+    fn item_menu_shows_archive_disabled_when_already_archived() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+        state.filter = SessionsDialogFilter::Archived;
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+        let menu = state.item_menu.as_ref().expect("menu open");
+        assert!(menu.archived);
+        assert!(!menu.is_enabled(ItemMenuEntry::Archive));
+        assert!(menu.is_enabled(ItemMenuEntry::Unarchive));
+
+        // Disabled shortcut does nothing (stays on menu).
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert!(state.item_menu.is_some());
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            action,
+            SessionsDialogAction::Archive("session-1".to_string())
+        );
+    }
+
+    #[test]
+    fn item_menu_navigation_skips_disabled_entries() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+        state.filter = SessionsDialogFilter::Archived;
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+        // Pin(0), Archive(1, disabled), Unarchive(2): j must skip Archive.
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert_eq!(state.item_menu.as_ref().expect("menu open").selected, 2);
+    }
+
+    #[test]
+    fn item_menu_delete_needs_two_steps() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            action,
+            SessionsDialogAction::PendingDelete("session-1".to_string())
+        );
+        assert!(state.item_menu.is_some());
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        // Arming parks selection on Delete, so Enter confirms it.
+        assert_eq!(
+            action,
+            SessionsDialogAction::Delete("session-1".to_string())
+        );
+        assert!(state.item_menu.is_none());
+    }
+
+    #[test]
+    fn item_menu_pin_and_rename_shortcuts() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            action,
+            SessionsDialogAction::TogglePin("session-1".to_string())
+        );
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            action,
+            SessionsDialogAction::Rename("session-1".to_string(), "First session".to_string())
+        );
     }
 
     #[test]
@@ -835,7 +1448,7 @@ mod tests {
 
     #[test]
     fn mouse_wheel_scrolls_session_list() {
-        let items = (0..20)
+        let items = (0..40)
             .map(|idx| session_item(&format!("session-{idx}"), &format!("Session {idx}")))
             .collect();
         let mut state = init_sessions_dialog("Sessions", items);
@@ -856,7 +1469,7 @@ mod tests {
 
     #[test]
     fn mouse_move_after_wheel_scroll_updates_selection_without_resetting_viewport() {
-        let items = (0..20)
+        let items = (0..40)
             .map(|idx| session_item(&format!("session-{idx}"), &format!("Session {idx}")))
             .collect();
         let mut state = init_sessions_dialog("Sessions", items);
