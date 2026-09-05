@@ -1183,7 +1183,10 @@ impl Dialog {
                     Span::styled(name, Style::default().fg(colors.primary)),
                 ]
             } else {
-                vec![Span::raw(format!("{indicator}{name}"))]
+                vec![Span::styled(
+                    format!("{indicator}{name}"),
+                    Style::default().fg(colors.text),
+                )]
             };
             return (spans, text_width);
         }
@@ -1199,7 +1202,10 @@ impl Dialog {
                     Span::styled(name, Style::default().fg(colors.primary)),
                 ]
             } else {
-                vec![Span::raw(format!("{indicator}{name}"))]
+                vec![Span::styled(
+                    format!("{indicator}{name}"),
+                    Style::default().fg(colors.text),
+                )]
             };
             return (spans, text_width);
         }
@@ -1217,7 +1223,10 @@ impl Dialog {
                 Style::default().fg(colors.primary),
             ));
         } else {
-            spans.push(Span::raw(format!("{indicator}{name_prefix}")));
+            spans.push(Span::styled(
+                format!("{indicator}{name_prefix}"),
+                Style::default().fg(colors.text),
+            ));
         }
         spans.push(Span::styled(
             description,
@@ -1719,6 +1728,20 @@ impl Dialog {
         frame.render_widget(esc_paragraph, header_chunks[1]);
 
         if self.search_visible {
+            self.search_textarea.set_style(
+                Style::default()
+                    .fg(colors.text)
+                    .bg(colors.dialog_background),
+            );
+            self.search_textarea
+                .set_placeholder_style(Style::default().fg(colors.text_weak));
+            self.search_textarea.set_cursor_style(
+                Style::default()
+                    .fg(colors.dialog_background)
+                    .bg(colors.text),
+            );
+            self.search_textarea
+                .set_selection_style(Style::default().fg(colors.text).bg(colors.border_focus));
             frame.render_widget(&self.search_textarea, chunks[2]);
         }
 
