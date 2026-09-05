@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::theme::ThemeColors;
 use crate::ui::components::input::Input;
 use crate::ui::components::status_bar::StatusBar;
-use crate::views::chat::{btw_panel_height, render_btw_panel};
+use crate::views::chat::{btw_panel_height, chat_input_height, render_btw_panel};
 
 const LOGO: &str = include_str!("../../crabcode-logo.txt");
 const MASCOT: &str = include_str!("../../mascot.txt");
@@ -103,7 +103,7 @@ pub fn render_home(
         .split(size);
 
     let btw_height = btw_panel_height(btw_entry, size.width, colors);
-    let input_height = input.get_height_for_width(size.width);
+    let input_height = chat_input_height(input, size.width, size.height, 0, btw_height, 1);
     let home_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(

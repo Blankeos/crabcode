@@ -37,7 +37,7 @@ use crate::views::agents_dialog::{
     render_agents_dialog, AgentsDialogAction,
 };
 use crate::views::chat::{
-    agent_color_for_tab, init_chat, queued_messages_height, render_chat,
+    agent_color_for_tab, chat_input_height, init_chat, queued_messages_height, render_chat,
     render_subagent_spinner_only, SubagentTab, SubagentTabs, SUBAGENT_FOOTER_HEIGHT,
 };
 use crate::views::command_palette::{
@@ -2021,17 +2021,24 @@ impl App {
     /// Rows under the chat viewport (queue/input/help/status) for dialog overlap math.
     fn dialog_below_chat_height(&self, size: ratatui::layout::Rect) -> u16 {
         let is_subagent = self.is_subagent_session_active();
-        let input_height = if is_subagent {
-            SUBAGENT_FOOTER_HEIGHT
-        } else {
-            self.input.get_height_for_width(size.width)
-        };
         let help_height = if is_subagent { 0 } else { 1 };
         let queue_height = if is_subagent {
             0
         } else {
             crate::views::chat::queued_messages_height(
                 &self.queued_message_previews_for_current_session(),
+            )
+        };
+        let input_height = if is_subagent {
+            SUBAGENT_FOOTER_HEIGHT
+        } else {
+            chat_input_height(
+                &self.input,
+                size.width,
+                size.height,
+                queue_height,
+                0,
+                help_height,
             )
         };
         // Matches render_chat: queue + input + help + inner status row + outer status bar.
@@ -3428,11 +3435,6 @@ impl App {
                 .as_ref(),
             )
             .split(size);
-        let input_height = if self.is_subagent_session_active() {
-            SUBAGENT_FOOTER_HEIGHT
-        } else {
-            self.input.get_height_for_width(size.width)
-        };
         let help_height = if self.is_subagent_session_active() {
             0
         } else {
@@ -3443,6 +3445,18 @@ impl App {
             0
         } else {
             queued_messages_height(&queued_messages)
+        };
+        let input_height = if self.is_subagent_session_active() {
+            SUBAGENT_FOOTER_HEIGHT
+        } else {
+            chat_input_height(
+                &self.input,
+                size.width,
+                size.height,
+                queue_height,
+                0,
+                help_height,
+            )
         };
         let above_status_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
@@ -4825,7 +4839,6 @@ impl App {
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
             .split(self.last_frame_size);
-        let input_height = self.input.get_height_for_width(self.last_frame_size.width);
         let queued_messages = self.queued_message_previews_for_current_session();
         let queue_height =
             if self.base_focus == BaseFocus::Chat && !self.is_subagent_session_active() {
@@ -4833,6 +4846,14 @@ impl App {
             } else {
                 0
             };
+        let input_height = chat_input_height(
+            &self.input,
+            self.last_frame_size.width,
+            self.last_frame_size.height,
+            queue_height,
+            0,
+            1,
+        );
         let input_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints(

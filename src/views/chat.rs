@@ -25,6 +25,26 @@ const QUEUED_MESSAGES_TOP_PADDING: u16 = 1;
 const QUEUED_MESSAGES_BOTTOM_PADDING: u16 = 1;
 const STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH: u16 = 64;
 const SUBAGENT_FOOTER_NAV_GAP: &str = "   ";
+/// Minimum transcript rows to keep visible when clamping the input height
+/// on short terminals. The input shrinks instead of forcing its full
+/// 9-line height and starving the chat view.
+const MIN_CHAT_VIEWPORT_HEIGHT: u16 = 5;
+
+/// Desired input height clamped to what fits in `total_height` alongside
+/// the queue / btw panels, help line and status rows.
+pub fn chat_input_height(
+    input: &Input,
+    width: u16,
+    total_height: u16,
+    queue_height: u16,
+    btw_height: u16,
+    help_height: u16,
+) -> u16 {
+    // Outer status bar (1) + inner status row (1).
+    let reserved = queue_height + btw_height + help_height + 1 + 1 + MIN_CHAT_VIEWPORT_HEIGHT;
+    let max_allowed = total_height.saturating_sub(reserved);
+    input.get_height_for_layout(width, max_allowed)
+}
 
 /// Paint only the animated loading cells into an already rendered frame.
 /// Callers must start from the last complete buffer; this deliberately skips
@@ -176,11 +196,6 @@ pub fn render_chat(
         .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
         .split(size);
 
-    let input_height = if is_subagent_view {
-        SUBAGENT_FOOTER_HEIGHT
-    } else {
-        input.get_height_for_width(size.width)
-    };
     let help_height = if is_subagent_view { 0 } else { 1 };
     let queue_height = if is_subagent_view {
         0
@@ -191,6 +206,18 @@ pub fn render_chat(
         0
     } else {
         btw_panel_height(btw_entry, size.width, colors)
+    };
+    let input_height = if is_subagent_view {
+        SUBAGENT_FOOTER_HEIGHT
+    } else {
+        chat_input_height(
+            input,
+            size.width,
+            size.height,
+            queue_height,
+            btw_height,
+            help_height,
+        )
     };
     let above_status_chunks = Layout::default()
         .direction(Direction::Vertical)

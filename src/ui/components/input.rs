@@ -47,7 +47,9 @@ fn char_kind(c: char) -> u8 {
 }
 
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
-const MAX_TEXTAREA_HEIGHT: usize = 6;
+pub(crate) const MAX_TEXTAREA_HEIGHT: usize = 9;
+pub(crate) const INPUT_CHROME_HEIGHT: u16 = 4;
+pub(crate) const MIN_INPUT_HEIGHT: u16 = 5;
 const POST_KEY_SCROLL_SUPPRESSION: Duration = Duration::from_millis(160);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -461,7 +463,14 @@ impl Input {
             .split(inner_area);
 
         let wrap_width = h_chunks[1].width as usize;
-        let textarea_height = self.textarea_height(wrap_width) as u16;
+        // Fit what's possible on short terminals: never request more rows
+        // than the allocated area allows.
+        let content_height = self.textarea_height(wrap_width) as u16;
+        let textarea_height = if area.height <= INPUT_CHROME_HEIGHT {
+            area.height
+        } else {
+            content_height.min(area.height - INPUT_CHROME_HEIGHT)
+        };
 
         let v_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
@@ -560,12 +569,23 @@ impl Input {
         // compact default so layout can reserve space before the first draw.
         let line_count = self.textarea.lines().len().max(1);
         let textarea_height = line_count.min(MAX_TEXTAREA_HEIGHT) as u16;
-        textarea_height + 4
+        textarea_height + INPUT_CHROME_HEIGHT
     }
 
     pub fn get_height_for_width(&self, area_width: u16) -> u16 {
         let wrap_width = area_width.saturating_sub(5).max(1) as usize;
-        self.textarea_height(wrap_width) as u16 + 4
+        self.textarea_height(wrap_width) as u16 + INPUT_CHROME_HEIGHT
+    }
+
+    /// Desired height clamped to `max_allowed` so short terminals still fit.
+    /// Never forces the full 9-line height when there is no room.
+    pub fn get_height_for_layout(&self, area_width: u16, max_allowed: u16) -> u16 {
+        let desired = self.get_height_for_width(area_width);
+        if max_allowed < MIN_INPUT_HEIGHT {
+            desired.min(max_allowed)
+        } else {
+            desired.min(max_allowed.max(MIN_INPUT_HEIGHT))
+        }
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
