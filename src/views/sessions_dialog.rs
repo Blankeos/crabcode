@@ -95,10 +95,25 @@ impl SessionsDialogState {
     }
 
     pub fn refresh_items(&mut self, items: Vec<DialogItem>) {
-        // The item menu acts on a snapshot of the selected row; rebuilds can
-        // move or remove that row, so never keep a stale menu (or an armed
-        // delete nothing can confirm) across a refresh.
-        self.item_menu = None;
+        // Background live refreshes (200ms metadata probe, dirty flags) can
+        // fire while the ctrl+o item menu is open. The old code dropped the
+        // menu on every rebuild, so the menu closed "by itself" — most often
+        // on the home page right after activity, when relative timestamps
+        // ("Xs ago") tick the list signature every second. Preserve the menu
+        // when its session is still listed, re-anchoring snapshot fields;
+        // drop it (and an armed delete) only when the session is gone.
+        let mut preserved_menu = self.item_menu.take();
+        if let Some(menu) = preserved_menu.as_ref() {
+            if !items.iter().any(|item| item.id == menu.session_id) {
+                preserved_menu = None;
+            }
+        }
+        let preserved_pending = self.pending_delete.take().filter(|id| {
+            preserved_menu
+                .as_ref()
+                .is_some_and(|menu| &menu.session_id == id)
+                || items.iter().any(|item| &item.id == id)
+        });
         self.pending_delete = None;
         let previous_dialog = self.dialog.clone();
         let title = self.dialog.title.clone();
@@ -137,6 +152,40 @@ impl SessionsDialogState {
         self.dialog.scroll_offset = scroll_offset;
         self.dialog
             .preserve_scrollbar_drag_state_from(&previous_dialog);
+
+        if let Some(mut menu) = preserved_menu {
+            if let Some(item) = self
+                .dialog
+                .items
+                .iter()
+                .find(|item| item.id == menu.session_id)
+            {
+                menu.session_title = if item.provider_id.is_empty() {
+                    item.name.clone()
+                } else {
+                    item.provider_id.clone()
+                };
+            }
+            if let Some(row) = self
+                .last_list_signature
+                .as_ref()
+                .and_then(|signature| signature.rows.iter().find(|row| row.id == menu.session_id))
+            {
+                menu.pinned = row.pinned;
+            }
+            menu.archived = self.filter == SessionsDialogFilter::Archived;
+            menu.selected = menu
+                .selected
+                .min(ItemMenuEntry::ALL.len().saturating_sub(1));
+            if !menu.is_enabled(ItemMenuEntry::ALL[menu.selected]) {
+                menu.selected = ItemMenuEntry::ALL
+                    .iter()
+                    .position(|entry| menu.is_enabled(*entry))
+                    .unwrap_or(0);
+            }
+            self.item_menu = Some(menu);
+        }
+        self.pending_delete = preserved_pending;
     }
 
     pub fn refresh_items_if_changed(
@@ -1229,6 +1278,58 @@ mod tests {
             SessionsDialogAction::Delete("session-1".to_string())
         );
         assert!(state.item_menu.is_none());
+    }
+
+    #[test]
+    fn item_menu_survives_background_refresh_while_session_listed() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+        assert!(state.item_menu.is_some());
+
+        // Simulate a live metadata-probe refresh (e.g. a ticking "Xs ago"
+        // tip) while the menu is open: the menu must stay open.
+        state.refresh_items(vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+        assert!(state.item_menu.is_some());
+
+        // Armed delete survives the refresh too.
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            action,
+            SessionsDialogAction::PendingDelete("session-1".to_string())
+        );
+        state.refresh_items(vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+        assert!(state.item_menu.is_some());
+        assert_eq!(state.pending_delete.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn item_menu_drops_when_session_disappears_from_refresh() {
+        let mut state =
+            init_sessions_dialog("Sessions", vec![session_item("session-1", "First session")]);
+        state.dialog.show();
+
+        let action = handle_sessions_dialog_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, SessionsDialogAction::Handled);
+
+        state.refresh_items(vec![session_item("session-2", "Other session")]);
+        state.dialog.show();
+        assert!(state.item_menu.is_none());
+        assert_eq!(state.pending_delete, None);
     }
 
     #[test]
