@@ -56,6 +56,19 @@ pub(crate) fn input_textarea(textarea: &mut TextArea<'static>, event: KeyEvent) 
     match event.code {
         KeyCode::Left if cmd => textarea.move_cursor(CursorMove::Head),
         KeyCode::Right if cmd => textarea.move_cursor(CursorMove::End),
+        // macOS Option+Arrow, plus Ghostty's Alt+b / Alt+f equivalents.
+        KeyCode::Left if event.modifiers.contains(KeyModifiers::ALT) => {
+            textarea.move_cursor(CursorMove::WordBack)
+        }
+        KeyCode::Right if event.modifiers.contains(KeyModifiers::ALT) => {
+            textarea.move_cursor(CursorMove::WordForward)
+        }
+        KeyCode::Char('b') | KeyCode::Char('B') if event.modifiers.contains(KeyModifiers::ALT) => {
+            textarea.move_cursor(CursorMove::WordBack)
+        }
+        KeyCode::Char('f') | KeyCode::Char('F') if event.modifiers.contains(KeyModifiers::ALT) => {
+            textarea.move_cursor(CursorMove::WordForward)
+        }
         KeyCode::Backspace if cmd => {
             command_backspace_to_line_start(textarea);
         }

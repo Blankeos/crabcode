@@ -778,6 +778,25 @@ impl Input {
                 self.move_word_with_selection(true, event.modifiers.contains(KeyModifiers::SHIFT));
                 true
             }
+            // Ghostty (default macOS mode) sends Opt+Left/Right as Alt+b / Alt+f
+            // instead of Alt+Arrow. Treat them identically, including
+            // Opt+Shift variants (Alt+Shift+b/f, possibly as uppercase B/F).
+            KeyCode::Char('b') | KeyCode::Char('B')
+                if event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                let extend = event.modifiers.contains(KeyModifiers::SHIFT)
+                    || event.code == KeyCode::Char('B');
+                self.move_word_with_selection(false, extend);
+                true
+            }
+            KeyCode::Char('f') | KeyCode::Char('F')
+                if event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                let extend = event.modifiers.contains(KeyModifiers::SHIFT)
+                    || event.code == KeyCode::Char('F');
+                self.move_word_with_selection(true, extend);
+                true
+            }
             KeyCode::Up if event.modifiers.contains(KeyModifiers::ALT) => {
                 self.move_paragraph_with_selection(
                     false,

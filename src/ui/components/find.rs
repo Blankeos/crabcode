@@ -125,6 +125,23 @@ impl FindBar {
                     .move_cursor(tui_textarea::CursorMove::WordForward);
                 return FindBarAction::None;
             }
+            // Ghostty sends Opt+Left/Right as Alt+b / Alt+f.
+            KeyCode::Char('b') | KeyCode::Char('B')
+                if event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.editing = true;
+                self.textarea
+                    .move_cursor(tui_textarea::CursorMove::WordBack);
+                return FindBarAction::None;
+            }
+            KeyCode::Char('f') | KeyCode::Char('F')
+                if event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.editing = true;
+                self.textarea
+                    .move_cursor(tui_textarea::CursorMove::WordForward);
+                return FindBarAction::None;
+            }
             KeyCode::Backspace if event.modifiers.contains(KeyModifiers::ALT) => {
                 self.editing = true;
                 self.textarea.delete_word();
