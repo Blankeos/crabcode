@@ -1547,28 +1547,24 @@ impl Input {
         frame: &mut ratatui::Frame,
         area: Rect,
         colors: &ThemeColors,
-        show_cursor: bool,
+        _show_cursor: bool,
     ) {
         if area.width == 0 || area.height == 0 {
             return;
         }
 
         let text_style = self.textarea.style();
-        let cursor_style = if show_cursor {
-            self.textarea.cursor_style()
-        } else {
-            text_style
-        };
+        // Single caret: the hardware terminal cursor is the source of truth
+        // (Ghostty shaders, IME popups). The fake block highlight is
+        // suppressed because on complex emoji (ZWJ sequences, VS16, flags)
+        // the terminal's grapheme width can differ from unicode-width
+        // tables by 1-2 cells, which otherwise shows as two split carets.
+        let cursor_style = text_style;
         let selection_style = self.textarea.selection_style();
         let selection_range = self.textarea.selection_range();
-        // When unfocused (dialog overlay open) suppress the fake block cursor
-        // so it doesn't linger behind/near the dialog. The hardware cursor is
-        // also hidden/moved elsewhere in that case.
-        let cursor = if show_cursor {
-            self.textarea.cursor()
-        } else {
-            (usize::MAX, usize::MAX)
-        };
+        // Fake block cursor is always suppressed (see above); the
+        // hardware cursor is positioned separately in `render`.
+        let cursor = (usize::MAX, usize::MAX);
         let visual_lines = self.visual_lines(area.width as usize);
 
         let text = if self.is_empty() && !self.textarea.placeholder_text().is_empty() {

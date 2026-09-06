@@ -164,6 +164,10 @@ impl ApiKeyInput {
         .alignment(ratatui::layout::Alignment::Right);
         frame.render_widget(esc_paragraph, header_chunks[1]);
 
+        // Single caret: hardware cursor below is source of truth; suppress
+        // fake block so emoji width differences can't show two carets.
+        let text_style = self.text_area.style();
+        self.text_area.set_cursor_style(text_style);
         frame.render_widget(&self.text_area, chunks[1]);
 
         // Hardware cursor follows the text field so terminal cursor effects

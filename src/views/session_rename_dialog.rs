@@ -200,6 +200,11 @@ pub fn render_session_rename_dialog(
     let title_paragraph = Paragraph::new(title_line).alignment(Alignment::Left);
     f.render_widget(title_paragraph, chunks[0]);
 
+    // Single caret: hardware cursor below is source of truth; suppress
+    // fake block so emoji can't show two split carets.
+    dialog_state
+        .input_textarea
+        .set_cursor_style(Style::default());
     f.render_widget(&dialog_state.input_textarea, chunks[3]);
 
     // Hardware cursor follows the text field so terminal cursor effects

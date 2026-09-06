@@ -1735,10 +1735,13 @@ impl Dialog {
             );
             self.search_textarea
                 .set_placeholder_style(Style::default().fg(colors.text_weak));
+            // Single caret: hardware cursor (place_terminal_cursor) is the
+            // source of truth. Fake block suppressed so complex emoji
+            // (ZWJ, VS16, flags) can't show as two split carets.
             self.search_textarea.set_cursor_style(
                 Style::default()
-                    .fg(colors.dialog_background)
-                    .bg(colors.text),
+                    .fg(colors.text)
+                    .bg(colors.dialog_background),
             );
             self.search_textarea
                 .set_selection_style(Style::default().fg(colors.text).bg(colors.border_focus));

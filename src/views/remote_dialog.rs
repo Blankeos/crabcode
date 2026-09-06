@@ -398,14 +398,11 @@ fn style_textarea(textarea: &mut TextArea<'static>, focused: bool, colors: Theme
     } else {
         colors.text_weak
     };
-    let cursor = if focused {
-        colors.primary
-    } else {
-        colors.text_weak
-    };
     textarea.set_style(Style::default().fg(fg));
     textarea.set_cursor_line_style(Style::default().fg(fg));
-    textarea.set_cursor_style(Style::default().fg(cursor).add_modifier(Modifier::REVERSED));
+    // Single caret: hardware cursor is source of truth; suppress fake block
+    // so emoji (ZWJ/VS16/flags) can't show two split carets.
+    textarea.set_cursor_style(Style::default().fg(fg));
 }
 
 fn render_label(f: &mut Frame, area: Rect, label: &str, focused: bool, colors: ThemeColors) {
