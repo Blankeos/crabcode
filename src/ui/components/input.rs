@@ -758,6 +758,14 @@ impl Input {
                 self.sync_pending_pastes();
                 true
             }
+            KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL => {
+                self.reveal_cursor_after_key_input();
+                self.preferred_visual_col = None;
+                self.delete_word_backward();
+                self.sync_image_placeholders();
+                self.sync_pending_pastes();
+                true
+            }
             KeyCode::Left if has_command_modifier(event.modifiers) => {
                 self.move_to_line_start(event.modifiers.contains(KeyModifiers::SHIFT));
                 true
