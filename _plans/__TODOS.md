@@ -504,3 +504,5 @@ I think this is how the TUI works already anyway right?
 - [x] dialog backdrop
 
 - [ ] the prompt history cycler has some bugs, sometimes when crabcode crashes, I press `up` and it actually rewinded to the oldest prompt i had???
+
+- [x] For errors, when stuff is toasted, let me click the toast so I can copy the whole thing to clipboard.

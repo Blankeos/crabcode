@@ -5103,6 +5103,10 @@ impl App {
             self.input.clear_hover();
         }
 
+        if self.handle_error_toast_mouse(mouse) {
+            return;
+        }
+
         if self.handle_selection_action_mouse(mouse) {
             return;
         }
@@ -6452,6 +6456,32 @@ impl App {
                 ));
             }
         }
+    }
+
+    fn handle_error_toast_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let message = {
+            let manager = get_toast_manager().lock().unwrap();
+            manager
+                .copyable_message_at(self.last_frame_size, Position::new(mouse.column, mouse.row))
+        };
+        let Some(message) = message else {
+            return false;
+        };
+
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        ) {
+            return false;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && mouse.modifiers.is_empty()
+        {
+            self.copy_text_with_toast(&message, "Copied error to clipboard");
+        }
+
+        true
     }
 
     fn handle_copy_actions_event(&mut self, event: ActionDialogEvent) -> bool {
