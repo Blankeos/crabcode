@@ -18,6 +18,7 @@ mod mcp;
 mod model;
 mod notify;
 mod persistence;
+mod pr;
 mod prompt;
 mod remote;
 mod remote_mcp;
@@ -791,6 +792,12 @@ enum Command {
         target: Option<String>,
     },
 
+    /// Fetch and checkout a GitHub PR branch, then run crabcode
+    Pr {
+        /// PR number to checkout
+        number: u64,
+    },
+
     /// Show token usage and cost statistics
     Stats {
         /// Show stats for the last N days (default: all time)
@@ -1026,6 +1033,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::Upgrade { target }) => {
             return crate::upgrade::upgrade(target.as_deref());
+        }
+        Some(Command::Pr { number }) => {
+            return crate::pr::run(*number);
         }
         Some(Command::Stats {
             days,
@@ -1441,6 +1451,8 @@ mod tests {
         assert!(help.contains("Generate or install shell completions"));
         assert!(help.contains("stats"));
         assert!(help.contains("Show token usage and cost statistics"));
+        assert!(help.contains("pr"));
+        assert!(help.contains("Fetch and checkout a GitHub PR branch, then run crabcode"));
         assert!(
             help.contains("serve        Host the current workspace for browser and CLI clients")
         );
@@ -1485,6 +1497,16 @@ mod tests {
         match args.command {
             Some(Command::Upgrade { target }) => assert_eq!(target.as_deref(), Some("0.1.0")),
             other => panic!("expected upgrade command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pr_command() {
+        let args = Args::try_parse_from(["crabcode", "pr", "123"]).unwrap();
+
+        match args.command {
+            Some(Command::Pr { number }) => assert_eq!(number, 123),
+            other => panic!("expected pr command, got {other:?}"),
         }
     }
 
