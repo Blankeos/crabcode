@@ -612,15 +612,6 @@ pub async fn stream_llm_with_cancellation(
         ui_vs_request_model_mismatch_warning(&ui_model, &request_config.model_name);
     // Sticky prompt-cache routing: same key for every tool step in this session.
     request_config.openai_options.prompt_cache_key = Some(session_id.clone());
-    if super::opencode::should_attach_session_headers(
-        &request_config.provider_name,
-        &request_config.base_url,
-    ) {
-        super::opencode::inject_session_headers(
-            &mut request_config.openai_options.additional_headers,
-            &session_id,
-        );
-    }
 
     let tool_registry = match tool_registry {
         Some(tool_registry) => {
@@ -1765,6 +1756,7 @@ async fn stream_provider_request(
         &config.base_url,
         &config.openai_options.additional_headers,
         config.openai_options.prompt_cache_key.as_deref(),
+        &std::collections::HashMap::new(),
     );
     match config.kind {
         ProviderKind::OpenAICompatible => {
@@ -1856,9 +1848,6 @@ async fn stream_provider_request(
             }
             if let Some(cache_key) = config.openai_options.prompt_cache_key.as_deref() {
                 builder = builder.prompt_cache_key(cache_key);
-            }
-            if !headers.is_empty() {
-                builder = builder.headers(headers.clone());
             }
             if let Some(policy) =
                 super::xai_build::retry_policy_for(&config.openai_options.additional_headers)

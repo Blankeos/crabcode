@@ -12,10 +12,15 @@ const CLIENT_VALUE: &str = "cli";
 /// this is ASCII-case-insensitive. Also matches zen/go base URLs.
 /// `.devrefs/references/anomalyco/opencode/packages/opencode/src/session/llm/request.ts`
 pub(crate) fn is_opencode_provider(provider_name: &str) -> bool {
-    provider_name
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("opencode")
+    let name = provider_name.trim().to_ascii_lowercase();
+    if name == "opencode" {
+        return true;
+    }
+    name.starts_with("opencode-")
+        || name.starts_with("opencode ")
+        || name.starts_with("opencode_")
+        || name.starts_with("opencode/")
+        || name.starts_with("opencode:")
 }
 
 pub(crate) fn is_opencode_endpoint(base_url: &str) -> bool {
@@ -29,17 +34,45 @@ pub(crate) fn should_attach_session_headers(provider_name: &str, base_url: &str)
     is_opencode_provider(provider_name) || is_opencode_endpoint(base_url)
 }
 
-/// Merge product headers with OpenCode Go session routing headers.
+fn remove_header_case_insensitive(headers: &mut HashMap<String, String>, name: &str) {
+    headers.retain(|k, _| !k.eq_ignore_ascii_case(name));
+}
+
+fn insert_header_case_insensitive(
+    headers: &mut HashMap<String, String>,
+    name: &str,
+    value: String,
+) {
+    remove_header_case_insensitive(headers, name);
+    headers.insert(name.to_string(), value);
+}
+
+fn merge_headers_case_insensitive(
+    dst: &mut HashMap<String, String>,
+    src: &HashMap<String, String>,
+) {
+    for (k, v) in src {
+        remove_header_case_insensitive(dst, k);
+        dst.insert(k.clone(), v.clone());
+    }
+}
+
+/// Merge base headers with per-call overrides, then stamp OpenCode Go session routing.
 ///
+/// Precedence: `base` < `overrides` < sticky session headers. Overrides win
+/// over base for generic headers, but the stable `x-opencode-session` stamp
+/// always wins so callers can't break conversation stickiness by accident.
 /// Uses `session_id` when present (sticky per conversation); otherwise mints a
 /// one-off id so auxiliary calls (title, compaction) still satisfy Console Go.
 pub(crate) fn ensure_session_headers(
     provider_name: &str,
     base_url: &str,
-    additional_headers: &HashMap<String, String>,
+    base_headers: &HashMap<String, String>,
     session_id: Option<&str>,
+    overrides: &HashMap<String, String>,
 ) -> HashMap<String, String> {
-    let mut headers = additional_headers.clone();
+    let mut headers = base_headers.clone();
+    merge_headers_case_insensitive(&mut headers, overrides);
     if !should_attach_session_headers(provider_name, base_url) {
         return headers;
     }
@@ -56,17 +89,22 @@ pub(crate) fn ensure_session_headers(
 ///
 /// OpenCode sends `x-opencode-session` (conversation), `x-opencode-request`
 /// (per invocation), `x-opencode-client`, and a non-generic `User-Agent`.
+/// Case-insensitive so `X-Opencode-Session` / `user-agent` variants can't
+/// duplicate and collapse nondeterministically in the `HeaderMap`.
 pub(crate) fn inject_session_headers(headers: &mut HashMap<String, String>, session_id: &str) {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return;
     }
-    headers.insert(SESSION_HEADER.to_string(), session_id.to_string());
-    headers.insert(REQUEST_HEADER.to_string(), cuid2::create_id());
-    headers.insert(CLIENT_HEADER.to_string(), CLIENT_VALUE.to_string());
-    headers
-        .entry("User-Agent".to_string())
-        .or_insert_with(|| format!("crabcode/{}", env!("CARGO_PKG_VERSION")));
+    insert_header_case_insensitive(headers, SESSION_HEADER, session_id.to_string());
+    insert_header_case_insensitive(headers, REQUEST_HEADER, cuid2::create_id());
+    insert_header_case_insensitive(headers, CLIENT_HEADER, CLIENT_VALUE.to_string());
+    if !headers.keys().any(|k| k.eq_ignore_ascii_case("User-Agent")) {
+        headers.insert(
+            "User-Agent".to_string(),
+            format!("crabcode/{}", env!("CARGO_PKG_VERSION")),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +121,7 @@ mod tests {
         assert!(is_opencode_provider("OpenCode Zen"));
         assert!(!is_opencode_provider("openai"));
         assert!(!is_opencode_provider("crof"));
+        assert!(!is_opencode_provider("opencodefoo"));
     }
 
     #[test]
@@ -116,6 +155,21 @@ mod tests {
     }
 
     #[test]
+    fn inject_is_case_insensitive() {
+        let mut headers = HashMap::from([
+            ("X-Opencode-Session".to_string(), "stale".to_string()),
+            ("user-agent".to_string(), "keep".to_string()),
+        ]);
+        inject_session_headers(&mut headers, "sess-1");
+        assert_eq!(
+            headers.get(SESSION_HEADER).map(String::as_str),
+            Some("sess-1")
+        );
+        assert!(headers.keys().all(|k| k != "X-Opencode-Session"));
+        assert_eq!(headers.get("user-agent").map(String::as_str), Some("keep"));
+    }
+
+    #[test]
     fn skips_blank_session_id() {
         let mut headers = HashMap::new();
         inject_session_headers(&mut headers, "  ");
@@ -125,7 +179,13 @@ mod tests {
     #[test]
     fn ensure_headers_is_noop_for_other_providers() {
         let existing = HashMap::from([("x-grok-session-id".to_string(), "keep".to_string())]);
-        let headers = ensure_session_headers("xai", "https://api.x.ai", &existing, Some("sess-1"));
+        let headers = ensure_session_headers(
+            "xai",
+            "https://api.x.ai",
+            &existing,
+            Some("sess-1"),
+            &HashMap::new(),
+        );
         assert_eq!(headers, existing);
         assert!(!headers.contains_key(SESSION_HEADER));
     }
@@ -137,6 +197,7 @@ mod tests {
             "https://opencode.ai/zen/go/v1",
             &HashMap::new(),
             Some("sticky-sess"),
+            &HashMap::new(),
         );
         assert_eq!(
             headers.get(SESSION_HEADER).map(String::as_str),
@@ -151,8 +212,33 @@ mod tests {
             "https://opencode.ai/zen/go/v1",
             &HashMap::new(),
             None,
+            &HashMap::new(),
         );
         assert!(headers.get(SESSION_HEADER).is_some_and(|id| !id.is_empty()));
+    }
+
+    #[test]
+    fn overrides_win_over_base_but_session_stays_sticky() {
+        let base = HashMap::from([("x-custom".to_string(), "base".to_string())]);
+        let overrides = HashMap::from([
+            ("x-custom".to_string(), "override".to_string()),
+            (SESSION_HEADER.to_string(), "spoof".to_string()),
+        ]);
+        let headers = ensure_session_headers(
+            "OpenCode Go",
+            "https://opencode.ai/zen/go/v1",
+            &base,
+            Some("sticky-sess"),
+            &overrides,
+        );
+        assert_eq!(
+            headers.get("x-custom").map(String::as_str),
+            Some("override")
+        );
+        assert_eq!(
+            headers.get(SESSION_HEADER).map(String::as_str),
+            Some("sticky-sess")
+        );
     }
 
     #[test]

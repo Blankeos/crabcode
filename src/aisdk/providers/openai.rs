@@ -50,7 +50,7 @@ pub struct OpenAI {
     model_name: String,
     provider_name: String,
     responses_path: String,
-    headers: HashMap<String, String>,
+    default_headers: HashMap<String, String>,
     store_override: Option<bool>,
     strip_system_and_developer_messages: bool,
     tool_strict_override: Option<bool>,
@@ -89,7 +89,7 @@ pub struct OpenAIBuilder {
     model_name: Option<String>,
     provider_name: Option<String>,
     responses_path: String,
-    headers: HashMap<String, String>,
+    default_headers: HashMap<String, String>,
     store_override: Option<bool>,
     strip_system_and_developer_messages: bool,
     tool_strict_override: Option<bool>,
@@ -128,8 +128,11 @@ impl OpenAIBuilder {
         self
     }
 
-    pub fn headers(mut self, headers: HashMap<String, String>) -> Self {
-        self.headers = headers;
+    /// Static headers set at build time (e.g. `User-Agent`, tenant routing).
+    /// Per-request `stream_text` headers win on conflict (`HeaderMap` is
+    /// case-insensitive, so applied second).
+    pub fn default_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.default_headers = headers;
         self
     }
 
@@ -213,7 +216,7 @@ impl OpenAIBuilder {
             model_name,
             provider_name,
             responses_path,
-            headers: self.headers,
+            default_headers: self.default_headers,
             store_override: self.store_override,
             strip_system_and_developer_messages: self.strip_system_and_developer_messages,
             tool_strict_override: self.tool_strict_override,
@@ -364,7 +367,7 @@ impl Provider for OpenAI {
                 format!("Bearer {}", self.api_key).parse().unwrap(),
             );
         }
-        super::apply_extra_headers(&mut request_headers, &self.headers);
+        super::apply_extra_headers(&mut request_headers, &self.default_headers);
         super::apply_extra_headers(&mut request_headers, headers);
         add_responses_lite_header(&mut request_headers, self.responses_lite);
         if self.responses_lite {
