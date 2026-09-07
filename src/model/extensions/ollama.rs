@@ -161,9 +161,17 @@ pub fn model_for_dialog(model: OllamaModel) -> crate::model::types::Model {
         free: false,
         local: true,
         reasoning_options: Vec::new(),
+        context_window: discovery_model_for_dialog(&model.id)
+            .and_then(|model| model.limit)
+            .map(|limit| limit.context)
+            .filter(|context| *context > 0),
         id: model.id,
         name: model.name,
     }
+}
+
+fn discovery_model_for_dialog(id: &str) -> Option<crate::model::discovery::Model> {
+    cached_discovery_models().and_then(|models| models.get(id).cloned())
 }
 
 fn cached_discovery_models(

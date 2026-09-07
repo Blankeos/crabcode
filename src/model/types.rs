@@ -17,6 +17,8 @@ pub struct Model {
     pub local: bool,
     /// Mirrors models.dev `reasoning_options`.
     pub reasoning_options: Vec<crate::model::reasoning::ReasoningOption>,
+    /// Mirrors models.dev `limit.context` when available.
+    pub context_window: Option<u32>,
 }
 
 impl Model {
@@ -142,6 +144,7 @@ mod tests {
                 kind: "effort".to_string(),
                 values: vec!["low".to_string()],
             }],
+            context_window: Some(128_000),
         };
 
         let description = model.dialog_description();
