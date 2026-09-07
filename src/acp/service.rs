@@ -31,24 +31,13 @@ pub struct AcpService {
 }
 
 fn command_text(parts: &[ContentBlock]) -> String {
-    let mut text = String::new();
-    for part in parts {
-        match part {
-            ContentBlock::Text(content) => text.push_str(&content.text),
-            ContentBlock::ResourceLink(link) => text.push_str(&format!("[{}]", link.uri)),
-            ContentBlock::Resource(resource) => match &resource.resource {
-                EmbeddedResourceResource::TextResourceContents(resource) => {
-                    text.push_str(&format!("[{}]\n{}", resource.uri, resource.text));
-                }
-                EmbeddedResourceResource::BlobResourceContents(resource) => {
-                    text.push_str(&format!("[{}]", resource.uri));
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-    text
+    parts
+        .iter()
+        .find_map(|part| match part {
+            ContentBlock::Text(content) => Some(content.text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn acp_session_info(
@@ -503,7 +492,7 @@ fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
         .merged_config
         .commands
         .iter()
-        .filter(|command| !matches!(command.name.as_str(), "compact" | "skills" | "mcp"))
+        .filter(|command| !matches!(command.name.as_str(), "btw" | "compact" | "skills" | "mcp"))
         .map(|command| {
             let description = command
                 .description
@@ -519,7 +508,7 @@ fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
             .skills
             .all()
             .into_iter()
-            .filter(|skill| !matches!(skill.name.as_str(), "compact" | "skills" | "mcp"))
+            .filter(|skill| !matches!(skill.name.as_str(), "btw" | "compact" | "skills" | "mcp"))
             .map(|skill| {
                 AvailableCommand::new(
                     skill.name.clone(),
@@ -545,6 +534,15 @@ fn available_commands(session: &AcpSession) -> Vec<AvailableCommand> {
         "compact",
         "Summarize this session to reduce context",
     ));
+    commands.push(
+        AvailableCommand::new(
+            "btw",
+            "Ask a quick side question without changing session history",
+        )
+        .input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("Question"),
+        )),
+    );
     commands.sort_by(|left, right| left.name.cmp(&right.name));
     commands.dedup_by(|left, right| left.name == right.name);
     commands
@@ -558,6 +556,7 @@ enum SlashExpansion {
         model: Option<String>,
     },
     LocalResult(String),
+    Btw(String),
 }
 
 async fn expand_slash_command(session: &AcpSession, prompt: &str) -> Result<SlashExpansion, Error> {
@@ -572,6 +571,13 @@ async fn expand_slash_command(session: &AcpSession, prompt: &str) -> Result<Slas
         .split_once(char::is_whitespace)
         .map(|(name, args)| (name, args.trim_start()))
         .unwrap_or((command_line, ""));
+    if name == "btw" {
+        let question = args.trim();
+        if question.is_empty() {
+            return Err(Error::invalid_params().data("Usage: /btw <question>"));
+        }
+        return Ok(SlashExpansion::Btw(question.to_string()));
+    }
     if name == "skills" {
         if !args.is_empty() {
             return Err(Error::invalid_params().data("Usage: /skills"));
@@ -1195,6 +1201,17 @@ impl AcpService {
                 }
                 Some(prompt)
             }
+            Some(SlashExpansion::Btw(question)) => {
+                if prompt
+                    .iter()
+                    .any(|part| !matches!(part, ContentBlock::Text(_)))
+                {
+                    return Err(Error::invalid_params().data("/btw does not accept attachments"));
+                }
+                return self
+                    .btw_session(&session_id, session, question, connection)
+                    .await;
+            }
             None => None,
         };
         let supports_images = session
@@ -1204,16 +1221,14 @@ impl AcpService {
             .is_some_and(|model| model.attachment);
         let supports_audio =
             model_supports_audio(&session.config, &session.provider, &session.model);
-        let (mut prompt, local_image_paths, local_audio_paths) = prompt_content(
+        let (prompt, local_image_paths, local_audio_paths) = prompt_content(
             prompt,
+            expanded_prompt.as_deref(),
             supports_images,
             supports_audio,
             &session_id,
             &session,
         )?;
-        if let Some(expanded_prompt) = expanded_prompt {
-            prompt = expanded_prompt;
-        }
         let mut managed_paths = local_image_paths.clone();
         managed_paths.extend(local_audio_paths.clone());
         let mut attachment_guard = ManagedAttachmentGuard::new(managed_paths);
@@ -1554,6 +1569,32 @@ impl AcpService {
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn btw_session(
+        &self,
+        session_id: &str,
+        session: AcpSession,
+        question: String,
+        connection: ConnectionTo<Client>,
+    ) -> Result<PromptResponse, Error> {
+        let history = self
+            .session_manager
+            .lock()
+            .map_err(|_| internal_error())?
+            .get_session_ref(session_id)
+            .map(|stored| stored.messages.clone())
+            .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        let answer = crate::llm::client::generate_btw_answer(
+            session.provider,
+            session.model,
+            question,
+            history,
+        )
+        .await
+        .map_err(|error| internal_error_with(&error.to_string()))?;
+        send_text(&connection, session_id, &cuid2::create_id(), answer, false)?;
+        Ok(PromptResponse::new(StopReason::EndTurn))
     }
 
     async fn run_compaction(
@@ -1939,17 +1980,21 @@ fn workspace_path(path: &Path) -> Result<PathBuf, Error> {
 
 fn prompt_content(
     parts: Vec<ContentBlock>,
+    text_override: Option<&str>,
     supports_images: bool,
     supports_audio: bool,
     session_id: &str,
     session: &AcpSession,
 ) -> Result<(String, Vec<String>, Vec<String>), Error> {
     let mut text = String::new();
+    let mut text_override = text_override;
     let mut local_image_paths = Vec::new();
     let mut local_audio_paths = Vec::new();
     for part in parts {
         match part {
-            ContentBlock::Text(content) => text.push_str(&content.text),
+            ContentBlock::Text(content) => {
+                text.push_str(text_override.take().unwrap_or(&content.text));
+            }
             ContentBlock::ResourceLink(link) => {
                 text.push_str(&format!("[{}]", link.uri));
             }
@@ -3224,6 +3269,23 @@ mod tests {
         assert!(command.input.is_none());
     }
 
+    #[tokio::test]
+    async fn advertises_and_parses_btw_side_command() {
+        let session = test_session();
+        let command = available_commands(&session)
+            .into_iter()
+            .find(|command| command.name == "btw")
+            .expect("btw command");
+        assert!(command.input.is_some());
+        assert_eq!(
+            expand_slash_command(&session, "/btw what changed?")
+                .await
+                .expect("btw expansion"),
+            SlashExpansion::Btw("what changed?".to_string())
+        );
+        assert!(expand_slash_command(&session, "/btw").await.is_err());
+    }
+
     #[test]
     fn builds_smaller_soft_compaction_for_acp() {
         let session = test_session();
@@ -3290,6 +3352,42 @@ mod tests {
     }
 
     #[test]
+    fn command_text_override_preserves_embedded_context() {
+        let resource = agent_client_protocol::schema::v1::EmbeddedResource::new(
+            EmbeddedResourceResource::TextResourceContents(
+                agent_client_protocol::schema::v1::TextResourceContents::new(
+                    "important context",
+                    "file:///tmp/context.txt",
+                ),
+            ),
+        );
+        let (text, images, audio) = prompt_content(
+            vec![
+                ContentBlock::Text(agent_client_protocol::schema::v1::TextContent::new(
+                    "/review src/lib.rs",
+                )),
+                ContentBlock::Text(agent_client_protocol::schema::v1::TextContent::new(
+                    "\nAdditional instructions",
+                )),
+                ContentBlock::Resource(resource),
+            ],
+            Some("expanded command prompt"),
+            false,
+            false,
+            "test-session",
+            &test_session(),
+        )
+        .expect("prompt content");
+
+        assert_eq!(
+            text,
+            "expanded command prompt\nAdditional instructions[file:///tmp/context.txt]\nimportant context"
+        );
+        assert!(images.is_empty());
+        assert!(audio.is_empty());
+    }
+
+    #[test]
     fn writes_supported_acp_audio_to_managed_session_storage() {
         let session_id = format!("acp-audio-{}", cuid2::create_id());
         let audio = agent_client_protocol::schema::v1::AudioContent::new("YXVkaW8=", "audio/wav");
@@ -3307,6 +3405,7 @@ mod tests {
             vec![ContentBlock::Audio(
                 agent_client_protocol::schema::v1::AudioContent::new("YXVkaW8=", "audio/wav"),
             )],
+            None,
             false,
             false,
             &session_id,
@@ -3345,6 +3444,7 @@ mod tests {
                     "image/png",
                 )),
             ],
+            None,
             true,
             false,
             &session_id,
