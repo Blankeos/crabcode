@@ -1,4 +1,5 @@
 pub mod client;
+pub(crate) mod opencode;
 pub mod provider;
 pub mod tool_calls;
 pub(crate) mod xai_build;

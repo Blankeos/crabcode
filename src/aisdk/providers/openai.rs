@@ -364,22 +364,8 @@ impl Provider for OpenAI {
                 format!("Bearer {}", self.api_key).parse().unwrap(),
             );
         }
-        for (k, v) in &self.headers {
-            if let (Ok(name), Ok(value)) = (
-                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-                reqwest::header::HeaderValue::from_str(v),
-            ) {
-                request_headers.insert(name, value);
-            }
-        }
-        for (k, v) in headers {
-            if let (Ok(name), Ok(value)) = (
-                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-                reqwest::header::HeaderValue::from_str(v),
-            ) {
-                request_headers.insert(name, value);
-            }
-        }
+        super::apply_extra_headers(&mut request_headers, &self.headers);
+        super::apply_extra_headers(&mut request_headers, headers);
         add_responses_lite_header(&mut request_headers, self.responses_lite);
         if self.responses_lite {
             if let Some(session_id) = self

@@ -113,7 +113,7 @@ impl Provider for OpenAICompatible {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        _headers: &HashMap<String, String>,
+        headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
         let base = self.base_url.trim_end_matches('/');
         let url = if super::base_url_has_version_segment(base) {
@@ -192,6 +192,7 @@ impl Provider for OpenAICompatible {
                 format!("Bearer {}", self.api_key).parse().unwrap(),
             );
         }
+        super::apply_extra_headers(&mut request_headers, headers);
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(

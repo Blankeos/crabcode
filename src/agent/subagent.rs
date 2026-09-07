@@ -378,11 +378,22 @@ async fn start_subagent_stream(
     messages: Vec<crate::aisdk::core::Message>,
     tools: Vec<crate::aisdk::core::Tool>,
     max_steps: Option<usize>,
-    headers: std::collections::HashMap<String, String>,
+    extra_headers: std::collections::HashMap<String, String>,
     cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<crate::aisdk::core::response::StreamTextResponse, String> {
     use crate::aisdk::core::response::stream_with_tools;
     use crate::aisdk::{Anthropic, OpenAI, OpenAICompatible};
+
+    let mut headers = crate::llm::opencode::ensure_session_headers(
+        &session.provider_name,
+        &session.base_url,
+        &session.openai_options.additional_headers,
+        session
+            .prompt_cache_key
+            .as_deref()
+            .or(session.openai_options.prompt_cache_key.as_deref()),
+    );
+    headers.extend(extra_headers);
 
     match session.provider_kind {
         ProviderKind::OpenAICompatible => {
@@ -478,8 +489,8 @@ async fn start_subagent_stream(
             {
                 builder = builder.prompt_cache_key(cache_key);
             }
-            if !session.openai_options.additional_headers.is_empty() {
-                builder = builder.headers(session.openai_options.additional_headers.clone());
+            if !headers.is_empty() {
+                builder = builder.headers(headers.clone());
             }
             let provider = builder
                 .build()

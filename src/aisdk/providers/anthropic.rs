@@ -93,7 +93,7 @@ impl Provider for Anthropic {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        _headers: &HashMap<String, String>,
+        headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
         let base = self.base_url.trim_end_matches('/');
         let url = anthropic_messages_url(base);
@@ -170,6 +170,7 @@ impl Provider for Anthropic {
             // Hosted web_search tool requires the anthropic-beta header.
             request_headers.insert("anthropic-beta", "web-search-2025-03-05".parse().unwrap());
         }
+        super::apply_extra_headers(&mut request_headers, headers);
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(
