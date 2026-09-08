@@ -317,7 +317,7 @@ impl OAuthProvider {
 
     fn default_model(self) -> &'static str {
         match self {
-            Self::OpenAI => "gpt-5.3-codex",
+            Self::OpenAI => "gpt-5.4",
             Self::XAI => "grok-build-0.1",
         }
     }
