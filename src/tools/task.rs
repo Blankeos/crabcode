@@ -132,6 +132,7 @@ mod tests {
                 openai_options: crate::agent::config::OpenAIRequestOptions::default(),
                 prompt_cache_key: None,
                 gateway_caching_auto: false,
+                prune_tool_outputs: false,
             },
         );
 
@@ -211,6 +212,7 @@ mod tests {
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
             prompt_cache_key: None,
             gateway_caching_auto: false,
+            prune_tool_outputs: false,
         };
 
         let mut warnings = Vec::new();
@@ -250,6 +252,7 @@ mod tests {
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
             prompt_cache_key: None,
             gateway_caching_auto: false,
+            prune_tool_outputs: false,
         };
         let mut warnings = Vec::new();
         let defs = crate::agent::definition::parse_agent_definitions_from_config(

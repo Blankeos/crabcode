@@ -86,6 +86,26 @@ Use `tui.compactMode` to explicitly control compact mode and its sticky message 
 
 `compactMode` takes priority over the preference saved by `/compact-mode`. Without a config value, crabcode restores the last `/compact-mode` choice; new installations default to enabled. `compact_mode` is accepted as an alias.
 
+## Context compaction
+
+Crabcode applies the OpenCode-compatible `compaction` settings to persisted TUI and ACP sessions. Request-time pruning is also inherited by print mode and subagents:
+
+```jsonc title="opencode.jsonc"
+{
+  "compaction": {
+    "auto": true,
+    "prune": false,
+    "reserved": 10000
+  }
+}
+```
+
+- `auto` defaults to `true`. TUI and ACP sessions check the effective model context window before a request and after a completed turn, then summarize persisted context when the usable window is reached.
+- `prune` defaults to `false`. When enabled, stale tool outputs may be shortened or cleared only in the provider-facing request; persisted session history and rendered tool cards remain intact.
+- `reserved` is an optional token buffer subtracted from the context window. Without an explicit value, Crabcode reserves the smaller of the model output limit and 20,000 tokens.
+
+Set `compaction` to `false` to disable automatic compaction and request-time tool-output pruning. Manual `/compact` remains available.
+
 ## Permissions
 
 crabcode reads the OpenCode-compatible `permission` field. Rules resolve to `allow`, `ask`, or `deny`, with later matching rules taking precedence.

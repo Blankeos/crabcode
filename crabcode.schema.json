@@ -21,6 +21,34 @@
       ],
       "type": "object"
     },
+    "CompactionConfigFile": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "auto": {
+              "default": true,
+              "description": "Automatically compact when estimated context reaches the usable window.",
+              "type": "boolean"
+            },
+            "prune": {
+              "default": false,
+              "description": "Remove stale tool outputs from provider requests while preserving durable history.",
+              "type": "boolean"
+            },
+            "reserved": {
+              "description": "Token buffer reserved before the context limit for compaction and model output.",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
     "ImageOpenWith": {
       "anyOf": [
         {
@@ -351,7 +379,9 @@
       ]
     },
     "command": true,
-    "compaction": true,
+    "compaction": {
+      "$ref": "#/$defs/CompactionConfigFile"
+    },
     "default_agent": true,
     "disabled_providers": true,
     "enabled_providers": true,

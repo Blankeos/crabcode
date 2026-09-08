@@ -817,10 +817,35 @@ impl Discovery {
     }
 
     pub fn get_model_limit(&self, provider_id: &str, model_id: &str) -> Option<u32> {
+        if let Some(limit) = self
+            .custom_providers
+            .as_ref()
+            .and_then(|providers| providers.get(&provider_id.trim().to_ascii_lowercase()))
+            .and_then(|provider| provider.models.get(model_id))
+            .and_then(|model| model.context_window)
+        {
+            return Some(limit);
+        }
         let entry = self.load_cache_entry().ok()??;
         let provider = entry.data.get(provider_id)?;
         let model = provider.models.get(model_id)?;
         model.limit.as_ref().map(|l| l.context)
+    }
+
+    pub fn get_model_output_limit(&self, provider_id: &str, model_id: &str) -> Option<u32> {
+        if let Some(limit) = self
+            .custom_providers
+            .as_ref()
+            .and_then(|providers| providers.get(&provider_id.trim().to_ascii_lowercase()))
+            .and_then(|provider| provider.models.get(model_id))
+            .and_then(|model| model.max_tokens)
+        {
+            return Some(limit);
+        }
+        let entry = self.load_cache_entry().ok()??;
+        let provider = entry.data.get(provider_id)?;
+        let model = provider.models.get(model_id)?;
+        model.limit.as_ref().map(|limit| limit.output)
     }
 
     pub fn model_supports_input_modality(

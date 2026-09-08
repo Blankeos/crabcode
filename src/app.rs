@@ -963,6 +963,7 @@ pub struct App {
     pub editor: crate::config::EditorConfig,
     pending_editor_suspend: Option<String>,
     pub websearch: crate::config::configuration::WebsearchConfig,
+    compaction: crate::config::configuration::CompactionConfig,
     pub mcp: crate::config::configuration::McpConfig,
     mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
     mcp_summary: crate::views::home::McpSummary,
@@ -1225,6 +1226,7 @@ impl App {
             editor: crate::config::EditorConfig::default(),
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
+            compaction: crate::config::configuration::CompactionConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             mcp_manager: None,
             mcp_summary: crate::views::home::McpSummary::default(),
@@ -1462,6 +1464,7 @@ impl App {
         self.images = loaded_config.merged_config.images.clone();
         self.editor = loaded_config.merged_config.editor.clone();
         self.websearch = loaded_config.merged_config.websearch.clone();
+        self.compaction = loaded_config.merged_config.compaction.clone();
         self.mcp = mcp_config;
         self.config_raw_merged = loaded_config.raw_merged;
         self.custom_instructions = runtime.custom_instructions;
@@ -6520,6 +6523,10 @@ impl App {
     }
 
     fn start_compact_session(&mut self, session_id: &str) {
+        self.start_compact_session_with_min(session_id, 0);
+    }
+
+    fn start_compact_session_with_min(&mut self, session_id: &str, minimum_tokens: usize) {
         if self.compaction_receiver.is_some() {
             push_toast(Toast::new(
                 "Compaction is already running",
@@ -6555,7 +6562,7 @@ impl App {
         let Some(selection) = crate::session::compaction::select_messages_for_compaction_with_min(
             &messages,
             crate::session::compaction::DEFAULT_TAIL_TURNS,
-            0,
+            minimum_tokens,
         ) else {
             self.play_sound_event(crate::sound::SoundEvent::Error);
             push_toast(Toast::new(
@@ -10355,6 +10362,9 @@ impl App {
         }
 
         self.cleanup_streaming_for_session(session_id);
+        if self.maybe_start_auto_compaction(session_id) {
+            return;
+        }
         if self.submit_queued_messages_for_session(session_id) {
             return;
         }
@@ -10368,6 +10378,59 @@ impl App {
             completion_stats.as_deref(),
         );
         self.notify_terminal_event(completion_event);
+    }
+
+    fn maybe_start_auto_compaction(&mut self, session_id: &str) -> bool {
+        if !self.is_active_session(session_id)
+            || self.compaction_receiver.is_some()
+            || self.session_has_active_compaction(session_id)
+        {
+            return false;
+        }
+        if !self.should_auto_compact_current_session(None) {
+            return false;
+        }
+        self.start_compact_session_with_min(
+            session_id,
+            crate::session::compaction::MIN_COMPACTABLE_TOKENS,
+        );
+        self.compaction_receiver.is_some()
+    }
+
+    fn should_auto_compact_current_session(
+        &self,
+        pending_message: Option<&crate::session::types::Message>,
+    ) -> bool {
+        let mut messages = self.chat_state.chat.messages.clone();
+        if let Some(message) = pending_message {
+            messages.push(message.clone());
+        }
+        let used_tokens = crate::session::compaction::total_context_tokens(&messages)
+            .saturating_add(self.mcp_tool_prefix_tokens());
+        let (context_window, max_output_tokens) = self
+            .discovery
+            .as_ref()
+            .map(|discovery| {
+                (
+                    discovery.get_model_limit(&self.provider_name.to_lowercase(), &self.model),
+                    discovery
+                        .get_model_output_limit(&self.provider_name.to_lowercase(), &self.model),
+                )
+            })
+            .unwrap_or((None, None));
+        if !crate::session::compaction::should_auto_compact(
+            &self.compaction,
+            used_tokens,
+            context_window,
+            max_output_tokens,
+        ) {
+            return false;
+        }
+        crate::session::compaction::select_messages_for_compaction(
+            &self.chat_state.chat.messages,
+            crate::session::compaction::DEFAULT_TAIL_TURNS,
+        )
+        .is_some()
     }
 
     fn defer_finish_if_tools_are_running(&mut self, session_id: &str) -> bool {
@@ -10953,6 +11016,7 @@ impl App {
         let agent_registry = self.agent_registry.clone();
         let websearch_config = self.websearch.clone();
         let mcp_config = self.mcp.clone();
+        let compaction_config = self.compaction.clone();
         let custom_instructions = self.custom_instructions.clone();
         let process_registry = self.process_registry.clone();
         let cwd = self.cwd.clone();
@@ -11025,6 +11089,7 @@ impl App {
                 tool_permissions,
                 websearch_config,
                 mcp_config,
+                compaction_config,
                 cwd,
                 None,
                 messages,
@@ -11873,6 +11938,22 @@ impl App {
         {
             if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
                 self.ensure_session_view_state(&session_id);
+                let mut pending_message = crate::session::types::Message::user(&msg);
+                pending_message.local_image_paths = image_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect();
+                if self.compaction_receiver.is_none()
+                    && !self.session_has_active_compaction(&session_id)
+                    && self.should_auto_compact_current_session(Some(&pending_message))
+                    && self.queue_message_for_current_session(msg.clone(), image_paths.clone())
+                {
+                    self.start_compact_session_with_min(
+                        &session_id,
+                        crate::session::compaction::MIN_COMPACTABLE_TOKENS,
+                    );
+                    return;
+                }
             }
             self.append_user_message_to_current_session(msg.clone(), image_paths);
 
@@ -12735,6 +12816,7 @@ mod tests {
             editor: crate::config::EditorConfig::default(),
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
+            compaction: crate::config::configuration::CompactionConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             mcp_manager: None,
             mcp_summary: crate::views::home::McpSummary::default(),

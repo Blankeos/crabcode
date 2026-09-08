@@ -30,6 +30,25 @@ pub struct AcpService {
     client_capabilities: Arc<Mutex<agent_client_protocol::schema::v1::ClientCapabilities>>,
 }
 
+fn model_output_limit(config: &LoadedConfig, provider_id: &str, model_id: &str) -> Option<u32> {
+    if let Some(limit) = config
+        .merged_config
+        .custom_providers
+        .get(&provider_id.trim().to_ascii_lowercase())
+        .and_then(|provider| provider.models.get(model_id))
+        .and_then(|model| model.max_tokens)
+    {
+        return Some(limit);
+    }
+    crate::model::discovery::Discovery::new_with_config(
+        Some(config.merged_config.custom_providers.clone()),
+        config.merged_config.disabled_providers.clone(),
+        config.merged_config.enabled_providers.clone(),
+    )
+    .ok()
+    .and_then(|discovery| discovery.get_model_output_limit(provider_id, model_id))
+}
+
 fn command_text(parts: &[ContentBlock]) -> String {
     parts
         .iter()
@@ -1260,6 +1279,29 @@ impl AcpService {
         user_message.provider = Some(session.provider.clone());
         user_message.model = Some(session.model.clone());
         user_message.agent_mode = Some(session.agent.clone());
+        let auto_compacted = self
+            .maybe_auto_compact_session(
+                &session_id,
+                &session,
+                cancellation.clone(),
+                crate::session::compaction::message_context_tokens(&user_message),
+            )
+            .await?;
+        if cancellation.is_cancelled() {
+            if let Some(current) = self.sessions.lock().await.get_mut(&session_id) {
+                current.cancellation = None;
+            }
+            return Ok(PromptResponse::new(StopReason::Cancelled));
+        }
+        if auto_compacted {
+            messages = self
+                .session_manager
+                .lock()
+                .map_err(|_| internal_error())?
+                .get_session_ref(&session_id)
+                .map(|stored| stored.messages.clone())
+                .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        }
         {
             let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
             manager
@@ -1342,6 +1384,7 @@ impl AcpService {
                 tool_permissions(&stream_session),
                 stream_session.config.merged_config.websearch.clone(),
                 stream_session.config.merged_config.mcp.clone(),
+                stream_session.config.merged_config.compaction.clone(),
                 stream_session.cwd.to_string_lossy().to_string(),
                 Some(stream_tool_registry),
                 messages,
@@ -1491,15 +1534,23 @@ impl AcpService {
                 .set_session_status(&session_id, status, failed.as_deref())
                 .map_err(|_| internal_error())?;
         }
-        if let Some(current) = self.sessions.lock().await.get_mut(&session_id) {
-            current.cancellation = None;
-        }
-
         if assistant.was_interrupted {
+            if let Some(current) = self.sessions.lock().await.get_mut(&session_id) {
+                current.cancellation = None;
+            }
             return Ok(PromptResponse::new(StopReason::Cancelled));
         }
         if let Some(error) = failed {
+            if let Some(current) = self.sessions.lock().await.get_mut(&session_id) {
+                current.cancellation = None;
+            }
             return Err(internal_error_with(&error));
+        }
+        let _ = self
+            .maybe_auto_compact_session(&session_id, &session, cancellation.clone(), 0)
+            .await?;
+        if let Some(current) = self.sessions.lock().await.get_mut(&session_id) {
+            current.cancellation = None;
         }
         Ok(PromptResponse::new(acp_stop_reason(turn_stop_reason)))
     }
@@ -1538,7 +1589,7 @@ impl AcpService {
         }
 
         let result = self
-            .run_compaction(session_id, &session, cancellation.clone())
+            .run_compaction(session_id, &session, cancellation.clone(), 0)
             .await;
         if let Some(current) = self.sessions.lock().await.get_mut(session_id) {
             current.cancellation = None;
@@ -1602,6 +1653,7 @@ impl AcpService {
         session_id: &str,
         session: &AcpSession,
         cancellation: CancellationToken,
+        minimum_tokens: usize,
     ) -> Result<crate::session::types::CompactionStats, Error> {
         let messages = {
             let manager = self.session_manager.lock().map_err(|_| internal_error())?;
@@ -1613,7 +1665,7 @@ impl AcpService {
         let selection = crate::session::compaction::select_messages_for_compaction_with_min(
             &messages,
             crate::session::compaction::DEFAULT_TAIL_TURNS,
-            0,
+            minimum_tokens,
         )
         .ok_or_else(|| Error::invalid_params().data("Nothing to compact"))?;
         let before_tokens = crate::session::compaction::total_context_tokens(&messages);
@@ -1645,6 +1697,69 @@ impl AcpService {
             .replace_session_messages(session_id, compacted)
             .map_err(|_| internal_error())?;
         Ok(stats)
+    }
+
+    async fn maybe_auto_compact_session(
+        &self,
+        session_id: &str,
+        session: &AcpSession,
+        cancellation: CancellationToken,
+        additional_tokens: usize,
+    ) -> Result<bool, Error> {
+        let messages = self
+            .session_manager
+            .lock()
+            .map_err(|_| internal_error())?
+            .get_session_ref(session_id)
+            .map(|stored| stored.messages.clone())
+            .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        let used_tokens = crate::session::compaction::total_context_tokens(&messages)
+            .saturating_add(additional_tokens);
+        if !crate::session::compaction::should_auto_compact(
+            &session.config.merged_config.compaction,
+            used_tokens,
+            session.context_window,
+            model_output_limit(&session.config, &session.provider, &session.model),
+        ) {
+            return Ok(false);
+        }
+        if crate::session::compaction::select_messages_for_compaction(
+            &messages,
+            crate::session::compaction::DEFAULT_TAIL_TURNS,
+        )
+        .is_none()
+        {
+            return Ok(false);
+        }
+        self.session_manager
+            .lock()
+            .map_err(|_| internal_error())?
+            .set_session_status(
+                session_id,
+                crate::session::types::SessionStatus::Streaming,
+                None,
+            )
+            .map_err(|_| internal_error())?;
+        let result = self
+            .run_compaction(
+                session_id,
+                session,
+                cancellation,
+                crate::session::compaction::MIN_COMPACTABLE_TOKENS,
+            )
+            .await;
+        self.session_manager
+            .lock()
+            .map_err(|_| internal_error())?
+            .set_session_status(session_id, crate::session::types::SessionStatus::Idle, None)
+            .map_err(|_| internal_error())?;
+        match result {
+            Ok(_) => Ok(true),
+            Err(error) => {
+                crate::emit_log!("ACP auto-compaction skipped after failure: {:?}", error);
+                Ok(false)
+            }
+        }
     }
 }
 

@@ -44,7 +44,7 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 | `permission` | ✅ | ✅ | Global tool permission rules are enforced during AI SDK tool execution. |
 | `instructions` | ✅ | ✅ | Loads the listed files relative to the project root (or from absolute and `~/` paths) and appends their contents to the system prompt. Unreadable files produce a config warning. |
 | `tools` | ✅ | ✅ | Global tool enable/disable map. Disabled tools are removed before agent-specific tool policies are applied. |
-| `compaction` | ✅ |  | Accepted and parsed (`false` or `{ "auto", "prune" }`), but compaction behavior is not applied yet. |
+| `compaction` | ✅ | ✅ | Applies `auto` and `reserved` to persisted TUI/ACP sessions; `prune` also applies to print and subagent requests. Manual `/compact` remains available when auto-compaction is disabled. |
 | `watcher` | ✅ | ✅ | Controls file suggestions in command autocomplete. Use `false` to disable them or `{ "ignore": ["path"] }` to exclude paths. |
 | `formatter` | ✅ |  | Accepted and parsed by file extension, but configured formatter commands are not run yet. |
 | `disabled_providers` | ✅ | ✅ | Removes the listed provider IDs from model discovery and selection. |
