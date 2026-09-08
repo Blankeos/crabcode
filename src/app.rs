@@ -6459,12 +6459,12 @@ impl App {
     }
 
     fn handle_error_toast_mouse(&mut self, mouse: MouseEvent) -> bool {
-        let message = {
+        let copied = {
             let manager = get_toast_manager().lock().unwrap();
             manager
                 .copyable_message_at(self.last_frame_size, Position::new(mouse.column, mouse.row))
         };
-        let Some(message) = message else {
+        let Some((message, level)) = copied else {
             return false;
         };
 
@@ -6478,7 +6478,11 @@ impl App {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && mouse.modifiers.is_empty()
         {
-            self.copy_text_with_toast(&message, "Copied error to clipboard");
+            let confirmation = match level {
+                crate::toast::ToastLevel::Warning => "Copied warning to clipboard",
+                _ => "Copied error to clipboard",
+            };
+            self.copy_text_with_toast(&message, confirmation);
         }
 
         true

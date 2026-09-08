@@ -44,7 +44,7 @@ impl ToastLevel {
     }
 
     fn is_copyable(self) -> bool {
-        matches!(self, ToastLevel::Error)
+        matches!(self, ToastLevel::Error | ToastLevel::Warning)
     }
 }
 
@@ -94,11 +94,15 @@ impl ToastManager {
         self.toasts.retain(|toast| !toast.is_expired(now));
     }
 
-    pub fn copyable_message_at(&self, frame: Rect, position: Position) -> Option<String> {
+    pub fn copyable_message_at(
+        &self,
+        frame: Rect,
+        position: Position,
+    ) -> Option<(String, ToastLevel)> {
         layout_visible_toasts(frame, self, Instant::now())
             .into_iter()
             .find(|laid| laid.toast.level.is_copyable() && laid.area.contains(position))
-            .map(|laid| laid.toast.message.clone())
+            .map(|laid| (laid.toast.message.clone(), laid.toast.level))
     }
 }
 
@@ -355,7 +359,25 @@ mod tests {
         );
 
         let copied = manager.copyable_message_at(frame(), Position::new(area.x, area.y));
+        let copied = copied.map(|(message, _)| message);
         assert_eq!(copied.as_deref(), Some(message.as_str()));
+    }
+
+    #[test]
+    fn clicking_warning_toast_returns_full_original_message() {
+        let mut manager = ToastManager::new();
+        let message = "warning: rate limit approaching\n".repeat(20);
+        manager.add(long_lived(&message, ToastLevel::Warning));
+
+        let areas = copyable_areas(&manager);
+        assert_eq!(areas.len(), 1);
+        let (area, _) = &areas[0];
+
+        let copied = manager.copyable_message_at(frame(), Position::new(area.x, area.y));
+        assert!(copied.is_some());
+        let (copied_message, copied_level) = copied.unwrap();
+        assert_eq!(copied_message, message);
+        assert_eq!(copied_level, ToastLevel::Warning);
     }
 
     #[test]
@@ -392,12 +414,14 @@ mod tests {
         assert_eq!(
             manager
                 .copyable_message_at(frame(), Position::new(areas[0].0.x, areas[0].0.y))
+                .map(|(message, _)| message)
                 .as_deref(),
             Some("newer error")
         );
         assert_eq!(
             manager
                 .copyable_message_at(frame(), Position::new(areas[1].0.x, areas[1].0.y))
+                .map(|(message, _)| message)
                 .as_deref(),
             Some("older error")
         );
