@@ -36,6 +36,48 @@ pub fn resolve_startup_theme(
     (themes, idx, dark_mode, theme_transparent)
 }
 
+fn plugin_command_directories(plugins: &[PluginSpec], project_root: &Path) -> Vec<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cache_home = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cache"));
+    let mut directories = Vec::new();
+
+    for plugin in plugins {
+        let source = plugin.source.trim();
+        if source.is_empty() {
+            continue;
+        }
+
+        let package_dir = if source.starts_with('.') || Path::new(source).is_absolute() {
+            let path = PathBuf::from(source);
+            Some(if path.is_absolute() {
+                path
+            } else {
+                project_root.join(path)
+            })
+        } else {
+            let candidates = [
+                project_root.join("node_modules").join(source),
+                cache_home
+                    .join("opencode/packages")
+                    .join(source)
+                    .join("node_modules")
+                    .join(source),
+            ];
+            candidates.into_iter().find(|path| path.is_dir())
+        };
+
+        if let Some(package_dir) = package_dir.filter(|path| path.is_dir()) {
+            directories.push(package_dir.join(".opencode"));
+        }
+    }
+
+    directories.sort();
+    directories.dedup();
+    directories
+}
+
 fn peek_config_theme_id(xdg_config_home: &Path, project_root: &Path) -> Option<String> {
     let sources = resolve_sources(xdg_config_home, project_root).ok()?;
     let mut theme_id = None;
@@ -147,6 +189,18 @@ fn list_json_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+fn append_discovered_plugins(plugins: &mut Vec<PluginSpec>, plugin_files: &[PathBuf]) {
+    for path in plugin_files {
+        let source = path.to_string_lossy().into_owned();
+        if !plugins.iter().any(|plugin| plugin.source == source) {
+            plugins.push(PluginSpec {
+                source,
+                options: Value::Null,
+            });
+        }
+    }
+}
+
 fn parse_provider_id_set(
     value: Option<&Value>,
     diagnostics: &mut ConfigDiagnostics,
@@ -214,6 +268,13 @@ pub struct ConfigInventory {
     pub opencode_agents: Vec<PathBuf>,
     pub opencode_skills_dirs: Vec<PathBuf>,
     pub command_files: Vec<PathBuf>,
+    pub plugin_files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginSpec {
+    pub source: String,
+    pub options: Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +634,7 @@ pub struct MergedConfig {
     pub compaction: CompactionConfig,
     pub watcher: WatcherConfig,
     pub formatter: HashMap<String, FormatterConfig>,
+    pub plugins: Vec<PluginSpec>,
 }
 
 impl MergedConfig {
@@ -713,14 +775,16 @@ impl ConfigLoader {
 
         substitute_placeholders(&mut merged, &provenance, &mut diagnostics);
 
+        let mut merged_config = parse_merged_config(&merged, &mut diagnostics);
         let commands = load_custom_commands(
             &sources,
             &xdg_config_home,
             &project_root,
+            &merged_config.plugins,
             &mut inventory,
             &mut diagnostics,
         );
-        let mut merged_config = parse_merged_config(&merged, &mut diagnostics);
+        append_discovered_plugins(&mut merged_config.plugins, &inventory.plugin_files);
         merged_config.instructions =
             load_instruction_files(&merged_config.instructions, &project_root, &mut diagnostics);
         let mut agent_definitions = crate::agent::definition::load_markdown_agent_definitions(
@@ -841,18 +905,69 @@ fn discover_opencode_inventory(
         ));
     }
     inventory.opencode_skills_dirs = skills_dirs;
+
+    let mut plugin_files = Vec::new();
+    for dir in [
+        global_opencode.join("plugins"),
+        global_opencode.join("plugin"),
+        local_opencode.join("plugins"),
+        local_opencode.join("plugin"),
+    ] {
+        plugin_files.extend(list_plugin_files(&dir));
+    }
+    plugin_files.sort();
+    plugin_files.dedup();
+    if !plugin_files.is_empty() {
+        diagnostics.info.push(format!(
+            "Discovered {} OpenCode plugin files",
+            plugin_files.len()
+        ));
+    }
+    inventory.plugin_files = plugin_files;
+}
+
+fn list_plugin_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let extension = path.extension().and_then(|value| value.to_str());
+        if matches!(extension, Some("js" | "mjs" | "cjs" | "ts")) {
+            out.push(path);
+        }
+    }
+    out
 }
 
 fn load_custom_commands(
     sources: &[SourceFile],
     xdg_config_home: &Path,
     project_root: &Path,
+    plugins: &[PluginSpec],
     inventory: &mut ConfigInventory,
     diagnostics: &mut ConfigDiagnostics,
 ) -> Vec<crate::command::custom::CustomCommand> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut commands = Vec::new();
     let mut command_by_name: HashMap<String, usize> = HashMap::new();
+
+    // OpenCode packages can ship slash commands in `.opencode/command`. Load
+    // these first so user/project command definitions retain their usual
+    // higher precedence.
+    for dir in plugin_command_directories(plugins, project_root) {
+        for command in crate::command::custom::commands_from_directory(
+            &dir,
+            project_root,
+            &mut diagnostics.warnings,
+        ) {
+            upsert_custom_command(&mut commands, &mut command_by_name, command);
+        }
+    }
 
     for layer in command_layers(xdg_config_home, project_root, &home) {
         if let Some(source) = sources.iter().find(|source| source.label == layer.label) {
@@ -1126,6 +1241,7 @@ fn opencode_allowed_keys() -> BTreeSet<&'static str> {
     [
         "$schema",
         "agent",
+        "plugin",
         "instructions",
         "tools",
         "mcp",
@@ -1166,7 +1282,6 @@ fn opencode_ignored_keys() -> BTreeSet<&'static str> {
         "share",
         "tui",
         "server",
-        "plugin",
         "tool",
         "custom tools",
         "custom_tools",
@@ -1397,6 +1512,50 @@ fn expand_path(arg: &str, base_dir: &Path) -> PathBuf {
     }
 }
 
+fn parse_plugin_specs(
+    value: Option<&Value>,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Vec<PluginSpec> {
+    let Some(Value::Array(entries)) = value else {
+        if value.is_some() {
+            diagnostics
+                .warnings
+                .push("plugin must be an array".to_string());
+        }
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| match entry {
+            Value::String(source) if !source.trim().is_empty() => Some(PluginSpec {
+                source: source.trim().to_string(),
+                options: Value::Null,
+            }),
+            Value::Array(tuple) if tuple.len() == 2 => {
+                let Some(source) = tuple[0].as_str().filter(|value| !value.trim().is_empty())
+                else {
+                    diagnostics.warnings.push(format!(
+                        "plugin[{index}] must start with a non-empty plugin source"
+                    ));
+                    return None;
+                };
+                Some(PluginSpec {
+                    source: source.trim().to_string(),
+                    options: tuple[1].clone(),
+                })
+            }
+            _ => {
+                diagnostics.warnings.push(format!(
+                    "plugin[{index}] must be a source string or [source, options]"
+                ));
+                None
+            }
+        })
+        .collect()
+}
+
 fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> MergedConfig {
     let mut out = MergedConfig::default();
     let obj = match merged.as_object() {
@@ -1444,6 +1603,7 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
         json_agents,
     );
     out.sync_agent_derived_fields();
+    out.plugins = parse_plugin_specs(obj.get("plugin"), diagnostics);
     out.provider_timeouts = parse_provider_timeouts(obj.get("provider"), diagnostics);
     out.enabled_providers = parse_provider_id_set(
         obj.get("enabled_providers")
@@ -2784,6 +2944,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "enabled_providers",
         "permission",
         "mcp",
+        "plugin",
     ]
     .into_iter()
     .collect();
@@ -2806,6 +2967,137 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parses_plugin_sources_and_options() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "plugin": [
+                    "./.opencode/plugins/one.mjs",
+                    ["@scope/two", { "enabled": true }],
+                    42
+                ]
+            }),
+            &mut diagnostics,
+        );
+
+        assert_eq!(config.plugins.len(), 2);
+        assert_eq!(config.plugins[0].source, "./.opencode/plugins/one.mjs");
+        assert_eq!(config.plugins[0].options, Value::Null);
+        assert_eq!(config.plugins[1].source, "@scope/two");
+        assert_eq!(config.plugins[1].options, json!({ "enabled": true }));
+        assert_eq!(diagnostics.warnings.len(), 1);
+    }
+
+    #[test]
+    fn opencode_plugin_key_is_parsed_and_not_reported_unimplemented() {
+        let filtered = filter_top_level(
+            json!({
+                "plugin": ["./plugin.mjs"],
+                "unknown": true
+            }),
+            SourceKind::OpenCode,
+        );
+
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(&filtered, &mut diagnostics);
+
+        assert_eq!(config.plugins.len(), 1);
+        assert_eq!(config.plugins[0].source, "./plugin.mjs");
+        assert!(collect_unimplemented_keys(&filtered).is_empty());
+    }
+
+    #[test]
+    fn discovers_commands_shipped_by_a_local_plugin_package() {
+        let project = tempfile::tempdir().expect("project temp dir");
+        let package = project.path().join("node_modules/example-plugin");
+        let command_dir = package.join(".opencode/command");
+        std::fs::create_dir_all(&command_dir).unwrap();
+        std::fs::write(
+            command_dir.join("hello.md"),
+            "---\ndescription: Hello from plugin\n---\nSay hello to $ARGUMENTS",
+        )
+        .unwrap();
+
+        let plugins = vec![PluginSpec {
+            source: "example-plugin".to_string(),
+            options: Value::Null,
+        }];
+        let dirs = plugin_command_directories(&plugins, project.path());
+        assert_eq!(dirs, vec![package.join(".opencode")]);
+
+        let mut warnings = Vec::new();
+        let commands = crate::command::custom::commands_from_directory(
+            &dirs[0],
+            project.path(),
+            &mut warnings,
+        );
+        assert!(warnings.is_empty());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "hello");
+    }
+
+    #[test]
+    fn discovers_supported_plugin_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("a.mjs"), "export default {};").unwrap();
+        std::fs::write(temp.path().join("b.ts"), "export default {};").unwrap();
+        std::fs::write(temp.path().join("ignored.txt"), "ignored").unwrap();
+
+        let mut files = list_plugin_files(temp.path());
+        files.sort();
+
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|path| path.ends_with("a.mjs")));
+        assert!(files.iter().any(|path| path.ends_with("b.ts")));
+    }
+
+    #[test]
+    fn plugin_discovery_is_sorted_across_singular_and_plural_directories() {
+        let project = tempfile::tempdir().expect("project temp dir");
+        let xdg = tempfile::tempdir().expect("xdg temp dir");
+        let singular = project.path().join(".opencode/plugin");
+        let plural = project.path().join(".opencode/plugins");
+        std::fs::create_dir_all(&singular).unwrap();
+        std::fs::create_dir_all(&plural).unwrap();
+        std::fs::write(singular.join("z.mjs"), "export default {};").unwrap();
+        std::fs::write(plural.join("a.js"), "export default {};").unwrap();
+
+        let mut inventory = ConfigInventory::default();
+        let mut diagnostics = ConfigDiagnostics::default();
+        discover_opencode_inventory(xdg.path(), project.path(), &mut inventory, &mut diagnostics);
+
+        let mut expected = vec![plural.join("a.js"), singular.join("z.mjs")];
+        expected.sort();
+
+        assert_eq!(inventory.plugin_files, expected);
+    }
+
+    #[test]
+    fn explicit_plugins_stay_first_and_dedupe_discovered_paths() {
+        let project = tempfile::tempdir().expect("project temp dir");
+        let plugin_dir = project.path().join(".opencode/plugins");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let discovered = plugin_dir.join("local.mjs");
+        std::fs::write(&discovered, "export default {};").unwrap();
+
+        let mut plugins = vec![
+            PluginSpec {
+                source: "@scope/package".to_string(),
+                options: json!({ "mode": "strict" }),
+            },
+            PluginSpec {
+                source: discovered.to_string_lossy().into_owned(),
+                options: Value::Null,
+            },
+        ];
+        append_discovered_plugins(&mut plugins, &[discovered]);
+
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0].source, "@scope/package");
+        assert_eq!(plugins[0].options, json!({ "mode": "strict" }));
+    }
 
     #[test]
     fn parses_and_applies_top_level_runtime_configuration() {
