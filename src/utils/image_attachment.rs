@@ -353,6 +353,7 @@ pub fn image_paths_from_paste(text: &str) -> Vec<PathBuf> {
     paths
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn paste_image_to_temp_png() -> Result<PathBuf> {
     let mut clipboard = arboard::Clipboard::new().context("failed to access clipboard")?;
 
@@ -382,6 +383,11 @@ pub fn paste_image_to_temp_png() -> Result<PathBuf> {
         .context("failed to write clipboard image file")?;
     let (_file, path) = temp.keep().context("failed to persist clipboard image")?;
     Ok(path)
+}
+
+#[cfg(target_os = "android")]
+pub fn paste_image_to_temp_png() -> Result<PathBuf> {
+    anyhow::bail!("pasting images from the clipboard is not supported on Android")
 }
 
 pub fn open_path(path: &Path, config: &crate::config::ImagesConfig) -> Result<()> {
