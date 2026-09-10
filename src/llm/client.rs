@@ -2932,8 +2932,7 @@ mod tests {
         convert_messages, convert_messages_for_model, convert_messages_for_model_with_audio,
         maybe_apply_unauthenticated_free_provider_key, model_supports_image_input,
         openai_oauth_default_originator, openai_oauth_model_uses_responses_lite,
-        openai_request_instructions, provider_kind_for_model, resolve_api_key,
-        resolve_model_route,
+        openai_request_instructions, provider_kind_for_model, resolve_api_key, resolve_model_route,
         ui_vs_request_model_mismatch_warning, vlm_agent_has_model, AisdkMessage,
         OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
     };
