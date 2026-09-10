@@ -5748,14 +5748,10 @@ impl App {
                 self.input.attach_image(path);
                 self.input.insert_str(" ");
                 self.update_suggestions();
-                push_toast(Toast::new(
-                    "Attached image from clipboard",
-                    ToastLevel::Info,
-                    None,
-                ));
+                push_toast(Toast::new("Attached image", ToastLevel::Info, None));
             }
             Err(err) => push_toast(Toast::new(
-                format!("Clipboard image paste failed: {}", err),
+                format!("Image attachment failed: {}", err),
                 ToastLevel::Warning,
                 None,
             )),
@@ -9930,7 +9926,6 @@ impl App {
         home_animating
             || self.has_active_selection_edge_scroll()
             || self.is_streaming
-            || self.chat_state.chat.has_active_tool_messages()
             || self.has_active_retry_status()
             || self.compaction_receiver.is_some()
             || self.storage_receiver.is_some()
@@ -9979,7 +9974,7 @@ impl App {
     }
 
     pub fn is_streaming_animation_only(&self) -> bool {
-        let streaming_only = (self.is_streaming || self.chat_state.chat.has_active_tool_messages())
+        let streaming_only = self.is_streaming
             && self.base_focus != BaseFocus::Home
             && !self.has_active_selection_edge_scroll()
             && self.current_session_retry_status().is_none()
@@ -14255,6 +14250,29 @@ mod tests {
         assert!(
             !app.is_animation_running(),
             "Home alone must not pin the 60fps loop after idle"
+        );
+    }
+
+    #[test]
+    fn stale_tool_messages_do_not_keep_the_event_loop_running() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::tool(
+                serde_json::json!({
+                    "name": "bash",
+                    "status": "pending",
+                    "args": { "command": "printf hello" },
+                })
+                .to_string(),
+            ));
+
+        assert!(app.chat_state.chat.has_active_tool_messages());
+        assert!(!app.is_streaming);
+        assert!(
+            !app.is_animation_running(),
+            "stale tool messages must not force continuous redraws after a stream finishes"
         );
     }
 
