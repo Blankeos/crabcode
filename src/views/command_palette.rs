@@ -338,15 +338,17 @@ fn core_palette_items(
         let Some(registered) = registry.get(command) else {
             continue;
         };
-        if !is_chat && registered.chat_only {
-            continue;
-        }
+        let description = if !is_chat && registered.chat_only {
+            format!("{description} (available during chat)")
+        } else {
+            description.to_string()
+        };
 
         items.push(DialogItem {
             id: command.to_string(),
             name: name.to_string(),
             group: group.to_string(),
-            description: description.to_string(),
+            description,
             tip: command_palette_tip(command),
             provider_id: registered.hidden_tokens.join(" "),
             active: false,
@@ -623,7 +625,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn palette_hides_chat_only_commands_outside_chat() {
+    fn palette_keeps_chat_only_commands_discoverable_outside_chat() {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
         let mut state = init_command_palette();
@@ -632,7 +634,20 @@ mod tests {
 
         assert!(state.dialog.items.iter().any(|item| item.id == "models"));
         assert!(state.dialog.items.iter().any(|item| item.id == "copy"));
-        assert!(!state.dialog.items.iter().any(|item| item.id == "fork"));
+        let compact = state
+            .dialog
+            .items
+            .iter()
+            .find(|item| item.id == "compact")
+            .expect("compact command should remain discoverable from home");
+        assert!(compact.description.contains("available during chat"));
+        let fork = state
+            .dialog
+            .items
+            .iter()
+            .find(|item| item.id == "fork")
+            .expect("fork command should remain discoverable from home");
+        assert!(fork.description.contains("available during chat"));
         assert!(!state
             .dialog
             .items
@@ -652,6 +667,13 @@ mod tests {
         assert!(state.dialog.items.iter().any(|item| item.id == "fork"));
         assert!(state.dialog.items.iter().any(|item| item.id == "move"));
         assert!(state.dialog.items.iter().any(|item| item.id == "open-find"));
+        let compact = state
+            .dialog
+            .items
+            .iter()
+            .find(|item| item.id == "compact")
+            .expect("compact command should be available during chat");
+        assert!(!compact.description.contains("available during chat"));
     }
 
     #[test]

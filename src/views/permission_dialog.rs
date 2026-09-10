@@ -556,6 +556,7 @@ mod tests {
     fn bash_detail_lines_show_command_and_workdir() {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let prompt = PermissionPrompt {
+            tool_call_id: None,
             tool_id: "bash".to_string(),
             action: PermissionAction::Bash,
             permission: "bash".to_string(),
@@ -563,7 +564,9 @@ mod tests {
             target: Some("cargo test".to_string()),
             command: Some("cargo test".to_string()),
             workdir: Some("/tmp/workspace".to_string()),
+            workspace: "/tmp/workspace".to_string(),
             reason: "Bash command execution requires permission".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         };
         let colors = Theme::load_builtin_default().get_colors(true);
@@ -589,6 +592,7 @@ mod tests {
     fn external_directory_detail_target_shows_wildcard_scope() {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let prompt = PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "external_directory".to_string(),
@@ -596,7 +600,9 @@ mod tests {
             target: Some("/Users/carlo/Desktop/Projects/sheetpilot".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "Tool 'read' wants to access path outside working directory".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         };
         let colors = Theme::load_builtin_default().get_colors(true);
@@ -614,6 +620,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "bash".to_string(),
             action: PermissionAction::Bash,
             permission: "bash".to_string(),
@@ -621,7 +628,9 @@ mod tests {
             target: Some("cargo test".to_string()),
             command: Some("cargo test".to_string()),
             workdir: Some("/tmp/workspace".to_string()),
+            workspace: "/tmp/workspace".to_string(),
             reason: "Bash command execution requires permission".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
 
@@ -658,6 +667,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "read".to_string(),
@@ -665,7 +675,9 @@ mod tests {
             target: Some("/tmp/file".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "explicit approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
 
@@ -689,6 +701,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "external_directory".to_string(),
@@ -696,7 +709,9 @@ mod tests {
             target: Some("/Users/carlo/Desktop/Projects/sheetpilot/README.md".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "Tool 'read' wants to access path outside working directory: /Users/carlo/Desktop/Projects/sheetpilot/README.md".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
         let colors = Theme::load_builtin_default().get_colors(true);
@@ -729,6 +744,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "read".to_string(),
@@ -736,7 +752,9 @@ mod tests {
             target: Some("/tmp/file".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "explicit approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
         let colors = Theme::load_builtin_default().get_colors(true);
@@ -770,6 +788,7 @@ mod tests {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
         let mut state = PermissionDialogState::new();
         state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "read".to_string(),
             action: PermissionAction::Read,
             permission: "read".to_string(),
@@ -777,7 +796,9 @@ mod tests {
             target: Some("/tmp/file".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "explicit approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx,
         });
         let colors = Theme::load_builtin_default().get_colors(true);

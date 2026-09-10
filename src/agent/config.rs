@@ -92,6 +92,7 @@ pub struct LlmSessionConfig {
     pub prompt_cache_key: Option<String>,
     /// Vercel AI Gateway: `providerOptions.gateway.caching = "auto"`.
     pub gateway_caching_auto: bool,
+    pub prune_tool_outputs: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +143,7 @@ mod tests {
             openai_options: OpenAIRequestOptions::default(),
             prompt_cache_key: None,
             gateway_caching_auto: false,
+            prune_tool_outputs: false,
         }
     }
 

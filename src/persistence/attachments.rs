@@ -1,0 +1,322 @@
+use anyhow::{anyhow, Context, Result};
+use std::path::{Component, Path, PathBuf};
+
+pub fn root_dir() -> PathBuf {
+    if cfg!(test) || std::env::var_os("CRABCODE_TEST_MODE").is_some() {
+        PathBuf::from("/tmp/crabcode_test_data/attachments")
+    } else {
+        super::get_data_dir().join("attachments")
+    }
+}
+
+pub struct AttachmentMigration {
+    pub messages: Vec<crate::session::types::Message>,
+    pub created: Vec<PathBuf>,
+}
+
+pub fn migrate_messages(
+    messages: &[crate::session::types::Message],
+    session_id: &str,
+) -> Result<Option<AttachmentMigration>> {
+    let mut migrated = messages.to_vec();
+    let mut created = Vec::new();
+    let mut changed = false;
+
+    for message in &mut migrated {
+        for paths in [
+            &mut message.local_image_paths,
+            &mut message.local_audio_paths,
+        ] {
+            let mut unique = Vec::new();
+            for attachment_path in std::mem::take(paths) {
+                if unique.contains(&attachment_path) {
+                    changed = true;
+                    continue;
+                }
+                let source = PathBuf::from(&attachment_path);
+                if is_managed_for_session(&source, session_id) {
+                    unique.push(attachment_path);
+                    continue;
+                }
+                let metadata = match std::fs::symlink_metadata(&source) {
+                    Ok(metadata) if metadata.file_type().is_file() => metadata,
+                    _ => {
+                        unique.push(attachment_path);
+                        continue;
+                    }
+                };
+                if metadata.file_type().is_symlink() {
+                    unique.push(attachment_path);
+                    continue;
+                }
+                let Some(extension) = source.extension().and_then(|extension| extension.to_str())
+                else {
+                    unique.push(attachment_path);
+                    continue;
+                };
+                let data = match std::fs::read(&source) {
+                    Ok(data) => data,
+                    Err(_) => {
+                        unique.push(attachment_path);
+                        continue;
+                    }
+                };
+                match write(session_id, extension, &data) {
+                    Ok(path) => {
+                        unique.push(path.to_string_lossy().into_owned());
+                        created.push(path);
+                        changed = true;
+                    }
+                    Err(error) => {
+                        for path in created {
+                            remove_file(&path);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            *paths = unique;
+        }
+    }
+
+    if changed {
+        Ok(Some(AttachmentMigration {
+            messages: migrated,
+            created,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn is_managed_for_session(path: &Path, session_id: &str) -> bool {
+    session_dir(session_id).is_ok_and(|dir| {
+        path.strip_prefix(dir).is_ok_and(|relative| {
+            relative.components().count() == 1
+                && relative
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+        })
+    })
+}
+fn validate_session_id(session_id: &str) -> Result<()> {
+    let path = Path::new(session_id);
+    if session_id.is_empty()
+        || path.is_absolute()
+        || path.components().count() != 1
+        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        return Err(anyhow!("invalid attachment session id"));
+    }
+    Ok(())
+}
+
+pub fn session_dir(session_id: &str) -> Result<PathBuf> {
+    validate_session_id(session_id)?;
+    Ok(root_dir().join(session_id))
+}
+
+pub fn ensure_session_dir(session_id: &str) -> Result<PathBuf> {
+    let dir = session_dir(session_id)?;
+    super::create_private_dir_all(&dir)?;
+    Ok(dir)
+}
+
+pub fn write(session_id: &str, extension: &str, data: &[u8]) -> Result<PathBuf> {
+    if extension.is_empty() || !extension.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Err(anyhow!("invalid attachment extension"));
+    }
+    let dir = ensure_session_dir(session_id)?;
+    let id = cuid2::create_id();
+    let final_path = dir.join(format!("{id}.{extension}"));
+    let temporary_path = dir.join(format!(".{id}.tmp"));
+    std::fs::write(&temporary_path, data)
+        .with_context(|| format!("failed to write attachment {}", temporary_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    if let Err(error) = std::fs::rename(&temporary_path, &final_path) {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(error)
+            .with_context(|| format!("failed to finalize attachment {}", final_path.display()));
+    }
+    Ok(final_path)
+}
+
+pub fn is_managed(path: &Path) -> bool {
+    path.strip_prefix(root_dir()).is_ok_and(|relative| {
+        relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    })
+}
+
+pub fn remove_file(path: &Path) {
+    if is_managed(path) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub fn cleanup_session(session_id: &str) -> Result<()> {
+    let dir = session_dir(session_id)?;
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", dir.display())),
+    }
+}
+
+pub fn clone_messages(
+    messages: &[crate::session::types::Message],
+    destination_session_id: &str,
+) -> Result<Vec<crate::session::types::Message>> {
+    let mut cloned = messages.to_vec();
+    let mut created = Vec::new();
+    for message in &mut cloned {
+        message.id = cuid2::create_id();
+        for paths in [
+            &mut message.local_image_paths,
+            &mut message.local_audio_paths,
+        ] {
+            for attachment_path in paths {
+                let source = PathBuf::from(&*attachment_path);
+                if !is_managed(&source) {
+                    continue;
+                }
+                if std::fs::symlink_metadata(&source)?.file_type().is_symlink() {
+                    return Err(anyhow!("managed attachment cannot be a symlink"));
+                }
+                let extension = source
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .ok_or_else(|| anyhow!("managed attachment has no extension"))?;
+                let data = std::fs::read(&source)
+                    .with_context(|| format!("failed to read attachment {}", source.display()))?;
+                match write(destination_session_id, extension, &data) {
+                    Ok(path) => {
+                        *attachment_path = path.to_string_lossy().into_owned();
+                        created.push(path);
+                    }
+                    Err(error) => {
+                        for path in created {
+                            remove_file(&path);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+    Ok(cloned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_attachment_round_trip_and_cleanup() {
+        let session = format!("attachment-test-{}", cuid2::create_id());
+        let path = write(&session, "png", b"png-data").unwrap();
+        assert!(is_managed(&path));
+        assert_eq!(std::fs::read(&path).unwrap(), b"png-data");
+        cleanup_session(&session).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn fork_clones_managed_files_and_regenerates_message_ids() {
+        let source_session = format!("attachment-source-{}", cuid2::create_id());
+        let destination_session = format!("attachment-dest-{}", cuid2::create_id());
+        let source = write(&source_session, "png", b"image").unwrap();
+        let mut message = crate::session::types::Message::user("image");
+        let original_id = message.id.clone();
+        message.local_image_paths = vec![source.to_string_lossy().into_owned()];
+
+        let cloned = clone_messages(&[message], &destination_session).unwrap();
+        assert_ne!(cloned[0].id, original_id);
+        assert_ne!(cloned[0].local_image_paths[0], source.to_string_lossy());
+        assert_eq!(
+            std::fs::read(&cloned[0].local_image_paths[0]).unwrap(),
+            b"image"
+        );
+
+        cleanup_session(&source_session).unwrap();
+        assert!(Path::new(&cloned[0].local_image_paths[0]).exists());
+        cleanup_session(&destination_session).unwrap();
+    }
+
+    #[test]
+    fn traversal_path_is_not_managed() {
+        let traversal = root_dir().join("session").join("..").join("outside.png");
+        assert!(!is_managed(&traversal));
+    }
+
+    #[test]
+    fn legacy_image_and_audio_paths_migrate_once() {
+        let legacy = tempfile::tempdir().unwrap();
+        let image = legacy.path().join("image.png");
+        let audio = legacy.path().join("audio.wav");
+        std::fs::write(&image, b"image").unwrap();
+        std::fs::write(&audio, b"audio").unwrap();
+        let session = format!("attachment-migrate-{}", cuid2::create_id());
+        let mut message = crate::session::types::Message::user("attachments");
+        message.local_image_paths = vec![image.to_string_lossy().into_owned()];
+        message.local_audio_paths = vec![audio.to_string_lossy().into_owned()];
+
+        let migration = migrate_messages(&[message], &session)
+            .unwrap()
+            .expect("legacy migration");
+        assert_eq!(migration.created.len(), 2);
+        assert!(migration.messages[0]
+            .local_image_paths
+            .iter()
+            .all(|path| is_managed_for_session(Path::new(path), &session)));
+        assert!(migration.messages[0]
+            .local_audio_paths
+            .iter()
+            .all(|path| is_managed_for_session(Path::new(path), &session)));
+        assert!(migrate_messages(&migration.messages, &session)
+            .unwrap()
+            .is_none());
+
+        cleanup_session(&session).unwrap();
+    }
+
+    #[test]
+    fn missing_legacy_paths_remain_loadable() {
+        let session = format!("attachment-missing-{}", cuid2::create_id());
+        let mut message = crate::session::types::Message::user("missing");
+        message.local_image_paths = vec!["/definitely/missing/image.png".to_string()];
+
+        assert!(migrate_messages(&[message], &session).unwrap().is_none());
+    }
+
+    #[test]
+    fn fork_clones_mixed_managed_attachments() {
+        let source_session = format!("attachment-mixed-source-{}", cuid2::create_id());
+        let destination_session = format!("attachment-mixed-dest-{}", cuid2::create_id());
+        let image = write(&source_session, "png", b"image").unwrap();
+        let audio = write(&source_session, "wav", b"audio").unwrap();
+        let mut message = crate::session::types::Message::user("mixed");
+        message.local_image_paths = vec![image.to_string_lossy().into_owned()];
+        message.local_audio_paths = vec![audio.to_string_lossy().into_owned()];
+
+        let cloned = clone_messages(&[message], &destination_session).unwrap();
+        assert_eq!(
+            std::fs::read(&cloned[0].local_image_paths[0]).unwrap(),
+            b"image"
+        );
+        assert_eq!(
+            std::fs::read(&cloned[0].local_audio_paths[0]).unwrap(),
+            b"audio"
+        );
+
+        cleanup_session(&source_session).unwrap();
+        assert!(Path::new(&cloned[0].local_image_paths[0]).exists());
+        assert!(Path::new(&cloned[0].local_audio_paths[0]).exists());
+        cleanup_session(&destination_session).unwrap();
+    }
+}

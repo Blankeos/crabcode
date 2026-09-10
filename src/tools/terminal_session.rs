@@ -36,9 +36,19 @@ pub struct TerminalSessionStart {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TerminalSessionControl {
-    Start { rows: u16, cols: u16 },
+    Start {
+        rows: u16,
+        cols: u16,
+    },
     Input(Vec<u8>),
-    Resize { rows: u16, cols: u16 },
+    Resize {
+        rows: u16,
+        cols: u16,
+    },
+    /// Complete the session using a terminal hosted by an external client.
+    ExternalResult(TerminalSessionResult),
+    /// Fail the session because an external terminal backend could not complete it.
+    ExternalError(String),
     Stop,
 }
 
@@ -123,6 +133,28 @@ impl TranscriptState {
             &text[..end],
             MAX_MODEL_OUTPUT_BYTES
         )
+    }
+}
+
+pub(crate) fn external_terminal_result(
+    start: &TerminalSessionStart,
+    output: &str,
+    truncated: bool,
+    exit_code: Option<i32>,
+    stopped_by_user: bool,
+) -> TerminalSessionResult {
+    let mut transcript = TranscriptState::new(start.rows.max(1), start.cols.max(1));
+    transcript.append(output.as_bytes());
+    transcript.truncated |= truncated;
+    TerminalSessionResult {
+        session_id: start.session_id.clone(),
+        exit_code,
+        transcript_bytes: transcript.raw.len(),
+        transcript_truncated: transcript.truncated,
+        transcript_plain: transcript.plain_text(),
+        cols: transcript.cols,
+        rows: transcript.rows,
+        stopped_by_user,
     }
 }
 
@@ -308,6 +340,10 @@ impl TerminalSessionTool {
                         start.rows = rows.max(1);
                         start.cols = cols.max(1);
                     }
+                    Some(TerminalSessionControl::ExternalResult(result)) => return Ok(result),
+                    Some(TerminalSessionControl::ExternalError(error)) => {
+                        return Err(ToolError::Execution(error));
+                    }
                     Some(TerminalSessionControl::Stop) | None => {
                         emit_event(&sender, &tool_call_id, TerminalSessionEvent::Stopped);
                         return Ok(TerminalSessionResult {
@@ -464,6 +500,8 @@ impl TerminalSessionTool {
                                 TerminalSessionEvent::Resized { rows, cols },
                             );
                         }
+                        Some(TerminalSessionControl::ExternalResult(_)) => {}
+                        Some(TerminalSessionControl::ExternalError(_)) => {}
                         Some(TerminalSessionControl::Stop) | None => {
                             stopped_by_user = true;
                             if let Ok(mut guard) = child.lock() {
@@ -728,6 +766,28 @@ mod tests {
         state.resize(40, 120);
         assert_eq!(state.rows, 40);
         assert_eq!(state.cols, 120);
+    }
+
+    #[test]
+    fn external_terminal_result_preserves_client_output_and_exit() {
+        let start = TerminalSessionStart {
+            session_id: "session".to_string(),
+            tool_call_id: "call".to_string(),
+            command: "echo hi".to_string(),
+            description: "test".to_string(),
+            workdir: None,
+            cols: 80,
+            rows: 24,
+            job_id: None,
+        };
+
+        let result = external_terminal_result(&start, "\x1b[31mhi\x1b[0m\n", true, Some(7), false);
+
+        assert_eq!(result.session_id, "session");
+        assert_eq!(result.transcript_plain, "hi\n");
+        assert!(result.transcript_truncated);
+        assert_eq!(result.exit_code, Some(7));
+        assert!(!result.stopped_by_user);
     }
 
     #[test]

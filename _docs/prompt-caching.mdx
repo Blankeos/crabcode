@@ -63,7 +63,7 @@ Grok Build’s sampler sends that header so cli-chat-proxy emits `response.doom_
 
 Doom-loop recovery matches Grok Build’s sampler, not a client tool-name babysitter. Only confident `tail_repetition:{n}@thinking` from `response.doom_loop_check` resamples: skip that generation’s tools, inject `RECOVERY_REMINDER` into the **next request only** (same `<system_reminder>` user-role item as `ConversationItem::system_reminder` — not a visible user turn). After `DEFAULT_MAX_RETRIES` (2) the abort is disarmed and the turn continues. Repeating reads or shell commands are not a loop — they usually mean earlier tool results were cleared.
 
-Tool-result pruning matches Grok Build `prune_conversation` (`.devrefs/references/xai-org/grok-build/crates/codegen/xai-chat-state/src/actor/request_builder.rs`): **only when estimated tokens exceed 50% of a 500k window** (`should_prune`), last 3 user turns stay intact, older large results soft-trim at 4000/1500/1500, age ≥ 10 hard-clear. Those numbers have not changed in Grok Build; the important gate is not pruning a short session at all.
+Tool-result pruning follows the OpenCode `compaction.prune` contract and is disabled by default. When enabled, the latest two user turns and roughly 40,000 tokens of newer tool output stay intact; older candidates are cleared only when doing so reclaims more than 20,000 tokens. `skill` results are always protected. This mutates only the provider-facing request, not persisted history or rendered tool cards.
 
 **Parent-cached aux** (e.g. max-steps text-only summary): keeps parent `prompt_cache_key` + session/conv so the conversation prefix can reuse the main turn's KV cache; assigns a fresh `aux-…` req id.
 

@@ -23,19 +23,9 @@ const DOOM_LOOP_MAX_RECOVERIES: usize = 2;
 /// `.devrefs/references/xai-org/grok-build/crates/codegen/xai-grok-sampler/src/doom_loop_recovery.rs`
 const DOOM_LOOP_REMINDER: &str = "<system_reminder>Your messages have been flagged as looping. Your response has been flagged as repeating the same text pattern. Avoid excessive repetition. If you are having trouble ask the user for guidance.</system_reminder>";
 
-/// Grok Build `PruningConfig::keep_last_n_turns` (`.devrefs/.../memory.rs`).
-/// Never prune tool results from this many most recent **user turns**.
-const KEEP_RECENT_USER_TURNS: usize = 3;
-/// Grok Build `PruningConfig::hard_clear_age_turns`.
-const HARD_CLEAR_AGE_TURNS: usize = 10;
-/// Grok Build `should_prune`: only when total tokens > 50% of the context
-/// window (`.devrefs/.../request_builder.rs`). grok-4.6 is 500k, so 250k.
-/// Estimate tokens as UTF-8 bytes / 4. Under this, every tool result stays.
-const PRUNE_AFTER_ESTIMATED_TOKENS: usize = 250_000;
-/// Soft-trim threshold for older-but-still-retained tool outputs (chars).
-const TOOL_OUTPUT_SOFT_TRIM_CHARS: usize = 4_000;
-const TOOL_OUTPUT_SOFT_TRIM_HEAD: usize = 1_500;
-const TOOL_OUTPUT_SOFT_TRIM_TAIL: usize = 1_500;
+const KEEP_RECENT_USER_TURNS: usize = 2;
+const PRUNE_PROTECT_TOKENS: usize = 40_000;
+const PRUNE_MINIMUM_TOKENS: usize = 20_000;
 const PRUNED_TOOL_OUTPUT_PLACEHOLDER: &str = "[Old tool result content cleared]";
 
 /// Image compact hysteresis:
@@ -118,6 +108,34 @@ pub async fn stream_with_tools<P: Provider>(
     headers: HashMap<String, String>,
     cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<StreamTextResponse> {
+    stream_with_tools_options(
+        provider,
+        messages,
+        tools,
+        max_steps,
+        stop_when,
+        headers,
+        cancel_token,
+        StreamWithToolsOptions::default(),
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamWithToolsOptions {
+    pub prune_tool_outputs: bool,
+}
+
+pub async fn stream_with_tools_options<P: Provider>(
+    provider: P,
+    messages: Vec<Message>,
+    tools: Vec<Tool>,
+    max_steps: Option<usize>,
+    stop_when: Option<StopWhenFn>,
+    headers: HashMap<String, String>,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
+    options: StreamWithToolsOptions,
+) -> Result<StreamTextResponse> {
     let (mut response, tx) = StreamTextResponse::create();
     let _ = tx.send(ChunkType::Start);
 
@@ -161,12 +179,18 @@ pub async fn stream_with_tools<P: Provider>(
             }
 
             let step_summary = provider_step_log_summary(&current_messages, &tools);
-            let pruned =
-                maybe_prune_stale_tool_outputs(&mut current_messages, tool_prefix_tokens(&tools));
+            let pruned = maybe_prune_stale_tool_outputs_if_enabled(
+                &mut current_messages,
+                tool_prefix_tokens(&tools),
+                options.prune_tool_outputs,
+            );
             if pruned > 0 {
                 let _ = tx_loop.send(ChunkType::Metadata(format!(
-                    "tool_outputs_pruned count={} keep_user_turns={} hard_clear_age={}",
-                    pruned, KEEP_RECENT_USER_TURNS, HARD_CLEAR_AGE_TURNS
+                    "tool_outputs_pruned count={} keep_user_turns={} protect_tokens={} minimum_tokens={}",
+                    pruned,
+                    KEEP_RECENT_USER_TURNS,
+                    PRUNE_PROTECT_TOKENS,
+                    PRUNE_MINIMUM_TOKENS
                 )));
             }
             let images_evicted = compact_images_to_budget_in_place(&mut current_messages);
@@ -1055,65 +1079,51 @@ fn rollback_provider_attempt(
 /// provider request. Durable UI/history copies are left intact — this only
 /// mutates the request-facing message list.
 ///
-/// Matches Grok Build `prune_conversation`
-/// (`.devrefs/references/xai-org/grok-build/crates/codegen/xai-chat-state/src/actor/request_builder.rs`):
-/// - Never prune tool results from the last [`KEEP_RECENT_USER_TURNS`] user turns
-///   (the current implement turn stays intact no matter how many tools it used)
-/// - Soft-trim large older results to head+tail
-/// - Hard-clear anything older than [`HARD_CLEAR_AGE_TURNS`] user turns
-/// - Drop attached images on pruned outputs (base64 is extremely expensive)
-///
-/// Grok Build only runs this when context is already over half full
-/// (`should_prune`). See [`maybe_prune_stale_tool_outputs`].
 fn prune_stale_tool_outputs_in_place(messages: &mut [Message]) -> usize {
-    let mut turn_from_end: usize = 0;
-    let mut seen_first_user = false;
-    let mut pruned = 0usize;
+    let mut user_turns = 0usize;
+    let mut protected_tokens = 0usize;
+    let mut candidate_tokens = 0usize;
+    let mut candidates = Vec::new();
 
     for i in (0..messages.len()).rev() {
         if is_injected_system_reminder(&messages[i]) {
             continue;
         }
         if matches!(&messages[i], Message::User(_)) {
-            if seen_first_user {
-                turn_from_end += 1;
-            }
-            seen_first_user = true;
+            user_turns += 1;
             continue;
         }
 
-        let Message::ToolOutput(output) = &mut messages[i] else {
+        let Message::ToolOutput(output) = &messages[i] else {
             continue;
         };
-
-        if turn_from_end < KEEP_RECENT_USER_TURNS {
+        if output.name == "skill" || user_turns < KEEP_RECENT_USER_TURNS {
             continue;
         }
-
-        let had_images = !output.images.is_empty();
-        let original_len = output.output.len();
-        if turn_from_end >= HARD_CLEAR_AGE_TURNS {
-            if original_len > PRUNED_TOOL_OUTPUT_PLACEHOLDER.len() || had_images {
-                output.output = PRUNED_TOOL_OUTPUT_PLACEHOLDER.to_string();
-                output.images.clear();
-                pruned += 1;
-            }
+        let image_bytes = output
+            .images
+            .iter()
+            .map(|image| image.data_url.len())
+            .sum::<usize>();
+        let tokens = output.output.len().saturating_add(image_bytes) / 4;
+        if protected_tokens < PRUNE_PROTECT_TOKENS {
+            protected_tokens = protected_tokens.saturating_add(tokens);
             continue;
         }
-
-        let trimmed = soft_trim_tool_output(&output.output);
-        if trimmed.len() < original_len || had_images {
-            output.output = trimmed;
+        candidate_tokens = candidate_tokens.saturating_add(tokens);
+        candidates.push(i);
+    }
+    if candidate_tokens <= PRUNE_MINIMUM_TOKENS {
+        return 0;
+    }
+    let pruned = candidates.len();
+    for index in candidates {
+        if let Message::ToolOutput(output) = &mut messages[index] {
+            output.output = PRUNED_TOOL_OUTPUT_PLACEHOLDER.to_string();
             output.images.clear();
-            pruned += 1;
         }
     }
-
     pruned
-}
-
-fn estimated_input_tokens(messages: &[Message]) -> usize {
-    (message_log_summary(messages).text_bytes + total_image_bytes(messages)) / 4
 }
 
 fn tool_prefix_tokens(tools: &[Tool]) -> usize {
@@ -1129,18 +1139,19 @@ fn tool_prefix_tokens(tools: &[Tool]) -> usize {
         / 4
 }
 
-/// No-op until the transcript is large enough that Grok Build would prune
-/// (`total_tokens > context_window / 2`). Hard probing is almost always
-/// the model rereading because we already cleared the bytes it needed.
-/// `extra_prefix_tokens` is the tools array (built-in + MCP schemas) that
-/// rides every request but is not in `messages`.
-fn maybe_prune_stale_tool_outputs(messages: &mut [Message], extra_prefix_tokens: usize) -> usize {
-    if estimated_input_tokens(messages).saturating_add(extra_prefix_tokens)
-        <= PRUNE_AFTER_ESTIMATED_TOKENS
-    {
+fn maybe_prune_stale_tool_outputs(messages: &mut [Message], _extra_prefix_tokens: usize) -> usize {
+    prune_stale_tool_outputs_in_place(messages)
+}
+
+fn maybe_prune_stale_tool_outputs_if_enabled(
+    messages: &mut [Message],
+    extra_prefix_tokens: usize,
+    enabled: bool,
+) -> usize {
+    if !enabled {
         return 0;
     }
-    prune_stale_tool_outputs_in_place(messages)
+    maybe_prune_stale_tool_outputs(messages, extra_prefix_tokens)
 }
 
 /// Evict oldest inline images with hysteresis:
@@ -1223,27 +1234,6 @@ fn total_image_bytes(messages: &[Message]) -> usize {
             _ => 0usize,
         })
         .sum()
-}
-
-fn soft_trim_tool_output(text: &str) -> String {
-    let char_count = text.chars().count();
-    if char_count <= TOOL_OUTPUT_SOFT_TRIM_CHARS {
-        return text.to_string();
-    }
-
-    let head: String = text.chars().take(TOOL_OUTPUT_SOFT_TRIM_HEAD).collect();
-    let tail: String = text
-        .chars()
-        .rev()
-        .take(TOOL_OUTPUT_SOFT_TRIM_TAIL)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    let omitted = char_count
-        .saturating_sub(TOOL_OUTPUT_SOFT_TRIM_HEAD)
-        .saturating_sub(TOOL_OUTPUT_SOFT_TRIM_TAIL);
-    format!("{head}\n\n...[{omitted} chars truncated]...\n\n{tail}")
 }
 
 #[derive(Debug, Default)]
@@ -1916,10 +1906,10 @@ mod tests {
     use super::{
         compact_images_to_budget_in_place, doom_loop_metadata_is_confident,
         doom_loop_trigger_is_confident, maybe_prune_stale_tool_outputs,
-        prune_stale_tool_outputs_in_place, soft_trim_tool_output, stream_with_tools,
-        total_image_bytes, ToolCallAccumulator, DOOM_LOOP_REMINDER, HARD_CLEAR_AGE_TURNS,
+        maybe_prune_stale_tool_outputs_if_enabled, prune_stale_tool_outputs_in_place,
+        stream_with_tools, total_image_bytes, ToolCallAccumulator, DOOM_LOOP_REMINDER,
         IMAGE_COMPACT_PLACEHOLDER, IMAGE_COMPACT_RECLAIM_TARGET_BYTES, IMAGE_COMPACT_TRIGGER_BYTES,
-        KEEP_RECENT_USER_TURNS, PRUNED_TOOL_OUTPUT_PLACEHOLDER, TOOL_OUTPUT_SOFT_TRIM_CHARS,
+        PRUNED_TOOL_OUTPUT_PLACEHOLDER, PRUNE_MINIMUM_TOKENS, PRUNE_PROTECT_TOKENS,
     };
     use crate::chunk::{ChunkType, FinishReason, MessagePhase, ReasoningReplayItem};
     use crate::message::Message;
@@ -1963,21 +1953,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn soft_trim_tool_output_keeps_short_text() {
-        assert_eq!(soft_trim_tool_output("short"), "short");
-    }
-
-    #[test]
-    fn soft_trim_tool_output_keeps_head_and_tail() {
-        let text = "a".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 500);
-        let trimmed = soft_trim_tool_output(&text);
-        assert!(trimmed.len() < text.len());
-        assert!(trimmed.starts_with('a'));
-        assert!(trimmed.ends_with('a'));
-        assert!(trimmed.contains("chars truncated"));
-    }
-
     fn tool_output_text<'a>(messages: &'a [Message], call_id: &str) -> &'a str {
         messages
             .iter()
@@ -1991,81 +1966,56 @@ mod tests {
     }
 
     #[test]
-    fn prune_stale_tool_outputs_keeps_current_user_turn() {
-        // A long implement turn (many tool results, one user message) must
-        // stay intact — this is the grok-build keep_last_n_turns contract.
+    fn prune_stale_tool_outputs_keeps_two_recent_user_turns() {
         let mut messages = vec![Message::user("implement")];
-        for i in 0..20 {
+        for i in 0..3 {
             messages.push(Message::tool_output(
                 format!("call_{i}"),
                 "read",
-                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 200),
+                "x".repeat(30_000),
                 false,
             ));
         }
+        messages.push(Message::user("follow up"));
 
         let pruned = prune_stale_tool_outputs_in_place(&mut messages);
         assert_eq!(pruned, 0);
-        for message in &messages {
-            if let Message::ToolOutput(output) = message {
-                assert_eq!(output.output.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 200);
-                assert_ne!(output.output, PRUNED_TOOL_OUTPUT_PLACEHOLDER);
-            }
-        }
     }
 
     #[test]
-    fn prune_stale_tool_outputs_soft_trims_outside_keep_window() {
-        // Grok Build ages a tool as (users after it) - 1, so KEEP+2 user
-        // turns are needed before the oldest result leaves the keep window.
-        let last = KEEP_RECENT_USER_TURNS + 1;
-        let mut messages = Vec::new();
-        for i in 0..=last {
-            messages.push(Message::user(format!("u{i}")));
-            messages.push(Message::tool_output(
-                format!("c{i}"),
-                "bash",
-                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 200),
-                false,
-            ));
-        }
+    fn prune_stale_tool_outputs_protects_recent_output_budget() {
+        let large = "x".repeat(PRUNE_PROTECT_TOKENS * 4);
+        let mut messages = vec![
+            Message::user("old"),
+            Message::tool_output("old-1", "bash", large.clone(), false),
+            Message::tool_output("old-2", "bash", large.clone(), false),
+            Message::user("recent-1"),
+            Message::user("recent-2"),
+        ];
 
         let pruned = prune_stale_tool_outputs_in_place(&mut messages);
-        assert!(pruned > 0);
-
-        let oldest = tool_output_text(&messages, "c0");
-        assert_ne!(oldest, PRUNED_TOOL_OUTPUT_PLACEHOLDER);
-        assert!(oldest.len() < TOOL_OUTPUT_SOFT_TRIM_CHARS + 200);
-        assert!(oldest.contains("chars truncated"));
-
-        let newest = tool_output_text(&messages, &format!("c{last}"));
-        assert_eq!(newest.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 200);
-    }
-
-    #[test]
-    fn prune_stale_tool_outputs_hard_clears_by_user_turn_age() {
-        let last = HARD_CLEAR_AGE_TURNS + 1;
-        let mut messages = Vec::new();
-        for i in 0..=last {
-            messages.push(Message::user(format!("u{i}")));
-            messages.push(Message::tool_output(
-                format!("c{i}"),
-                "bash",
-                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
-                false,
-            ));
-        }
-
-        let pruned = prune_stale_tool_outputs_in_place(&mut messages);
-        assert!(pruned > 0);
-
+        assert_eq!(pruned, 1);
         assert_eq!(
-            tool_output_text(&messages, "c0"),
+            tool_output_text(&messages, "old-1"),
             PRUNED_TOOL_OUTPUT_PLACEHOLDER
         );
+        assert_eq!(tool_output_text(&messages, "old-2"), large);
+    }
 
-        let newest = tool_output_text(&messages, &format!("c{last}"));
-        assert_eq!(newest.len(), TOOL_OUTPUT_SOFT_TRIM_CHARS + 50);
+    #[test]
+    fn prune_stale_tool_outputs_requires_minimum_savings() {
+        let small = "x".repeat(PRUNE_MINIMUM_TOKENS * 4);
+        let mut messages = vec![
+            Message::user("old"),
+            Message::tool_output("old", "bash", small, false),
+            Message::user("recent-1"),
+            Message::user("recent-2"),
+        ];
+        assert_eq!(prune_stale_tool_outputs_in_place(&mut messages), 0);
+        assert_ne!(
+            tool_output_text(&messages, "old"),
+            PRUNED_TOOL_OUTPUT_PLACEHOLDER
+        );
     }
 
     #[test]
@@ -2075,7 +2025,7 @@ mod tests {
             messages.push(Message::tool_output(
                 format!("call_{i}"),
                 "read",
-                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 200),
+                "x".repeat((PRUNE_PROTECT_TOKENS + PRUNE_MINIMUM_TOKENS + 1) * 4),
                 false,
             ));
         }
@@ -2086,45 +2036,34 @@ mod tests {
     }
 
     #[test]
-    fn maybe_prune_leaves_small_transcripts_intact() {
-        // Four user turns of large tool results, but nowhere near 50% of a
-        // 500k window — Grok Build would not prune, so we must not either.
-        let mut messages = Vec::new();
-        for i in 0..=HARD_CLEAR_AGE_TURNS {
-            messages.push(Message::user(format!("u{i}")));
-            messages.push(Message::tool_output(
-                format!("c{i}"),
-                "bash",
-                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
-                false,
-            ));
-        }
+    fn prune_stale_tool_outputs_never_prunes_skill_results() {
+        let large = "x".repeat((PRUNE_PROTECT_TOKENS + PRUNE_MINIMUM_TOKENS + 1) * 4);
+        let mut messages = vec![
+            Message::user("old"),
+            Message::tool_output("skill", "skill", large, false),
+            Message::user("recent-1"),
+            Message::user("recent-2"),
+        ];
         assert_eq!(maybe_prune_stale_tool_outputs(&mut messages, 0), 0);
-        assert_ne!(
-            tool_output_text(&messages, "c0"),
-            PRUNED_TOOL_OUTPUT_PLACEHOLDER
-        );
     }
 
     #[test]
-    fn maybe_prune_counts_tool_prefix_tokens() {
-        let mut messages = Vec::new();
-        for i in 0..=HARD_CLEAR_AGE_TURNS {
-            messages.push(Message::user(format!("u{i}")));
-            messages.push(Message::tool_output(
-                format!("c{i}"),
-                "bash",
-                "x".repeat(TOOL_OUTPUT_SOFT_TRIM_CHARS + 50),
-                false,
-            ));
-        }
-        assert_eq!(maybe_prune_stale_tool_outputs(&mut messages, 0), 0);
-        let original_len = tool_output_text(&messages, "c0").len();
-        assert!(
-            maybe_prune_stale_tool_outputs(&mut messages, super::PRUNE_AFTER_ESTIMATED_TOKENS + 1)
-                > 0
+    fn disabled_pruning_keeps_provider_request_tool_outputs_intact() {
+        let large = "x".repeat((PRUNE_PROTECT_TOKENS + PRUNE_MINIMUM_TOKENS + 1) * 4);
+        let mut messages = vec![
+            Message::user("old"),
+            Message::tool_output("old-1", "bash", large.clone(), false),
+            Message::tool_output("old-2", "bash", large.clone(), false),
+            Message::user("recent-1"),
+            Message::user("recent-2"),
+        ];
+
+        assert_eq!(
+            maybe_prune_stale_tool_outputs_if_enabled(&mut messages, 0, false),
+            0
         );
-        assert!(tool_output_text(&messages, "c0").len() < original_len);
+        assert_eq!(tool_output_text(&messages, "old-1"), large);
+        assert_eq!(tool_output_text(&messages, "old-2"), large);
     }
 
     #[test]

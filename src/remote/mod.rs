@@ -304,6 +304,7 @@ struct RemoteMessage {
     model: Option<String>,
     provider: Option<String>,
     local_image_paths: Vec<String>,
+    local_audio_paths: Vec<String>,
     was_interrupted: bool,
     parts: Vec<crate::session::types::MessagePart>,
 }
@@ -3305,6 +3306,7 @@ fn remote_message(message: &Message) -> RemoteMessage {
         model: message.model.clone(),
         provider: message.provider.clone(),
         local_image_paths: message.local_image_paths.clone(),
+        local_audio_paths: message.local_audio_paths.clone(),
         was_interrupted: message.was_interrupted,
         parts: message.parts.clone(),
     }
@@ -4121,10 +4123,12 @@ mod tests {
     fn remote_message_includes_local_image_paths() {
         let mut message = Message::user("see [Image #1]");
         message.local_image_paths = vec!["/tmp/example.png".to_string()];
+        message.local_audio_paths = vec!["/tmp/example.wav".to_string()];
 
         let remote = remote_message(&message);
 
         assert_eq!(remote.local_image_paths, vec!["/tmp/example.png"]);
+        assert_eq!(remote.local_audio_paths, vec!["/tmp/example.wav"]);
     }
 
     #[test]

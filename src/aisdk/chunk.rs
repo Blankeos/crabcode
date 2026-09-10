@@ -126,6 +126,7 @@ impl FinishReason {
             "tool_calls" | "function_call" => Self::ToolCalls,
             "length" => Self::Length,
             "content_filter" => Self::ContentFilter,
+            "refusal" => Self::Refusal,
             other => Self::Unknown(other.to_string()),
         }
     }

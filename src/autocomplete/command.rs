@@ -141,24 +141,18 @@ impl CommandAuto {
         let mut results: Vec<Suggestion> = Vec::new();
 
         for cmd in &self.commands {
-            if !is_chat && self.chat_only_commands.contains(&cmd.name) {
-                continue;
-            }
             if cmd.name.to_lowercase().starts_with(&input_lower) {
                 if seen.insert(cmd.name.clone()) {
-                    results.push(cmd.clone());
+                    results.push(self.with_context_description(cmd, is_chat));
                 }
             }
         }
 
         for (token, command_name) in &self.hidden_token_map {
-            if !is_chat && self.chat_only_commands.contains(command_name) {
-                continue;
-            }
             if token.to_lowercase().starts_with(&input_lower) {
                 if seen.insert(command_name.clone()) {
                     if let Some(cmd) = self.commands.iter().find(|c| c.name == *command_name) {
-                        results.push(cmd.clone());
+                        results.push(self.with_context_description(cmd, is_chat));
                     }
                 }
             }
@@ -175,6 +169,14 @@ impl CommandAuto {
         }
 
         results
+    }
+
+    fn with_context_description(&self, command: &Suggestion, is_chat: bool) -> Suggestion {
+        let mut suggestion = command.clone();
+        if !is_chat && self.chat_only_commands.contains(&command.name) {
+            suggestion.description = format!("{} (available during chat)", command.description);
+        }
+        suggestion
     }
 }
 
@@ -247,15 +249,23 @@ mod tests {
     }
 
     #[test]
-    fn test_chat_only_suggestions_hidden_outside_chat() {
+    fn test_chat_only_suggestions_remain_discoverable_outside_chat() {
         let registry = setup_registry();
         let auto = CommandAuto::new(&registry);
 
         let home_suggestions = auto.get_suggestions("c", false);
-        assert!(home_suggestions.iter().all(|s| s.name != "compact"));
+        let compact = home_suggestions
+            .iter()
+            .find(|suggestion| suggestion.name == "compact")
+            .expect("compact command should remain discoverable from home");
+        assert!(compact.description.contains("available during chat"));
 
         let chat_suggestions = auto.get_suggestions("c", true);
-        assert!(chat_suggestions.iter().any(|s| s.name == "compact"));
+        let compact = chat_suggestions
+            .iter()
+            .find(|suggestion| suggestion.name == "compact")
+            .expect("compact command should be available during chat");
+        assert!(!compact.description.contains("available during chat"));
     }
 
     #[test]

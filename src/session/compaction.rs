@@ -12,6 +12,7 @@ pub const DEFAULT_PRESERVE_RECENT_TOKENS: usize = 12_000;
 /// Minimum tokens in the head (to summarize) before compaction is worth running.
 /// Grok default is 5k; 2k still skips tiny heads that a fat summary would inflate.
 pub const MIN_COMPACTABLE_TOKENS: usize = 2_000;
+pub const DEFAULT_RESERVED_TOKENS: u32 = 20_000;
 pub const SUMMARY_PREFIX: &str = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
 pub const COMPACTION_MARKER_CONTENT: &str = "[crabcode:context-compacted]";
 
@@ -54,6 +55,33 @@ Rules:
 - Do not mention the summary process or that context was compacted."#;
 
 const TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
+
+pub fn auto_compaction_threshold(
+    config: &crate::config::configuration::CompactionConfig,
+    context_window: Option<u32>,
+    max_output_tokens: Option<u32>,
+) -> Option<usize> {
+    if !config.auto() {
+        return None;
+    }
+    let context_window = context_window.filter(|limit| *limit > 0)?;
+    let reserved = config.reserved().unwrap_or_else(|| {
+        max_output_tokens
+            .unwrap_or(DEFAULT_RESERVED_TOKENS)
+            .min(DEFAULT_RESERVED_TOKENS)
+    });
+    Some(context_window.saturating_sub(reserved) as usize)
+}
+
+pub fn should_auto_compact(
+    config: &crate::config::configuration::CompactionConfig,
+    used_tokens: usize,
+    context_window: Option<u32>,
+    max_output_tokens: Option<u32>,
+) -> bool {
+    auto_compaction_threshold(config, context_window, max_output_tokens)
+        .is_some_and(|threshold| used_tokens >= threshold)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionSelection {
@@ -172,7 +200,6 @@ fn select_messages_with_budget(
             kept_tokens = kept_tokens.saturating_add(size);
         }
     }
-
     // OpenCode: if no keep, or keep would start at work index 0, summarize all.
     let tail_start_work = match tail_start_work {
         Some(0) | None => work_indices.len(),
@@ -414,7 +441,9 @@ pub fn message_context_tokens(message: &Message) -> usize {
     // Billed compaction usage can be persisted on the summary. Context is the
     // summary text, never those billed prompt tokens.
     if is_compaction_summary(message) {
-        return estimate_tokens(&message.content);
+        return message
+            .token_count
+            .unwrap_or_else(|| estimate_tokens(&message.content));
     }
 
     let part_tokens = message_parts_context_tokens(message);
@@ -587,6 +616,18 @@ fn message_content_for_prompt(message: &Message) -> String {
         }
     }
 
+    if !message.local_audio_paths.is_empty() {
+        if !content.trim().is_empty() {
+            content.push('\n');
+        }
+        content.push_str("Attached local audio:\n");
+        for path in &message.local_audio_paths {
+            content.push_str("- ");
+            content.push_str(path);
+            content.push('\n');
+        }
+    }
+
     content
 }
 
@@ -697,6 +738,61 @@ fn estimate_tokens(content: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_compaction_uses_explicit_reserved_tokens() {
+        let config = crate::config::configuration::CompactionConfig::Settings {
+            auto: true,
+            prune: false,
+            reserved: Some(10_000),
+        };
+        assert_eq!(
+            auto_compaction_threshold(&config, Some(128_000), Some(32_000)),
+            Some(118_000)
+        );
+        assert!(!should_auto_compact(
+            &config,
+            117_999,
+            Some(128_000),
+            Some(32_000)
+        ));
+        assert!(should_auto_compact(
+            &config,
+            118_000,
+            Some(128_000),
+            Some(32_000)
+        ));
+    }
+
+    #[test]
+    fn auto_compaction_falls_back_to_output_or_twenty_thousand_tokens() {
+        let config = crate::config::configuration::CompactionConfig::Enabled;
+        assert_eq!(
+            auto_compaction_threshold(&config, Some(128_000), Some(8_192)),
+            Some(119_808)
+        );
+        assert_eq!(
+            auto_compaction_threshold(&config, Some(128_000), Some(64_000)),
+            Some(108_000)
+        );
+    }
+
+    #[test]
+    fn auto_compaction_requires_auto_and_known_context_window() {
+        let disabled = crate::config::configuration::CompactionConfig::Disabled;
+        assert_eq!(
+            auto_compaction_threshold(&disabled, Some(128_000), Some(8_192)),
+            None
+        );
+        assert_eq!(
+            auto_compaction_threshold(
+                &crate::config::configuration::CompactionConfig::Enabled,
+                None,
+                Some(8_192)
+            ),
+            None
+        );
+    }
 
     #[test]
     fn select_messages_drops_heavy_tail_turn_over_preserve_budget() {

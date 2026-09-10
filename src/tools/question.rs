@@ -74,16 +74,75 @@ fn parse_questions_param(params: &Value) -> Result<Value, ToolError> {
         }
     };
 
-    match parsed {
-        Value::Array(_) => Ok(normalize_questions(parsed)),
-        Value::Object(_) => Ok(normalize_questions(Value::Array(vec![parsed]))),
-        Value::String(s) if !s.trim().is_empty() => {
-            Ok(normalize_questions(question_from_plain_text(params, &s)))
+    let normalized = match parsed {
+        Value::Array(items) if items.is_empty() => {
+            return Err(ToolError::Validation(
+                "questions array cannot be empty".to_string(),
+            ));
         }
-        _ => Err(ToolError::Validation(
-            "questions JSON must decode to an array or object".to_string(),
-        )),
+        Value::Array(_) => normalize_questions(parsed),
+        Value::Object(_) => normalize_questions(Value::Array(vec![parsed])),
+        Value::String(s) if !s.trim().is_empty() => {
+            normalize_questions(question_from_plain_text(params, &s))
+        }
+        _ => {
+            return Err(ToolError::Validation(
+                "questions JSON must decode to an array or object".to_string(),
+            ));
+        }
+    };
+    validate_normalized_questions(&normalized)?;
+    Ok(normalized)
+}
+
+fn validate_normalized_questions(questions: &Value) -> Result<(), ToolError> {
+    let items = questions
+        .as_array()
+        .ok_or_else(|| ToolError::Validation("questions must normalize to an array".to_string()))?;
+    for (index, item) in items.iter().enumerate() {
+        let object = item.as_object().ok_or_else(|| {
+            ToolError::Validation(format!("question {} must be an object", index + 1))
+        })?;
+        let has_prompt = ["question", "header"]
+            .iter()
+            .filter_map(|key| object.get(*key).and_then(Value::as_str))
+            .any(|value| !value.trim().is_empty());
+        if !has_prompt {
+            return Err(ToolError::Validation(format!(
+                "question {} must include non-empty question or header text",
+                index + 1
+            )));
+        }
+        let options = object
+            .get("options")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                ToolError::Validation(format!("question {} options must be an array", index + 1))
+            })?;
+        let mut labels = std::collections::HashSet::new();
+        for (option_index, option) in options.iter().enumerate() {
+            let label = option
+                .get("label")
+                .and_then(Value::as_str)
+                .or_else(|| option.as_str())
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .ok_or_else(|| {
+                    ToolError::Validation(format!(
+                        "question {} option {} must include a non-empty label",
+                        index + 1,
+                        option_index + 1
+                    ))
+                })?;
+            if !labels.insert(label.to_string()) {
+                return Err(ToolError::Validation(format!(
+                    "question {} contains duplicate option label: {label}",
+                    index + 1
+                )));
+            }
+        }
     }
+    Ok(())
 }
 
 fn normalize_questions(value: Value) -> Value {
@@ -385,6 +444,7 @@ impl ToolHandler for QuestionTool {
 
         sender
             .send(crate::llm::ChunkMessage::QuestionRequest {
+                tool_call_id: ctx.call_id.clone(),
                 questions: questions.clone(),
                 response_tx,
             })
@@ -546,6 +606,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_questions_rejects_empty_or_malformed_items() {
+        for params in [
+            json!({ "questions": [] }),
+            json!({ "questions": [null] }),
+            json!({ "questions": [{ "question": "", "header": "" }] }),
+            json!({
+                "questions": [{
+                    "question": "Pick",
+                    "options": [{"label":"A"}, {"label":"A"}]
+                }]
+            }),
+        ] {
+            assert!(parse_questions_param(&params).is_err(), "{params}");
+        }
+    }
+
+    #[test]
     fn model_output_includes_questions_and_answers() {
         let questions = json!([
             {
@@ -588,5 +665,43 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Do not call the question tool again"));
+    }
+
+    #[tokio::test]
+    async fn question_request_preserves_tool_call_id_and_answers() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let tool = QuestionTool::new().with_sender(sender);
+        let (_abort_tx, abort_rx) = tokio::sync::watch::channel(false);
+        let ctx = ToolContext::new("session", "message", "Build", abort_rx)
+            .with_call_id("question_call_1");
+        let task = tokio::spawn(async move {
+            tool.execute(
+                json!({
+                    "questions": [{
+                        "question": "Pick one",
+                        "header": "Choice",
+                        "options": [{"label": "A", "description": "First"}]
+                    }]
+                }),
+                &ctx,
+            )
+            .await
+        });
+
+        let Some(crate::llm::ChunkMessage::QuestionRequest {
+            tool_call_id,
+            questions,
+            response_tx,
+        }) = receiver.recv().await
+        else {
+            panic!("question request");
+        };
+        assert_eq!(tool_call_id.as_deref(), Some("question_call_1"));
+        assert_eq!(questions[0]["question"], "Pick one");
+        response_tx.send(json!([["A"]])).expect("question response");
+
+        let result = task.await.expect("question task").expect("tool result");
+        assert!(result.output.contains("\"status\":\"answered\""));
+        assert_eq!(result.metadata["answers"], json!([["A"]]));
     }
 }

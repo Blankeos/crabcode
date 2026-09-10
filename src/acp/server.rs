@@ -1,11 +1,12 @@
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse,
-    ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, LoadSessionRequest, McpCapabilities, NewSessionRequest,
-    PromptCapabilities, PromptRequest, ResumeSessionRequest, SessionCapabilities,
-    SessionCloseCapabilities, SessionForkCapabilities, SessionListCapabilities,
-    SessionNotification, SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, SetSessionModeResponse,
+    DeleteSessionRequest, DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse,
+    Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
+    McpCapabilities, NewSessionRequest, PromptCapabilities, PromptRequest, ResumeSessionRequest,
+    SessionCapabilities, SessionCloseCapabilities, SessionDeleteCapabilities,
+    SessionForkCapabilities, SessionListCapabilities, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    SetSessionModeResponse,
 };
 use agent_client_protocol::{Agent, Stdio};
 use anyhow::{Context, Result};
@@ -30,12 +31,14 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
     })?;
     let service = crate::acp::service::AcpService::new(&workspace)
         .map_err(|_| anyhow::anyhow!("failed to initialize ACP session storage"))?;
+    let initialize_service = service.clone();
 
     Agent
         .builder()
         .name("crabcode-acp")
         .on_receive_request(
             async move |request: InitializeRequest, responder, _connection| {
+                initialize_service.set_client_capabilities(request.client_capabilities.clone());
                 let response = InitializeResponse::new(request.protocol_version)
                     .agent_capabilities(capabilities())
                     .agent_info(Implementation::new("crabcode", env!("CARGO_PKG_VERSION")));
@@ -46,16 +49,39 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
         .on_receive_request(
             {
                 let service = service.clone();
-                async move |request: ForkSessionRequest, responder, _connection| {
-                    let result = service
-                        .fork_session(request.session_id.to_string(), request.cwd)
-                        .await
-                        .map(|response| {
-                            ForkSessionResponse::new(response.session_id)
+                async move |request: DeleteSessionRequest, responder, _connection| {
+                    responder.respond_with_result(
+                        service
+                            .delete_session(&request.session_id.to_string())
+                            .await
+                            .map(|_| DeleteSessionResponse::new()),
+                    )
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let service = service.clone();
+                async move |request: ForkSessionRequest, responder, connection| {
+                    let service = service.clone();
+                    let task_connection = connection.clone();
+                    connection.spawn(async move {
+                        let response = service
+                            .fork_session(request.session_id.to_string(), request.cwd)
+                            .await?;
+                        let session_id = response.session_id.clone();
+                        let commands = service.available_commands(&session_id.to_string()).await?;
+                        responder.respond(
+                            ForkSessionResponse::new(session_id.clone())
                                 .modes(response.modes)
-                                .config_options(response.config_options)
-                        });
-                    responder.respond_with_result(result)
+                                .config_options(response.config_options),
+                        )?;
+                        task_connection.send_notification(SessionNotification::new(
+                            session_id,
+                            SessionUpdate::AvailableCommandsUpdate(commands),
+                        ))
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -188,7 +214,9 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
             {
                 let service = service.clone();
                 async move |request: ListSessionsRequest, responder, _connection| {
-                    responder.respond_with_result(service.list_sessions(request.cwd).await)
+                    responder.respond_with_result(
+                        service.list_sessions(request.cwd, request.cursor).await,
+                    )
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -240,13 +268,33 @@ pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
 fn capabilities() -> AgentCapabilities {
     AgentCapabilities::new()
         .load_session(true)
-        .prompt_capabilities(PromptCapabilities::new().embedded_context(true).image(true))
+        .prompt_capabilities(
+            PromptCapabilities::new()
+                .embedded_context(true)
+                .image(true)
+                .audio(true),
+        )
         .mcp_capabilities(McpCapabilities::new().http(true).sse(true))
         .session_capabilities(
             SessionCapabilities::new()
                 .list(SessionListCapabilities::new())
                 .resume(SessionResumeCapabilities::new())
                 .fork(SessionForkCapabilities::new())
-                .close(SessionCloseCapabilities::new()),
+                .close(SessionCloseCapabilities::new())
+                .delete(SessionDeleteCapabilities::new()),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertises_audio_prompt_support() {
+        let capabilities = capabilities();
+        let prompt = capabilities.prompt_capabilities;
+        assert!(prompt.audio);
+        assert!(prompt.image);
+        assert!(capabilities.session_capabilities.delete.is_some());
+    }
 }

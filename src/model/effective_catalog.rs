@@ -27,6 +27,8 @@ struct SnapshotModel {
     free: bool,
     local: bool,
     reasoning_options: Vec<crate::model::reasoning::ReasoningOption>,
+    #[serde(default)]
+    context_window: Option<u32>,
 }
 
 impl From<Model> for SnapshotModel {
@@ -42,6 +44,7 @@ impl From<Model> for SnapshotModel {
             free: model.free,
             local: model.local,
             reasoning_options: model.reasoning_options,
+            context_window: model.context_window,
         }
     }
 }
@@ -59,6 +62,7 @@ impl From<SnapshotModel> for Model {
             free: model.free,
             local: model.local,
             reasoning_options: model.reasoning_options,
+            context_window: model.context_window,
         }
     }
 }
@@ -179,6 +183,7 @@ mod tests {
             free: false,
             local: false,
             reasoning_options: Vec::new(),
+            context_window: None,
         }
     }
 

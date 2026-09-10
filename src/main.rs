@@ -471,6 +471,7 @@ async fn run_print_mode(
     let agent_registry = loaded_config.merged_config.agent_registry.clone();
     let websearch_config = loaded_config.merged_config.websearch.clone();
     let mcp_config = loaded_config.merged_config.mcp.clone();
+    let compaction_config = loaded_config.merged_config.compaction.clone();
     let agent_max_steps = agent_registry
         .get(&agent_mode)
         .and_then(|agent| agent.max_steps);
@@ -529,6 +530,7 @@ async fn run_print_mode(
             tool_permissions,
             websearch_config,
             mcp_config,
+            compaction_config,
             cwd,
             Some(prompt_registry),
             messages,
@@ -561,7 +563,8 @@ async fn run_print_mode(
             | crate::llm::ChunkMessage::SubagentStarted { .. }
             | crate::llm::ChunkMessage::SubagentChunk { .. }
             | crate::llm::ChunkMessage::TerminalSessionEvent { .. }
-            | crate::llm::ChunkMessage::BackgroundJobEvent { .. } => {}
+            | crate::llm::ChunkMessage::BackgroundJobEvent { .. }
+            | crate::llm::ChunkMessage::TurnStopReason(_) => {}
             crate::llm::ChunkMessage::End => {
                 println!();
                 play_resolved_sound(&sounds, crate::sound::SoundEvent::Complete);
