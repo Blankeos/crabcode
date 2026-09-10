@@ -1656,17 +1656,9 @@ async fn maybe_apply_openai_oauth_overrides(
 
     crate::emit_log!("Configured OpenAI OAuth Codex transport");
 
-    if !is_openai_oauth_model_allowed(&request_config.model_name) {
-        let fallback_model = "gpt-5.3-codex".to_string();
-        send_warning(
-            sender,
-            format!(
-                "Model '{}' is not supported for OpenAI OAuth. Falling back to '{}'.",
-                request_config.model_name, fallback_model
-            ),
-        );
-        request_config.model_name = fallback_model;
-    }
+    // No client-side allowlist: like Codex CLI, the server catalog is the source
+    // of truth. Unsupported models surface as server errors instead of a silent
+    // client-side swap.
     request_config.openai_options.use_responses_lite =
         openai_oauth_model_uses_responses_lite(&request_config.model_name);
     let default_originator =
@@ -1852,7 +1844,13 @@ async fn stream_provider_request(
     max_steps: Option<usize>,
     cancel_token: Option<CancellationToken>,
 ) -> Result<StreamTextResponse, DynError> {
-    let headers = HashMap::new();
+    let headers = super::opencode::ensure_session_headers(
+        &config.provider_name,
+        &config.base_url,
+        &config.openai_options.additional_headers,
+        config.openai_options.prompt_cache_key.as_deref(),
+        &std::collections::HashMap::new(),
+    );
     match config.kind {
         ProviderKind::OpenAICompatible => {
             let mut builder = OpenAICompatible::builder()
@@ -1949,9 +1947,6 @@ async fn stream_provider_request(
             }
             if let Some(cache_key) = config.openai_options.prompt_cache_key.as_deref() {
                 builder = builder.prompt_cache_key(cache_key);
-            }
-            if !config.openai_options.additional_headers.is_empty() {
-                builder = builder.headers(config.openai_options.additional_headers.clone());
             }
             if let Some(policy) =
                 super::xai_build::retry_policy_for(&config.openai_options.additional_headers)
@@ -2867,17 +2862,17 @@ fn is_vercel_ai_gateway(provider_name: &str, npm_package: &str) -> bool {
     provider_name == "vercel" || npm_package == "@ai-sdk/gateway"
 }
 
-fn is_openai_oauth_model_allowed(model: &str) -> bool {
-    let model = model.trim().to_ascii_lowercase();
-    model.contains("codex") || is_openai_oauth_gpt5_model(&model)
-}
-
 fn openai_oauth_model_uses_responses_lite(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
     let model = model.strip_prefix("openai/").unwrap_or(&model);
-    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
-        .iter()
-        .any(|lite_model| model == *lite_model || model.starts_with(&format!("{lite_model}-")))
+    [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-6-astra",
+    ]
+    .iter()
+    .any(|lite_model| model == *lite_model || model.starts_with(&format!("{lite_model}-")))
 }
 
 fn openai_oauth_default_originator(use_responses_lite: bool) -> &'static str {
@@ -2886,15 +2881,6 @@ fn openai_oauth_default_originator(use_responses_lite: bool) -> &'static str {
     } else {
         "crabcode"
     }
-}
-
-fn is_openai_oauth_gpt5_model(model: &str) -> bool {
-    let model = model.strip_prefix("openai/").unwrap_or(model);
-    if model.contains("-chat") {
-        return false;
-    }
-
-    model == "gpt-5" || model.starts_with("gpt-5.") || model.starts_with("gpt-5-")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2944,10 +2930,10 @@ mod tests {
     use super::{
         apply_compaction_stream_chunk, apply_provider_request_defaults, btw_context_messages,
         convert_messages, convert_messages_for_model, convert_messages_for_model_with_audio,
-        is_openai_oauth_model_allowed, maybe_apply_unauthenticated_free_provider_key,
-        model_supports_image_input, openai_oauth_default_originator,
-        openai_oauth_model_uses_responses_lite, openai_request_instructions,
-        provider_kind_for_model, resolve_api_key, resolve_model_route,
+        maybe_apply_unauthenticated_free_provider_key, model_supports_image_input,
+        openai_oauth_default_originator, openai_oauth_model_uses_responses_lite,
+        openai_request_instructions, provider_kind_for_model, resolve_api_key,
+        resolve_model_route,
         ui_vs_request_model_mismatch_warning, vlm_agent_has_model, AisdkMessage,
         OpenAIRequestOptions, ProviderKind, ProviderRequestConfig,
     };
@@ -3113,19 +3099,16 @@ mod tests {
     }
 
     #[test]
-    fn openai_oauth_allows_versioned_gpt5_models() {
-        assert!(is_openai_oauth_model_allowed("gpt-5.4"));
-        assert!(is_openai_oauth_model_allowed("gpt-5.5"));
-        assert!(is_openai_oauth_model_allowed("openai/gpt-5.6"));
-    }
-
-    #[test]
     fn openai_oauth_uses_responses_lite_only_for_current_gpt56_codex_models() {
         assert!(openai_oauth_model_uses_responses_lite("gpt-5.6-sol"));
         assert!(openai_oauth_model_uses_responses_lite(
             "openai/gpt-5.6-terra"
         ));
         assert!(openai_oauth_model_uses_responses_lite("gpt-5.6-luna-high"));
+        assert!(openai_oauth_model_uses_responses_lite("gpt-6-astra"));
+        assert!(openai_oauth_model_uses_responses_lite(
+            "openai/gpt-6-astra-wm"
+        ));
         assert!(!openai_oauth_model_uses_responses_lite("gpt-5.5"));
         assert!(!openai_oauth_model_uses_responses_lite("gpt-5.3-codex"));
     }
@@ -3134,18 +3117,6 @@ mod tests {
     fn openai_oauth_uses_codex_originator_only_for_responses_lite() {
         assert_eq!(openai_oauth_default_originator(true), "codex_cli_rs");
         assert_eq!(openai_oauth_default_originator(false), "crabcode");
-    }
-
-    #[test]
-    fn openai_oauth_allows_codex_named_models() {
-        assert!(is_openai_oauth_model_allowed("gpt-5.3-codex"));
-        assert!(is_openai_oauth_model_allowed("codex-mini-latest"));
-    }
-
-    #[test]
-    fn openai_oauth_rejects_known_non_codex_chat_models() {
-        assert!(!is_openai_oauth_model_allowed("gpt-5-chat-latest"));
-        assert!(!is_openai_oauth_model_allowed("gpt-4o"));
     }
 
     #[test]

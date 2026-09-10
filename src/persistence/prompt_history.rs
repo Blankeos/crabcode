@@ -157,10 +157,14 @@ impl PromptHistoryCache {
         self.prompts.len()
     }
 
-    pub fn navigate_up(&mut self, _current_text: &str) -> Option<String> {
+    pub fn navigate_up(&mut self, current_text: &str) -> Option<String> {
         if self.prompts.is_empty() {
             return None;
         }
+
+        // Stash any in-progress edit to the currently shown entry (session-only,
+        // never persisted to sqlite) so Down then Up doesn't lose it.
+        self.stash_current_edit(current_text);
 
         match self.current_index {
             None => {
@@ -178,7 +182,10 @@ impl PromptHistoryCache {
         }
     }
 
-    pub fn navigate_down(&mut self, _current_text: &str) -> Option<String> {
+    pub fn navigate_down(&mut self, current_text: &str) -> Option<String> {
+        // Same session-only stash as navigate_up.
+        self.stash_current_edit(current_text);
+
         match self.current_index {
             None => None,
             Some(0) => {
@@ -194,6 +201,16 @@ impl PromptHistoryCache {
 
     pub fn reset_navigation(&mut self) {
         self.current_index = None;
+    }
+
+    fn stash_current_edit(&mut self, current_text: &str) {
+        if let Some(index) = self.current_index {
+            if let Some(slot) = self.prompts.get_mut(index) {
+                if *slot != current_text {
+                    *slot = current_text.to_string();
+                }
+            }
+        }
     }
 
     pub fn is_navigating(&self) -> bool {

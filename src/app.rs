@@ -37,7 +37,7 @@ use crate::views::agents_dialog::{
     render_agents_dialog, AgentsDialogAction,
 };
 use crate::views::chat::{
-    agent_color_for_tab, init_chat, queued_messages_height, render_chat,
+    agent_color_for_tab, chat_input_height, init_chat, queued_messages_height, render_chat,
     render_subagent_spinner_only, SubagentTab, SubagentTabs, SUBAGENT_FOOTER_HEIGHT,
 };
 use crate::views::command_palette::{
@@ -317,7 +317,7 @@ impl OAuthProvider {
 
     fn default_model(self) -> &'static str {
         match self {
-            Self::OpenAI => "gpt-5.3-codex",
+            Self::OpenAI => "gpt-5.4",
             Self::XAI => "grok-build-0.1",
         }
     }
@@ -2024,17 +2024,24 @@ impl App {
     /// Rows under the chat viewport (queue/input/help/status) for dialog overlap math.
     fn dialog_below_chat_height(&self, size: ratatui::layout::Rect) -> u16 {
         let is_subagent = self.is_subagent_session_active();
-        let input_height = if is_subagent {
-            SUBAGENT_FOOTER_HEIGHT
-        } else {
-            self.input.get_height_for_width(size.width)
-        };
         let help_height = if is_subagent { 0 } else { 1 };
         let queue_height = if is_subagent {
             0
         } else {
             crate::views::chat::queued_messages_height(
                 &self.queued_message_previews_for_current_session(),
+            )
+        };
+        let input_height = if is_subagent {
+            SUBAGENT_FOOTER_HEIGHT
+        } else {
+            chat_input_height(
+                &self.input,
+                size.width,
+                size.height,
+                queue_height,
+                0,
+                help_height,
             )
         };
         // Matches render_chat: queue + input + help + inner status row + outer status bar.
@@ -3357,6 +3364,35 @@ impl App {
         had_selection
     }
 
+    /// Shift+navigation extends (or shrinks) the input selection instead of
+    /// clearing it, so the copy tooltip must stay alive across these keys.
+    fn is_selection_extend_key(key: KeyEvent) -> bool {
+        key.modifiers.contains(event::KeyModifiers::SHIFT)
+            && matches!(
+                key.code,
+                KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Home
+                    | KeyCode::End
+            )
+    }
+
+    /// Mirror the mouse-drag behavior for keyboard selections: show the `y`
+    /// copy bar as soon as Shift+arrows select text, hide it once the
+    /// selection is gone.
+    fn sync_input_selection_action_bar(&mut self) {
+        if self.input.has_selection() && !self.input.get_selected_text().is_empty() {
+            self.show_selection_action_bar_for(SelectionActionTarget::Input);
+        } else if matches!(
+            self.selection_action_bar,
+            Some(state) if state.target == SelectionActionTarget::Input
+        ) {
+            self.selection_action_bar = None;
+        }
+    }
+
     fn add_selection_to_prompt(&mut self, target: SelectionActionTarget) -> bool {
         if target != SelectionActionTarget::Chat {
             return false;
@@ -3431,11 +3467,6 @@ impl App {
                 .as_ref(),
             )
             .split(size);
-        let input_height = if self.is_subagent_session_active() {
-            SUBAGENT_FOOTER_HEIGHT
-        } else {
-            self.input.get_height_for_width(size.width)
-        };
         let help_height = if self.is_subagent_session_active() {
             0
         } else {
@@ -3446,6 +3477,18 @@ impl App {
             0
         } else {
             queued_messages_height(&queued_messages)
+        };
+        let input_height = if self.is_subagent_session_active() {
+            SUBAGENT_FOOTER_HEIGHT
+        } else {
+            chat_input_height(
+                &self.input,
+                size.width,
+                size.height,
+                queue_height,
+                0,
+                help_height,
+            )
         };
         let above_status_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
@@ -3729,6 +3772,7 @@ impl App {
                 } else {
                     let input_handled = self.input.handle_event(key);
                     self.update_suggestions();
+                    self.sync_input_selection_action_bar();
                     input_handled
                 }
             }
@@ -4362,6 +4406,10 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         self.chat_state.chat.toggle_thinking_visible();
                     }
+                    crate::views::which_key::WhichKeyAction::ShowCopyDialog => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.open_copy_actions_dialog();
+                    }
                     crate::views::which_key::WhichKeyAction::GoChild => {
                         self.overlay_focus = OverlayFocus::None;
                         let _ = self.switch_to_latest_child_session();
@@ -4712,7 +4760,17 @@ impl App {
     }
 
     fn handle_input_and_app_keys(&mut self, key: KeyEvent) {
-        if self.selection_action_bar.is_some() {
+        if Self::is_selection_extend_key(key) {
+            // Shift+arrows extend the input selection: clear any chat-side
+            // selection/bar but never the input selection itself.
+            self.chat_state.chat.selection.clear();
+            if !matches!(
+                self.selection_action_bar,
+                Some(state) if state.target == SelectionActionTarget::Input
+            ) {
+                self.selection_action_bar = None;
+            }
+        } else if self.selection_action_bar.is_some() {
             self.dismiss_selection_actions();
         } else {
             self.chat_state.chat.selection.clear();
@@ -4721,6 +4779,7 @@ impl App {
         if self.is_subagent_session_active() {
             if Self::is_input_navigation_key(key) {
                 self.input.handle_event(key);
+                self.sync_input_selection_action_bar();
             }
             clear_suggestions(&mut self.suggestions_popup_state);
             self.overlay_focus = OverlayFocus::None;
@@ -4782,11 +4841,13 @@ impl App {
                         self.input.clear();
                     }
                     self.clear_suggestions_and_blur();
+                    self.sync_input_selection_action_bar();
                 }
             }
             _ => {
                 self.input.handle_event(key);
                 self.update_suggestions();
+                self.sync_input_selection_action_bar();
             }
         }
     }
@@ -4828,7 +4889,6 @@ impl App {
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([ratatui::layout::Constraint::Min(0)].as_ref())
             .split(self.last_frame_size);
-        let input_height = self.input.get_height_for_width(self.last_frame_size.width);
         let queued_messages = self.queued_message_previews_for_current_session();
         let queue_height =
             if self.base_focus == BaseFocus::Chat && !self.is_subagent_session_active() {
@@ -4836,6 +4896,14 @@ impl App {
             } else {
                 0
             };
+        let input_height = chat_input_height(
+            &self.input,
+            self.last_frame_size.width,
+            self.last_frame_size.height,
+            queue_height,
+            0,
+            1,
+        );
         let input_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints(
@@ -5036,6 +5104,10 @@ impl App {
 
         if matches!(mouse.kind, MouseEventKind::Moved) && !self.input.contains_mouse(mouse) {
             self.input.clear_hover();
+        }
+
+        if self.handle_error_toast_mouse(mouse) {
+            return;
         }
 
         if self.handle_selection_action_mouse(mouse) {
@@ -6289,6 +6361,12 @@ impl App {
                     description: "Full conversation as Markdown".to_string(),
                 },
                 ActionDialogItem {
+                    id: "input".to_string(),
+                    key: 'c',
+                    label: "Copy current chat input".to_string(),
+                    description: "Current draft in the input box".to_string(),
+                },
+                ActionDialogItem {
                     id: "id".to_string(),
                     key: 'i',
                     label: "Copy session id".to_string(),
@@ -6318,6 +6396,7 @@ impl App {
                 self.copy_text_with_toast(&text, "Provider+model id copied to clipboard");
             }
             "transcript" => self.copy_session_transcript(),
+            "input" => self.copy_current_chat_input(),
             "id" => {
                 let Some(id) = self.session_manager.get_current_session_id().cloned() else {
                     self.play_sound_event(crate::sound::SoundEvent::Error);
@@ -6354,6 +6433,20 @@ impl App {
         self.close_copy_actions_dialog();
     }
 
+    fn copy_current_chat_input(&mut self) {
+        let text = self.input.submission_text();
+        if text.trim().is_empty() {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "No chat input to copy",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return;
+        }
+        self.copy_text_with_toast(&text, "Chat input copied to clipboard");
+    }
+
     fn copy_text_with_toast(&mut self, text: &str, success_message: &'static str) {
         match crate::utils::clipboard::copy_text(text) {
             Ok(_) => push_toast(Toast::new(success_message, ToastLevel::Info, None)),
@@ -6366,6 +6459,36 @@ impl App {
                 ));
             }
         }
+    }
+
+    fn handle_error_toast_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let copied = {
+            let manager = get_toast_manager().lock().unwrap();
+            manager
+                .copyable_message_at(self.last_frame_size, Position::new(mouse.column, mouse.row))
+        };
+        let Some((message, level)) = copied else {
+            return false;
+        };
+
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        ) {
+            return false;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && mouse.modifiers.is_empty()
+        {
+            let confirmation = match level {
+                crate::toast::ToastLevel::Warning => "Copied warning to clipboard",
+                _ => "Copied error to clipboard",
+            };
+            self.copy_text_with_toast(&message, confirmation);
+        }
+
+        true
     }
 
     fn handle_copy_actions_event(&mut self, event: ActionDialogEvent) -> bool {
@@ -7714,11 +7837,15 @@ impl App {
                     return;
                 }
 
-                let undone_message: Option<crate::session::types::Message> = {
+                let (undone_message, removed_count): (
+                    Option<crate::session::types::Message>,
+                    usize,
+                ) = {
                     if let Some(session) = self.session_manager.get_current_session() {
+                        let len = session.messages.len();
                         let message = session.messages.get(idx).cloned();
                         session.messages.truncate(idx);
-                        message
+                        (message, len.saturating_sub(idx))
                     } else {
                         return;
                     }
@@ -7747,7 +7874,7 @@ impl App {
                 }
 
                 push_toast(Toast::new(
-                    format!("Removed {} message(s)", idx),
+                    format!("Removed {} message(s)", removed_count),
                     ToastLevel::Info,
                     None,
                 ));
@@ -12028,6 +12155,10 @@ impl App {
                     btw_entry.as_ref(),
                     self.btw_scroll,
                     &mut self.btw_panel_area,
+                    matches!(
+                        self.overlay_focus,
+                        OverlayFocus::None | OverlayFocus::SuggestionsPopup
+                    ),
                 );
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
@@ -12101,7 +12232,10 @@ impl App {
                     self.btw_scroll,
                     &mut self.btw_panel_area,
                     &mut self.find_bar,
-                    self.overlay_focus == OverlayFocus::None,
+                    matches!(
+                        self.overlay_focus,
+                        OverlayFocus::None | OverlayFocus::SuggestionsPopup
+                    ),
                     self.session_manager
                         .get_current_session()
                         .map(|s| s.title.as_str()),
@@ -16319,13 +16453,11 @@ mod tests {
         assert!(app.switch_to_session(&deleted_id));
 
         app.handle_keys(KeyEvent::new(
-            KeyCode::Char('d'),
+            KeyCode::Char('o'),
             event::KeyModifiers::CONTROL,
         ));
-        app.handle_keys(KeyEvent::new(
-            KeyCode::Char('d'),
-            event::KeyModifiers::CONTROL,
-        ));
+        app.handle_keys(KeyEvent::new(KeyCode::Char('d'), event::KeyModifiers::NONE));
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE));
 
         assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
         assert!(app.sessions_dialog_state.dialog.is_visible());
@@ -16348,13 +16480,11 @@ mod tests {
         app.open_sessions_dialog();
 
         app.handle_keys(KeyEvent::new(
-            KeyCode::Char('d'),
+            KeyCode::Char('o'),
             event::KeyModifiers::CONTROL,
         ));
-        app.handle_keys(KeyEvent::new(
-            KeyCode::Char('d'),
-            event::KeyModifiers::CONTROL,
-        ));
+        app.handle_keys(KeyEvent::new(KeyCode::Char('d'), event::KeyModifiers::NONE));
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE));
 
         assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
         assert!(app.sessions_dialog_state.dialog.is_visible());
@@ -16383,9 +16513,10 @@ mod tests {
         assert!(app.switch_to_session(&archived_id));
 
         app.handle_keys(KeyEvent::new(
-            KeyCode::Char('a'),
+            KeyCode::Char('o'),
             event::KeyModifiers::CONTROL,
         ));
+        app.handle_keys(KeyEvent::new(KeyCode::Char('a'), event::KeyModifiers::NONE));
 
         assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
         assert!(app.sessions_dialog_state.dialog.is_visible());

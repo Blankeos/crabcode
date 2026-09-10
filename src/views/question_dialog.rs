@@ -1645,6 +1645,51 @@ pub fn render_question_dialog(
         header_chunks[1],
     );
 
+    // Hardware cursor follows the custom answer so terminal cursor effects
+    // (e.g. ghostty shaders) and IME popups track typing, like every other
+    // text input. The old fake "_" marker is gone; the terminal draws the
+    // caret at this cell instead.
+    let custom_cursor_cell: Option<(u16, u16)> = (|| {
+        let request = state.active()?;
+        if !request.current_is_text_entry() {
+            return None;
+        }
+        let answer = request.current_answer()?;
+        if body_lines.is_empty() || chunks[1].width == 0 || chunks[1].height == 0 {
+            return None;
+        }
+        let custom_line_idx = body_lines.len().saturating_sub(1);
+        let line = body_lines.get(custom_line_idx)?;
+        let full: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        let full_chars = full.chars().count();
+        let custom_chars = answer.custom_text.chars().count();
+        let prefix = full_chars.saturating_sub(custom_chars);
+        let cursor_idx = prefix.saturating_add(answer.custom_cursor.min(custom_chars));
+        let (rel_row, col) = wrapped_cursor_position(&full, cursor_idx, chunks[1].width);
+        // `wrapped_cursor_position` is relative to the custom line; add the
+        // wrapped heights of all lines above it to get the absolute body row.
+        let mut row = rel_row;
+        for prior in body_lines.iter().take(custom_line_idx) {
+            row = row.saturating_add(line_wrapped_height(prior, chunks[1].width).max(1));
+        }
+        if row < body_scroll_y {
+            return None;
+        }
+        let rel = row.saturating_sub(body_scroll_y);
+        if rel >= chunks[1].height {
+            return None;
+        }
+        let x = chunks[1]
+            .x
+            .saturating_add(col.min(chunks[1].width.saturating_sub(1)));
+        let y = chunks[1].y.saturating_add(rel);
+        Some((x, y))
+    })();
+
     if chunks[1].height > 0 {
         f.render_widget(
             Paragraph::new(body_lines)
@@ -1653,6 +1698,10 @@ pub fn render_question_dialog(
                 .scroll((body_scroll_y, 0)),
             chunks[1],
         );
+    }
+
+    if let Some((x, y)) = custom_cursor_cell {
+        f.set_cursor_position((x, y));
     }
 
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Left), chunks[3]);
@@ -1832,11 +1881,141 @@ fn option_row_count(question: &QuestionItem) -> usize {
     question.options.len() + usize::from(question.custom && !question.options.is_empty())
 }
 
-fn text_with_cursor(text: &str, cursor: usize) -> String {
-    let mut chars: Vec<char> = text.chars().collect();
+fn char_cell_width(ch: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+/// Screen (row, col) of a char index inside a single logical line, using the
+/// same word-wrap rules as `word_wrap_row_count` (`Paragraph` with
+/// `Wrap { trim: true }`). Hard newlines split first; each segment wraps
+/// independently so pasted multiline answers map correctly.
+fn wrapped_cursor_position(text: &str, cursor: usize, width: u16) -> (u16, u16) {
+    let max_w = usize::from(width.max(1));
+    let chars: Vec<char> = text.chars().collect();
     let cursor = cursor.min(chars.len());
-    chars.insert(cursor, '_');
-    chars.into_iter().collect()
+    // Split hard lines, remembering char ranges.
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    for (idx, ch) in chars.iter().enumerate() {
+        if *ch == '\n' {
+            segments.push((start, idx));
+            start = idx + 1;
+        }
+    }
+    segments.push((start, chars.len()));
+    // Find the segment holding the cursor (cursor at a '\n' maps to end of
+    // the previous segment; cursor at the very end maps to the last one).
+    let mut seg_idx = segments.len().saturating_sub(1);
+    for (idx, (s, e)) in segments.iter().enumerate() {
+        if cursor >= *s && cursor <= *e {
+            // Prefer the earlier segment when cursor sits exactly on a '\n'
+            // boundary (cursor == e == next s - 1).
+            seg_idx = idx;
+            break;
+        }
+    }
+    let mut base_rows: u16 = 0;
+    for (s, e) in segments.iter().take(seg_idx) {
+        let part: String = chars[*s..*e].iter().collect();
+        for sub in part.split('\n') {
+            base_rows = base_rows.saturating_add(word_wrap_row_count(sub, width).max(1));
+        }
+    }
+    let (seg_start, seg_end) = segments[seg_idx];
+    let (rel_row, col) =
+        wrapped_cursor_in_hard_line(&chars[seg_start..seg_end], cursor - seg_start, max_w);
+    (base_rows.saturating_add(rel_row), col as u16)
+}
+
+fn wrapped_cursor_in_hard_line(chars: &[char], cursor: usize, max_w: usize) -> (u16, usize) {
+    let max_w = max_w.max(1);
+    let cursor = cursor.min(chars.len());
+    // Tokenize into (start, end, is_space) char ranges.
+    let mut tokens: Vec<(usize, usize, bool)> = Vec::new();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        let space = chars[idx].is_whitespace();
+        let mut end = idx + 1;
+        while end < chars.len() && chars[end].is_whitespace() == space {
+            end += 1;
+        }
+        tokens.push((idx, end, space));
+        idx = end;
+    }
+    if tokens.is_empty() {
+        return (0, 0);
+    }
+    let token_width =
+        |s: usize, e: usize| -> usize { chars[s..e].iter().map(|ch| char_cell_width(*ch)).sum() };
+    let mut rows: u16 = 0;
+    let mut col: usize = 0;
+    for (s, e, is_space) in tokens {
+        let contains = cursor >= s && cursor < e;
+        let at_start = cursor == s;
+        if is_space {
+            if col == 0 {
+                // Leading whitespace is trimmed (`Wrap { trim: true }`).
+                if contains || at_start {
+                    return (rows, 0);
+                }
+                continue;
+            }
+            let w = token_width(s, e);
+            if col.saturating_add(w) > max_w {
+                rows = rows.saturating_add(1);
+                col = 0;
+                if contains || at_start {
+                    return (rows, 0);
+                }
+                continue;
+            }
+            if contains {
+                let prefix = token_width(s, cursor);
+                return (rows, col.saturating_add(prefix));
+            }
+            if at_start {
+                return (rows, col);
+            }
+            col = col.saturating_add(w);
+            continue;
+        }
+        let w = token_width(s, e);
+        if w > max_w {
+            if col > 0 {
+                rows = rows.saturating_add(1);
+                col = 0;
+            }
+            for i in s..e {
+                if cursor == i {
+                    return (rows, col);
+                }
+                let cw = char_cell_width(chars[i]);
+                if col > 0 && col.saturating_add(cw) > max_w {
+                    rows = rows.saturating_add(1);
+                    col = 0;
+                }
+                // Zero-width chars still advance the char index without moving.
+                col = col.saturating_add(cw);
+            }
+            if cursor == e {
+                return (rows, col);
+            }
+            continue;
+        }
+        if col > 0 && col.saturating_add(w) > max_w {
+            rows = rows.saturating_add(1);
+            col = 0;
+        }
+        if contains {
+            let prefix = token_width(s, cursor);
+            return (rows, col.saturating_add(prefix));
+        }
+        if at_start {
+            return (rows, col);
+        }
+        col = col.saturating_add(w);
+    }
+    (rows, col)
 }
 
 fn stable_tab_label(label: &str) -> String {
@@ -1961,14 +2140,9 @@ fn question_body_lines<'a>(
     lines.push(Line::from(""));
 
     if question.options.is_empty() {
-        let text = if editing_custom {
-            text_with_cursor(&answer.custom_text, answer.custom_cursor)
-        } else {
-            answer.custom_text.clone()
-        };
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().fg(colors.info)),
-            Span::styled(text, Style::default().fg(colors.text)),
+            Span::styled(answer.custom_text.clone(), Style::default().fg(colors.text)),
         ]));
         return lines;
     }
@@ -1988,13 +2162,9 @@ fn question_body_lines<'a>(
         let mut label = "Type your own answer".to_string();
         if !answer.custom_text.is_empty() {
             label.push_str(": ");
-            if editing_custom {
-                label.push_str(&text_with_cursor(&answer.custom_text, answer.custom_cursor));
-            } else {
-                label.push_str(&answer.custom_text);
-            }
+            label.push_str(&answer.custom_text);
         } else if editing_custom {
-            label.push_str(": _");
+            label.push_str(": ");
         }
 
         let option = QuestionOption {

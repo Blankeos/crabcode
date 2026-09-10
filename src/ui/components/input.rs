@@ -47,7 +47,9 @@ fn char_kind(c: char) -> u8 {
 }
 
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
-const MAX_TEXTAREA_HEIGHT: usize = 6;
+pub(crate) const MAX_TEXTAREA_HEIGHT: usize = 9;
+pub(crate) const INPUT_CHROME_HEIGHT: u16 = 4;
+pub(crate) const MIN_INPUT_HEIGHT: u16 = 5;
 const POST_KEY_SCROLL_SUPPRESSION: Duration = Duration::from_millis(160);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,11 +208,13 @@ impl Input {
         }
     }
 
-    fn move_to_line_start(&mut self) {
+    fn move_to_line_start(&mut self, extend: bool) {
         self.reveal_cursor_after_key_input();
         self.preferred_visual_col = None;
+        self.begin_extend_or_cancel(extend);
         let (row, _) = self.textarea.cursor();
         self.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
+        self.cancel_empty_selection();
     }
 
     fn line_end_col(&self, row: usize) -> usize {
@@ -221,13 +225,55 @@ impl Input {
             .unwrap_or(0)
     }
 
-    fn move_to_line_end(&mut self) {
+    fn move_to_line_end(&mut self, extend: bool) {
         self.reveal_cursor_after_key_input();
         self.preferred_visual_col = None;
+        self.begin_extend_or_cancel(extend);
         let (row, _) = self.textarea.cursor();
         let col = self.line_end_col(row);
         self.textarea
             .move_cursor(CursorMove::Jump(row as u16, col as u16));
+        self.cancel_empty_selection();
+    }
+
+    /// Selection plumbing shared by Cmd/Opt+Arrow jumps: with `extend`
+    /// (Shift held) start/continue the selection, otherwise clear it.
+    fn begin_extend_or_cancel(&mut self, extend: bool) {
+        if extend {
+            if !self.textarea.is_selecting() {
+                self.textarea.start_selection();
+            }
+        } else {
+            self.textarea.cancel_selection();
+        }
+    }
+
+    /// Option+Arrow word jump (mirrors tui-textarea's Ctrl+Arrow handling,
+    /// which terminals don't send for macOS Option). With `extend`, behaves
+    /// like Shift+Arrow: starts/continues the selection instead of clearing.
+    fn move_word_with_selection(&mut self, forward: bool, extend: bool) {
+        self.reveal_cursor_after_key_input();
+        self.preferred_visual_col = None;
+        self.begin_extend_or_cancel(extend);
+        self.textarea.move_cursor(if forward {
+            CursorMove::WordForward
+        } else {
+            CursorMove::WordBack
+        });
+        self.cancel_empty_selection();
+    }
+
+    /// Option+Up/Down paragraph jump (mirrors Ctrl+Up/Down in tui-textarea).
+    fn move_paragraph_with_selection(&mut self, forward: bool, extend: bool) {
+        self.reveal_cursor_after_key_input();
+        self.preferred_visual_col = None;
+        self.begin_extend_or_cancel(extend);
+        self.textarea.move_cursor(if forward {
+            CursorMove::ParagraphForward
+        } else {
+            CursorMove::ParagraphBack
+        });
+        self.cancel_empty_selection();
     }
 
     fn delete_to_line_start(&mut self) {
@@ -461,7 +507,14 @@ impl Input {
             .split(inner_area);
 
         let wrap_width = h_chunks[1].width as usize;
-        let textarea_height = self.textarea_height(wrap_width) as u16;
+        // Fit what's possible on short terminals: never request more rows
+        // than the allocated area allows.
+        let content_height = self.textarea_height(wrap_width) as u16;
+        let textarea_height = if area.height <= INPUT_CHROME_HEIGHT {
+            area.height
+        } else {
+            content_height.min(area.height - INPUT_CHROME_HEIGHT)
+        };
 
         let v_chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
@@ -490,7 +543,7 @@ impl Input {
 
         let visible_lines = v_chunks[1].height as usize;
         self.update_viewport(visible_lines, wrap_width);
-        self.render_wrapped_textarea(frame, v_chunks[1], colors);
+        self.render_wrapped_textarea(frame, v_chunks[1], colors, show_terminal_cursor);
 
         // Set the physical terminal cursor position to the textarea's cursor
         // location so that the IME candidate window appears at the correct position.
@@ -560,12 +613,23 @@ impl Input {
         // compact default so layout can reserve space before the first draw.
         let line_count = self.textarea.lines().len().max(1);
         let textarea_height = line_count.min(MAX_TEXTAREA_HEIGHT) as u16;
-        textarea_height + 4
+        textarea_height + INPUT_CHROME_HEIGHT
     }
 
     pub fn get_height_for_width(&self, area_width: u16) -> u16 {
         let wrap_width = area_width.saturating_sub(5).max(1) as usize;
-        self.textarea_height(wrap_width) as u16 + 4
+        self.textarea_height(wrap_width) as u16 + INPUT_CHROME_HEIGHT
+    }
+
+    /// Desired height clamped to `max_allowed` so short terminals still fit.
+    /// Never forces the full 9-line height when there is no room.
+    pub fn get_height_for_layout(&self, area_width: u16, max_allowed: u16) -> u16 {
+        let desired = self.get_height_for_width(area_width);
+        if max_allowed < MIN_INPUT_HEIGHT {
+            desired.min(max_allowed)
+        } else {
+            desired.min(max_allowed.max(MIN_INPUT_HEIGHT))
+        }
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
@@ -681,11 +745,11 @@ impl Input {
             }
             KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
             KeyCode::Char('a') if event.modifiers == KeyModifiers::CONTROL => {
-                self.move_to_line_start();
+                self.move_to_line_start(false);
                 true
             }
             KeyCode::Char('e') if event.modifiers == KeyModifiers::CONTROL => {
-                self.move_to_line_end();
+                self.move_to_line_end(false);
                 true
             }
             KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
@@ -694,12 +758,65 @@ impl Input {
                 self.sync_pending_pastes();
                 true
             }
+            KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL => {
+                self.reveal_cursor_after_key_input();
+                self.preferred_visual_col = None;
+                self.delete_word_backward();
+                self.sync_image_placeholders();
+                self.sync_pending_pastes();
+                true
+            }
             KeyCode::Left if has_command_modifier(event.modifiers) => {
-                self.move_to_line_start();
+                self.move_to_line_start(event.modifiers.contains(KeyModifiers::SHIFT));
                 true
             }
             KeyCode::Right if has_command_modifier(event.modifiers) => {
-                self.move_to_line_end();
+                self.move_to_line_end(event.modifiers.contains(KeyModifiers::SHIFT));
+                true
+            }
+            // macOS Option(+Shift)+Arrow: tui-textarea only word-jumps on
+            // Ctrl+Arrow, while terminals report Option as ALT. Handle it
+            // here so Opt+Left/Right moves by word and Opt+Shift extends
+            // the selection by word (ditto paragraphs for Up/Down).
+            KeyCode::Left if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_word_with_selection(false, event.modifiers.contains(KeyModifiers::SHIFT));
+                true
+            }
+            KeyCode::Right if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_word_with_selection(true, event.modifiers.contains(KeyModifiers::SHIFT));
+                true
+            }
+            // Ghostty (default macOS mode) sends Opt+Left/Right as Alt+b / Alt+f
+            // instead of Alt+Arrow. Treat them identically, including
+            // Opt+Shift variants (Alt+Shift+b/f, possibly as uppercase B/F).
+            KeyCode::Char('b') | KeyCode::Char('B')
+                if event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                let extend = event.modifiers.contains(KeyModifiers::SHIFT)
+                    || event.code == KeyCode::Char('B');
+                self.move_word_with_selection(false, extend);
+                true
+            }
+            KeyCode::Char('f') | KeyCode::Char('F')
+                if event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                let extend = event.modifiers.contains(KeyModifiers::SHIFT)
+                    || event.code == KeyCode::Char('F');
+                self.move_word_with_selection(true, extend);
+                true
+            }
+            KeyCode::Up if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_paragraph_with_selection(
+                    false,
+                    event.modifiers.contains(KeyModifiers::SHIFT),
+                );
+                true
+            }
+            KeyCode::Down if event.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_paragraph_with_selection(
+                    true,
+                    event.modifiers.contains(KeyModifiers::SHIFT),
+                );
                 true
             }
             KeyCode::Tab => false,
@@ -1430,16 +1547,24 @@ impl Input {
         frame: &mut ratatui::Frame,
         area: Rect,
         colors: &ThemeColors,
+        _show_cursor: bool,
     ) {
         if area.width == 0 || area.height == 0 {
             return;
         }
 
         let text_style = self.textarea.style();
-        let cursor_style = self.textarea.cursor_style();
+        // Single caret: the hardware terminal cursor is the source of truth
+        // (Ghostty shaders, IME popups). The fake block highlight is
+        // suppressed because on complex emoji (ZWJ sequences, VS16, flags)
+        // the terminal's grapheme width can differ from unicode-width
+        // tables by 1-2 cells, which otherwise shows as two split carets.
+        let cursor_style = text_style;
         let selection_style = self.textarea.selection_style();
         let selection_range = self.textarea.selection_range();
-        let cursor = self.textarea.cursor();
+        // Fake block cursor is always suppressed (see above); the
+        // hardware cursor is positioned separately in `render`.
+        let cursor = (usize::MAX, usize::MAX);
         let visual_lines = self.visual_lines(area.width as usize);
 
         let text = if self.is_empty() && !self.textarea.placeholder_text().is_empty() {
@@ -3381,5 +3506,55 @@ mod tests {
             buffer.cell(general_pos).expect("general cell").style().fg,
             Some(colors.success)
         );
+    }
+
+    #[test]
+    fn test_alt_shift_left_extends_selection_by_word() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        // Cursor at end; Opt+Shift+Left should select "world".
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Left,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert_eq!(input.get_selected_text(), "world");
+    }
+
+    #[test]
+    fn test_alt_shift_right_extends_selection_by_word() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        input.textarea.move_cursor(CursorMove::Jump(0, 0));
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Right,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert_eq!(input.get_selected_text(), "hello ");
+    }
+
+    #[test]
+    fn test_alt_left_without_shift_moves_by_word_without_selection() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        assert!(input.handle_event(modified_key_event(KeyCode::Left, KeyModifiers::ALT)));
+        assert!(!input.has_selection());
+        assert_eq!(input.textarea.cursor(), (0, 6));
+    }
+
+    #[test]
+    fn test_cmd_shift_left_selects_to_line_start() {
+        // Ghostty sends the real combo (SUPER+SHIFT); WezTerm remaps to
+        // Shift+Home instead. Both must select to line start.
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Left,
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert_eq!(input.get_selected_text(), "hello world");
+        assert_eq!(input.textarea.cursor(), (0, 0));
     }
 }

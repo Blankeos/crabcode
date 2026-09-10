@@ -27,6 +27,7 @@ pub enum WhichKeyAction {
     NextChild,
     NewSession,
     Quit,
+    ShowCopyDialog,
     ScrollUp,
     ScrollDown,
     ScrollToTop,
@@ -129,6 +130,11 @@ impl WhichKeyState {
                 key: "e".to_string(),
                 description: "Expand/collapse thinking".to_string(),
                 target: BindingTarget::Action(WhichKeyAction::ToggleThinking),
+            },
+            KeyBinding {
+                key: "c".to_string(),
+                description: "Open Copy dialog".to_string(),
+                target: BindingTarget::Action(WhichKeyAction::ShowCopyDialog),
             },
             KeyBinding {
                 key: "k".to_string(),

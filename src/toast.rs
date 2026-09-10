@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
@@ -41,6 +41,10 @@ impl ToastLevel {
             ToastLevel::Error => colors.error,
             ToastLevel::Success => colors.success,
         }
+    }
+
+    fn is_copyable(self) -> bool {
+        matches!(self, ToastLevel::Error | ToastLevel::Warning)
     }
 }
 
@@ -89,10 +93,31 @@ impl ToastManager {
         let now = Instant::now();
         self.toasts.retain(|toast| !toast.is_expired(now));
     }
+
+    pub fn copyable_message_at(
+        &self,
+        frame: Rect,
+        position: Position,
+    ) -> Option<(String, ToastLevel)> {
+        layout_visible_toasts(frame, self, Instant::now())
+            .into_iter()
+            .find(|laid| laid.toast.level.is_copyable() && laid.area.contains(position))
+            .map(|laid| (laid.toast.message.clone(), laid.toast.level))
+    }
 }
 
-pub fn render_toasts(frame: &mut Frame, manager: &ToastManager, colors: &ThemeColors) {
-    let now = Instant::now();
+struct LaidOutToast<'a> {
+    toast: &'a Toast,
+    area: Rect,
+    wrapped_lines: Vec<String>,
+    content_width: u16,
+}
+
+fn layout_visible_toasts<'a>(
+    area: Rect,
+    manager: &'a ToastManager,
+    now: Instant,
+) -> Vec<LaidOutToast<'a>> {
     let visible_toasts: Vec<&Toast> = manager
         .toasts
         .iter()
@@ -102,22 +127,24 @@ pub fn render_toasts(frame: &mut Frame, manager: &ToastManager, colors: &ThemeCo
         .collect();
 
     if visible_toasts.is_empty() {
-        return;
+        return Vec::new();
     }
 
-    let area = frame.area();
     if area.width <= TOAST_HORIZONTAL_MARGIN * 2 + 8 || area.height <= TOAST_VERTICAL_MARGIN * 2 + 2
     {
-        return;
+        return Vec::new();
     }
 
     let available_width = area.width.saturating_sub(TOAST_HORIZONTAL_MARGIN * 2);
     let max_toast_width = available_width.min(TOAST_MAX_WIDTH);
     let max_content_width = max_toast_width.saturating_sub(ACCENT_WIDTH + HORIZONTAL_PADDING * 2);
     if max_content_width == 0 {
-        return;
+        return Vec::new();
     }
+
     let mut y = area.y.saturating_add(TOAST_VERTICAL_MARGIN);
+    let mut laid_out = Vec::new();
+    let bottom = area.y.saturating_add(area.height);
 
     for toast in visible_toasts {
         let preferred_content_width = preferred_content_width(&toast.message, max_content_width);
@@ -135,6 +162,9 @@ pub fn render_toasts(frame: &mut Frame, manager: &ToastManager, colors: &ThemeCo
 
         let text_height = wrapped_lines.len().max(1) as u16;
         let toast_height = text_height + VERTICAL_PADDING * 2;
+        if y.saturating_add(toast_height) > bottom {
+            break;
+        }
 
         let x = area.x.saturating_add(
             area.width
@@ -142,27 +172,36 @@ pub fn render_toasts(frame: &mut Frame, manager: &ToastManager, colors: &ThemeCo
                 .saturating_sub(TOAST_HORIZONTAL_MARGIN),
         );
 
-        let bottom = area.y.saturating_add(area.height);
-        if y.saturating_add(toast_height) > bottom {
-            break;
-        }
+        laid_out.push(LaidOutToast {
+            toast,
+            area: Rect {
+                x,
+                y,
+                width: toast_width,
+                height: toast_height,
+            },
+            wrapped_lines,
+            content_width,
+        });
 
-        let toast_area = Rect {
-            x,
-            y,
-            width: toast_width,
-            height: toast_height,
-        };
+        y = y.saturating_add(toast_height + TOAST_VERTICAL_SPACING);
+    }
 
-        let accent = toast.level.accent_color(colors);
+    laid_out
+}
+
+pub fn render_toasts(frame: &mut Frame, manager: &ToastManager, colors: &ThemeColors) {
+    let area = frame.area();
+    for laid in layout_visible_toasts(area, manager, Instant::now()) {
+        let accent = laid.toast.level.accent_color(colors);
         let background = tint_color(colors.dialog_background, accent, 0.14);
 
-        frame.render_widget(Clear, toast_area);
+        frame.render_widget(Clear, laid.area);
         let body_area = Rect {
-            x: toast_area.x.saturating_add(ACCENT_WIDTH),
-            y: toast_area.y,
-            width: toast_area.width.saturating_sub(ACCENT_WIDTH),
-            height: toast_area.height,
+            x: laid.area.x.saturating_add(ACCENT_WIDTH),
+            y: laid.area.y,
+            width: laid.area.width.saturating_sub(ACCENT_WIDTH),
+            height: laid.area.height,
         };
         if body_area.width > 0 {
             frame.render_widget(
@@ -172,10 +211,10 @@ pub fn render_toasts(frame: &mut Frame, manager: &ToastManager, colors: &ThemeCo
         }
 
         let accent_area = Rect {
-            x: toast_area.x,
-            y: toast_area.y,
+            x: laid.area.x,
+            y: laid.area.y,
             width: ACCENT_WIDTH,
-            height: toast_area.height,
+            height: laid.area.height,
         };
         if accent_area.width > 0 {
             frame.render_widget(
@@ -184,14 +223,16 @@ pub fn render_toasts(frame: &mut Frame, manager: &ToastManager, colors: &ThemeCo
             );
         }
 
+        let text_height = laid.wrapped_lines.len().max(1) as u16;
         let text_area = Rect {
-            x: toast_area.x + ACCENT_WIDTH + HORIZONTAL_PADDING,
-            y: toast_area.y + VERTICAL_PADDING,
-            width: content_width,
+            x: laid.area.x + ACCENT_WIDTH + HORIZONTAL_PADDING,
+            y: laid.area.y + VERTICAL_PADDING,
+            width: laid.content_width,
             height: text_height,
         };
 
-        let lines: Vec<Line> = wrapped_lines
+        let lines: Vec<Line> = laid
+            .wrapped_lines
             .into_iter()
             .map(|line| Line::from(Span::styled(line, Style::default().fg(colors.text))))
             .collect();
@@ -199,8 +240,6 @@ pub fn render_toasts(frame: &mut Frame, manager: &ToastManager, colors: &ThemeCo
             Paragraph::new(lines).style(Style::default().bg(background)),
             text_area,
         );
-
-        y = y.saturating_add(toast_height + TOAST_VERTICAL_SPACING);
     }
 }
 
@@ -282,5 +321,109 @@ fn tint_color(base: Color, accent: Color, amount: f32) -> Color {
             Color::Rgb(mix(br, ar), mix(bg, ag), mix(bb, ab))
         }
         _ => base,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame() -> Rect {
+        Rect::new(0, 0, 80, 24)
+    }
+
+    fn long_lived(message: &str, level: ToastLevel) -> Toast {
+        Toast::new(message, level, Some(Duration::from_secs(60)))
+    }
+
+    fn copyable_areas(manager: &ToastManager) -> Vec<(Rect, String)> {
+        layout_visible_toasts(frame(), manager, Instant::now())
+            .into_iter()
+            .filter(|laid| laid.toast.level.is_copyable())
+            .map(|laid| (laid.area, laid.toast.message.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn clicking_error_toast_returns_full_original_message() {
+        let mut manager = ToastManager::new();
+        let message = "LLM error: provider exploded\n".repeat(20);
+        manager.add(long_lived(&message, ToastLevel::Error));
+
+        let areas = copyable_areas(&manager);
+        assert_eq!(areas.len(), 1);
+        let (area, _) = &areas[0];
+        assert!(
+            area.height <= VERTICAL_PADDING * 2 + MAX_TEXT_LINES_PER_TOAST as u16,
+            "displayed toast should stay truncated"
+        );
+
+        let copied = manager.copyable_message_at(frame(), Position::new(area.x, area.y));
+        let copied = copied.map(|(message, _)| message);
+        assert_eq!(copied.as_deref(), Some(message.as_str()));
+    }
+
+    #[test]
+    fn clicking_warning_toast_returns_full_original_message() {
+        let mut manager = ToastManager::new();
+        let message = "warning: rate limit approaching\n".repeat(20);
+        manager.add(long_lived(&message, ToastLevel::Warning));
+
+        let areas = copyable_areas(&manager);
+        assert_eq!(areas.len(), 1);
+        let (area, _) = &areas[0];
+
+        let copied = manager.copyable_message_at(frame(), Position::new(area.x, area.y));
+        assert!(copied.is_some());
+        let (copied_message, copied_level) = copied.unwrap();
+        assert_eq!(copied_message, message);
+        assert_eq!(copied_level, ToastLevel::Warning);
+    }
+
+    #[test]
+    fn info_toasts_are_not_copyable() {
+        let mut manager = ToastManager::new();
+        manager.add(long_lived("Copied to clipboard", ToastLevel::Info));
+
+        let laid = layout_visible_toasts(frame(), &manager, Instant::now());
+        assert_eq!(laid.len(), 1);
+        assert!(manager
+            .copyable_message_at(frame(), Position::new(laid[0].area.x, laid[0].area.y))
+            .is_none());
+    }
+
+    #[test]
+    fn click_outside_toast_does_not_copy() {
+        let mut manager = ToastManager::new();
+        manager.add(long_lived("boom", ToastLevel::Error));
+
+        assert!(manager
+            .copyable_message_at(frame(), Position::new(0, 0))
+            .is_none());
+    }
+
+    #[test]
+    fn newest_error_toast_wins_when_stacked() {
+        let mut manager = ToastManager::new();
+        manager.add(long_lived("older error", ToastLevel::Error));
+        manager.add(long_lived("newer error", ToastLevel::Error));
+
+        let areas = copyable_areas(&manager);
+        assert_eq!(areas.len(), 2);
+        assert_eq!(areas[0].1, "newer error");
+        assert_eq!(
+            manager
+                .copyable_message_at(frame(), Position::new(areas[0].0.x, areas[0].0.y))
+                .map(|(message, _)| message)
+                .as_deref(),
+            Some("newer error")
+        );
+        assert_eq!(
+            manager
+                .copyable_message_at(frame(), Position::new(areas[1].0.x, areas[1].0.y))
+                .map(|(message, _)| message)
+                .as_deref(),
+            Some("older error")
+        );
     }
 }

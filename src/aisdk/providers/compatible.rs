@@ -19,6 +19,7 @@ pub struct OpenAICompatible {
     provider_name: String,
     reasoning_effort: Option<String>,
     prompt_cache_key: Option<String>,
+    default_headers: HashMap<String, String>,
 
     /// Vercel AI Gateway: set `providerOptions.gateway.caching = "auto"` so
     /// Anthropic (and MiniMax) models get explicit cache breakpoints.
@@ -39,6 +40,7 @@ pub struct OpenAICompatibleBuilder {
     provider_name: Option<String>,
     reasoning_effort: Option<String>,
     prompt_cache_key: Option<String>,
+    default_headers: HashMap<String, String>,
 
     gateway_caching_auto: bool,
 }
@@ -79,6 +81,13 @@ impl OpenAICompatibleBuilder {
         self
     }
 
+    /// Static headers set at build time. Per-request `stream_text` headers
+    /// win on conflict.
+    pub fn default_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.default_headers = headers;
+        self
+    }
+
     pub fn build(self) -> Result<OpenAICompatible> {
         Ok(OpenAICompatible {
             base_url: self
@@ -93,6 +102,7 @@ impl OpenAICompatibleBuilder {
                 .unwrap_or_else(|| "openai-compatible".to_string()),
             reasoning_effort: self.reasoning_effort,
             prompt_cache_key: self.prompt_cache_key,
+            default_headers: self.default_headers,
 
             gateway_caching_auto: self.gateway_caching_auto,
         })
@@ -113,7 +123,7 @@ impl Provider for OpenAICompatible {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        _headers: &HashMap<String, String>,
+        headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
         let base = self.base_url.trim_end_matches('/');
         let url = if super::base_url_has_version_segment(base) {
@@ -192,6 +202,8 @@ impl Provider for OpenAICompatible {
                 format!("Bearer {}", self.api_key).parse().unwrap(),
             );
         }
+        super::apply_extra_headers(&mut request_headers, &self.default_headers);
+        super::apply_extra_headers(&mut request_headers, headers);
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(

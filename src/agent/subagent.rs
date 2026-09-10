@@ -384,6 +384,17 @@ async fn start_subagent_stream(
     use crate::aisdk::core::response::{stream_with_tools_options, StreamWithToolsOptions};
     use crate::aisdk::{Anthropic, OpenAI, OpenAICompatible};
 
+    let headers = crate::llm::opencode::ensure_session_headers(
+        &session.provider_name,
+        &session.base_url,
+        &session.openai_options.additional_headers,
+        session
+            .prompt_cache_key
+            .as_deref()
+            .or(session.openai_options.prompt_cache_key.as_deref()),
+        &headers,
+    );
+
     match session.provider_kind {
         ProviderKind::OpenAICompatible => {
             let mut builder = OpenAICompatible::builder()
@@ -483,9 +494,6 @@ async fn start_subagent_stream(
                 .or(session.openai_options.prompt_cache_key.as_deref())
             {
                 builder = builder.prompt_cache_key(cache_key);
-            }
-            if !session.openai_options.additional_headers.is_empty() {
-                builder = builder.headers(session.openai_options.additional_headers.clone());
             }
             let provider = builder
                 .build()

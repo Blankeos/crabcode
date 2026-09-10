@@ -29,6 +29,7 @@
       "label": "Configuration",
       "items": [
         { "label": "Overview", "path": "/config" },
+        { "label": "Terminal Keymaps", "path": "/config/keymaps" },
         { "label": "OpenCode Compatibility", "path": "/config/opencode-compatibility" },
         { "label": "Notifications", "path": "/config/notifications" },
         { "label": "Images", "path": "/config/images" },

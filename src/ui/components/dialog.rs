@@ -1183,7 +1183,10 @@ impl Dialog {
                     Span::styled(name, Style::default().fg(colors.primary)),
                 ]
             } else {
-                vec![Span::raw(format!("{indicator}{name}"))]
+                vec![Span::styled(
+                    format!("{indicator}{name}"),
+                    Style::default().fg(colors.text),
+                )]
             };
             return (spans, text_width);
         }
@@ -1199,7 +1202,10 @@ impl Dialog {
                     Span::styled(name, Style::default().fg(colors.primary)),
                 ]
             } else {
-                vec![Span::raw(format!("{indicator}{name}"))]
+                vec![Span::styled(
+                    format!("{indicator}{name}"),
+                    Style::default().fg(colors.text),
+                )]
             };
             return (spans, text_width);
         }
@@ -1217,7 +1223,10 @@ impl Dialog {
                 Style::default().fg(colors.primary),
             ));
         } else {
-            spans.push(Span::raw(format!("{indicator}{name_prefix}")));
+            spans.push(Span::styled(
+                format!("{indicator}{name_prefix}"),
+                Style::default().fg(colors.text),
+            ));
         }
         spans.push(Span::styled(
             description,
@@ -1719,6 +1728,23 @@ impl Dialog {
         frame.render_widget(esc_paragraph, header_chunks[1]);
 
         if self.search_visible {
+            self.search_textarea.set_style(
+                Style::default()
+                    .fg(colors.text)
+                    .bg(colors.dialog_background),
+            );
+            self.search_textarea
+                .set_placeholder_style(Style::default().fg(colors.text_weak));
+            // Single caret: hardware cursor (place_terminal_cursor) is the
+            // source of truth. Fake block suppressed so complex emoji
+            // (ZWJ, VS16, flags) can't show as two split carets.
+            self.search_textarea.set_cursor_style(
+                Style::default()
+                    .fg(colors.text)
+                    .bg(colors.dialog_background),
+            );
+            self.search_textarea
+                .set_selection_style(Style::default().fg(colors.text).bg(colors.border_focus));
             frame.render_widget(&self.search_textarea, chunks[2]);
         }
 
@@ -1863,6 +1889,40 @@ impl Dialog {
         let footer_paragraph = Paragraph::new(self.footer_lines(chunks[5].width, colors))
             .alignment(ratatui::layout::Alignment::Left);
         frame.render_widget(footer_paragraph, chunks[5]);
+
+        self.place_terminal_cursor(frame, &chunks, &list_content_area);
+    }
+
+    /// Move the hardware terminal cursor into the dialog so terminal-level
+    /// cursor effects (e.g. ghostty cursor shaders) follow dialog focus
+    /// instead of staying stuck on the chat input behind the dialog.
+    ///
+    /// Typing always goes to the search box, so the cursor lives there —
+    /// even with an empty query. Dialogs without a search box (e.g.
+    /// /variants) set no cursor, letting ratatui hide it instead of
+    /// jumpily tracking list selection.
+    fn place_terminal_cursor(&self, frame: &mut Frame, chunks: &[Rect], _list_content_area: &Rect) {
+        if chunks.len() < 4 {
+            return;
+        }
+        if self.search_visible {
+            let search_area = chunks[2];
+            if search_area.width == 0 || search_area.height == 0 {
+                return;
+            }
+            let (cursor_row, cursor_col) = self.search_textarea.cursor();
+            let cursor_col = cursor_col.min(usize::MAX >> 1);
+            let line = self
+                .search_textarea
+                .lines()
+                .get(cursor_row)
+                .cloned()
+                .unwrap_or_default();
+            let prefix: String = line.chars().take(cursor_col).collect();
+            let x_offset = (prefix.width() as u16).min(search_area.width.saturating_sub(1));
+            let y_offset = (cursor_row as u16).min(search_area.height.saturating_sub(1));
+            frame.set_cursor_position((search_area.x + x_offset, search_area.y + y_offset));
+        }
     }
 
     pub fn footer_lines(&self, width: u16, colors: ThemeColors) -> Vec<Line<'static>> {

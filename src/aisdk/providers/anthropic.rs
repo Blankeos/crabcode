@@ -19,6 +19,7 @@ pub struct Anthropic {
     model_name: String,
     provider_name: String,
     reasoning_effort: Option<String>,
+    default_headers: HashMap<String, String>,
 }
 
 impl Anthropic {
@@ -34,6 +35,7 @@ pub struct AnthropicBuilder {
     model_name: Option<String>,
     provider_name: Option<String>,
     reasoning_effort: Option<String>,
+    default_headers: HashMap<String, String>,
 }
 
 impl AnthropicBuilder {
@@ -62,6 +64,13 @@ impl AnthropicBuilder {
         self
     }
 
+    /// Static headers set at build time. Per-request `stream_text` headers
+    /// win on conflict.
+    pub fn default_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.default_headers = headers;
+        self
+    }
+
     pub fn build(self) -> Result<Anthropic> {
         Ok(Anthropic {
             base_url: self
@@ -75,6 +84,7 @@ impl AnthropicBuilder {
                 .provider_name
                 .unwrap_or_else(|| "anthropic".to_string()),
             reasoning_effort: self.reasoning_effort,
+            default_headers: self.default_headers,
         })
     }
 }
@@ -93,7 +103,7 @@ impl Provider for Anthropic {
         &self,
         messages: &[Message],
         tools: &[Tool],
-        _headers: &HashMap<String, String>,
+        headers: &HashMap<String, String>,
     ) -> Result<ProviderStream> {
         let base = self.base_url.trim_end_matches('/');
         let url = anthropic_messages_url(base);
@@ -170,6 +180,8 @@ impl Provider for Anthropic {
             // Hosted web_search tool requires the anthropic-beta header.
             request_headers.insert("anthropic-beta", "web-search-2025-03-05".parse().unwrap());
         }
+        super::apply_extra_headers(&mut request_headers, &self.default_headers);
+        super::apply_extra_headers(&mut request_headers, headers);
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(
