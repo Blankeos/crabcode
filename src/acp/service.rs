@@ -1406,29 +1406,65 @@ impl AcpService {
         let mut failed = None;
         let mut cancelled = false;
         let mut turn_stop_reason = None;
+        let mut live_usage = AcpLiveUsage::default();
 
         while let Some(chunk) = receiver.recv().await {
             match chunk {
                 crate::llm::ChunkMessage::Text(text) => {
                     assistant.append(&text);
                     send_text(&connection, &session_id, &message_id, text, false)?;
+                    send_live_usage(
+                        &connection,
+                        &session_id,
+                        &session,
+                        base_context_tokens,
+                        base_cost,
+                        &assistant,
+                        &live_usage,
+                    )?;
                 }
                 crate::llm::ChunkMessage::Reasoning(text) => {
                     assistant.append_reasoning(&text);
                     send_text(&connection, &session_id, &message_id, text, true)?;
+                    send_live_usage(
+                        &connection,
+                        &session_id,
+                        &session,
+                        base_context_tokens,
+                        base_cost,
+                        &assistant,
+                        &live_usage,
+                    )?;
                 }
                 crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
+                    for tool_call in &tool_calls {
+                        record_tool_call(&mut assistant, tool_call);
+                    }
                     for tool_call in tool_calls {
                         send_tool_call(&connection, &session_id, tool_call, &session.cwd)?;
                     }
+                    send_live_usage(
+                        &connection,
+                        &session_id,
+                        &session,
+                        base_context_tokens,
+                        base_cost,
+                        &assistant,
+                        &live_usage,
+                    )?;
                 }
                 crate::llm::ChunkMessage::ToolResult(result) => {
-                    assistant.add_or_update_tool_result_part(serde_json::json!({
-                        "id": result.tool_call_id,
-                        "name": result.name,
-                        "content": result.content,
-                    }));
+                    record_tool_result(&mut assistant, &result);
                     send_tool_result(&connection, &session_id, result, &session.cwd)?;
+                    send_live_usage(
+                        &connection,
+                        &session_id,
+                        &session,
+                        base_context_tokens,
+                        base_cost,
+                        &assistant,
+                        &live_usage,
+                    )?;
                 }
                 crate::llm::ChunkMessage::Metrics {
                     token_count,
@@ -1440,17 +1476,23 @@ impl AcpService {
                     assistant.duration_ms = Some(duration_ms);
                     if let Some(usage) = usage {
                         assistant.apply_usage(usage, cost);
+                        live_usage.cumulative = usage;
                     }
+                    live_usage.cost = cost.unwrap_or(live_usage.cost);
                     send_usage(
                         &connection,
                         &session_id,
                         &session,
-                        base_context_tokens.saturating_add(token_count),
-                        cost.map(|turn_cost| base_cost + turn_cost),
+                        live_usage
+                            .context_tokens(base_context_tokens, &assistant)
+                            .max(base_context_tokens.saturating_add(token_count)),
+                        cumulative_cost(base_cost, live_usage.cost),
                         usage,
                     )?;
                 }
                 crate::llm::ChunkMessage::Usage(usage) => {
+                    live_usage.observe_provider_usage(&assistant, usage);
+                    live_usage.cost += estimate_session_usage_cost(&session, &usage);
                     assistant
                         .parts
                         .push(crate::session::types::MessagePart::usage(
@@ -1468,6 +1510,15 @@ impl AcpService {
                                 .saturating_add(usage.output as usize),
                         );
                     }
+                    send_live_usage(
+                        &connection,
+                        &session_id,
+                        &session,
+                        base_context_tokens,
+                        base_cost,
+                        &assistant,
+                        &live_usage,
+                    )?;
                 }
                 crate::llm::ChunkMessage::Cancelled => cancelled = true,
                 crate::llm::ChunkMessage::Failed(error) => failed = Some(error),
@@ -2689,6 +2740,160 @@ fn send_usage(
         .map_err(|_| internal_error())
 }
 
+fn send_live_usage(
+    connection: &ConnectionTo<Client>,
+    session_id: &str,
+    session: &AcpSession,
+    base_context_tokens: usize,
+    base_cost: f64,
+    assistant: &crate::session::types::Message,
+    live_usage: &AcpLiveUsage,
+) -> Result<(), Error> {
+    send_usage(
+        connection,
+        session_id,
+        session,
+        live_usage.context_tokens(base_context_tokens, assistant),
+        cumulative_cost(base_cost, live_usage.cost),
+        (!live_usage.cumulative.is_empty()).then_some(live_usage.cumulative),
+    )
+}
+
+#[derive(Debug, Default)]
+struct AcpLiveUsage {
+    cumulative: crate::aisdk::chunk::TokenUsage,
+    provider_context_floor: usize,
+    cost: f64,
+}
+
+impl AcpLiveUsage {
+    fn observe_provider_usage(
+        &mut self,
+        assistant: &crate::session::types::Message,
+        usage: crate::aisdk::chunk::TokenUsage,
+    ) {
+        self.cumulative = self.cumulative.saturating_add(usage);
+        let provider_input = usage
+            .input
+            .saturating_add(usage.cache_read)
+            .saturating_add(usage.cache_write);
+        let observed_assistant = live_assistant_context_tokens(assistant);
+        self.provider_context_floor = self
+            .provider_context_floor
+            .max(usize::try_from(provider_input).unwrap_or(usize::MAX))
+            .max(observed_assistant);
+    }
+
+    fn context_tokens(
+        &self,
+        base_context_tokens: usize,
+        assistant: &crate::session::types::Message,
+    ) -> usize {
+        base_context_tokens
+            .saturating_add(live_assistant_context_tokens(assistant))
+            .max(self.provider_context_floor)
+    }
+}
+
+fn live_assistant_context_tokens(assistant: &crate::session::types::Message) -> usize {
+    let persisted = crate::session::compaction::message_context_tokens(assistant);
+    let reasoning = assistant
+        .reasoning
+        .as_deref()
+        .map(estimate_acp_tokens)
+        .unwrap_or(0);
+    persisted.saturating_add(reasoning)
+}
+
+fn estimate_acp_tokens(content: &str) -> usize {
+    content.chars().count().saturating_add(3) / 4
+}
+
+fn cumulative_cost(base_cost: f64, turn_cost: f64) -> Option<f64> {
+    let cost = base_cost + turn_cost;
+    (cost > 0.0).then_some(cost)
+}
+
+fn record_tool_call(
+    assistant: &mut crate::session::types::Message,
+    tool_call: &crate::llm::ToolCall,
+) {
+    let args = serde_json::from_str(&tool_call.function.arguments)
+        .unwrap_or_else(|_| serde_json::Value::String(tool_call.function.arguments.clone()));
+    let provider_executed = matches!(
+        tool_call.function.name.as_str(),
+        "x_search" | "web_search" | "file_search"
+    );
+
+    if let Some(part) = assistant
+        .parts
+        .iter_mut()
+        .find(|part| part.part_type == "tool_call" && part.tool_id() == Some(tool_call.id.as_str()))
+    {
+        if let Some(obj) = part.data.as_object_mut() {
+            obj.insert(
+                "name".to_string(),
+                serde_json::Value::String(tool_call.function.name.clone()),
+            );
+            obj.insert("args".to_string(), args);
+            if provider_executed {
+                obj.insert(
+                    "provider_executed".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+        }
+        return;
+    }
+
+    assistant.add_tool_call_part(tool_call.id.clone(), tool_call.function.name.clone(), args);
+    if provider_executed {
+        if let Some(obj) = assistant
+            .parts
+            .last_mut()
+            .and_then(|part| part.data.as_object_mut())
+        {
+            obj.insert(
+                "provider_executed".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+    }
+}
+
+fn record_tool_result(
+    assistant: &mut crate::session::types::Message,
+    result: &crate::llm::ToolCallResult,
+) {
+    let mut data = assistant
+        .tool_call_part_data(&result.tool_call_id)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    data["id"] = serde_json::Value::String(result.tool_call_id.clone());
+    data["name"] = serde_json::Value::String(result.name.clone());
+    if matches!(
+        result.name.as_str(),
+        "x_search" | "web_search" | "file_search"
+    ) {
+        data["provider_executed"] = serde_json::Value::Bool(true);
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&result.content) {
+        Ok(serde_json::Value::Object(payload)) => {
+            if let Some(data) = data.as_object_mut() {
+                for (key, value) in payload {
+                    data.insert(key, value);
+                }
+            }
+        }
+        _ => {
+            data["status"] = serde_json::Value::String("ok".to_string());
+            data["output_preview"] = serde_json::Value::String(result.content.clone());
+        }
+    }
+    assistant.add_or_update_tool_result_part(data);
+}
+
 fn usage_update(
     session: &AcpSession,
     used: usize,
@@ -2993,6 +3198,85 @@ mod tests {
         assert_eq!(meta["crabcode"]["contextWindowKnown"], false);
         assert_eq!(meta["crabcode"]["usage"]["inputTokens"], 800);
         assert_eq!(meta["crabcode"]["usage"]["cacheWriteTokens"], 100);
+    }
+
+    #[test]
+    fn acp_live_usage_advances_with_streamed_tools_and_provider_context() {
+        let mut assistant = crate::session::types::Message::incomplete("hello");
+        record_tool_call(
+            &mut assistant,
+            &crate::llm::ToolCall {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({ "filePath": "src/main.rs" }).to_string(),
+                },
+            },
+        );
+        record_tool_result(
+            &mut assistant,
+            &crate::llm::ToolCallResult {
+                tool_call_id: "call_1".to_string(),
+                role: "tool".to_string(),
+                name: "read".to_string(),
+                content: serde_json::json!({
+                    "status": "ok",
+                    "output_preview": "x".repeat(4_000),
+                })
+                .to_string(),
+            },
+        );
+
+        let mut live = AcpLiveUsage::default();
+        let before_provider_usage = live.context_tokens(18_000, &assistant);
+        assert!(before_provider_usage > 18_000);
+        assert!(assistant
+            .tool_call_part_data("call_1")
+            .and_then(|part| part.get("args"))
+            .is_some());
+
+        live.observe_provider_usage(
+            &assistant,
+            crate::aisdk::chunk::TokenUsage {
+                input: 70_000,
+                output: 500,
+                cache_read: 20_000,
+                cache_write: 0,
+            },
+        );
+        assert_eq!(live.context_tokens(18_000, &assistant), 90_000);
+        assert_eq!(live.cumulative.input, 70_000);
+        assert_eq!(live.cumulative.cache_read, 20_000);
+    }
+
+    #[test]
+    fn acp_live_usage_keeps_largest_provider_context_across_tool_steps() {
+        let assistant = crate::session::types::Message::incomplete("");
+        let mut live = AcpLiveUsage::default();
+        live.observe_provider_usage(
+            &assistant,
+            crate::aisdk::chunk::TokenUsage {
+                input: 60_000,
+                output: 200,
+                cache_read: 20_000,
+                cache_write: 0,
+            },
+        );
+        live.observe_provider_usage(
+            &assistant,
+            crate::aisdk::chunk::TokenUsage {
+                input: 10_000,
+                output: 100,
+                cache_read: 40_000,
+                cache_write: 0,
+            },
+        );
+
+        assert_eq!(live.context_tokens(18_000, &assistant), 80_000);
+        assert_eq!(live.cumulative.input, 70_000);
+        assert_eq!(live.cumulative.output, 300);
+        assert_eq!(live.cumulative.cache_read, 60_000);
     }
 
     #[test]
