@@ -72,10 +72,26 @@ struct Snapshot {
     models: Vec<SnapshotModel>,
 }
 
+/// Lenient version gate for the snapshot envelope.
+///
+/// The old two-parse reader returned `None` for a stale `schema_version`
+/// without ever deserializing the body, so an incompatible old body (missing
+/// fields, different shapes) never surfaced as an error. A single typed
+/// `Snapshot` parse breaks that: a stale version with an incompatible body
+/// (or a missing `schema_version`, which is required on `Snapshot`) errors
+/// instead of returning `None`.
+///
+/// This envelope preserves the old semantics with one cheap JSON scan for the
+/// stale path: `schema_version` defaults to `0` when missing (stale), and the
+/// body is captured as borrowed `RawValue` so incompatible old shapes never
+/// fail the gate. The strict `Snapshot` parse runs only when the version is
+/// current, so current-schema corruptions still surface as errors.
 #[derive(Deserialize)]
-struct SnapshotHeader {
+struct SnapshotEnvelope<'a> {
     #[serde(default)]
     schema_version: u32,
+    #[serde(borrow)]
+    models: Option<&'a serde_json::value::RawValue>,
 }
 
 fn snapshot_path() -> Result<PathBuf> {
@@ -96,15 +112,19 @@ fn load_snapshot() -> Result<Option<Snapshot>> {
         return Ok(None);
     }
 
-    let contents = fs::read_to_string(path).context("read effective model catalog")?;
-    let header: SnapshotHeader =
-        serde_json::from_str(&contents).context("parse effective model catalog")?;
-    if header.schema_version != SNAPSHOT_SCHEMA_VERSION {
+    let contents = fs::read(&path).context("read effective model catalog")?;
+    // Version gate first: a single cheap scan that never validates the body
+    // beyond JSON syntax. Stale/missing versions return `None` without a
+    // strict body parse, matching the old header-then-body reader.
+    let envelope: SnapshotEnvelope =
+        serde_json::from_slice(&contents).context("parse effective model catalog")?;
+    if envelope.schema_version != SNAPSHOT_SCHEMA_VERSION {
         return Ok(None);
     }
 
+    // Current version only: strict parse so corruptions surface as errors.
     let snapshot: Snapshot =
-        serde_json::from_str(&contents).context("parse effective model catalog")?;
+        serde_json::from_slice(&contents).context("parse effective model catalog")?;
 
     Ok(Some(snapshot))
 }
@@ -163,6 +183,63 @@ pub fn cleanup_test_snapshot() -> Result<()> {
     Ok(())
 }
 
+/// Serializes tests that mutate the snapshot file.
+///
+/// The snapshot path is shared by every test in the binary, so
+/// file-mutating tests must hold this lock and stash/restore via
+/// [`StashedSnapshot`] instead of clobbering each other.
+#[cfg(test)]
+static SNAPSHOT_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub fn lock_snapshot_for_test() -> std::sync::MutexGuard<'static, ()> {
+    // Recover from poisoning: an unrelated test panic must not cascade into
+    // every snapshot test holding this lock.
+    SNAPSHOT_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Stashes the current snapshot file (if any) and restores it on drop.
+#[cfg(test)]
+pub struct StashedSnapshot {
+    backup: Option<Vec<u8>>,
+}
+
+#[cfg(test)]
+impl StashedSnapshot {
+    pub fn stash() -> Result<Self> {
+        let path = snapshot_path()?;
+        let backup = if path.is_file() {
+            Some(fs::read(&path).context("stash effective model catalog")?)
+        } else {
+            None
+        };
+        if path.exists() {
+            fs::remove_file(&path).context("clear effective model catalog for test")?;
+        }
+        Ok(Self { backup })
+    }
+}
+
+#[cfg(test)]
+impl Drop for StashedSnapshot {
+    fn drop(&mut self) {
+        let Ok(path) = snapshot_path() else {
+            return;
+        };
+        match &self.backup {
+            Some(bytes) => {
+                let _ = fs::write(&path, bytes);
+            }
+            None => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,13 +261,143 @@ mod tests {
 
     #[test]
     fn publish_and_read_round_trip() {
-        cleanup_test_snapshot().expect("clean test snapshot");
+        let _guard = lock_snapshot_for_test();
+        let _stashed = StashedSnapshot::stash().expect("stash snapshot");
         publish_refreshed_models(vec![model()]).expect("publish snapshot");
         let models = models_for_dialog()
             .expect("read snapshot")
             .expect("snapshot exists");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "model-1");
-        cleanup_test_snapshot().expect("clean test snapshot");
+    }
+
+    #[test]
+    fn stale_schema_version_is_ignored() {
+        // The version gate must still honor stale versions: an old snapshot
+        // is treated as absent so callers take the cold path once.
+        let _guard = lock_snapshot_for_test();
+        let _stashed = StashedSnapshot::stash().expect("stash snapshot");
+        let path = snapshot_path().expect("snapshot path");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "schema_version": 1,
+                "revision": 7,
+                "updated_at": 0,
+                "models": [],
+            })
+            .to_string(),
+        )
+        .expect("write stale snapshot");
+        let models = models_for_dialog().expect("read stale snapshot");
+        assert!(models.is_none());
+    }
+
+    #[test]
+    fn stale_schema_with_incompatible_body_is_ignored() {
+        // Old bodies may miss fields required by the current schema (or carry
+        // entirely different shapes). The old header-then-body reader returned
+        // `None` for a stale version without deserializing the body; the gate
+        // must preserve that instead of surfacing a body error.
+        let _guard = lock_snapshot_for_test();
+        let _stashed = StashedSnapshot::stash().expect("stash snapshot");
+        let path = snapshot_path().expect("snapshot path");
+        // Missing required `SnapshotModel` fields (`name`, `provider_id`, …).
+        fs::write(
+            &path,
+            serde_json::json!({
+                "schema_version": 1,
+                "revision": 7,
+                "updated_at": 0,
+                "models": [{ "id": "old-model" }],
+            })
+            .to_string(),
+        )
+        .expect("write stale snapshot");
+        let models = models_for_dialog().expect("stale incompatible body is None");
+        assert!(models.is_none());
+
+        // Entirely different body shape (models not an array at all).
+        fs::write(
+            &path,
+            serde_json::json!({
+                "schema_version": 1,
+                "revision": 7,
+                "updated_at": 0,
+                "models": "not-an-array",
+            })
+            .to_string(),
+        )
+        .expect("write stale snapshot");
+        let models = models_for_dialog().expect("stale wrong-type body is None");
+        assert!(models.is_none());
+    }
+
+    #[test]
+    fn missing_version_is_ignored() {
+        // `schema_version` is required on the current `Snapshot`, but the old
+        // header defaulted a missing version to `0` (stale) and returned
+        // `None` without a body error. Preserve that for both compatible and
+        // incompatible bodies.
+        let _guard = lock_snapshot_for_test();
+        let _stashed = StashedSnapshot::stash().expect("stash snapshot");
+        let path = snapshot_path().expect("snapshot path");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "revision": 7,
+                "updated_at": 0,
+                "models": [],
+            })
+            .to_string(),
+        )
+        .expect("write missing-version snapshot");
+        let models = models_for_dialog().expect("missing version is None");
+        assert!(models.is_none());
+
+        fs::write(
+            &path,
+            serde_json::json!({
+                "revision": 7,
+                "models": [{ "id": "old-model" }],
+            })
+            .to_string(),
+        )
+        .expect("write missing-version snapshot");
+        let models = models_for_dialog().expect("missing version + bad body is None");
+        assert!(models.is_none());
+    }
+
+    #[test]
+    fn corrupt_snapshot_surfaces_error() {
+        let _guard = lock_snapshot_for_test();
+        let _stashed = StashedSnapshot::stash().expect("stash snapshot");
+        let path = snapshot_path().expect("snapshot path");
+        fs::write(&path, "{ not valid json").expect("write corrupt snapshot");
+        assert!(models_for_dialog().is_err());
+    }
+
+    #[test]
+    fn round_trip_preserves_dialog_fields() {
+        let _guard = lock_snapshot_for_test();
+        let _stashed = StashedSnapshot::stash().expect("stash snapshot");
+        let mut dialog_model = model();
+        dialog_model.provider_id = "ollama".to_string();
+        dialog_model.provider_name = "Ollama (Local)".to_string();
+        dialog_model.local = true;
+        dialog_model.attachment = true;
+        dialog_model.reasoning_options = vec![crate::model::reasoning::ReasoningOption {
+            kind: "effort".to_string(),
+            values: vec!["low".to_string(), "high".to_string()],
+        }];
+        publish_refreshed_models(vec![dialog_model]).expect("publish snapshot");
+        let models = models_for_dialog()
+            .expect("read snapshot")
+            .expect("snapshot exists");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].provider_id, "ollama");
+        assert!(models[0].local);
+        assert!(models[0].attachment);
+        assert_eq!(models[0].reasoning_options.len(), 1);
     }
 }

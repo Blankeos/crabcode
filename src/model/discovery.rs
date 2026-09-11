@@ -944,6 +944,15 @@ impl Discovery {
         if cache_path.exists() {
             fs::remove_file(&cache_path).context("Failed to remove test cache file")?;
         }
+        // Clear in-memory caches so tests are isolated: otherwise a previous
+        // test's `fetch_models` result (keyed by custom signature) would leak
+        // into the next test even after the file is removed.
+        if let Ok(mut cache) = memory_cache().lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = memory_model_cache().lock() {
+            cache.clear();
+        }
         Ok(())
     }
 }

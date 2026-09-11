@@ -39,6 +39,7 @@ pub async fn selectable_models(
 
     let snapshot_models = crate::model::effective_catalog::models_for_dialog()
         .context("failed to load effective model catalog")?;
+    let snapshot_present = snapshot_models.is_some();
     let mut models = if let Some(models) = snapshot_models {
         models
     } else if has_persistent {
@@ -60,9 +61,18 @@ pub async fn selectable_models(
 
     let mut runtime_errors = Vec::new();
     if has_runtime {
-        let runtime = ModelExtensions::runtime_models_for_dialog_cached().await;
-        merge_dialog_models(&mut models, runtime.models);
-        runtime_errors = runtime.errors;
+        // Warm path: the snapshot already carries last-refresh runtime rows,
+        // so merge only the in-process runtime cache (synchronous, never
+        // spawns `ollama ls`). An explicit runtime filter still takes the
+        // fresh path; `/refreshmodels` remains the refresh boundary.
+        if snapshot_present && !filter_matches_runtime {
+            let cached = ModelExtensions::runtime_models_from_cache();
+            merge_dialog_models(&mut models, cached);
+        } else {
+            let runtime = ModelExtensions::runtime_models_for_dialog_cached().await;
+            merge_dialog_models(&mut models, runtime.models);
+            runtime_errors = runtime.errors;
+        }
     }
 
     models.retain(|model| {
@@ -147,5 +157,57 @@ mod tests {
 
         config.disabled_providers.insert("anthropic".into());
         assert!(!provider_is_enabled(&config, "anthropic"));
+    }
+
+    fn test_config() -> crate::config::configuration::LoadedConfig {
+        crate::config::configuration::LoadedConfig {
+            merged_config: crate::config::configuration::MergedConfig::default(),
+            raw_merged: serde_json::json!({}),
+            diagnostics: Default::default(),
+            inventory: Default::default(),
+            project_root: std::path::PathBuf::from("/tmp"),
+            cwd: std::path::PathBuf::from("/tmp"),
+            xdg_config_home: std::path::PathBuf::from("/tmp"),
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_snapshot_serves_runtime_rows_without_subprocess() {
+        // With a published snapshot, unfiltered selection serves the
+        // snapshot's runtime rows via the in-process cache only (no
+        // `ollama ls` spawn). The ollama cache is left empty on purpose.
+        let _snapshot_lock = crate::model::effective_catalog::lock_snapshot_for_test();
+        let _stashed =
+            crate::model::effective_catalog::StashedSnapshot::stash().expect("stash snapshot");
+        let _ollama_guard = crate::model::extensions::ollama::test_cache_lock();
+        crate::model::extensions::ollama::clear_cache_for_test();
+
+        let marker = Model {
+            id: "catalog-warm-1".into(),
+            name: "Catalog Warm 1".into(),
+            family: "test".into(),
+            provider_id: crate::model::extensions::ollama::PROVIDER_ID.into(),
+            provider_name: crate::model::extensions::ollama::PROVIDER_NAME.into(),
+            attachment: false,
+            structured_output: false,
+            free: false,
+            local: true,
+            reasoning_options: Vec::new(),
+        };
+        crate::model::effective_catalog::publish_refreshed_models(vec![marker])
+            .expect("publish warm snapshot");
+
+        let models = selectable_models(&test_config(), None)
+            .await
+            .expect("warm selectable models");
+        assert!(
+            models.iter().any(|model| model.id == "catalog-warm-1"
+                && model.provider_id == crate::model::extensions::ollama::PROVIDER_ID),
+            "snapshot runtime rows missing: {:?}",
+            models
+                .iter()
+                .map(|model| (model.provider_id.clone(), model.id.clone()))
+                .collect::<Vec<_>>()
+        );
     }
 }
