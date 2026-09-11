@@ -22,7 +22,7 @@ use crate::session::manager::SessionManager;
 use crate::tools::{PermissionResponse, ToolHandler};
 
 use crate::push_toast;
-use crate::toast::{self, Toast, ToastLevel};
+use crate::toast::{self, Toast, ToastAction, ToastLevel};
 use crate::ui::components::action_dialog::{ActionDialog, ActionDialogEvent, ActionDialogItem};
 use crate::ui::components::chat::{Chat, ChatImageTarget};
 use crate::ui::components::find::{FindBar, FindBarAction};
@@ -943,6 +943,16 @@ pub struct App {
         Option<tokio::sync::mpsc::UnboundedReceiver<TitleGenerationTaskMessage>>,
     btw_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<BtwTaskMessage>>,
     btw_entries: Vec<BtwEntry>,
+    /// Background update-check channel; `Some` while the lazy check is in flight.
+    /// Keeps the event loop fast-polling so the toast appears promptly.
+    update_check_receiver:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::update::UpdateCheckResult>>,
+    /// Set once the lazy check has started (or been skipped) — one check per process.
+    update_check_started: bool,
+    /// Background upgrade channel; `Some` while `crabcode upgrade` runs.
+    upgrade_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<crate::update::UpgradeOutcome>>,
+    /// Guards against double-running the upgrade from repeated toast clicks.
+    upgrade_in_progress: bool,
     /// Lines scrolled down from the top inside the `/btw` panel (0 = top).
     btw_scroll: usize,
     /// Last-rendered `/btw` panel rect, for mouse-wheel hit-testing.
@@ -1213,6 +1223,10 @@ impl App {
             title_generation_receiver: None,
             btw_receiver: None,
             btw_entries: Vec::new(),
+            update_check_receiver: None,
+            update_check_started: false,
+            upgrade_receiver: None,
+            upgrade_in_progress: false,
             btw_scroll: 0,
             btw_panel_area: None,
             prefs_dao,
@@ -5311,6 +5325,10 @@ impl App {
             self.input.clear_hover();
         }
 
+        if self.handle_update_toast_mouse(mouse) {
+            return;
+        }
+
         if self.handle_error_toast_mouse(mouse) {
             return;
         }
@@ -6701,6 +6719,184 @@ impl App {
                 ));
             }
         }
+    }
+
+    /// Lazy update check: once per process, after first paint. A fresh 24h
+    /// cache shows the toast synchronously (no thread, no network); otherwise
+    /// one blocking lookup runs off-thread. Check failures are silent.
+    /// `CRABCODE_FORCE_UPDATE_NOTICE` previews the toast with no network;
+    /// `CRABCODE_NO_UPDATE_CHECK` disables everything, including the preview.
+    pub fn maybe_start_update_check(&mut self) {
+        if self.update_check_started || self.update_check_receiver.is_some() {
+            return;
+        }
+        self.update_check_started = true;
+        // UI-testing preview: force the toast without cache/network/version
+        // checks. Never auto-upgrades; a click still runs the normal flow.
+        // Disable wins over force.
+        let disabled = crate::update::update_check_disabled();
+        if crate::update::forced_preview_active(disabled, crate::update::force_update_notice()) {
+            push_toast(Toast::update_available());
+            return;
+        }
+        if disabled {
+            return;
+        }
+
+        let current = crate::upgrade::current_version();
+        if let Some(_latest) = crate::update::load_cached_update(&current) {
+            push_toast(Toast::update_available());
+            return;
+        }
+        if !crate::update::should_fetch_update() {
+            // Fresh cache, already current — respect the 24h TTL.
+            return;
+        }
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.update_check_receiver = Some(receiver);
+        crate::update::spawn_detached_update_worker("crabcode-update-check", sender, move || {
+            crate::update::check_and_cache(&current)
+        });
+    }
+
+    /// Drain the background version check. Returns true when a toast was
+    /// pushed so the event loop can redraw once (no 60fps animation).
+    fn process_update_check_events(&mut self) -> bool {
+        let mut latest_available: Option<String> = None;
+        let mut disconnected = false;
+
+        if let Some(receiver) = &mut self.update_check_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(result) => {
+                        if latest_available.is_none() {
+                            latest_available = result;
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected || latest_available.is_some() {
+            self.update_check_receiver = None;
+        }
+
+        if let Some(_latest) = latest_available {
+            push_toast(Toast::update_available());
+            return true;
+        }
+        // Disconnects and `None` results stay silent by design.
+        false
+    }
+
+    /// Start `crabcode upgrade` off-thread after an explicit toast click.
+    /// Retires the nudge first so it cannot double-run; the result arrives via
+    /// [`Self::process_upgrade_events`] as `Updated · Restart to apply` or an
+    /// error toast. No confirm dialog, no auto-restart, no forced exit.
+    fn start_upgrade_from_toast(&mut self) {
+        if self.upgrade_in_progress || self.upgrade_receiver.is_some() {
+            return;
+        }
+        get_toast_manager()
+            .lock()
+            .unwrap()
+            .remove_action(ToastAction::Upgrade);
+        self.upgrade_in_progress = true;
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.upgrade_receiver = Some(receiver);
+        // Intentionally detached std thread (not the Tokio blocking pool):
+        // Tokio waits indefinitely on shutdown for started spawn_blocking
+        // tasks even if the JoinHandle is dropped, so a minutes-long install
+        // would hang quit. A detached OS thread is untracked by the runtime,
+        // so quitting mid-upgrade stays immediate. Timeouts (`--max-time`),
+        // null stdin, and no-prompt env bound every network/prompt wait; the
+        // installer child is reparented if the TUI exits first and either
+        // completes or fails silently — never a zombie under the TUI
+        // (captured `output()` reaps while attached). No auto-restart.
+        crate::update::spawn_detached_update_worker("crabcode-upgrade", sender, move || {
+            crate::upgrade::upgrade_noninteractive(None).map_err(|err| format!("{err:#}"))
+        });
+    }
+
+    /// Drain the background upgrade. Returns true when a toast was pushed so
+    /// the event loop can redraw once (no 60fps animation).
+    fn process_upgrade_events(&mut self) -> bool {
+        let mut outcomes = Vec::new();
+        let mut disconnected = false;
+
+        if let Some(receiver) = &mut self.upgrade_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok(outcome) => outcomes.push(outcome),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected || !outcomes.is_empty() {
+            self.upgrade_receiver = None;
+            self.upgrade_in_progress = false;
+        }
+
+        let had_outcomes = !outcomes.is_empty();
+        for outcome in outcomes {
+            match outcome {
+                Ok(_version) => push_toast(Toast::updated()),
+                Err(err) => push_toast(Toast::upgrade_failed(
+                    crate::update::upgrade_failure_message(&err),
+                )),
+            }
+        }
+
+        if disconnected && !had_outcomes {
+            push_toast(Toast::upgrade_failed(
+                "Update failed: background task ended",
+            ));
+            return true;
+        }
+        had_outcomes
+    }
+
+    /// Clicking the `New version available · Upgrade` toast explicitly runs
+    /// `crabcode upgrade`. The whole toast is the Upgrade affordance. Other
+    /// clicks on the toast are swallowed so they don't fall through to chat.
+    fn handle_update_toast_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let hit = {
+            let manager = get_toast_manager().lock().unwrap();
+            manager.action_at(self.last_frame_size, Position::new(mouse.column, mouse.row))
+        };
+        let Some((action, _message)) = hit else {
+            return false;
+        };
+        if !matches!(action, ToastAction::Upgrade) {
+            return false;
+        }
+
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+        ) {
+            return false;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && mouse.modifiers.is_empty()
+        {
+            self.start_upgrade_from_toast();
+        }
+
+        true
     }
 
     fn handle_error_toast_mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -10181,6 +10377,11 @@ impl App {
             || self.storage_receiver.is_some()
             || self.models_receiver.is_some()
             || self.title_generation_receiver.is_some()
+            // NOTE: update_check/upgrade receivers are intentionally *not*
+            // animation: a 10s version lookup or minutes-long `cargo install`
+            // must not pin 60fps full renders. Completion wakes via bounded
+            // background poll (see `has_pending_update_work`) plus one redraw
+            // when the toast lands.
             || self.terminal_session_dialog_state.has_active()
             || self
                 .session_view_states
@@ -10192,6 +10393,14 @@ impl App {
             // Keep ticking while the jobs dialog is open so duration/spinner
             // stay live — never call running_count_blocking here (can stall UI).
             || self.jobs_dialog_state.is_visible()
+    }
+
+    /// Background update/upgrade in flight (version lookup or installer).
+    /// The event loop uses this for a bounded non-animation poll (~10Hz,
+    /// no renders) so completion lands promptly without 60fps churn and
+    /// without blocking startup (check starts after first paint).
+    pub fn has_pending_update_work(&self) -> bool {
+        self.update_check_receiver.is_some() || self.upgrade_receiver.is_some()
     }
 
     fn sessions_dialog_has_streaming_rows(&self) -> bool {
@@ -10302,9 +10511,14 @@ impl App {
         input_scrolled || chat_scrolled
     }
 
-    pub fn process_streaming_chunks(&mut self) {
+    /// Drain background channels + streams. Returns true when an update or
+    /// upgrade toast landed so the event loop can redraw once (idle wakeup
+    /// path has no animation to carry the repaint).
+    pub fn process_streaming_chunks(&mut self) -> bool {
         self.process_provider_oauth_events();
         self.process_mcp_oauth_events();
+        let update_toasted = self.process_update_check_events();
+        let upgrade_toasted = self.process_upgrade_events();
         self.process_compaction_events();
         self.process_storage_events();
         self.process_models_events();
@@ -10366,6 +10580,7 @@ impl App {
 
         self.sync_active_streaming_flag();
         self.update_sessions_dialog_live_state(false);
+        update_toasted || upgrade_toasted
     }
 
     fn process_streaming_chunk_for_session(
@@ -13008,6 +13223,27 @@ mod tests {
     use crate::tools::{PermissionAction, PermissionPrompt};
     use serde_json::json;
 
+    /// Serializes the preview-flag env tests so concurrent cases cannot swap
+    /// `CRABCODE_FORCE_UPDATE_NOTICE` / `CRABCODE_NO_UPDATE_CHECK` mid-call.
+    fn update_preview_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        &LOCK
+    }
+
+    fn restore_env_var(key: &str, prev: Option<String>) {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    fn restore_env_os(key: &str, prev: Option<std::ffi::OsString>) {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
     fn test_app() -> App {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
@@ -13079,6 +13315,10 @@ mod tests {
             title_generation_receiver: None,
             btw_receiver: None,
             btw_entries: Vec::new(),
+            update_check_receiver: None,
+            update_check_started: false,
+            upgrade_receiver: None,
+            upgrade_in_progress: false,
             btw_scroll: 0,
             btw_panel_area: None,
             prefs_dao: None,
@@ -13703,6 +13943,205 @@ mod tests {
             row,
             modifiers: KeyModifiers::empty(),
         }
+    }
+
+    #[test]
+    fn upgrade_success_event_clears_in_flight_state() {
+        let mut app = test_app();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.upgrade_receiver = Some(receiver);
+        app.upgrade_in_progress = true;
+
+        sender.send(Ok("0.0.13".to_string())).unwrap();
+        assert!(
+            app.process_upgrade_events(),
+            "upgrade toast must request a redraw"
+        );
+
+        assert!(app.upgrade_receiver.is_none());
+        assert!(!app.upgrade_in_progress);
+    }
+
+    #[test]
+    fn upgrade_failure_event_clears_in_flight_state() {
+        let mut app = test_app();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.upgrade_receiver = Some(receiver);
+        app.upgrade_in_progress = true;
+
+        sender.send(Err("boom".to_string())).unwrap();
+        assert!(
+            app.process_upgrade_events(),
+            "failure toast must request a redraw"
+        );
+
+        assert!(app.upgrade_receiver.is_none());
+        assert!(!app.upgrade_in_progress);
+    }
+
+    #[test]
+    fn upgrade_disconnect_without_result_clears_in_flight_state() {
+        let mut app = test_app();
+        let (sender, receiver) =
+            tokio::sync::mpsc::unbounded_channel::<crate::update::UpgradeOutcome>();
+        app.upgrade_receiver = Some(receiver);
+        app.upgrade_in_progress = true;
+        drop(sender);
+
+        assert!(
+            app.process_upgrade_events(),
+            "disconnect toast must request a redraw"
+        );
+
+        assert!(app.upgrade_receiver.is_none());
+        assert!(!app.upgrade_in_progress);
+    }
+
+    #[test]
+    fn pending_update_work_does_not_pin_animation_loop() {
+        // Merge-blocker regression: a 10s lookup or minutes-long install must
+        // use the bounded background poll, not 60fps full renders.
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        assert!(!app.has_pending_update_work());
+        assert!(!app.is_animation_running());
+
+        let (_s1, r1) = tokio::sync::mpsc::unbounded_channel::<crate::update::UpdateCheckResult>();
+        app.update_check_receiver = Some(r1);
+        assert!(app.has_pending_update_work());
+        assert!(
+            !app.is_animation_running(),
+            "update check must not force animation"
+        );
+        app.update_check_receiver = None;
+
+        let (_s2, r2) = tokio::sync::mpsc::unbounded_channel::<crate::update::UpgradeOutcome>();
+        app.upgrade_receiver = Some(r2);
+        app.upgrade_in_progress = true;
+        assert!(app.has_pending_update_work());
+        assert!(
+            !app.is_animation_running(),
+            "upgrade install must not force animation"
+        );
+    }
+
+    #[test]
+    fn update_check_event_reports_redraw_only_on_toast() {
+        let mut app = test_app();
+        // No receiver => no toast, no redraw.
+        assert!(!app.process_update_check_events());
+        // Available update => toast + redraw.
+        let (sender, receiver) =
+            tokio::sync::mpsc::unbounded_channel::<crate::update::UpdateCheckResult>();
+        app.update_check_receiver = Some(receiver);
+        sender.send(Some("9.9.9".to_string())).unwrap();
+        assert!(app.process_update_check_events());
+        assert!(app.update_check_receiver.is_none());
+        crate::get_toast_manager()
+            .lock()
+            .unwrap()
+            .remove_action(crate::toast::ToastAction::Upgrade);
+    }
+
+    #[test]
+    fn update_check_already_started_is_noop() {
+        let mut app = test_app();
+        app.update_check_started = true;
+        app.maybe_start_update_check();
+        assert!(app.update_check_receiver.is_none());
+    }
+
+    #[test]
+    fn forced_preview_marks_started_without_spawning_fetch() {
+        // Preview bypasses cache/network/version checks and never auto-runs
+        // the upgrade; the forced path returns before any background task, so
+        // no tokio runtime is needed here.
+        let _guard = update_preview_env_lock().lock().unwrap();
+        let prev_force = std::env::var("CRABCODE_FORCE_UPDATE_NOTICE").ok();
+        let prev_disable = std::env::var_os("CRABCODE_NO_UPDATE_CHECK");
+        std::env::set_var("CRABCODE_FORCE_UPDATE_NOTICE", "1");
+        std::env::remove_var("CRABCODE_NO_UPDATE_CHECK");
+
+        let mut app = test_app();
+        app.maybe_start_update_check();
+
+        assert!(app.update_check_started);
+        assert!(app.update_check_receiver.is_none());
+
+        restore_env_var("CRABCODE_FORCE_UPDATE_NOTICE", prev_force);
+        restore_env_os("CRABCODE_NO_UPDATE_CHECK", prev_disable);
+        crate::get_toast_manager()
+            .lock()
+            .unwrap()
+            .remove_action(crate::toast::ToastAction::Upgrade);
+    }
+
+    #[test]
+    fn disable_wins_over_forced_preview() {
+        let _guard = update_preview_env_lock().lock().unwrap();
+        let prev_force = std::env::var("CRABCODE_FORCE_UPDATE_NOTICE").ok();
+        let prev_disable = std::env::var_os("CRABCODE_NO_UPDATE_CHECK");
+        std::env::set_var("CRABCODE_FORCE_UPDATE_NOTICE", "1");
+        std::env::set_var("CRABCODE_NO_UPDATE_CHECK", "1");
+
+        // Helper-level precedence plus wiring: disabled short-circuits before
+        // any fetch is spawned.
+        assert!(!crate::update::forced_preview_active(true, true));
+        let mut app = test_app();
+        app.maybe_start_update_check();
+
+        assert!(app.update_check_started);
+        assert!(app.update_check_receiver.is_none());
+
+        restore_env_var("CRABCODE_FORCE_UPDATE_NOTICE", prev_force);
+        restore_env_os("CRABCODE_NO_UPDATE_CHECK", prev_disable);
+        crate::get_toast_manager()
+            .lock()
+            .unwrap()
+            .remove_action(crate::toast::ToastAction::Upgrade);
+    }
+
+    #[test]
+    fn update_toast_click_is_consumed_while_upgrade_in_flight() {
+        // Guard path only: upgrade already running, so no task spawns (unit
+        // tests have no tokio runtime). Proves the click hits the Upgrade
+        // toast and is swallowed instead of falling through to chat.
+        //
+        // The global toast manager is shared with parallel tests, so re-push
+        // our nudge (making it newest/visible) and retry the scan+click pair
+        // if a concurrent push crowds it out of the visible window.
+        let mut app = test_app();
+        app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.upgrade_in_progress = true;
+
+        let frame = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let mut consumed = false;
+        for _ in 0..50 {
+            crate::push_toast(crate::toast::Toast::update_available());
+            let hit = (0..24).find_map(|y| {
+                (0..80).find_map(|x| {
+                    let at = crate::get_toast_manager()
+                        .lock()
+                        .unwrap()
+                        .action_at(frame, ratatui::layout::Position::new(x, y));
+                    matches!(at, Some((crate::toast::ToastAction::Upgrade, _))).then_some((x, y))
+                })
+            });
+            let Some((x, y)) = hit else { continue };
+            if app.handle_update_toast_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y)) {
+                consumed = true;
+                break;
+            }
+        }
+        assert!(consumed, "update toast click should be consumed");
+        // In-flight guard: no new channel, still marked in progress.
+        assert!(app.upgrade_receiver.is_none());
+        assert!(app.upgrade_in_progress);
+
+        crate::get_toast_manager()
+            .lock()
+            .unwrap()
+            .remove_action(crate::toast::ToastAction::Upgrade);
     }
 
     #[test]

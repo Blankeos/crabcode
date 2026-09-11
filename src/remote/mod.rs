@@ -1217,7 +1217,7 @@ fn tick_remote_host_app(app: &mut App) {
             ));
         }
     }
-    app.process_streaming_chunks();
+    let _ = app.process_streaming_chunks();
     app.update_animations();
     crate::remove_expired_toasts();
 }
