@@ -67,9 +67,9 @@ Needs `jq`. Crabcode already reports agent status when `HERDR_PANE_ID` is set.
 {
   "editor": {
     // Helix
-    "open": "herdr pane run \"$(herdr tab create --focus --label hx | jq -r .result.root_pane.pane_id)\" hx -- {pathname}:{line}:{column}",
+    "open": "tab=$(herdr tab create --focus --label hx) && pane=$(printf '%s\\n' \"$tab\" | jq -er '.result.root_pane.pane_id // empty') && herdr pane run \"$pane\" hx -- {location}",
     // Neovim
-    "open": "herdr pane run \"$(herdr tab create --focus --label nvim | jq -r .result.root_pane.pane_id)\" nvim +{line} -- {pathname}",
+    "open": "tab=$(herdr tab create --focus --label nvim) && pane=$(printf '%s\\n' \"$tab\" | jq -er '.result.root_pane.pane_id // empty') && herdr pane run \"$pane\" nvim +{line} -- {pathname}",
   },
 }
 ```
