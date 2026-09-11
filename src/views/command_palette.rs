@@ -27,6 +27,7 @@ pub enum CommandPaletteAppAction {
     OpenSkillsDialog,
     OpenMcpDialog,
     OpenJobs,
+    RecallPending,
 }
 
 #[derive(Debug)]
@@ -218,6 +219,9 @@ fn action_for_item(item: &DialogItem) -> CommandPaletteAction {
                 CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenMcpDialog)
             }
             "open-jobs" => CommandPaletteAction::RunAppAction(CommandPaletteAppAction::OpenJobs),
+            "edit-pending" => {
+                CommandPaletteAction::RunAppAction(CommandPaletteAppAction::RecallPending)
+            }
             _ => CommandPaletteAction::None,
         };
     }
@@ -449,6 +453,22 @@ fn core_palette_items(
                 .position(|item| item.group == "Appearance")
                 .unwrap_or(items.len()),
             app_action_item(id, name, "Appearance", description, None, &hidden_tokens),
+        );
+
+        items.insert(
+            items
+                .iter()
+                .position(|item| item.group == "Workspace")
+                .map(|idx| idx + 1)
+                .unwrap_or(items.len()),
+            app_action_item(
+                "edit-pending",
+                "Edit Pending Message",
+                "Workspace",
+                "Recall queued messages into the composer for editing",
+                Some("ctrl+x r"),
+                &["pending", "queued", "recall", "edit queued"],
+            ),
         );
     }
 

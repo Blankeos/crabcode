@@ -25,6 +25,15 @@ const QUEUED_MESSAGES_TOP_PADDING: u16 = 1;
 const QUEUED_MESSAGES_BOTTOM_PADDING: u16 = 1;
 const STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH: u16 = 64;
 const SUBAGENT_FOOTER_NAV_GAP: &str = "   ";
+/// Hover target for the pending (queued) header actions.
+/// Tracks mouse hover for a foreground-only highlight with no background.
+/// Follows the `Input`/`Chat` hover convention: `Option` state set on
+/// `MouseEventKind::Moved`, cleared off-target/hidden, rendered fg-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingHover {
+    Edit,
+    Send,
+}
 /// Minimum transcript rows to keep visible when clamping the input height
 /// on short terminals. The input shrinks instead of forcing its full
 /// 9-line height and starving the chat view.
@@ -176,6 +185,7 @@ pub fn render_chat(
     usage_text: &str,
     subagent_tabs: Option<SubagentTabs>,
     queued_messages: &[String],
+    queued_has_user_messages: bool,
     btw_entry: Option<&crate::app::BtwEntry>,
     btw_scroll: usize,
     btw_panel_area: &mut Option<Rect>,
@@ -184,8 +194,13 @@ pub fn render_chat(
     session_title: Option<&str>,
     running_jobs: usize,
     jobs_chip_area: &mut Option<Rect>,
+    queued_edit_area: &mut Option<Rect>,
+    queued_send_area: &mut Option<Rect>,
+    queued_hover: Option<PendingHover>,
 ) {
     *jobs_chip_area = None;
+    *queued_edit_area = None;
+    *queued_send_area = None;
     let size = f.area();
     let is_subagent_view = subagent_tabs
         .as_ref()
@@ -510,9 +525,13 @@ pub fn render_chat(
             f,
             above_input[1],
             queued_messages,
+            queued_has_user_messages,
             &agent,
             colors,
             esc_cancel_primed,
+            queued_edit_area,
+            queued_send_area,
+            queued_hover,
         );
 
         input.render(
@@ -1103,10 +1122,16 @@ fn render_queued_messages(
     f: &mut Frame,
     area: Rect,
     messages: &[String],
+    has_pending_user_messages: bool,
     agent: &str,
     colors: &ThemeColors,
     esc_cancel_primed: bool,
+    edit_area: &mut Option<Rect>,
+    send_area: &mut Option<Rect>,
+    queued_hover: Option<PendingHover>,
 ) {
+    *edit_area = None;
+    *send_area = None;
     if messages.is_empty() || area.width == 0 || area.height == 0 {
         return;
     }
@@ -1144,10 +1169,79 @@ fn render_queued_messages(
     } else {
         "esc "
     };
-    let hint_width = UnicodeWidthStr::width(hint_prefix) + UnicodeWidthStr::width("steer");
+    let send_label = "send now";
+    let send_width = UnicodeWidthStr::width(hint_prefix) + UnicodeWidthStr::width(send_label);
     let title = "Queued message";
     let title_width = 2 + UnicodeWidthStr::width(title);
-    let show_hint = content_area.width as usize >= title_width + hint_width + 4;
+    let content_width = content_area.width as usize;
+
+    // Header actions (top-right, right-aligned): quiet clickable Edit plus
+    // the accurate Esc send-now hint. Desired order:
+    // `Edit   esc send now` (armed: `esc again to send now`).
+    // Keyboard binding (Ctrl+X r) stays active but has no visible hint.
+    // No extra bottom action row is reserved. Narrow-safe: Edit + send-now,
+    // then send-only, then title-only. Hitboxes require an
+    // actual pending user message — a compact-only queue (e.g. ["/compact"])
+    // keeps the queued line (and the send-now hint text when it fits) but offers
+    // no Edit/send targets. Widths use Unicode display width so hitboxes
+    // align with the right-aligned header labels on narrow terminals.
+    const HEADER_GAP: usize = 3;
+    const HEADER_MIN_SPACER: usize = 2;
+    let edit_label = "edit";
+    let edit_width = UnicodeWidthStr::width(edit_label);
+    let right_edit = edit_width + HEADER_GAP + send_width;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum PendingHeaderMode {
+        Edit,
+        SendOnly,
+        TitleOnly,
+    }
+    let mode = if has_pending_user_messages {
+        if content_width >= title_width + right_edit + HEADER_MIN_SPACER {
+            PendingHeaderMode::Edit
+        } else if content_width >= title_width + send_width + HEADER_MIN_SPACER {
+            PendingHeaderMode::SendOnly
+        } else {
+            PendingHeaderMode::TitleOnly
+        }
+    } else if content_width >= title_width + send_width + HEADER_MIN_SPACER {
+        PendingHeaderMode::SendOnly
+    } else {
+        PendingHeaderMode::TitleOnly
+    };
+    let right_width = match mode {
+        PendingHeaderMode::Edit => right_edit,
+        PendingHeaderMode::SendOnly => send_width,
+        PendingHeaderMode::TitleOnly => 0,
+    };
+    let show_edit = matches!(mode, PendingHeaderMode::Edit);
+
+    // Foreground-only hover: idle stays muted (text_weak), hovered turns
+    // bright (text) with no background change. Mirrors the Input/Chat image
+    // hover convention (fg change, bg untouched). Effective hover requires a
+    // clickable target so stale hover never highlights hidden text.
+    let edit_hovered =
+        matches!(queued_hover, Some(PendingHover::Edit)) && has_pending_user_messages && show_edit;
+    let send_hovered = matches!(queued_hover, Some(PendingHover::Send))
+        && has_pending_user_messages
+        && right_width > 0
+        && (show_edit || matches!(mode, PendingHeaderMode::SendOnly));
+    let edit_fg = if edit_hovered {
+        colors.text
+    } else {
+        colors.text_weak
+    };
+    let send_prefix_fg = if send_hovered {
+        colors.text
+    } else {
+        colors.text_weak
+    };
+    let send_label_fg = if send_hovered {
+        colors.text
+    } else {
+        colors.text_weak
+    };
 
     let mut header_spans = vec![
         Span::styled("•", Style::default().fg(agent_color)),
@@ -1159,25 +1253,60 @@ fn render_queued_messages(
                 .add_modifier(Modifier::BOLD),
         ),
     ];
-    if show_hint {
-        let spacer_width = content_area
-            .width
-            .saturating_sub((title_width + hint_width) as u16);
-        header_spans.push(Span::raw(" ".repeat(spacer_width as usize)));
+    if right_width > 0 {
+        let spacer_width = content_width.saturating_sub(title_width + right_width);
+        header_spans.push(Span::raw(" ".repeat(spacer_width)));
+        if show_edit {
+            header_spans.push(Span::styled(edit_label, Style::default().fg(edit_fg)));
+            header_spans.push(Span::raw(" ".repeat(HEADER_GAP)));
+        }
         header_spans.push(Span::styled(
             hint_prefix,
             Style::default()
-                .fg(colors.text_weak)
+                .fg(send_prefix_fg)
                 .add_modifier(Modifier::DIM),
         ));
         header_spans.push(Span::styled(
-            "steer",
+            send_label,
             Style::default()
-                .fg(colors.text_weak)
+                .fg(send_label_fg)
                 .add_modifier(Modifier::BOLD),
         ));
     }
     lines.push(Line::from(header_spans));
+
+    // Header hitboxes clamped to the content area so narrow terminals never
+    // produce out-of-bounds rects. Edit covers the quiet label; send covers
+    // prefix + label and invokes the same handler as the
+    // former Send action (steering path). Compact-only and too-narrow headers
+    // leave both as None (reset at entry).
+    if has_pending_user_messages && right_width > 0 {
+        let header_y = content_area.y;
+        let content_right = content_area.x.saturating_add(content_area.width);
+        if show_edit {
+            let edit_w = edit_width as u16;
+            let edit_x = content_right.saturating_sub(right_width as u16);
+            let edit_w = edit_w.min(content_right.saturating_sub(edit_x));
+            if edit_w > 0 {
+                *edit_area = Some(Rect::new(edit_x, header_y, edit_w, 1));
+            }
+            let send_x = edit_x.saturating_add(edit_w.saturating_add(HEADER_GAP as u16));
+            if send_x < content_right {
+                let send_w = (send_width as u16).min(content_right.saturating_sub(send_x));
+                if send_w > 0 {
+                    *send_area = Some(Rect::new(send_x, header_y, send_w, 1));
+                }
+            }
+        } else {
+            let send_x = content_right.saturating_sub(send_width as u16);
+            if send_x >= content_area.x && send_x < content_right {
+                let send_w = (send_width as u16).min(content_right.saturating_sub(send_x));
+                if send_w > 0 {
+                    *send_area = Some(Rect::new(send_x, header_y, send_w, 1));
+                }
+            }
+        }
+    }
 
     let message_width = content_area.width.saturating_sub(4) as usize;
     for message in messages.iter().take(QUEUED_MESSAGES_MAX_VISIBLE) {
@@ -1722,10 +1851,10 @@ mod tests {
     use super::{
         btw_body_lines, btw_body_width, btw_panel_height, chat_status_layout_widths,
         compact_transcript_layout, display_agent_name, natural_sticky_index, paint_sticky_overlay,
-        render_chat, render_subagent_spinner_only, resolve_sticky_display,
+        queued_messages_height, render_chat, render_subagent_spinner_only, resolve_sticky_display,
         sticky_overlay_height_for_span, sticky_overlay_rect, streaming_status_spans,
         subagent_nav_width, subagent_streaming_status_spans, user_message_body_end,
-        wrap_plain_text_line, ChatState, ChatStatusLayoutWidths, BTW_MAX_BODY_LINES,
+        wrap_plain_text_line, ChatState, ChatStatusLayoutWidths, PendingHover, BTW_MAX_BODY_LINES,
         STICKY_UP_HYSTERESIS, STREAMING_STATUS_COMPACT_BREAKPOINT_WIDTH,
     };
     use crate::theme::ThemeColors;
@@ -2468,6 +2597,7 @@ mod tests {
                     "",
                     None,
                     &[],
+                    false,
                     None,
                     0,
                     &mut None,
@@ -2476,6 +2606,9 @@ mod tests {
                     Some("Session"),
                     0,
                     &mut None,
+                    &mut None,
+                    &mut None,
+                    None,
                 );
             })
             .expect("draw without sticky");
@@ -2530,6 +2663,7 @@ mod tests {
                     "",
                     None,
                     &[],
+                    false,
                     None,
                     0,
                     &mut None,
@@ -2538,6 +2672,9 @@ mod tests {
                     Some("Session"),
                     0,
                     &mut None,
+                    &mut None,
+                    &mut None,
+                    None,
                 );
             })
             .expect("draw with sticky");
@@ -2612,6 +2749,7 @@ mod tests {
                     "",
                     None,
                     &[],
+                    false,
                     None,
                     0,
                     &mut None,
@@ -2620,6 +2758,9 @@ mod tests {
                     Some("Session"),
                     0,
                     &mut None,
+                    &mut None,
+                    &mut None,
+                    None,
                 );
             })
             .expect("draw");
@@ -2699,5 +2840,592 @@ mod tests {
         let lines = wrap_plain_text_line("abcdefghij", 4);
         assert_eq!(lines, vec!["abcd", "efgh", "ij"]);
         assert_eq!(wrap_plain_text_line("", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn queued_messages_height_has_no_action_row() {
+        assert_eq!(queued_messages_height(&[]), 0);
+        // Top(1) + header(1) + 1 message + bottom(1); header hosts the actions.
+        assert_eq!(queued_messages_height(&["one".to_string()]), 4);
+        // Overflow adds exactly one "+N more" line; no extra action row.
+        assert_eq!(
+            queued_messages_height(&[
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string()
+            ]),
+            1 + (1 + 3 + 1) + 1
+        );
+    }
+
+    fn buffer_row_text(buffer: &ratatui::buffer::Buffer, width: u16, y: u16) -> String {
+        (0..width)
+            .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol().to_string()))
+            .collect()
+    }
+
+    fn render_pending_buffer(
+        width: u16,
+        height: u16,
+        messages: &[String],
+        has_user: bool,
+        esc_primed: bool,
+        colors: &ThemeColors,
+        hover: Option<PendingHover>,
+    ) -> (Option<Rect>, Option<Rect>, Buffer) {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut chat_state = ChatState {
+            chat: Chat::new(),
+            wave_spinner: WaveSpinner::new(Color::Blue),
+            compact_mode: false,
+            sticky_message_index: None,
+            sticky_click_target: None,
+            last_chat_area: None,
+        };
+        let mut input = Input::new();
+        let mut find_bar = FindBar::new();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut edit: Option<Rect> = None;
+        let mut send: Option<Rect> = None;
+        terminal
+            .draw(|f| {
+                render_chat(
+                    f,
+                    &mut chat_state,
+                    &mut input,
+                    "0.0.0".into(),
+                    "/tmp".into(),
+                    None,
+                    "build".into(),
+                    "model".into(),
+                    "model".into(),
+                    "provider".into(),
+                    None,
+                    false,
+                    colors,
+                    false,
+                    false,
+                    esc_primed,
+                    None,
+                    "",
+                    None,
+                    messages,
+                    has_user,
+                    None,
+                    0,
+                    &mut None,
+                    &mut find_bar,
+                    true,
+                    Some("Session"),
+                    0,
+                    &mut None,
+                    &mut edit,
+                    &mut send,
+                    hover,
+                );
+            })
+            .expect("draw pending");
+        let buffer = terminal.backend().buffer().clone();
+        (edit, send, buffer)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_pending_snapshot(
+        width: u16,
+        height: u16,
+        messages: &[String],
+        has_user: bool,
+        esc_primed: bool,
+    ) -> (Option<Rect>, Option<Rect>, Vec<String>) {
+        render_pending_snapshot_with_hover(width, height, messages, has_user, esc_primed, None)
+    }
+
+    fn render_pending_snapshot_with_hover(
+        width: u16,
+        height: u16,
+        messages: &[String],
+        has_user: bool,
+        esc_primed: bool,
+        hover: Option<PendingHover>,
+    ) -> (Option<Rect>, Option<Rect>, Vec<String>) {
+        let colors = test_colors();
+        let (edit, send, buffer) = render_pending_buffer(
+            width, height, messages, has_user, esc_primed, &colors, hover,
+        );
+        let rows = (0..height)
+            .map(|y| buffer_row_text(&buffer, width, y))
+            .collect();
+        (edit, send, rows)
+    }
+
+    fn render_pending_hitboxes(
+        width: u16,
+        height: u16,
+        messages: &[String],
+        has_user: bool,
+    ) -> (Option<Rect>, Option<Rect>) {
+        let (edit, send, _) = render_pending_snapshot(width, height, messages, has_user, false);
+        (edit, send)
+    }
+
+    #[test]
+    fn pending_hitboxes_appear_in_header_at_wide_width() {
+        let messages = vec!["hello pending".to_string()];
+        let (edit, send, rows) = render_pending_snapshot(80, 30, &messages, true, false);
+        let edit = edit.expect("edit hitbox at 80 cols");
+        let send = send.expect("send hitbox at 80 cols");
+        // Shared header row, edit before send, both single-row and in bounds.
+        assert_eq!(edit.height, 1);
+        assert_eq!(send.height, 1);
+        assert_eq!(edit.y, send.y);
+        assert!(edit.x + edit.width <= 80);
+        assert!(send.x + send.width <= 80);
+        assert!(edit.x < send.x);
+        // Quiet Edit has no visible shortcut: single "Edit" (4) mode at any width.
+        assert_eq!(edit.width, 4);
+        // Unprimed send-now hint is "esc " (4) + "send now" (8) via display width.
+        assert_eq!(send.width, 12, "wide shows full 'esc send now' hint");
+        // Header coordinates: same row hosts the title and both actions.
+        let header = rows.get(edit.y as usize).expect("header row");
+        assert!(
+            header.contains("Queued message"),
+            "header row must keep the title, got: {header:?}"
+        );
+        assert!(
+            header.contains("Edit"),
+            "header must show Edit, got: {header:?}"
+        );
+        assert!(
+            !header.contains("(^X r)"),
+            "header must not show the ^X hint, got: {header:?}"
+        );
+        assert!(
+            !header.contains("^X"),
+            "header must not show any ^X shortcut, got: {header:?}"
+        );
+        assert!(
+            header.contains("esc"),
+            "header must show esc hint, got: {header:?}"
+        );
+        assert!(
+            header.contains("send now"),
+            "header must show send now, got: {header:?}"
+        );
+        assert!(
+            !header.contains("steer"),
+            "header must not show stale steer wording, got: {header:?}"
+        );
+        // Hitboxes align with the right-aligned header labels (byte offsets
+        // differ from columns for wide border/bullet glyphs, so compare via
+        // display width).
+        let edit_byte = header.find("Edit").expect("Edit offset");
+        let edit_col = unicode_width::UnicodeWidthStr::width(&header[..edit_byte]) as u16;
+        assert_eq!(edit.x, edit_col, "Edit hitbox must sit on the header label");
+        let send_byte = header.find("esc").expect("esc offset");
+        let send_col = unicode_width::UnicodeWidthStr::width(&header[..send_byte]) as u16;
+        assert_eq!(send.x, send_col, "send hitbox must sit on the esc hint");
+        // Muted style: Edit uses text_weak with no bold, distinct from primary.
+        let mut styled_colors = test_colors();
+        styled_colors.primary = Color::Red;
+        styled_colors.text_weak = Color::Gray;
+        let (styled_edit, _, styled_buffer) =
+            render_pending_buffer(80, 30, &messages, true, false, &styled_colors, None);
+        let styled_edit = styled_edit.expect("styled edit hitbox");
+        assert_eq!(styled_edit.width, 4);
+        for dx in 0..styled_edit.width {
+            let cell = styled_buffer
+                .cell((styled_edit.x + dx, styled_edit.y))
+                .expect("Edit cell");
+            assert_eq!(
+                cell.fg,
+                Color::Gray,
+                "Edit cell {dx} must use text_weak, got {:?}",
+                cell.fg
+            );
+            assert!(
+                !cell.modifier.contains(Modifier::BOLD),
+                "Edit cell {dx} must not be bold"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_edit_quiet_at_medium_width() {
+        let messages = vec!["hello pending".to_string()];
+        // 44 cols -> content width 40: quiet Edit (no ^X hint) + unprimed
+        // send-now — same single mode as wide (needs 16+19+2=37).
+        let (edit, send, rows) = render_pending_snapshot(44, 30, &messages, true, false);
+        let edit = edit.expect("edit hitbox at 44 cols");
+        let send = send.expect("send hitbox at 44 cols");
+        assert_eq!(edit.width, 4, "medium keeps quiet Edit without hint");
+        assert_eq!(send.width, 12);
+        assert_eq!(edit.y, send.y);
+        assert!(edit.x + edit.width <= 44);
+        assert!(send.x + send.width <= 44);
+        let header = rows.get(edit.y as usize).expect("header row");
+        assert!(header.contains("Edit"), "got: {header:?}");
+        assert!(
+            !header.contains("(^X r)"),
+            "medium header must not show the ^X hint, got: {header:?}"
+        );
+        assert!(header.contains("send now"), "got: {header:?}");
+        assert!(!header.contains("steer"), "got: {header:?}");
+    }
+
+    #[test]
+    fn pending_send_hint_preserves_armed_wording() {
+        let messages = vec!["hello pending".to_string()];
+        let (edit, send, rows) = render_pending_snapshot(80, 30, &messages, true, true);
+        let edit = edit.expect("edit hitbox when primed");
+        let send = send.expect("send hitbox when primed");
+        assert_eq!(edit.width, 4, "primed keeps quiet Edit without hint");
+        // Armed hint is "esc again to " (13) + "send now" (8) via display width.
+        assert_eq!(send.width, 21, "primed shows 'esc again to send now'");
+        assert_eq!(edit.y, send.y);
+        let header = rows.get(edit.y as usize).expect("header row");
+        assert!(
+            header.contains("esc again to"),
+            "armed header must keep double-Esc wording, got: {header:?}"
+        );
+        assert!(header.contains("send now"), "got: {header:?}");
+        assert!(!header.contains("steer"), "got: {header:?}");
+        assert!(
+            !header.contains("(^X r)"),
+            "armed header must not show the ^X hint, got: {header:?}"
+        );
+    }
+
+    #[test]
+    fn pending_send_only_fallback_when_edit_does_not_fit() {
+        let messages = vec!["hello pending".to_string()];
+        // 36 cols -> content width 32: title + send-only fits (16+12+2=30),
+        // but Edit + send (16+19+2=37) does not.
+        let (edit, send, rows) = render_pending_snapshot(36, 30, &messages, true, false);
+        assert!(edit.is_none(), "too narrow for Edit must hide only Edit");
+        let send = send.expect("send-only fallback must stay clickable");
+        assert_eq!(send.width, 12);
+        let header = rows.get(send.y as usize).expect("header row");
+        assert!(
+            header.contains("Queued message"),
+            "fallback stays on the header, got: {header:?}"
+        );
+        assert!(
+            !header.contains("Edit"),
+            "fallback header must drop Edit, got: {header:?}"
+        );
+        assert!(header.contains("send now"), "got: {header:?}");
+    }
+
+    #[test]
+    fn pending_hitboxes_hide_when_too_narrow() {
+        let messages = vec!["hello pending".to_string()];
+        // 20 cols -> content width 16: title fills the row, no room for
+        // header actions alongside it.
+        let (edit, send) = render_pending_hitboxes(20, 30, &messages, true);
+        assert!(edit.is_none(), "too narrow must hide Edit target");
+        assert!(send.is_none(), "too narrow must hide send target");
+        // 14 cols -> content width 10: still hidden and never out of bounds.
+        let (edit, send) = render_pending_hitboxes(14, 30, &messages, true);
+        assert!(edit.is_none(), "too narrow must hide Edit target");
+        assert!(send.is_none(), "too narrow must hide send target");
+    }
+
+    #[test]
+    fn pending_hitboxes_reset_when_hidden() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut chat_state = ChatState {
+            chat: Chat::new(),
+            wave_spinner: WaveSpinner::new(Color::Blue),
+            compact_mode: false,
+            sticky_message_index: None,
+            sticky_click_target: None,
+            last_chat_area: None,
+        };
+        let mut input = Input::new();
+        let mut find_bar = FindBar::new();
+        let colors = test_colors();
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let messages = vec!["hello pending".to_string()];
+
+        let mut edit: Option<Rect> = None;
+        let mut send: Option<Rect> = None;
+        terminal
+            .draw(|f| {
+                render_chat(
+                    f,
+                    &mut chat_state,
+                    &mut input,
+                    "0.0.0".into(),
+                    "/tmp".into(),
+                    None,
+                    "build".into(),
+                    "model".into(),
+                    "model".into(),
+                    "provider".into(),
+                    None,
+                    false,
+                    &colors,
+                    false,
+                    false,
+                    false,
+                    None,
+                    "",
+                    None,
+                    &messages,
+                    true,
+                    None,
+                    0,
+                    &mut None,
+                    &mut find_bar,
+                    true,
+                    Some("Session"),
+                    0,
+                    &mut None,
+                    &mut edit,
+                    &mut send,
+                    None,
+                );
+            })
+            .expect("draw with pending");
+        assert!(edit.is_some() && send.is_some());
+
+        // Second paint with no queued messages must clear the previous boxes.
+        let empty: Vec<String> = Vec::new();
+        terminal
+            .draw(|f| {
+                render_chat(
+                    f,
+                    &mut chat_state,
+                    &mut input,
+                    "0.0.0".into(),
+                    "/tmp".into(),
+                    None,
+                    "build".into(),
+                    "model".into(),
+                    "model".into(),
+                    "provider".into(),
+                    None,
+                    false,
+                    &colors,
+                    false,
+                    false,
+                    false,
+                    None,
+                    "",
+                    None,
+                    &empty,
+                    false,
+                    None,
+                    0,
+                    &mut None,
+                    &mut find_bar,
+                    true,
+                    Some("Session"),
+                    0,
+                    &mut None,
+                    &mut edit,
+                    &mut send,
+                    None,
+                );
+            })
+            .expect("draw without pending");
+        assert!(edit.is_none(), "empty queue must reset Edit hitbox");
+        assert!(send.is_none(), "empty queue must reset send hitbox");
+    }
+
+    #[test]
+    fn pending_hitboxes_hide_for_compact_only_queue() {
+        // A compact-only queue still renders the "/compact" line, but Edit/send
+        // require an actual pending user message.
+        let compact_only = vec!["/compact".to_string()];
+        let (edit, send) = render_pending_hitboxes(80, 30, &compact_only, false);
+        assert!(edit.is_none(), "compact-only must not offer Edit");
+        assert!(send.is_none(), "compact-only must not offer send");
+
+        // Mixed queue (user message + /compact) keeps both targets.
+        let mixed = vec!["hello pending".to_string(), "/compact".to_string()];
+        let (edit, send) = render_pending_hitboxes(80, 30, &mixed, true);
+        assert!(edit.is_some(), "mixed queue must offer Edit");
+        assert!(send.is_some(), "mixed queue must offer send");
+    }
+
+    fn hover_test_colors() -> ThemeColors {
+        let mut colors = test_colors();
+        // Distinct idle (muted) vs hover (bright) foregrounds; backgrounds stay
+        // Reset so fg-only can be asserted via bg equality.
+        colors.text_weak = Color::Gray;
+        colors.text = Color::White;
+        colors
+    }
+
+    #[test]
+    fn pending_edit_hover_changes_foreground_only() {
+        let messages = vec!["hello pending".to_string()];
+        let colors = hover_test_colors();
+        let (edit, _, idle_buffer) =
+            render_pending_buffer(80, 30, &messages, true, false, &colors, None);
+        let edit = edit.expect("edit hitbox");
+        // Idle Edit cells are muted.
+        for dx in 0..edit.width {
+            let cell = idle_buffer
+                .cell((edit.x + dx, edit.y))
+                .expect("idle Edit cell");
+            assert_eq!(cell.fg, Color::Gray, "idle Edit must be muted");
+            assert_eq!(cell.bg, Color::Reset, "idle Edit must have no bg");
+        }
+        let (hover_edit, _, hover_buffer) = render_pending_buffer(
+            80,
+            30,
+            &messages,
+            true,
+            false,
+            &colors,
+            Some(PendingHover::Edit),
+        );
+        let hover_edit = hover_edit.expect("hovered edit hitbox");
+        assert_eq!(hover_edit, edit, "hover must not move the hitbox");
+        for dx in 0..hover_edit.width {
+            let idle_cell = idle_buffer.cell((edit.x + dx, edit.y)).expect("idle cell");
+            let cell = hover_buffer
+                .cell((hover_edit.x + dx, hover_edit.y))
+                .expect("hovered Edit cell");
+            assert_eq!(
+                cell.fg,
+                Color::White,
+                "hovered Edit cell {dx} must use text, got {:?}",
+                cell.fg
+            );
+            assert_eq!(
+                cell.bg, idle_cell.bg,
+                "hovered Edit cell {dx} must not change background"
+            );
+            assert!(
+                !cell.modifier.contains(Modifier::BOLD),
+                "hovered Edit cell {dx} must stay non-bold (fg-only)"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_send_hover_highlights_full_action_foreground_only() {
+        let messages = vec!["hello pending".to_string()];
+        let colors = hover_test_colors();
+        let (_, send, idle_buffer) =
+            render_pending_buffer(80, 30, &messages, true, false, &colors, None);
+        let send = send.expect("send hitbox");
+        // Unprimed full action is "esc send now" (12 cols).
+        assert_eq!(send.width, 12);
+        for dx in 0..send.width {
+            let cell = idle_buffer
+                .cell((send.x + dx, send.y))
+                .expect("idle send cell");
+            assert_eq!(cell.fg, Color::Gray, "idle send must be muted");
+            assert_eq!(cell.bg, Color::Reset, "idle send must have no bg");
+        }
+        let (_, hover_send, hover_buffer) = render_pending_buffer(
+            80,
+            30,
+            &messages,
+            true,
+            false,
+            &colors,
+            Some(PendingHover::Send),
+        );
+        let hover_send = hover_send.expect("hovered send hitbox");
+        assert_eq!(hover_send, send, "hover must not move the hitbox");
+        for dx in 0..hover_send.width {
+            let idle_cell = idle_buffer.cell((send.x + dx, send.y)).expect("idle cell");
+            let cell = hover_buffer
+                .cell((hover_send.x + dx, hover_send.y))
+                .expect("hovered send cell");
+            assert_eq!(
+                cell.fg,
+                Color::White,
+                "hovered send cell {dx} must use text, got {:?}",
+                cell.fg
+            );
+            assert_eq!(
+                cell.bg, idle_cell.bg,
+                "hovered send cell {dx} must not change background"
+            );
+        }
+        // Armed full action is "esc again to send now" (21 cols); hover still
+        // covers the whole action with fg-only change.
+        let (_, armed_send, armed_idle) =
+            render_pending_buffer(80, 30, &messages, true, true, &colors, None);
+        let armed_send = armed_send.expect("armed send hitbox");
+        assert_eq!(armed_send.width, 21);
+        let (_, armed_hover, armed_hover_buffer) = render_pending_buffer(
+            80,
+            30,
+            &messages,
+            true,
+            true,
+            &colors,
+            Some(PendingHover::Send),
+        );
+        let armed_hover = armed_hover.expect("armed hovered hitbox");
+        assert_eq!(armed_hover, armed_send);
+        for dx in 0..armed_hover.width {
+            let idle_cell = armed_idle
+                .cell((armed_send.x + dx, armed_send.y))
+                .expect("armed idle cell");
+            let cell = armed_hover_buffer
+                .cell((armed_hover.x + dx, armed_hover.y))
+                .expect("armed hovered cell");
+            assert_eq!(cell.fg, Color::White, "armed hover cell {dx} must use text");
+            assert_eq!(cell.bg, idle_cell.bg, "armed hover must not change bg");
+        }
+    }
+
+    #[test]
+    fn pending_hover_ignored_when_no_clickable_target() {
+        // Compact-only queue shows the send-now text but offers no hitbox;
+        // stale Send hover must not brighten it (stays muted).
+        let colors = hover_test_colors();
+        let compact_only = vec!["/compact".to_string()];
+        let (edit, send, buffer) = render_pending_buffer(
+            80,
+            30,
+            &compact_only,
+            false,
+            false,
+            &colors,
+            Some(PendingHover::Send),
+        );
+        assert!(edit.is_none());
+        assert!(send.is_none());
+        // Find the header row via the title and assert every send-now cell
+        // remains muted even with hover set.
+        let mut found_title = false;
+        for y in 0..30u16 {
+            let row = buffer_row_text(&buffer, 80, y);
+            if row.contains("Queued message") {
+                found_title = true;
+                if let Some(byte) = row.find("esc") {
+                    let col = unicode_width::UnicodeWidthStr::width(&row[..byte]) as u16;
+                    for dx in 0..12u16 {
+                        if let Some(cell) = buffer.cell((col + dx, y)) {
+                            // Only check cells that are part of the hint; the
+                            // row may be shorter on narrow renders, so skip OOB.
+                            assert_eq!(
+                                cell.fg,
+                                Color::Gray,
+                                "compact-only hover must stay muted at ({}, {y})",
+                                col + dx
+                            );
+                            assert_eq!(cell.bg, Color::Reset);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        assert!(found_title, "compact header must render");
     }
 }

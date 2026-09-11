@@ -21,6 +21,7 @@ pub enum WhichKeyAction {
     /// Ctrl+X opens WhichKey; bind `j` here for jobs (don't steal Ctrl+X).
     ShowJobs,
     ToggleThinking,
+    RecallPending,
     GoChild,
     GoParent,
     PreviousChild,
@@ -130,6 +131,11 @@ impl WhichKeyState {
                 key: "e".to_string(),
                 description: "Expand/collapse thinking".to_string(),
                 target: BindingTarget::Action(WhichKeyAction::ToggleThinking),
+            },
+            KeyBinding {
+                key: "r".to_string(),
+                description: "Edit pending queued message".to_string(),
+                target: BindingTarget::Action(WhichKeyAction::RecallPending),
             },
             KeyBinding {
                 key: "c".to_string(),
@@ -273,6 +279,60 @@ impl Default for WhichKeyState {
 
 pub fn init_which_key() -> WhichKeyState {
     WhichKeyState::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::KeyModifiers;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn chat_r_recalls_pending_message() {
+        let mut state = WhichKeyState::new();
+        state.set_chat_active(true);
+        state.show();
+        let action = state.handle_key_event(key(KeyCode::Char('r')));
+        assert_eq!(action, WhichKeyAction::RecallPending);
+        assert!(!state.is_visible());
+    }
+
+    #[test]
+    fn chat_r_is_case_insensitive() {
+        let mut state = WhichKeyState::new();
+        state.set_chat_active(true);
+        state.show();
+        let action = state.handle_key_event(key(KeyCode::Char('R')));
+        assert_eq!(action, WhichKeyAction::RecallPending);
+    }
+
+    #[test]
+    fn chat_e_toggles_thinking() {
+        let mut state = WhichKeyState::new();
+        state.set_chat_active(true);
+        state.show();
+        let action = state.handle_key_event(key(KeyCode::Char('e')));
+        assert_eq!(action, WhichKeyAction::ToggleThinking);
+    }
+
+    #[test]
+    fn non_chat_hides_r_and_e() {
+        let mut state = WhichKeyState::new();
+        state.set_chat_active(false);
+        state.show();
+        assert_eq!(
+            state.handle_key_event(key(KeyCode::Char('r'))),
+            WhichKeyAction::None
+        );
+        state.show();
+        assert_eq!(
+            state.handle_key_event(key(KeyCode::Char('e'))),
+            WhichKeyAction::None
+        );
+    }
 }
 
 pub fn render_which_key(f: &mut Frame, state: &WhichKeyState, colors: &ThemeColors) {

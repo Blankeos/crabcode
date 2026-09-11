@@ -38,7 +38,7 @@ use crate::views::agents_dialog::{
 };
 use crate::views::chat::{
     agent_color_for_tab, chat_input_height, init_chat, queued_messages_height, render_chat,
-    render_subagent_spinner_only, SubagentTab, SubagentTabs, SUBAGENT_FOOTER_HEIGHT,
+    render_subagent_spinner_only, PendingHover, SubagentTab, SubagentTabs, SUBAGENT_FOOTER_HEIGHT,
 };
 use crate::views::command_palette::{
     handle_command_palette_key_event, handle_command_palette_mouse_event, init_command_palette,
@@ -844,6 +844,9 @@ impl QueuedItem {
 struct ClientSessionState {
     chat: Chat,
     input_draft: String,
+    /// Composer image attachments for the draft; kept alongside `input_draft`
+    /// so recalling pending messages with images survives session switches.
+    input_image_paths: Vec<std::path::PathBuf>,
     stream: Option<SessionStreamState>,
     external_stream: Option<ExternalStreamState>,
     tool_calls: ToolCallViewState,
@@ -858,6 +861,7 @@ impl ClientSessionState {
         Self {
             chat,
             input_draft: String::new(),
+            input_image_paths: Vec::new(),
             stream: None,
             external_stream: None,
             tool_calls: ToolCallViewState::default(),
@@ -907,6 +911,15 @@ pub struct App {
     pub jobs_dialog_state: JobsDialogState,
     /// Last-rendered jobs chip hit area (chat status line); set during render.
     jobs_chip_area: Option<ratatui::layout::Rect>,
+    /// Last-rendered pending-block action hit areas; set during render.
+    /// Header-hosted actions; `None` when hidden or not rendered.
+    queued_edit_area: Option<ratatui::layout::Rect>,
+    queued_send_area: Option<ratatui::layout::Rect>,
+    /// Hovered pending header action for foreground-only highlight.
+    /// Follows the `Input`/`Chat` hover convention: set on `Moved`,
+    /// cleared off-target/hidden/session change; rendered fg-only with no
+    /// background. `None` when idle or not hovered.
+    queued_hover: Option<PendingHover>,
     /// First Esc arms a double-Esc gesture (cancel while streaming, timeline when idle).
     /// Matches OpenCode: second Esc confirms; arm expires after [`Self::ESC_ARM_TIMEOUT`].
     esc_primed_at: Option<std::time::Instant>,
@@ -1177,6 +1190,9 @@ impl App {
             timeline_dialog_state,
             jobs_dialog_state,
             jobs_chip_area: None,
+            queued_edit_area: None,
+            queued_send_area: None,
+            queued_hover: None,
             esc_primed_at: None,
             copy_actions_dialog: None,
             message_actions_index: None,
@@ -1855,14 +1871,23 @@ impl App {
 
         self.ensure_session_view_state(&session_id);
 
+        // Snapshot composer before borrowing the view state (disjoint fields,
+        // but keep the borrow short and explicit).
+        let draft_text = if is_child_session {
+            String::new()
+        } else {
+            self.input.submission_text()
+        };
+        let draft_images = if is_child_session {
+            Vec::new()
+        } else {
+            self.input.local_image_paths_for_submission()
+        };
         if let Some(state) = self.session_view_states.get_mut(&session_id) {
             state.chat = std::mem::take(&mut self.chat_state.chat);
             state.find_bar = std::mem::take(&mut self.find_bar);
-            state.input_draft = if is_child_session {
-                String::new()
-            } else {
-                self.input.submission_text()
-            };
+            state.input_draft = draft_text;
+            state.input_image_paths = draft_images;
         }
     }
 
@@ -1903,8 +1928,11 @@ impl App {
             if is_child_session {
                 self.input.clear();
                 state.input_draft.clear();
+                state.input_image_paths.clear();
             } else {
-                self.input.set_text(&state.input_draft);
+                let draft = state.input_draft.clone();
+                let images = state.input_image_paths.clone();
+                self.input.set_text_with_local_images(&draft, images);
             }
             state.unread_completed = false;
         } else {
@@ -1924,6 +1952,8 @@ impl App {
         self.session_manager.switch_session(session_id);
         self.pending_session_title = None;
         self.load_session_view_state(session_id);
+        // Pending hitboxes are re-rendered for the new session; drop stale hover.
+        self.clear_queued_hover();
         self.release_render_caches_outside_current_family();
         let is_child_session = self.session_manager.parent_id_of(session_id).is_some();
         self.base_focus = if !is_child_session
@@ -2260,6 +2290,8 @@ impl App {
     fn create_new_session(&mut self, title: Option<String>) -> String {
         self.save_active_session_view_state();
         self.pending_session_title = None;
+        // New session has no pending block; drop stale hover.
+        self.clear_queued_hover();
         let session_id = self.session_manager.create_session(title);
         self.session_view_states.insert(
             session_id.clone(),
@@ -2426,6 +2458,178 @@ impl App {
                     .iter()
                     .any(|item| matches!(item, QueuedItem::Message(_)))
             })
+    }
+
+    /// Set the pending header hover target. Mirrors `Chat::set_hovered_image`
+    /// / `Input` hover: returns false when unchanged so callers can follow
+    /// the existing hover tracking convention (main loop always redraws on
+    /// mouse, so no extra invalidation is needed beyond state change).
+    fn set_queued_hover(&mut self, hover: Option<PendingHover>) -> bool {
+        if self.queued_hover == hover {
+            return false;
+        }
+        self.queued_hover = hover;
+        true
+    }
+
+    fn clear_queued_hover(&mut self) -> bool {
+        self.set_queued_hover(None)
+    }
+
+    /// Hover target at a terminal position from the last-rendered hitboxes.
+    /// Returns `None` off-target or when hidden (areas are `None` when the
+    /// pending block is hidden, compact-only, or too narrow).
+    fn queued_hover_at(&self, pos: ratatui::layout::Position) -> Option<PendingHover> {
+        if self.queued_edit_area.is_some_and(|area| area.contains(pos)) {
+            Some(PendingHover::Edit)
+        } else if self.queued_send_area.is_some_and(|area| area.contains(pos)) {
+            Some(PendingHover::Send)
+        } else {
+            None
+        }
+    }
+
+    /// Recall ALL pending user messages for the active session into the
+    /// composer for editing, using the existing combine logic so image
+    /// `[Image #n]` numbering is preserved. Queued `/compact` actions stay
+    /// queued. Never overwrites an existing composer draft.
+    fn recall_pending_messages_for_current_session(&mut self) -> bool {
+        let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
+            push_toast(Toast::new(
+                "No pending message to edit",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
+            return false;
+        };
+        if self.base_focus != BaseFocus::Chat
+            || self.is_subagent_session_active()
+            || !self.is_active_session(&session_id)
+        {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "No active chat session to edit pending message",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return false;
+        }
+        if !self.has_queued_user_messages_for_session(&session_id) {
+            push_toast(Toast::new(
+                "No pending message to edit",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
+            return false;
+        }
+        // Never overwrite an existing draft (text or attachments). This mirrors
+        // submit-time `!text.is_empty() || !images.is_empty()`.
+        if self.input.has_draft_content() {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "Composer already has a draft — clear it before editing the pending message",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return false;
+        }
+
+        let combined = {
+            let Some(state) = self.session_view_states.get_mut(&session_id) else {
+                return false;
+            };
+            let items: Vec<QueuedItem> = state.queued_items.drain(..).collect();
+            let mut messages = Vec::new();
+            let mut compact_items = Vec::new();
+            for item in items {
+                match item {
+                    QueuedItem::Message(message) => messages.push(message),
+                    QueuedItem::Compact => compact_items.push(QueuedItem::Compact),
+                }
+            }
+            // Preserve queued /compact actions separately (at most one exists
+            // via queue dedup, but keep whatever was there).
+            for compact in compact_items {
+                state.queued_items.push_back(compact);
+            }
+            if messages.is_empty() {
+                return false;
+            }
+            Self::combine_queued_messages(messages)
+        };
+
+        self.input
+            .set_text_with_local_images(&combined.text, combined.image_paths);
+        self.update_suggestions();
+        self.sync_input_selection_action_bar();
+        // Queue drained (messages recalled); hover target no longer valid.
+        self.clear_queued_hover();
+        push_toast(Toast::new(
+            "Recalled pending message for editing",
+            ToastLevel::Info,
+            Some(std::time::Duration::from_secs(3)),
+        ));
+        true
+    }
+
+    /// Send-now action for the pending block: invoke the existing steering
+    /// path directly (same as double-Esc second press). Falls back to a plain
+    /// queued submit when idle; otherwise safe no-op with feedback.
+    fn send_queued_now_for_current_session(&mut self) -> bool {
+        let Some(session_id) = self.session_manager.get_current_session_id().cloned() else {
+            push_toast(Toast::new(
+                "No pending message to send",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
+            return false;
+        };
+        if self.base_focus != BaseFocus::Chat
+            || self.is_subagent_session_active()
+            || !self.is_active_session(&session_id)
+        {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                "No active chat session to send pending message",
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return false;
+        }
+        if !self.has_queued_user_messages_for_session(&session_id) {
+            push_toast(Toast::new(
+                "No pending message to send",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(2)),
+            ));
+            return false;
+        }
+        if self.interrupt_streaming_to_send_queued_for_session(&session_id) {
+            self.clear_queued_hover();
+            return true;
+        }
+        if self.submit_queued_messages_for_session(&session_id) {
+            self.clear_queued_hover();
+            return true;
+        }
+        // Active compaction blocks dispatch without draining the queue, so
+        // report that accurately instead of claiming there is no pending
+        // message. The queue is preserved; retry Send after compaction ends.
+        if self.session_has_active_compaction(&session_id) {
+            push_toast(Toast::new(
+                "Compaction in progress — pending message kept",
+                ToastLevel::Info,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+            return false;
+        }
+        self.play_sound_event(crate::sound::SoundEvent::Error);
+        push_toast(Toast::new(
+            "No pending message to send",
+            ToastLevel::Error,
+            Some(std::time::Duration::from_secs(3)),
+        ));
+        false
     }
 
     fn queue_message_for_current_session(
@@ -4403,6 +4607,10 @@ impl App {
                         self.overlay_focus = OverlayFocus::None;
                         self.chat_state.chat.toggle_thinking_visible();
                     }
+                    crate::views::which_key::WhichKeyAction::RecallPending => {
+                        self.overlay_focus = OverlayFocus::None;
+                        self.recall_pending_messages_for_current_session();
+                    }
                     crate::views::which_key::WhichKeyAction::ShowCopyDialog => {
                         self.overlay_focus = OverlayFocus::None;
                         self.open_copy_actions_dialog();
@@ -5139,6 +5347,40 @@ impl App {
                     self.open_jobs_dialog();
                     return;
                 }
+            }
+            // Pending-block actions (only valid active chat session; hitboxes
+            // are set during render and already clamped for narrow terminals).
+            let pending_pos = ratatui::layout::Position::new(mouse.column, mouse.row);
+            if self
+                .queued_edit_area
+                .is_some_and(|area| area.contains(pending_pos))
+            {
+                self.recall_pending_messages_for_current_session();
+                return;
+            }
+            if self
+                .queued_send_area
+                .is_some_and(|area| area.contains(pending_pos))
+            {
+                self.send_queued_now_for_current_session();
+                return;
+            }
+        }
+
+        // Pending header hover (foreground-only, no background highlight).
+        // Follows the Chat/Input hover convention: `Moved` inside a hitbox
+        // sets the target, movement off-target/hidden clears it. Only active
+        // for the active chat with no overlay; otherwise clear stale hover.
+        // Main-loop redraw on every mouse event provides the invalidation.
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            if self.base_focus == BaseFocus::Chat
+                && self.overlay_focus == OverlayFocus::None
+                && !self.is_subagent_session_active()
+            {
+                let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
+                self.set_queued_hover(self.queued_hover_at(pos));
+            } else {
+                self.clear_queued_hover();
             }
         }
 
@@ -6263,6 +6505,9 @@ impl App {
                     CommandPaletteAppAction::OpenSkillsDialog => self.show_skills_dialog(),
                     CommandPaletteAppAction::OpenMcpDialog => self.show_mcp_dialog(),
                     CommandPaletteAppAction::OpenJobs => self.open_jobs_dialog(),
+                    CommandPaletteAppAction::RecallPending => {
+                        self.recall_pending_messages_for_current_session();
+                    }
                 }
                 self.clear_suggestions_and_blur();
             }
@@ -12069,6 +12314,10 @@ impl App {
             BaseFocus::Chat => {
                 let subagent_tabs = self.subagent_tabs_for_current_session();
                 let queued_messages = self.queued_message_previews_for_current_session();
+                let queued_has_user_messages = self
+                    .session_manager
+                    .get_current_session_id()
+                    .is_some_and(|id| self.has_queued_user_messages_for_session(id));
                 let (display_agent, display_model) = self.current_session_agent_model_for_display();
                 let display_model_name =
                     self.model_name_for_display(&self.provider_name, &display_model);
@@ -12118,6 +12367,7 @@ impl App {
                     usage_text,
                     subagent_tabs,
                     &queued_messages,
+                    queued_has_user_messages,
                     btw_entry.as_ref(),
                     self.btw_scroll,
                     &mut self.btw_panel_area,
@@ -12131,7 +12381,21 @@ impl App {
                         .map(|s| s.title.as_str()),
                     self.process_registry.running_count(),
                     &mut self.jobs_chip_area,
+                    &mut self.queued_edit_area,
+                    &mut self.queued_send_area,
+                    self.queued_hover,
                 );
+                // Responsive/hidden reset: hover points at the last-rendered
+                // hitboxes, so drop it when its target did not render (too
+                // narrow, compact-only, empty queue, or session change).
+                if self.queued_hover == Some(PendingHover::Edit) && self.queued_edit_area.is_none()
+                {
+                    self.queued_hover = None;
+                } else if self.queued_hover == Some(PendingHover::Send)
+                    && self.queued_send_area.is_none()
+                {
+                    self.queued_hover = None;
+                }
 
                 if is_suggestions_visible(&self.suggestions_popup_state)
                     && self.overlay_focus != OverlayFocus::AgentsDialog
@@ -12792,6 +13056,9 @@ mod tests {
             timeline_dialog_state: crate::views::timeline_dialog::init_timeline_dialog(),
             jobs_dialog_state: init_jobs_dialog(),
             jobs_chip_area: None,
+            queued_edit_area: None,
+            queued_send_area: None,
+            queued_hover: None,
             esc_primed_at: None,
             copy_actions_dialog: None,
             message_actions_index: None,
@@ -15256,6 +15523,385 @@ mod tests {
         assert_eq!(
             user_message.local_image_paths,
             vec!["/tmp/first.png".to_string(), "/tmp/second.png".to_string()]
+        );
+    }
+
+    #[test]
+    fn recall_pending_recalls_aggregated_messages_with_renumbered_images() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Recall".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "first [Image #1]".to_string(),
+                image_paths: vec![std::path::PathBuf::from("/tmp/first.png")],
+            }));
+        state
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "second [Image #1]".to_string(),
+                image_paths: vec![std::path::PathBuf::from("/tmp/second.png")],
+            }));
+
+        assert!(app.recall_pending_messages_for_current_session());
+
+        assert_eq!(app.input.get_text(), "first [Image #1]\nsecond [Image #2]");
+        assert_eq!(
+            app.input.local_image_paths_for_submission(),
+            vec![
+                std::path::PathBuf::from("/tmp/first.png"),
+                std::path::PathBuf::from("/tmp/second.png")
+            ]
+        );
+        assert!(app
+            .session_view_states
+            .get(&session_id)
+            .unwrap()
+            .queued_items
+            .is_empty());
+    }
+
+    #[test]
+    fn recall_pending_preserves_compact() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Recall compact".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let state = app.session_view_states.get_mut(&session_id).unwrap();
+        state
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "pending edit".to_string(),
+                image_paths: Vec::new(),
+            }));
+        state.queued_items.push_back(QueuedItem::Compact);
+
+        assert!(app.recall_pending_messages_for_current_session());
+        assert_eq!(app.input.get_text(), "pending edit");
+
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert_eq!(state.queued_items.len(), 1);
+        assert!(matches!(
+            state.queued_items.front(),
+            Some(QueuedItem::Compact)
+        ));
+    }
+
+    #[test]
+    fn recall_pending_refuses_existing_draft_without_loss() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Recall draft".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.session_view_states
+            .get_mut(&session_id)
+            .unwrap()
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "pending".to_string(),
+                image_paths: Vec::new(),
+            }));
+        app.input.insert_str("composer draft");
+
+        assert!(!app.recall_pending_messages_for_current_session());
+        assert_eq!(app.input.get_text(), "composer draft");
+        assert_eq!(
+            app.session_view_states
+                .get(&session_id)
+                .unwrap()
+                .queued_items
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn recall_pending_refuses_existing_attachments_without_loss() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Recall images".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.session_view_states
+            .get_mut(&session_id)
+            .unwrap()
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "pending".to_string(),
+                image_paths: Vec::new(),
+            }));
+        app.input
+            .attach_image(std::path::PathBuf::from("/tmp/draft.png"));
+
+        assert!(!app.recall_pending_messages_for_current_session());
+        assert_eq!(
+            app.input.local_image_paths_for_submission(),
+            vec![std::path::PathBuf::from("/tmp/draft.png")]
+        );
+        assert_eq!(
+            app.session_view_states
+                .get(&session_id)
+                .unwrap()
+                .queued_items
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn recall_pending_without_queue_is_safe_noop() {
+        let mut app = test_app();
+        app.create_new_session(Some("Recall empty".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        assert!(!app.recall_pending_messages_for_current_session());
+        assert!(app.input.get_text().is_empty());
+    }
+
+    #[test]
+    fn session_switch_retains_composer_text_and_images() {
+        let mut app = test_app();
+        let first = app.create_new_session(Some("First".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.input.set_text_with_local_images(
+            "see [Image #1]",
+            vec![std::path::PathBuf::from("/tmp/keep.png")],
+        );
+
+        let second = app.create_new_session(Some("Second".to_string()));
+        assert_ne!(first, second);
+        // New session starts with an empty composer.
+        assert!(app.input.get_text().is_empty());
+
+        assert!(app.switch_to_session(&first));
+        assert_eq!(app.input.get_text(), "see [Image #1]");
+        assert_eq!(
+            app.input.local_image_paths_for_submission(),
+            vec![std::path::PathBuf::from("/tmp/keep.png")]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_queued_now_submits_when_idle() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Send now".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.session_view_states
+            .get_mut(&session_id)
+            .unwrap()
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "send me".to_string(),
+                image_paths: Vec::new(),
+            }));
+
+        assert!(app.send_queued_now_for_current_session());
+        assert!(app
+            .session_view_states
+            .get(&session_id)
+            .unwrap()
+            .queued_items
+            .is_empty());
+        assert!(app.chat_state.chat.messages.iter().any(|message| {
+            message.role == crate::session::types::MessageRole::User && message.content == "send me"
+        }));
+    }
+
+    #[test]
+    fn send_queued_now_without_queue_is_safe_noop() {
+        let mut app = test_app();
+        app.create_new_session(Some("Send empty".to_string()));
+        app.base_focus = BaseFocus::Chat;
+
+        assert!(!app.send_queued_now_for_current_session());
+        assert!(!app.is_streaming);
+    }
+
+    #[test]
+    fn send_queued_now_refuses_non_chat_focus_without_loss() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Send focus".to_string()));
+        app.base_focus = BaseFocus::Home;
+        app.session_view_states
+            .get_mut(&session_id)
+            .unwrap()
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "keep me".to_string(),
+                image_paths: Vec::new(),
+            }));
+
+        assert!(!app.send_queued_now_for_current_session());
+        assert_eq!(
+            app.session_view_states
+                .get(&session_id)
+                .unwrap()
+                .queued_items
+                .len(),
+            1
+        );
+        assert!(!app.is_streaming);
+    }
+
+    #[test]
+    fn send_queued_now_keeps_queue_during_active_compaction() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Send compacting".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.session_view_states
+            .get_mut(&session_id)
+            .unwrap()
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "wait for compact".to_string(),
+                image_paths: Vec::new(),
+            }));
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.compaction_receiver = Some(receiver);
+        app.compaction_pending = Some(CompactionPending {
+            session_id: session_id.clone(),
+            before_tokens: 1_000,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+        });
+
+        assert!(!app.send_queued_now_for_current_session());
+        // Dispatch is blocked, so the pending message must survive untouched.
+        let state = app.session_view_states.get(&session_id).unwrap();
+        assert_eq!(state.queued_items.len(), 1);
+        assert!(matches!(
+            &state.queued_items[0],
+            QueuedItem::Message(m) if m.text == "wait for compact"
+        ));
+        assert!(app.chat_state.chat.messages.is_empty());
+    }
+
+    #[test]
+    fn pending_edit_mouse_recalls_queued_message() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Mouse recall".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        app.session_view_states
+            .get_mut(&session_id)
+            .unwrap()
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "via mouse".to_string(),
+                image_paths: Vec::new(),
+            }));
+        // Quiet Edit hitbox is exactly the 4-col "Edit" label.
+        app.queued_edit_area = Some(Rect::new(10, 5, 4, 1));
+        app.queued_send_area = None;
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 11, 5));
+
+        assert_eq!(app.input.get_text(), "via mouse");
+        assert!(app
+            .session_view_states
+            .get(&session_id)
+            .unwrap()
+            .queued_items
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_send_mouse_dispatches_queued_message() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Mouse send".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        app.session_view_states
+            .get_mut(&session_id)
+            .unwrap()
+            .queued_items
+            .push_back(QueuedItem::Message(QueuedUserMessage {
+                text: "send via mouse".to_string(),
+                image_paths: Vec::new(),
+            }));
+        app.queued_edit_area = None;
+        // Unprimed full send-now action is "esc send now" (12 cols).
+        app.queued_send_area = Some(Rect::new(25, 5, 12, 1));
+
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 26, 5));
+
+        assert!(app
+            .session_view_states
+            .get(&session_id)
+            .unwrap()
+            .queued_items
+            .is_empty());
+        assert!(app.chat_state.chat.messages.iter().any(|message| {
+            message.role == crate::session::types::MessageRole::User
+                && message.content == "send via mouse"
+        }));
+    }
+
+    #[test]
+    fn pending_hover_tracks_edit_and_send_then_resets_off_target() {
+        let mut app = test_app();
+        app.create_new_session(Some("Hover".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        // Header layout: Edit (4) at x=60, gap 3, send-now (12) at x=67.
+        app.queued_edit_area = Some(Rect::new(60, 5, 4, 1));
+        app.queued_send_area = Some(Rect::new(67, 5, 12, 1));
+        assert_eq!(app.queued_hover, None);
+
+        // Moving onto Edit sets Edit hover (mirrors Chat/Input Moved convention).
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 61, 5));
+        assert_eq!(app.queued_hover, Some(PendingHover::Edit));
+
+        // Moving onto the full send-now action sets Send hover.
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 68, 5));
+        assert_eq!(app.queued_hover, Some(PendingHover::Send));
+
+        // Movement off both targets resets to None.
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 0, 0));
+        assert_eq!(app.queued_hover, None);
+    }
+
+    #[test]
+    fn pending_hover_resets_when_hidden_or_session_changes() {
+        let mut app = test_app();
+        let first = app.create_new_session(Some("Hover hidden".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        app.queued_edit_area = Some(Rect::new(60, 5, 4, 1));
+        app.queued_send_area = Some(Rect::new(67, 5, 12, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 61, 5));
+        assert_eq!(app.queued_hover, Some(PendingHover::Edit));
+
+        // Hidden (areas cleared, e.g. queue drained or too narrow) resets.
+        app.queued_edit_area = None;
+        app.queued_send_area = None;
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 61, 5));
+        assert_eq!(
+            app.queued_hover, None,
+            "hover must reset when hitboxes are hidden"
+        );
+
+        // Session change resets stale hover even if the position matches.
+        app.queued_edit_area = Some(Rect::new(60, 5, 4, 1));
+        app.queued_send_area = Some(Rect::new(67, 5, 12, 1));
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 68, 5));
+        assert_eq!(app.queued_hover, Some(PendingHover::Send));
+        let second = app.create_new_session(Some("Hover next".to_string()));
+        assert_ne!(first, second);
+        assert_eq!(
+            app.queued_hover, None,
+            "creating a session must clear pending hover"
+        );
+
+        // Overlay open clears hover (pending header not interactive behind dialogs).
+        app.queued_edit_area = Some(Rect::new(60, 5, 4, 1));
+        app.queued_send_area = Some(Rect::new(67, 5, 12, 1));
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 61, 5));
+        assert_eq!(app.queued_hover, Some(PendingHover::Edit));
+        app.overlay_focus = OverlayFocus::CommandPalette;
+        app.handle_mouse_event(mouse(MouseEventKind::Moved, 61, 5));
+        assert_eq!(
+            app.queued_hover, None,
+            "hover must reset when an overlay is open"
         );
     }
 

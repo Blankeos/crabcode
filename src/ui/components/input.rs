@@ -2259,6 +2259,16 @@ impl Input {
         self.get_text().is_empty()
     }
 
+    /// Non-mutating draft check for pending-recall refusal.
+    /// Mirrors submit-time `!text.is_empty() || !images.is_empty()`: any
+    /// textarea text (including image/paste placeholders) or tracked
+    /// attachments counts as an existing draft that recall must not overwrite.
+    pub fn has_draft_content(&self) -> bool {
+        !self.get_text().is_empty()
+            || !self.local_images.is_empty()
+            || !self.pending_pastes.is_empty()
+    }
+
     pub fn clear(&mut self) {
         self.reset_textarea();
         self.viewport_top = 0;
@@ -2610,6 +2620,20 @@ mod tests {
 
         assert_eq!(input.get_text(), "see [Image #1] and [Image #2]");
         assert_eq!(input.local_image_paths_for_submission(), paths);
+    }
+
+    #[test]
+    fn test_has_draft_content_refuses_text_and_attachments() {
+        let mut input = Input::new();
+        assert!(!input.has_draft_content());
+
+        input.insert_str("draft");
+        assert!(input.has_draft_content());
+        input.clear();
+        assert!(!input.has_draft_content());
+
+        input.attach_image(PathBuf::from("/tmp/draft.png"));
+        assert!(input.has_draft_content());
     }
 
     #[test]
