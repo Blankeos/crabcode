@@ -792,8 +792,16 @@ mod tests {
 
     #[test]
     fn adaptive_selection_reduces_tail_when_prefix_is_only_prior_summary() {
-        // Pad so reduced-tail head clears MIN_COMPACTABLE_TOKENS.
-        let mut summary = Message::user(format!("{}\nold summary", SUMMARY_PREFIX));
+        // Summary context is estimated from content (billed token_count/usage
+        // ignored; see `message_context_tokens`). Pad content so the
+        // reduced-tail head clears MIN_COMPACTABLE_TOKENS.
+        let mut summary = Message::user(format!(
+            "{}\nold summary {}",
+            SUMMARY_PREFIX,
+            "x".repeat(8_000)
+        ));
+        // token_count on summaries is ignored for context accounting; kept to
+        // guard against regressions that honor it.
         summary.token_count = Some(1_500);
         let mut a1 = Message::assistant("a1");
         a1.token_count = Some(1_500);
@@ -813,6 +821,33 @@ mod tests {
         assert_eq!(selected.messages_to_summarize[1].content, "u1");
         assert_eq!(selected.tail_messages.len(), 2);
         assert_eq!(selected.tail_messages[0].content, "u2");
+    }
+
+    #[test]
+    fn prior_summary_billed_tokens_do_not_inflate_selection_head() {
+        // Regression for billed-usage persistence: token_count and usage parts
+        // on a prior summary must not inflate head/min accounting. Small
+        // content + huge billed buckets must still refuse selection.
+        let mut summary = Message::user(format!("{}\nold summary", SUMMARY_PREFIX));
+        summary.token_count = Some(80_000);
+        summary
+            .parts
+            .push(MessagePart::usage(80_000, 400, 12_000, 1_000, 0.42));
+        let messages = vec![
+            summary,
+            Message::user("u1"),
+            Message::assistant("a1"),
+            Message::user("u2"),
+            Message::assistant("a2"),
+        ];
+
+        // Context is the summary text (~100 tokens), never billed buckets.
+        assert_eq!(
+            message_context_tokens(&messages[0]),
+            estimate_tokens(&messages[0].content)
+        );
+        assert!(message_context_tokens(&messages[0]) < MIN_COMPACTABLE_TOKENS);
+        assert!(select_messages_for_compaction(&messages, 2).is_none());
     }
 
     #[test]

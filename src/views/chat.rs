@@ -1175,15 +1175,15 @@ fn render_queued_messages(
     let title_width = 2 + UnicodeWidthStr::width(title);
     let content_width = content_area.width as usize;
 
-    // Header actions (top-right, right-aligned): quiet clickable Edit plus
+    // Header actions (top-right, right-aligned): quiet clickable `edit` plus
     // the accurate Esc send-now hint. Desired order:
-    // `Edit   esc send now` (armed: `esc again to send now`).
+    // `edit   esc send now` (armed: `esc again to send now`).
     // Keyboard binding (Ctrl+X r) stays active but has no visible hint.
-    // No extra bottom action row is reserved. Narrow-safe: Edit + send-now,
+    // No extra bottom action row is reserved. Narrow-safe: edit + send-now,
     // then send-only, then title-only. Hitboxes require an
     // actual pending user message — a compact-only queue (e.g. ["/compact"])
     // keeps the queued line (and the send-now hint text when it fits) but offers
-    // no Edit/send targets. Widths use Unicode display width so hitboxes
+    // no edit/send targets. Widths use Unicode display width so hitboxes
     // align with the right-aligned header labels on narrow terminals.
     const HEADER_GAP: usize = 3;
     const HEADER_MIN_SPACER: usize = 2;
@@ -1276,7 +1276,7 @@ fn render_queued_messages(
     lines.push(Line::from(header_spans));
 
     // Header hitboxes clamped to the content area so narrow terminals never
-    // produce out-of-bounds rects. Edit covers the quiet label; send covers
+    // produce out-of-bounds rects. `edit` covers the quiet label; send covers
     // prefix + label and invokes the same handler as the
     // former Send action (steering path). Compact-only and too-narrow headers
     // leave both as None (reset at entry).
@@ -2984,7 +2984,7 @@ mod tests {
         assert!(edit.x + edit.width <= 80);
         assert!(send.x + send.width <= 80);
         assert!(edit.x < send.x);
-        // Quiet Edit has no visible shortcut: single "Edit" (4) mode at any width.
+        // Quiet `edit` has no visible shortcut: single "edit" (4) mode at any width.
         assert_eq!(edit.width, 4);
         // Unprimed send-now hint is "esc " (4) + "send now" (8) via display width.
         assert_eq!(send.width, 12, "wide shows full 'esc send now' hint");
@@ -2995,8 +2995,8 @@ mod tests {
             "header row must keep the title, got: {header:?}"
         );
         assert!(
-            header.contains("Edit"),
-            "header must show Edit, got: {header:?}"
+            header.contains("edit"),
+            "header must show edit, got: {header:?}"
         );
         assert!(
             !header.contains("(^X r)"),
@@ -3021,13 +3021,13 @@ mod tests {
         // Hitboxes align with the right-aligned header labels (byte offsets
         // differ from columns for wide border/bullet glyphs, so compare via
         // display width).
-        let edit_byte = header.find("Edit").expect("Edit offset");
+        let edit_byte = header.find("edit").expect("edit offset");
         let edit_col = unicode_width::UnicodeWidthStr::width(&header[..edit_byte]) as u16;
-        assert_eq!(edit.x, edit_col, "Edit hitbox must sit on the header label");
+        assert_eq!(edit.x, edit_col, "edit hitbox must sit on the header label");
         let send_byte = header.find("esc").expect("esc offset");
         let send_col = unicode_width::UnicodeWidthStr::width(&header[..send_byte]) as u16;
         assert_eq!(send.x, send_col, "send hitbox must sit on the esc hint");
-        // Muted style: Edit uses text_weak with no bold, distinct from primary.
+        // Muted style: edit uses text_weak with no bold, distinct from primary.
         let mut styled_colors = test_colors();
         styled_colors.primary = Color::Red;
         styled_colors.text_weak = Color::Gray;
@@ -3038,16 +3038,16 @@ mod tests {
         for dx in 0..styled_edit.width {
             let cell = styled_buffer
                 .cell((styled_edit.x + dx, styled_edit.y))
-                .expect("Edit cell");
+                .expect("edit cell");
             assert_eq!(
                 cell.fg,
                 Color::Gray,
-                "Edit cell {dx} must use text_weak, got {:?}",
+                "edit cell {dx} must use text_weak, got {:?}",
                 cell.fg
             );
             assert!(
                 !cell.modifier.contains(Modifier::BOLD),
-                "Edit cell {dx} must not be bold"
+                "edit cell {dx} must not be bold"
             );
         }
     }
@@ -3055,18 +3055,18 @@ mod tests {
     #[test]
     fn pending_edit_quiet_at_medium_width() {
         let messages = vec!["hello pending".to_string()];
-        // 44 cols -> content width 40: quiet Edit (no ^X hint) + unprimed
+        // 44 cols -> content width 40: quiet edit (no ^X hint) + unprimed
         // send-now — same single mode as wide (needs 16+19+2=37).
         let (edit, send, rows) = render_pending_snapshot(44, 30, &messages, true, false);
         let edit = edit.expect("edit hitbox at 44 cols");
         let send = send.expect("send hitbox at 44 cols");
-        assert_eq!(edit.width, 4, "medium keeps quiet Edit without hint");
+        assert_eq!(edit.width, 4, "medium keeps quiet edit without hint");
         assert_eq!(send.width, 12);
         assert_eq!(edit.y, send.y);
         assert!(edit.x + edit.width <= 44);
         assert!(send.x + send.width <= 44);
         let header = rows.get(edit.y as usize).expect("header row");
-        assert!(header.contains("Edit"), "got: {header:?}");
+        assert!(header.contains("edit"), "got: {header:?}");
         assert!(
             !header.contains("(^X r)"),
             "medium header must not show the ^X hint, got: {header:?}"
@@ -3081,7 +3081,7 @@ mod tests {
         let (edit, send, rows) = render_pending_snapshot(80, 30, &messages, true, true);
         let edit = edit.expect("edit hitbox when primed");
         let send = send.expect("send hitbox when primed");
-        assert_eq!(edit.width, 4, "primed keeps quiet Edit without hint");
+        assert_eq!(edit.width, 4, "primed keeps quiet edit without hint");
         // Armed hint is "esc again to " (13) + "send now" (8) via display width.
         assert_eq!(send.width, 21, "primed shows 'esc again to send now'");
         assert_eq!(edit.y, send.y);
@@ -3102,9 +3102,9 @@ mod tests {
     fn pending_send_only_fallback_when_edit_does_not_fit() {
         let messages = vec!["hello pending".to_string()];
         // 36 cols -> content width 32: title + send-only fits (16+12+2=30),
-        // but Edit + send (16+19+2=37) does not.
+        // but edit + send (16+19+2=37) does not.
         let (edit, send, rows) = render_pending_snapshot(36, 30, &messages, true, false);
-        assert!(edit.is_none(), "too narrow for Edit must hide only Edit");
+        assert!(edit.is_none(), "too narrow for edit must hide only edit");
         let send = send.expect("send-only fallback must stay clickable");
         assert_eq!(send.width, 12);
         let header = rows.get(send.y as usize).expect("header row");
@@ -3113,8 +3113,8 @@ mod tests {
             "fallback stays on the header, got: {header:?}"
         );
         assert!(
-            !header.contains("Edit"),
-            "fallback header must drop Edit, got: {header:?}"
+            !header.contains("edit"),
+            "fallback header must drop edit, got: {header:?}"
         );
         assert!(header.contains("send now"), "got: {header:?}");
     }

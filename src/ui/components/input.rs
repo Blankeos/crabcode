@@ -3037,7 +3037,7 @@ mod tests {
 
     #[test]
     fn test_input_cursor_uses_agent_color() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{backend::Backend, backend::TestBackend, Terminal};
 
         let mut input = Input::new();
         let mut colors = test_colors();
@@ -3061,13 +3061,32 @@ mod tests {
             })
             .unwrap();
 
-        let buffer = terminal.backend().buffer();
-        let cursor_cell = buffer.cell((3, 1)).expect("cursor cell").style();
-        assert_eq!(cursor_cell.bg, Some(colors.secondary));
+        // Agent color is still wired through the textarea cursor style.
+        // The visible caret is the hardware terminal cursor (single-caret
+        // design, see 99f3227); the buffer no longer carries a fake block.
+        let expected = input_cursor_style(colors.secondary);
+        assert_eq!(input.textarea.cursor_style(), expected);
+        assert_eq!(expected.bg, Some(colors.secondary));
         assert_eq!(
-            cursor_cell.fg,
+            expected.fg,
             Some(crate::theme::contrast_text(colors.secondary))
         );
+
+        // Single caret: fake block highlight is suppressed so complex emoji
+        // (ZWJ/VS16/flags) can't render two split carets. The buffer cell
+        // keeps the text/background style instead of the agent color.
+        let buffer = terminal.backend().buffer();
+        let cursor_cell = buffer.cell((3, 1)).expect("cursor cell").style();
+        assert_eq!(cursor_cell.bg, Some(colors.background_element));
+        assert_ne!(cursor_cell.bg, Some(colors.secondary));
+
+        // Hardware terminal cursor is the source of truth and sits on the
+        // textarea caret.
+        let pos = terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("hardware cursor");
+        assert_eq!((pos.x, pos.y), (3, 1));
     }
 
     #[test]
