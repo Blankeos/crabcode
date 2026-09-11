@@ -31,6 +31,7 @@ mod theme;
 mod toast;
 mod tools;
 mod ui;
+mod update;
 mod upgrade;
 mod utils;
 mod views;
@@ -686,6 +687,20 @@ pub fn push_toast(toast: Toast) {
 
 pub fn remove_expired_toasts() {
     TOAST_MANAGER.lock().unwrap().remove_expired();
+}
+
+/// Drop expired toasts, reporting whether a redraw is needed. Separated from
+/// the void helper so the event loop can repaint exactly once at expiry
+/// without continuously animating.
+fn remove_expired_toasts_needs_redraw() -> bool {
+    TOAST_MANAGER.lock().unwrap().remove_expired()
+}
+
+/// How long until the next toast expires (for idle wakeup). Caps the idle
+/// `poll()` so a 4s toast wakes one redraw at expiry instead of lingering
+/// painted with a dead hitbox.
+fn time_until_next_toast_expiry() -> Option<std::time::Duration> {
+    TOAST_MANAGER.lock().unwrap().time_until_next_expiry()
 }
 
 pub fn get_toast_manager() -> &'static Mutex<ToastManager> {
@@ -1591,6 +1606,10 @@ async fn run_event_loop(
     // A short "idle" poll still burns needless redraws/sec; block until input instead.
     const FAST_POLL: Duration = Duration::from_millis(16); // ~60fps for interactive animations
     const STREAMING_POLL: Duration = Duration::from_millis(40); // 25fps, matches wave spinner
+                                                                // Background update/upgrade completion poll: wakes to drain the channel
+                                                                // without rendering (10Hz, no frames). Far cheaper than pinning 60fps
+                                                                // full renders for a 10s lookup or minutes-long install.
+    const BACKGROUND_POLL: Duration = Duration::from_millis(100);
     const IDLE_POLL: Duration = Duration::from_secs(30); // wake only on input / timeout
 
     let mut needs_redraw = true;
@@ -1601,13 +1620,23 @@ async fn run_event_loop(
         let loop_start = std::time::Instant::now();
 
         let animation_needed = app.is_animation_running();
+        let background_pending = app.has_pending_update_work();
 
-        let poll_duration = if animation_needed && app.is_streaming_animation_only() {
+        let base_poll = if animation_needed && app.is_streaming_animation_only() {
             STREAMING_POLL
         } else if animation_needed {
             FAST_POLL
+        } else if background_pending {
+            BACKGROUND_POLL
         } else {
             IDLE_POLL
+        };
+        // Cap idle/background waits at the next toast expiry so a 4s toast
+        // wakes exactly one redraw at expiry (no stale paint + dead hitbox,
+        // no continuous animation).
+        let poll_duration = match time_until_next_toast_expiry() {
+            Some(until_expiry) => base_poll.min(until_expiry),
+            None => base_poll,
         };
 
         let elapsed_before_poll = loop_start.elapsed();
@@ -1757,10 +1786,18 @@ async fn run_event_loop(
             needs_redraw = true;
         }
 
-        app.process_streaming_chunks();
+        // Background update/upgrade completion lands a toast: redraw once even
+        // when idle (no animation/input to carry the repaint).
+        if app.process_streaming_chunks() {
+            needs_redraw = true;
+        }
         app.update_animations();
         app.update_terminal_title_signal();
-        remove_expired_toasts();
+        // Toast expiry also needs exactly one redraw: without it the last
+        // frame stays painted while hit-testing already reports expired.
+        if remove_expired_toasts_needs_redraw() {
+            needs_redraw = true;
+        }
         let isolated_spinner_interval = app.isolated_subagent_spinner_interval();
         let full_render_due = isolated_spinner_interval.is_none_or(|interval| {
             last_complete_frame.is_none() || last_full_render_at.elapsed() >= interval
@@ -1810,6 +1847,8 @@ async fn run_event_loop(
                 session_history_loaded = true;
                 needs_redraw = true;
             }
+            // Lazy nonblocking update check (24h cache, silent failures).
+            app.maybe_start_update_check();
         }
     }
     Ok(())
