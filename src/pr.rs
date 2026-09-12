@@ -111,8 +111,12 @@ fn pull_request_info(number: u64, cwd: &Path) -> Result<Option<PullRequestInfo>>
         .map(Some)
 }
 
-fn normalize_host(host: &str) -> String {
-    host.trim().to_lowercase()
+fn normalize_host(host: &str, port: Option<u16>) -> String {
+    let host = host.trim().to_lowercase();
+    match port {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    }
 }
 
 // (host, owner, repo) lowercased; host keeps explicit port and www as distinct.
@@ -140,13 +144,10 @@ fn parse_remote_identity(remote_url: &str) -> Option<(String, String, String)> {
             None,
         )
     };
-    let mut host = normalize_host(&raw_host);
-    if host.is_empty() {
+    if raw_host.trim().is_empty() {
         return None;
     }
-    if let Some(port) = port {
-        host = format!("{host}:{port}");
-    }
+    let host = normalize_host(&raw_host, port);
     let path = raw_path.trim().trim_matches('/');
     let mut parts = path.split('/');
     let owner = parts.next()?.trim().to_lowercase();
@@ -171,8 +172,8 @@ fn select_fork_remote_name(
     fork_repo_lower: &str,
     owner_login: &str,
 ) -> String {
-    let fork_host = normalize_host(fork_host);
-    let mut matches: Vec<&str> = existing
+    let fork_host = normalize_host(fork_host, None);
+    if let Some(name) = existing
         .iter()
         .filter(|(_, url)| {
             parse_remote_identity(url).is_some_and(|(host, owner, repo)| {
@@ -180,10 +181,9 @@ fn select_fork_remote_name(
             })
         })
         .map(|(name, _)| name.as_str())
-        .collect();
-    if !matches.is_empty() {
-        matches.sort_unstable();
-        return matches[0].to_owned();
+        .min()
+    {
+        return name.to_owned();
     }
     let taken = |candidate: &str| existing.iter().any(|(name, _)| name == candidate);
     if !taken(owner_login) {
@@ -234,18 +234,12 @@ fn pr_base(pr_url: &str) -> Option<(String, String)> {
     if parsed.scheme() != "https" && parsed.scheme() != "http" {
         return None;
     }
-    let mut host = normalize_host(parsed.host_str()?);
-    if host.is_empty() {
+    let host = normalize_host(parsed.host_str()?, parsed.port());
+    let mut parts = parsed.path().split('/').filter(|s| !s.is_empty());
+    let (owner, repo) = (parts.next()?.trim(), parts.next()?.trim());
+    if parts.next()? != "pull" {
         return None;
     }
-    if let Some(port) = parsed.port() {
-        host = format!("{host}:{port}");
-    }
-    let parts: Vec<&str> = parsed.path().split('/').filter(|s| !s.is_empty()).collect();
-    if parts.len() < 3 || parts[2] != "pull" {
-        return None;
-    }
-    let (owner, repo) = (parts[0].trim(), parts[1].trim());
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
@@ -292,11 +286,11 @@ fn configure_fork_remote_with_pin(
     let pr = info.url.as_deref().and_then(pr_base);
     let fork_host = pr
         .as_ref()
-        .map(|(h, _)| h.clone())
-        .unwrap_or_else(|| "github.com".to_owned());
+        .map(|(host, _)| host.as_str())
+        .unwrap_or("github.com");
     let remote_name = select_fork_remote_name(
         &existing,
-        &fork_host,
+        fork_host,
         &owner.login.to_lowercase(),
         &repository.name.to_lowercase(),
         &owner.login,
@@ -630,6 +624,26 @@ mod tests {
 
     #[test]
     fn selects_fork_name_on_collision() {
+        let aliases = vec![
+            (
+                "z-fork".to_owned(),
+                "git@github.com:contributor/example.git".to_owned(),
+            ),
+            (
+                "a-fork".to_owned(),
+                "https://github.com/contributor/example.git".to_owned(),
+            ),
+        ];
+        assert_eq!(
+            select_fork_remote_name(
+                &aliases,
+                "github.com",
+                "contributor",
+                "example",
+                "contributor"
+            ),
+            "a-fork"
+        );
         let occupied = vec![(
             "contributor".to_owned(),
             "https://github.com/contributor/other.git".to_owned(),
