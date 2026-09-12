@@ -92,6 +92,16 @@ Without `--install`, the script is printed to stdout. `crabcode completion` with
 
 If you previously ran `crabcode completion >> ~/.zshrc`, re-run `--install` so that dump is stripped and replaced by the autoload hook.
 
+### Pull Requests
+
+Fetch and checkout a GitHub pull request as `pr/<number>`, then start Crabcode in the checked-out worktree:
+
+```sh
+crabcode pr <number>
+```
+
+This command requires the authenticated [GitHub CLI](https://cli.github.com/). For pull requests from forks, Crabcode also adds the fork as a Git remote when needed and configures the local branch to track the contributor's branch.
+
 ### Agent Types
 
 - **PLAN** - Read-only analysis and planning agent. Best for understanding codebases, architecture questions, and planning changes.
