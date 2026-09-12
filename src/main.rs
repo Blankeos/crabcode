@@ -1632,14 +1632,39 @@ async fn run_event_loop(
                                                                 // without rendering (10Hz, no frames). Far cheaper than pinning 60fps
                                                                 // full renders for a 10s lookup or minutes-long install.
     const BACKGROUND_POLL: Duration = Duration::from_millis(100);
-    const IDLE_POLL: Duration = Duration::from_secs(30); // wake only on input / timeout
+    // Discover cross-terminal job changes without forcing animation/redraws.
+    const IDLE_POLL: Duration = Duration::from_secs(1);
 
     let mut needs_redraw = true;
+    let mut first_frame_painted = false;
     let mut last_complete_frame: Option<Buffer> = None;
     let mut last_full_render_at = std::time::Instant::now();
+    let mut jobs_refresh: Option<tokio::task::JoinHandle<()>> = None;
+    let mut last_jobs_refresh = None::<std::time::Instant>;
+    let mut displayed_jobs_count = app.process_registry.running_count();
 
     while app.running {
         let loop_start = std::time::Instant::now();
+
+        if jobs_refresh.as_ref().is_some_and(|task| task.is_finished()) {
+            jobs_refresh.take();
+        }
+        // First paint must not compete with spawning a worker or reading the ledger.
+        if first_frame_painted
+            && jobs_refresh.is_none()
+            && last_jobs_refresh.is_none_or(|last| last.elapsed() >= IDLE_POLL)
+        {
+            let registry = app.process_registry.clone();
+            jobs_refresh = Some(tokio::task::spawn_blocking(move || {
+                registry.refresh_running_jobs();
+            }));
+            last_jobs_refresh = Some(std::time::Instant::now());
+        }
+        let jobs_count = app.process_registry.running_count();
+        if jobs_count != displayed_jobs_count {
+            displayed_jobs_count = jobs_count;
+            needs_redraw = true;
+        }
 
         let animation_needed = app.is_animation_running();
         let background_pending = app.has_pending_update_work();
@@ -1716,6 +1741,15 @@ async fn run_event_loop(
                                         if next_mouse.kind == last_scroll.kind {
                                             scroll_count = scroll_count.saturating_add(1);
                                         } else {
+                                            // Flush before switching direction: dropping
+                                            // the accumulated ticks would eat the
+                                            // dominant gesture and let a stray
+                                            // opposite tick move the viewport the
+                                            // wrong way.
+                                            app.handle_coalesced_mouse_scroll(
+                                                last_scroll,
+                                                scroll_count,
+                                            );
                                             last_scroll = next_mouse;
                                             scroll_count = 1;
                                         }
@@ -1857,6 +1891,7 @@ async fn run_event_loop(
                 last_full_render_at = std::time::Instant::now();
             }
             needs_redraw = false;
+            first_frame_painted = true;
 
             // Hydrate config/prefs/themes/skills, then session index, after first paint.
             if !startup_hydrated {

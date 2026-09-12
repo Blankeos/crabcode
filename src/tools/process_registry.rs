@@ -225,9 +225,35 @@ impl ProcessRegistry {
         }
     }
 
-    /// Non-blocking running-job count for the status chip (updated on spawn/kill/list).
+    /// Non-blocking status-chip count, updated by job operations and background refresh.
     pub fn running_count(&self) -> usize {
         self.running_count.load(Ordering::Relaxed)
+    }
+
+    /// Refresh persisted jobs off the UI thread, including jobs from other terminals.
+    pub fn refresh_running_jobs(&self) {
+        let workdir = self.lock_inner().workdir.clone();
+        let Ok(mut metas) = list_for_project(&workdir) else {
+            return;
+        };
+        for meta in &mut metas {
+            // Observe liveness without writing stale metadata over a concurrent restart.
+            if meta.status == LedgerStatus::Running && !crate::jobs::ledger::is_pid_alive(meta.pid)
+            {
+                meta.status = LedgerStatus::Exited;
+            }
+        }
+        let mut inner = self.lock_inner();
+        if inner.workdir != workdir {
+            return;
+        }
+        inner.jobs.retain(|id, job| {
+            job.kind == JobKind::Interactive || metas.iter().any(|meta| meta.id == *id)
+        });
+        let cached_ids: std::collections::HashSet<_> = inner.jobs.keys().cloned().collect();
+        inner.order.retain(|id| cached_ids.contains(id));
+        Self::hydrate_ledger_into_cache(&mut inner, &metas);
+        Self::recompute_running_count(&inner, &self.running_count);
     }
 
     fn recompute_running_count(inner: &ProcessRegistryInner, counter: &AtomicUsize) {
@@ -1162,6 +1188,43 @@ mod tests {
         let list = registry.list_blocking();
         assert!(list.is_empty() || list.iter().all(|j| !j.id.is_empty()));
         assert_eq!(registry.running_count_blocking(), registry.running_count());
+    }
+
+    #[test]
+    fn refresh_discovers_existing_jobs_without_opening_dialog() {
+        let _state = TempState::new();
+        let workdir = tempfile::tempdir().unwrap();
+        let mut meta = JobMeta {
+            id: "job_indicator_refresh".into(),
+            pid: std::process::id(),
+            pgid: None,
+            command: "test".into(),
+            name: "test".into(),
+            workdir: workdir.path().to_string_lossy().into_owned(),
+            session_id: None,
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+            status: LedgerStatus::Running,
+            exit_code: None,
+        };
+        crate::jobs::ledger::save_meta(&meta).unwrap();
+        let registry = ProcessRegistry::with_workdir(workdir.path().to_path_buf());
+        assert_eq!(registry.running_count(), 0);
+        registry.refresh_running_jobs();
+        assert_eq!(registry.running_count(), 1);
+
+        meta.status = LedgerStatus::Exited;
+        crate::jobs::ledger::save_meta(&meta).unwrap();
+        registry.refresh_running_jobs();
+        assert_eq!(registry.running_count(), 0);
+
+        meta.status = LedgerStatus::Running;
+        crate::jobs::ledger::save_meta(&meta).unwrap();
+        registry.refresh_running_jobs();
+        assert_eq!(registry.running_count(), 1);
+        std::fs::remove_dir_all(crate::jobs::ledger::job_dir(&meta.id)).unwrap();
+        registry.refresh_running_jobs();
+        assert_eq!(registry.running_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

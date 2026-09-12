@@ -273,10 +273,13 @@ impl Dialog {
         }
 
         self.visible_row_count = visible_row_count;
-        self.scroll_offset = scroll_offset;
         self.set_collapsed_groups(collapsed_groups);
         self.is_dragging_scrollbar = was_dragging;
         self.scrollbar_drag_offset = drag_offset;
+        // Restore the saved viewport last: set_collapsed_groups reconciles
+        // selection (adjust_scroll), which would otherwise yank a
+        // wheel-scrolled viewport back to the selected row on every refresh.
+        self.scroll_offset = scroll_offset;
         self.update_scrollbar();
     }
 

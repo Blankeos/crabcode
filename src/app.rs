@@ -3369,11 +3369,7 @@ impl App {
             ),
             SelectionActionTarget::JobsDetail => {
                 let content = self.jobs_dialog_state.detail_content_area();
-                let selection = &self.jobs_dialog_state.selection;
-                let ((s_line, _), (e_line, _)) = selection.range();
-                let top_line = s_line.min(e_line);
-                let scroll = self.jobs_dialog_state.detail_scroll as usize;
-                let visible_row = top_line.saturating_sub(scroll) as u16;
+                let visible_row = self.jobs_dialog_state.selection_visible_row();
                 let row = content
                     .y
                     .saturating_add(visible_row)
@@ -3867,7 +3863,7 @@ impl App {
                 }
                 TerminalSessionResponse::Minimize => {
                     // Park session: keep running, dismiss overlay only.
-                    self.overlay_focus = OverlayFocus::None;
+                    self.restore_focus_after_priority_overlay();
                 }
                 TerminalSessionResponse::Handled | TerminalSessionResponse::NotHandled => {}
             }
@@ -4486,6 +4482,12 @@ impl App {
                 }
             }
             OverlayFocus::JobsDialog => {
+                if key.code == KeyCode::Esc {
+                    // Detail -> list is a dismissal too: drain queued repeats even
+                    // though focus stays on JobsDialog, and never arm chat Esc.
+                    self.reset_esc_primed_state();
+                    self.just_closed_overlay = true;
+                }
                 if !(key.code == KeyCode::Char('y')
                     && key.modifiers == event::KeyModifiers::NONE
                     && self.jobs_dialog_state.is_detail_open()
@@ -6364,7 +6366,9 @@ impl App {
     }
 
     fn restore_focus_after_priority_overlay(&mut self) {
-        self.overlay_focus = if self.find_bar.is_active() && self.can_open_find_bar() {
+        self.overlay_focus = if self.jobs_dialog_state.is_visible() {
+            OverlayFocus::JobsDialog
+        } else if self.find_bar.is_active() && self.can_open_find_bar() {
             OverlayFocus::FindBar
         } else {
             OverlayFocus::None
@@ -8048,17 +8052,6 @@ impl App {
                     crate::emit_log!("[JOBS] restart failed id={} err={}", id, err);
                 }
             },
-            JobsDialogAction::FocusInteractive(id) => {
-                self.jobs_dialog_state.hide();
-                self.selection_action_bar = None;
-                if self.terminal_session_dialog_state.active_job_id() == Some(id.as_str())
-                    && self.terminal_session_dialog_state.has_active()
-                {
-                    self.overlay_focus = OverlayFocus::TerminalSessionDialog;
-                } else if self.overlay_focus == OverlayFocus::JobsDialog {
-                    self.overlay_focus = OverlayFocus::None;
-                }
-            }
         }
     }
 
@@ -11631,7 +11624,15 @@ impl App {
                 None,
             );
         }
-        self.overlay_focus = OverlayFocus::None;
+        if matches!(
+            self.overlay_focus,
+            OverlayFocus::None
+                | OverlayFocus::PermissionDialog
+                | OverlayFocus::QuestionDialog
+                | OverlayFocus::TerminalSessionDialog
+        ) {
+            self.restore_focus_after_priority_overlay();
+        }
     }
 
     pub fn remote_respond_permission(&mut self, response: PermissionResponse) -> bool {
@@ -12497,6 +12498,8 @@ impl App {
                     mcp_summary,
                     &colors,
                     usage_text,
+                    self.process_registry.running_count(),
+                    &mut self.jobs_chip_area,
                     btw_entry.as_ref(),
                     self.btw_scroll,
                     &mut self.btw_panel_area,
@@ -12731,10 +12734,7 @@ impl App {
             );
         }
 
-        if self.jobs_dialog_state.is_visible()
-            && (self.overlay_focus == OverlayFocus::JobsDialog
-                || self.jobs_dialog_state.dialog.is_visible())
-        {
+        if self.jobs_dialog_state.is_visible() && self.overlay_focus == OverlayFocus::JobsDialog {
             render_jobs_dialog(f, &mut self.jobs_dialog_state, size, colors);
         }
 
@@ -14161,6 +14161,155 @@ mod tests {
             OverlayFocus::None,
             "overlay focus must clear so the input can receive keys again"
         );
+    }
+
+    fn start_jobs_test_stream(app: &mut App) -> tokio_util::sync::CancellationToken {
+        let session_id = app.create_new_session(Some("Jobs Escape".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                cancel_token.clone(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+        cancel_token
+    }
+
+    async fn open_jobs_test_detail(app: &mut App) {
+        // In-memory registration avoids spawning a process or writing the ledger.
+        let id = app
+            .process_registry
+            .register_interactive("test command", "Jobs focus test", std::env::temp_dir())
+            .await;
+        app.open_jobs_dialog();
+        assert!(app.jobs_dialog_state.dialog.select_item_by_id(&id));
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.jobs_dialog_state.is_detail_open());
+    }
+
+    fn enqueue_jobs_test_terminal(app: &mut App) {
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.terminal_session_dialog_state
+            .enqueue(crate::tools::TerminalSessionRequest {
+                start: crate::tools::TerminalSessionStart {
+                    session_id: "jobs-terminal".to_string(),
+                    tool_call_id: "jobs-terminal-call".to_string(),
+                    command: "test command".to_string(),
+                    description: "Jobs focus test".to_string(),
+                    workdir: None,
+                    cols: 80,
+                    rows: 24,
+                    job_id: None,
+                },
+                control_tx,
+            });
+        app.overlay_focus = OverlayFocus::TerminalSessionDialog;
+    }
+
+    fn escape_jobs_without_cancelling(app: &mut App, token: &tokio_util::sync::CancellationToken) {
+        let was_detail = app.jobs_dialog_state.is_detail_open();
+        app.arm_esc_primed(); // A stale chat arm must not survive dismissing jobs.
+        app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.esc_is_primed());
+        assert!(!token.is_cancelled());
+        assert!(app.is_streaming);
+        // The event loop uses this signal to drain queued Escape repeats,
+        // including detail -> list where overlay_focus itself does not change.
+        assert!(app.take_just_closed_overlay());
+        assert_eq!(app.jobs_dialog_state.is_visible(), was_detail);
+        assert!(!app.jobs_dialog_state.is_detail_open());
+        assert_eq!(
+            app.overlay_focus,
+            if was_detail {
+                OverlayFocus::JobsDialog
+            } else {
+                OverlayFocus::None
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn jobs_detail_escape_returns_to_list_then_closes_without_cancelling_stream() {
+        let mut app = test_app();
+        let token = start_jobs_test_stream(&mut app);
+        open_jobs_test_detail(&mut app).await;
+        escape_jobs_without_cancelling(&mut app, &token);
+        escape_jobs_without_cancelling(&mut app, &token);
+    }
+
+    #[tokio::test]
+    async fn parked_terminal_exit_preserves_jobs_list_and_detail_focus() {
+        for detail in [false, true] {
+            let mut app = test_app();
+            let token = start_jobs_test_stream(&mut app);
+            enqueue_jobs_test_terminal(&mut app);
+            app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(app.terminal_session_dialog_state.has_active());
+            assert_eq!(app.overlay_focus, OverlayFocus::None);
+            app.take_just_closed_overlay();
+            if detail {
+                open_jobs_test_detail(&mut app).await;
+            } else {
+                app.open_jobs_dialog();
+            }
+
+            app.handle_terminal_session_stream_event(
+                "jobs-terminal-call",
+                TerminalSessionEvent::Exited { exit_code: Some(0) },
+            );
+            assert!(!app.terminal_session_dialog_state.has_active());
+            assert_eq!(app.overlay_focus, OverlayFocus::JobsDialog);
+            assert_eq!(app.jobs_dialog_state.is_detail_open(), detail);
+            assert!(!app.esc_is_primed());
+            assert!(!token.is_cancelled());
+            escape_jobs_without_cancelling(&mut app, &token);
+            if detail {
+                escape_jobs_without_cancelling(&mut app, &token);
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_minimize_and_exit_restore_visible_but_not_hidden_jobs() {
+        for visible in [false, true] {
+            let mut app = test_app();
+            app.open_jobs_dialog();
+            if !visible {
+                app.jobs_dialog_state.hide();
+            }
+            let expected = if visible {
+                OverlayFocus::JobsDialog
+            } else {
+                OverlayFocus::None
+            };
+            enqueue_jobs_test_terminal(&mut app);
+            app.handle_keys(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert_eq!(app.overlay_focus, expected);
+            // Also exercise foreground exit, which must restore underlying jobs.
+            app.overlay_focus = OverlayFocus::TerminalSessionDialog;
+            app.handle_terminal_session_stream_event(
+                "jobs-terminal-call",
+                TerminalSessionEvent::Exited { exit_code: Some(0) },
+            );
+            assert_eq!(app.overlay_focus, expected);
+        }
+    }
+
+    #[test]
+    fn parked_terminal_exit_preserves_unrelated_overlay() {
+        let mut app = test_app();
+        enqueue_jobs_test_terminal(&mut app);
+        app.overlay_focus = OverlayFocus::CommandPalette;
+        app.handle_terminal_session_stream_event(
+            "jobs-terminal-call",
+            TerminalSessionEvent::Exited { exit_code: Some(0) },
+        );
+        assert_eq!(app.overlay_focus, OverlayFocus::CommandPalette);
     }
 
     #[test]
