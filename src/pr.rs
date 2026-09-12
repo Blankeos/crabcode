@@ -18,6 +18,19 @@ struct PullRequestInfo {
     head_ref_name: Option<String>,
 }
 
+fn checkout_command(number: u64, local_branch: &str) -> Command {
+    let mut command = Command::new("gh");
+    // Keep gh's default safeguards for local commits and uncommitted edits.
+    command.args([
+        "pr",
+        "checkout",
+        &number.to_string(),
+        "--branch",
+        local_branch,
+    ]);
+    command
+}
+
 #[derive(Debug, Deserialize)]
 struct Repository {
     name: String,
@@ -35,15 +48,7 @@ pub fn run(number: u64) -> Result<()> {
     let local_branch = format!("pr/{number}");
     println!("Fetching and checking out PR #{number}...");
 
-    let checkout = Command::new("gh")
-        .args([
-            "pr",
-            "checkout",
-            &number.to_string(),
-            "--branch",
-            &local_branch,
-            "--force",
-        ])
+    let checkout = checkout_command(number, &local_branch)
         .current_dir(&cwd)
         .status();
 
@@ -133,6 +138,11 @@ fn configure_fork_remote(info: &PullRequestInfo, local_branch: &str, cwd: &Path)
         println!("Added fork remote: {remote_name}");
     }
 
+    // gh may have fetched only the base repository's PR ref. Adding a remote
+    // does not create the remote-tracking ref required by --set-upstream-to.
+    let refspec = format!("+refs/heads/{head_ref_name}:refs/remotes/{remote_name}/{head_ref_name}");
+    run_git(cwd, ["fetch", "--no-tags", remote_name, &refspec])?;
+
     let upstream = format!("--set-upstream-to={remote_name}/{head_ref_name}");
     run_git(cwd, ["branch", &upstream, local_branch])
 }
@@ -158,6 +168,123 @@ fn run_git<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestRepo(std::path::PathBuf);
+
+    impl TestRepo {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "crabcode-pr-test-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let repo = Self(path);
+            repo.git(&["init", "-q"]);
+            repo.git(&[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "initial",
+            ]);
+            repo
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&self.0)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn checkout_keeps_default_local_work_safeguards() {
+        let command = checkout_command(50, "pr/50");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(args, ["pr", "checkout", "50", "--branch", "pr/50"]);
+    }
+
+    fn fork_info(branch: &str) -> PullRequestInfo {
+        PullRequestInfo {
+            head_repository: Some(Repository {
+                name: "example".into(),
+            }),
+            head_repository_owner: Some(RepositoryOwner {
+                login: "contributor".into(),
+            }),
+            is_cross_repository: true,
+            head_ref_name: Some(branch.into()),
+        }
+    }
+
+    #[test]
+    fn fetches_missing_fork_ref_before_setting_upstream() {
+        let fork = TestRepo::new();
+        fork.git(&["branch", "feat/example"]);
+        let repo = TestRepo::new();
+        repo.git(&["branch", "pr/50"]);
+        repo.git(&["remote", "add", "contributor", fork.0.to_str().unwrap()]);
+        assert!(repo
+            .git(&["for-each-ref", "refs/remotes/contributor"])
+            .is_empty());
+
+        configure_fork_remote(&fork_info("feat/example"), "pr/50", &repo.0).unwrap();
+
+        assert_eq!(
+            repo.git(&["rev-parse", "pr/50@{upstream}"]),
+            fork.git(&["rev-parse", "feat/example"])
+        );
+        assert_eq!(repo.git(&["config", "branch.pr/50.remote"]), "contributor");
+        assert_eq!(
+            repo.git(&["config", "branch.pr/50.merge"]),
+            "refs/heads/feat/example"
+        );
+    }
+
+    #[test]
+    fn failed_fork_fetch_does_not_change_upstream() {
+        let fork = TestRepo::new();
+        let repo = TestRepo::new();
+        repo.git(&["branch", "pr/50"]);
+        repo.git(&["remote", "add", "contributor", fork.0.to_str().unwrap()]);
+        repo.git(&["config", "branch.pr/50.remote", "original"]);
+        repo.git(&["config", "branch.pr/50.merge", "refs/heads/original"]);
+
+        assert!(configure_fork_remote(&fork_info("missing"), "pr/50", &repo.0).is_err());
+        assert_eq!(repo.git(&["config", "branch.pr/50.remote"]), "original");
+        assert_eq!(
+            repo.git(&["config", "branch.pr/50.merge"]),
+            "refs/heads/original"
+        );
+    }
 
     #[test]
     fn parses_cross_repository_pull_request_info() {
