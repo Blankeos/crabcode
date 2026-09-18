@@ -120,7 +120,7 @@ mod tests {
         assert!(is_opencode_provider("OpenCode Go"));
         assert!(is_opencode_provider("OpenCode Zen"));
         assert!(!is_opencode_provider("openai"));
-        assert!(!is_opencode_provider("crof"));
+        assert!(!is_opencode_provider("xai"));
         assert!(!is_opencode_provider("opencodefoo"));
     }
 
