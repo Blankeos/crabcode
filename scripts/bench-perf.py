@@ -14,12 +14,17 @@ Examples
   python3 scripts/bench-perf.py --cwd /tmp --json-out /tmp/bench.json
 
 Requires: python3. Optional: hyperfine (section A).
+
+Section B measures from process launch to the first apparent rendered PTY frame;
+it is a heuristic, not a guarantee that initialization/input handling is complete.
+`time <interactive CLI>` measures the entire session through exit, not startup.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import errno
 import fcntl
 import json
 import os
@@ -146,8 +151,12 @@ def reply_queries(data: bytes) -> bytes:
 def looks_like_frame(buf: bytes) -> bool:
     if len(buf) < 400:
         return False
-    markers = (b"\x1b[2J", b"\x1b[H", b"\x1b[?1049h", b"\x1b[?2026h", b"\x1b[?1049h")
-    return any(m in buf for m in markers)
+    markers = (b"\x1b[2J", b"\x1b[H", b"\x1b[?1049h", b"\x1b[?2026h")
+    # Setup/probes (including OSC titles) are not rendered frame content.
+    visible = re.sub(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)", b"", buf)
+    visible = re.sub(rb"\x1b\[[0-?]*[ -/]*(?:[@-~]|$)", b"", visible)
+    visible = visible.rstrip(b"\x1b")
+    return any(m in buf for m in markers) and bool(visible.strip())
 
 
 def descendant_pids(root: int) -> set[int]:
@@ -334,24 +343,40 @@ def drain_and_reply(master: int, buf: bytearray, timeout: float = 0.0) -> int:
 
 
 def wait_first_frame(
-    proc: subprocess.Popen[bytes], master: int, timeout: float
+    proc: subprocess.Popen[bytes], master: int, timeout: float, start: float
 ) -> tuple[float | None, float | None, bytearray]:
+    """Observe startup from the pre-spawn clock, without batching frame reads."""
     buf = bytearray()
-    start = time.perf_counter()
     first_byte: float | None = None
-    first_frame: float | None = None
     deadline = start + timeout
-    while time.perf_counter() < deadline:
-        n = drain_and_reply(master, buf, timeout=0.05)
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([master], [], [], min(0.05, remaining))
+        if master not in ready:
+            if proc.poll() is not None:
+                break
+            continue
+        try:
+            chunk = os.read(master, 65536)
+        except OSError as e:
+            if e.errno == errno.EIO:  # Linux PTY EOF
+                break
+            raise
         now = time.perf_counter()
-        if n and first_byte is None:
+        if not chunk:
+            break
+        if first_byte is None:
             first_byte = now - start
-        if first_frame is None and looks_like_frame(bytes(buf)):
-            first_frame = now - start
-            break
-        if proc.poll() is not None:
-            break
-    return first_byte, first_frame, buf
+        buf.extend(chunk)
+        is_frame = looks_like_frame(bytes(buf))
+        reply = reply_queries(chunk)
+        if reply:
+            os.write(master, reply)
+        if is_frame:
+            return first_byte, now - start, buf
+    return first_byte, None, buf
 
 
 def percentile(xs: list[float], p: float) -> float:
@@ -455,14 +480,20 @@ def bench_open(agents: list[str], cwd: str, timeout: float, repeats: int) -> lis
             continue
         argv = AGENT_ARGV[name]
         frames: list[float] = []
+        first_bytes: list[float] = []
         bytes_last = 0
         err: str | None = None
         for _ in range(repeats):
             proc = None
             master = None
             try:
+                start = time.perf_counter()
                 proc, master = spawn_pty(argv, cwd)
-                first_byte, first_frame, buf = wait_first_frame(proc, master, timeout)
+                first_byte, first_frame, buf = wait_first_frame(
+                    proc, master, timeout, start
+                )
+                if first_byte is not None:
+                    first_bytes.append(first_byte * 1000)
                 bytes_last = len(buf)
                 if first_frame is None:
                     err = f"no frame within {timeout}s (bytes={len(buf)})"
@@ -485,7 +516,8 @@ def bench_open(agents: list[str], cwd: str, timeout: float, repeats: int) -> lis
                 OpenResult(
                     agent=name,
                     available=True,
-                    first_byte_ms=None,
+                    first_byte_ms=statistics.mean(first_bytes) if first_bytes else None,
+                    error=err,
                     first_frame_ms=mean,
                     best_ms=min(frames),
                     worst_ms=max(frames),
@@ -496,8 +528,18 @@ def bench_open(agents: list[str], cwd: str, timeout: float, repeats: int) -> lis
                 f"  {name:10} first_frame {mean:7.1f} ms  "
                 f"(best {min(frames):.1f}, worst {max(frames):.1f}, n={len(frames)})"
             )
+            if err:
+                print(f"  {name:10} WARNING partial failure: {err}")
         else:
-            results.append(OpenResult(agent=name, available=True, error=err, bytes_seen=bytes_last))
+            results.append(
+                OpenResult(
+                    agent=name,
+                    available=True,
+                    first_byte_ms=statistics.mean(first_bytes) if first_bytes else None,
+                    error=err,
+                    bytes_seen=bytes_last,
+                )
+            )
             print(f"  {name:10} ERROR {err}")
     return results
 
@@ -527,8 +569,11 @@ def bench_idle(
         try:
             # Reset linux jiffy baseline between agents
             _linux_prev.clear()
+            start = time.perf_counter()
             proc, master = spawn_pty(argv, cwd)
-            first_byte, first_frame, buf = wait_first_frame(proc, master, open_timeout)
+            first_byte, first_frame, buf = wait_first_frame(
+                proc, master, open_timeout, start
+            )
             if first_frame is None:
                 results.append(
                     IdleResult(
@@ -696,12 +741,22 @@ def print_summary(report: Report) -> None:
 
     print()
     print(f"host={report.host}  platform={report.platform}  cwd={report.cwd}")
-    print(f"settle={report.settle_s}s  sample={report.sample_s}s  interval={report.sample_interval_s}s")
+    print(
+        f"settle={report.settle_s}s  sample={report.sample_s}s  interval={report.sample_interval_s}s"
+    )
     print()
     print("Notes")
+    print(
+        "  • First frame is a PTY-output heuristic, not a full input-readiness measurement."
+    )
+    print(
+        "  • `time <interactive CLI>` measures the whole session, not time to first paint."
+    )
     print("  • macOS `ps %cpu` is smoothed — use Linux /proc for a clearer idle peg.")
     print("  • Run from a real project dir to include indexer cost.")
-    print("  • Compare release binary: `cargo build --release && PATH=./target/release:$PATH just bench-perf`")
+    print(
+        "  • Compare release binary: `cargo build --release && PATH=./target/release:$PATH just bench-perf`"
+    )
 
 
 # ---------------------------------------------------------------------------
