@@ -302,6 +302,7 @@ Your output will be displayed on a command line interface. Your responses should
 
     fn get_print_mode_context(&self) -> String {
         r#"Non-Interactive Print Mode:
+- Override conversational preamble/progress instructions: do not announce tool calls or emit interim commentary. Only output the requested final answer.
 - Keep planning internal; do not call update_plan.
 - Do not ask the user questions or wait for interactive input.
 - Prefer direct read/apply_patch/edit/bash tool use.
@@ -463,6 +464,7 @@ mod tests {
         let context = composer.get_print_mode_context();
 
         assert!(context.contains("do not call update_plan"));
+        assert!(context.contains("do not announce tool calls or emit interim commentary"));
         assert!(context.contains("Do not ask the user questions"));
         assert!(context.contains("apply_patch"));
         assert!(context.contains("write_files"));

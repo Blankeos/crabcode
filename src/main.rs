@@ -545,14 +545,14 @@ async fn run_print_mode(
         let _ = completion_sender.send(crate::llm::ChunkMessage::End);
     });
 
+    let mut output = PrintOutput::default();
     while let Some(chunk) = receiver.recv().await {
+        if let Some(commentary) = output.observe(&chunk) {
+            eprintln!("{commentary}");
+        }
         match chunk {
-            crate::llm::ChunkMessage::Text(text) => {
-                print!("{}", text);
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            }
-            crate::llm::ChunkMessage::ToolCalls(_)
+            crate::llm::ChunkMessage::Text(_)
+            | crate::llm::ChunkMessage::ToolCalls(_)
             | crate::llm::ChunkMessage::ToolResult(_)
             | crate::llm::ChunkMessage::Metrics { .. }
             | crate::llm::ChunkMessage::Cancelled
@@ -565,7 +565,7 @@ async fn run_print_mode(
             | crate::llm::ChunkMessage::TerminalSessionEvent { .. }
             | crate::llm::ChunkMessage::BackgroundJobEvent { .. } => {}
             crate::llm::ChunkMessage::End => {
-                println!();
+                println!("{}", output.pending);
                 play_resolved_sound(&sounds, crate::sound::SoundEvent::Complete);
                 break;
             }
@@ -608,6 +608,42 @@ async fn run_print_mode(
 
     let _ = no_session_persistence;
     Ok(())
+}
+
+/// Buffer text until we know whether it is tool-step commentary or the final answer.
+/// Streaming every delta to stdout joins preambles directly onto machine-consumed output.
+#[derive(Default)]
+struct PrintOutput {
+    pending: String,
+}
+
+impl PrintOutput {
+    fn observe(&mut self, chunk: &crate::llm::ChunkMessage) -> Option<String> {
+        use crate::llm::ChunkMessage;
+        match chunk {
+            ChunkMessage::Text(text) => self.pending.push_str(text),
+            ChunkMessage::ToolCalls(calls) if !calls.is_empty() => {
+                return self.take_commentary();
+            }
+            // Some providers can emit text after announcing a tool call.
+            ChunkMessage::ToolResult(_) => return self.take_commentary(),
+            ChunkMessage::StreamRollback { text, .. } => {
+                if self.pending.ends_with(text) {
+                    self.pending.truncate(self.pending.len() - text.len());
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn take_commentary(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.pending))
+        }
+    }
 }
 
 fn play_resolved_sound(
@@ -718,7 +754,7 @@ pub(crate) struct Args {
     #[arg(short = 's', long = "session")]
     session: Option<String>,
 
-    /// Run in print mode (non-interactive, streams output to stdout)
+    /// Run non-interactively (final answer on stdout, tool-step commentary on stderr)
     #[arg(short = 'p', long = "print")]
     print_mode: bool,
 
@@ -1266,6 +1302,66 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn print_output_separates_tool_preambles_from_final_answer() {
+        use crate::llm::{ChunkMessage, FunctionCall, ToolCall, ToolCallResult};
+        let mut output = PrintOutput::default();
+        for preamble in [
+            "Fetching staged diff to draft the commit message.",
+            "Checking one more file.",
+        ] {
+            output.observe(&ChunkMessage::Text(preamble.into()));
+            let commentary = output.observe(&ChunkMessage::ToolCalls(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            }]));
+            assert_eq!(commentary.as_deref(), Some(preamble));
+            output.observe(&ChunkMessage::Text("Late commentary".into()));
+            assert_eq!(
+                output.observe(&ChunkMessage::ToolResult(ToolCallResult {
+                    tool_call_id: "call_1".into(),
+                    role: "tool".into(),
+                    name: "read".into(),
+                    content: "file contents".into(),
+                })),
+                Some("Late commentary".into())
+            );
+        }
+        output.observe(&ChunkMessage::Reasoning("private reasoning".into()));
+        output.observe(&ChunkMessage::Text(
+            "fix(session): preserve metadata".into(),
+        ));
+        output.observe(&ChunkMessage::Text("\n\n- cover snapshots".into()));
+        output.observe(&ChunkMessage::End);
+        assert_eq!(
+            output.pending,
+            "fix(session): preserve metadata\n\n- cover snapshots"
+        );
+    }
+
+    #[test]
+    fn print_output_preserves_direct_answers_and_applies_retry_rollbacks() {
+        use crate::llm::ChunkMessage;
+        let mut output = PrintOutput::default();
+        output.observe(&ChunkMessage::Text("fix: café".into()));
+        output.observe(&ChunkMessage::StreamRollback {
+            text: "café".into(),
+            reasoning: String::new(),
+        });
+        output.observe(&ChunkMessage::Text("retry".into()));
+        output.observe(&ChunkMessage::StreamRollback {
+            text: "not a suffix".into(),
+            reasoning: String::new(),
+        });
+        output.observe(&ChunkMessage::ToolCalls(vec![]));
+        output.observe(&ChunkMessage::End);
+        assert_eq!(output.pending, "fix: retry");
+    }
 
     #[test]
     fn parses_model_after_print_prompt() {
