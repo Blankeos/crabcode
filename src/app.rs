@@ -2343,6 +2343,19 @@ impl App {
     }
 
     fn persist_chat_messages_for_session(&mut self, session_id: &str) -> bool {
+        // Snapshots must be self-contained even if the process exits before
+        // finalization. Use the captured turn metadata, not the current selection.
+        if let Some((start, model, provider)) = self.streaming_boundary_for_session(session_id) {
+            if let Some(chat) = self.chat_for_session_mut(session_id) {
+                for message in chat.messages.iter_mut().skip(start) {
+                    if message.role == crate::session::types::MessageRole::Assistant {
+                        message.model = model.clone();
+                        message.provider = provider.clone();
+                    }
+                }
+            }
+        }
+
         let Some(messages) = self
             .chat_for_session(session_id)
             .map(|chat| chat.messages.clone())
@@ -16700,6 +16713,56 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn streaming_snapshot_preserves_original_model_before_finalization() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Snapshot model".to_string()));
+        let mut previous = crate::session::types::Message::assistant("Earlier answer");
+        previous.model = Some("earlier-model".to_string());
+        app.chat_state.chat.add_message(previous);
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::user("Prompt"));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Partial"));
+
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("original-model".to_string()),
+                Some("original-provider".to_string()),
+                2,
+            ));
+        app.model = "new-model".to_string();
+        app.provider_name = "new-provider".to_string();
+
+        // Cover both the initial save and a later snapshot containing a new
+        // assistant message, without ever finalizing the streaming turn.
+        assert!(app.persist_chat_messages_for_session(&session_id));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Continued"));
+        app.mark_streaming_snapshot_pending(&session_id);
+        app.maybe_persist_streaming_snapshot_for_session(&session_id, true);
+
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(session.messages[0].model.as_deref(), Some("earlier-model"));
+        assert!(session.messages[1].model.is_none());
+        assert_eq!(session.messages.len(), 4);
+        for message in &session.messages[2..] {
+            assert!(!message.is_complete);
+            assert_eq!(message.model.as_deref(), Some("original-model"));
+            assert_eq!(message.provider.as_deref(), Some("original-provider"));
+            let persisted: crate::persistence::Message = message.clone().into();
+            let restored: crate::session::types::Message = persisted.try_into().unwrap();
+            assert_eq!(restored.model, message.model);
+            assert_eq!(restored.provider, message.provider);
+        }
     }
 
     #[test]
