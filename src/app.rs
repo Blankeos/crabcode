@@ -3448,7 +3448,7 @@ impl App {
         self.themes_dialog_state.set_transparent(transparent);
         if let Some(ref dao) = self.prefs_dao {
             if let Err(e) = dao.set_theme_transparent(transparent) {
-                eprintln!("Failed to save theme transparency: {}", e);
+                crate::emit_log!("Failed to save theme transparency: {}", e);
             }
         }
     }
@@ -3456,7 +3456,7 @@ impl App {
     fn persist_theme_selection(&self, theme_id: &str) {
         if let Some(ref dao) = self.prefs_dao {
             if let Err(e) = dao.set_active_theme(theme_id.to_string()) {
-                eprintln!("Failed to save active theme: {}", e);
+                crate::emit_log!("Failed to save active theme: {}", e);
             }
         }
     }
@@ -4077,7 +4077,7 @@ impl App {
                             if let Err(e) =
                                 dao.set_active_model(provider_id.clone(), model_id_clone.clone())
                             {
-                                eprintln!("Failed to save active model: {}", e);
+                                crate::emit_log!("Failed to save active model: {}", e);
                             }
                         }
 
@@ -4835,7 +4835,7 @@ impl App {
         self.chat_state.compact_mode = enabled;
         if let Some(dao) = &self.prefs_dao {
             if let Err(error) = dao.set_compact_mode(enabled) {
-                eprintln!("Failed to persist compact mode preference: {error}");
+                crate::emit_log!("Failed to persist compact mode preference: {}", error);
             }
         }
         push_toast(Toast::new(
@@ -5511,7 +5511,7 @@ impl App {
                         if let Err(e) =
                             dao.set_active_model(provider_id.clone(), model_id_clone.clone())
                         {
-                            eprintln!("Failed to save active model: {}", e);
+                            crate::emit_log!("Failed to save active model: {}", e);
                         }
                     }
 
