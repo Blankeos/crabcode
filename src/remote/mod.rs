@@ -4008,8 +4008,8 @@ mod tests {
         assert!(!host.accepts_token(""));
     }
 
-    #[test]
-    fn remote_status_exposes_visible_primary_agents() {
+    #[tokio::test]
+    async fn remote_status_exposes_visible_primary_agents() {
         let mut app = App::new_with_model_override(None, None).unwrap();
         let mut warnings = Vec::new();
         let defs = crate::agent::definition::parse_agent_definitions_from_config(

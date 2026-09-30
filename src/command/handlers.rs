@@ -1419,8 +1419,8 @@ mod tests {
         let _ = crate::model::discovery::Discovery::cleanup_test();
         let parsed = ParsedCommand {
             name: "models".to_string(),
-            args: vec![],
-            raw: "/models".to_string(),
+            args: vec!["ollama".to_string()],
+            raw: "/models ollama".to_string(),
             prefs_data: None,
             active_model_id: None,
         };
