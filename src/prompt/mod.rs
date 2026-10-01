@@ -331,6 +331,7 @@ Your output will be displayed on a command line interface. Your responses should
             r#"Tool use:
 - Use the model's built-in tool/function calling mechanism (do not print tool calls as text).
 - Prefer specialized tools over bash when possible (available: {names}). For long-running jobs use bash mode=background and manage with bash_output/bash_kill/bash_restart; interactive PTY Esc minimizes, ctrl+] stops.
+- For file discovery, prefer glob over bash find; glob/grep respect ignore rules by default. Set include_ignored=true only when needed. If using bash for search, prefer rg/rg --files (use --no-ignore only when explicitly needed); find does not respect .gitignore.
 - After tool results are returned, use them to answer.
 "#
         )
