@@ -425,6 +425,27 @@ impl Discovery {
             .resolved_api_key()
     }
 
+    fn custom_provider_discovery_api_keys(&self) -> HashMap<String, String> {
+        Self::discovery_api_keys_from_auth(
+            crate::persistence::AuthDAO::new()
+                .and_then(|auth| auth.load())
+                .unwrap_or_default(),
+        )
+    }
+
+    fn discovery_api_keys_from_auth(
+        providers: HashMap<String, crate::persistence::AuthConfig>,
+    ) -> HashMap<String, String> {
+        providers
+            .into_iter()
+            .filter_map(|(provider_id, auth)| match auth {
+                crate::persistence::AuthConfig::Api { key } => Some((provider_id, key)),
+                crate::persistence::AuthConfig::OAuth { access, .. } => Some((provider_id, access)),
+                crate::persistence::AuthConfig::Local => None,
+            })
+            .collect()
+    }
+
     /// Query configured OpenAI-compatible endpoints for their advertised model
     /// IDs. Endpoint failures are deliberately isolated to preserve manual
     /// configuration for providers that do not implement `GET /v1/models`.
@@ -459,6 +480,7 @@ impl Discovery {
         let Some(custom_providers) = &self.custom_providers else {
             return Vec::new();
         };
+        let stored_api_keys = self.custom_provider_discovery_api_keys();
 
         let mut models = Vec::new();
         for (provider_id, provider) in custom_providers {
@@ -486,7 +508,11 @@ impl Discovery {
                 .client
                 .get(endpoint)
                 .header("Accept", "application/json");
-            if let Some(api_key) = provider.resolved_api_key() {
+            if let Some(api_key) = stored_api_keys
+                .get(provider_id)
+                .cloned()
+                .or_else(|| provider.resolved_api_key())
+            {
                 request = request.bearer_auth(api_key);
             }
 
@@ -1243,6 +1269,40 @@ mod tests {
     use crate::config::configuration::{
         CustomModelConfig, CustomModelModalities, CustomProviderConfig,
     };
+
+    #[test]
+    fn discovery_uses_stored_api_and_oauth_credentials() {
+        let oauth: crate::persistence::AuthConfig = serde_json::from_value(serde_json::json!({
+            "type": "oauth",
+            "refresh": "refresh-token",
+            "access": "access-token",
+            "expires": 9223372036854775807_i64
+        }))
+        .expect("OAuth auth config");
+        let credentials = Discovery::discovery_api_keys_from_auth(HashMap::from([
+            (
+                "api-provider".to_string(),
+                crate::persistence::AuthConfig::Api {
+                    key: "api-key".to_string(),
+                },
+            ),
+            ("oauth-provider".to_string(), oauth),
+            (
+                "local-provider".to_string(),
+                crate::persistence::AuthConfig::Local,
+            ),
+        ]));
+
+        assert_eq!(
+            credentials.get("api-provider"),
+            Some(&"api-key".to_string())
+        );
+        assert_eq!(
+            credentials.get("oauth-provider"),
+            Some(&"access-token".to_string())
+        );
+        assert!(!credentials.contains_key("local-provider"));
+    }
 
     fn unique_test_cache_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
