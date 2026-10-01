@@ -1,9 +1,10 @@
 use crate::config::configuration::McpRemoteConfig;
 use anyhow::{anyhow, Context, Result};
-use rmcp::transport::auth::{AuthorizationManager, OAuthClientConfig};
+use rmcp::transport::auth::{AuthError, AuthorizationManager, CredentialStore, OAuthClientConfig};
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::{self, IsTerminal};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -19,12 +20,58 @@ pub struct OAuthCallback {
     pub issuer: Option<String>,
 }
 
-pub fn is_auth_error_message(msg: &str) -> bool {
-    let lower = msg.to_ascii_lowercase();
-    lower.contains("auth")
-        || lower.contains("401")
-        || lower.contains("unauthorized")
-        || lower.contains("authorization required")
+pub(super) async fn stored_authorization_manager(
+    name: &str,
+    remote: &McpRemoteConfig,
+) -> Result<super::oauth_client::OAuthSession> {
+    stored_authorization_manager_with_store(
+        remote,
+        super::credentials::FileCredentialStore::new(name, &remote.url),
+    )
+    .await
+}
+
+pub(super) async fn stored_authorization_manager_with_store(
+    remote: &McpRemoteConfig,
+    store: impl CredentialStore + 'static,
+) -> Result<super::oauth_client::OAuthSession> {
+    let stored = store
+        .load()
+        .await?
+        .ok_or(AuthError::AuthorizationRequired)?;
+    if stored.token_response.is_none() {
+        return Err(AuthError::AuthorizationRequired.into());
+    }
+    // Do not reuse tokens registered to a different configured OAuth client.
+    if remote
+        .oauth_client_id
+        .as_deref()
+        .is_some_and(|id| id != stored.client_id)
+    {
+        return Err(AuthError::AuthorizationRequired.into());
+    }
+    let http_client = Arc::new(super::oauth_client::OAuthRequestClient::new()?);
+    let mut manager =
+        AuthorizationManager::new_with_oauth_http_client(remote.url.as_str(), http_client.clone())
+            .await?;
+    manager.set_credential_store(store);
+    let metadata = tokio::time::timeout(DISCOVERY_TIMEOUT, manager.discover_metadata())
+        .await
+        .context("OAuth metadata discovery timed out")??;
+    manager.set_metadata(metadata);
+    let mut config = OAuthClientConfig::new(stored.client_id, remote.url.clone());
+    config.client_secret = remote.oauth_client_secret.clone();
+    manager.configure_client(config)?;
+    Ok(super::oauth_client::OAuthSession {
+        manager,
+        transient_failure: http_client.transient_failure.clone(),
+    })
+}
+
+fn authorization_scopes(manager: &AuthorizationManager, configured: Option<&str>) -> Vec<String> {
+    // Explicit scopes win over discovery; the SDK appends offline_access when
+    // advertised so providers that require it can issue refresh tokens.
+    manager.select_scopes(configured.filter(|scope| !scope.trim().is_empty()), &[])
 }
 
 pub fn has_static_authorization(remote: &McpRemoteConfig) -> bool {
@@ -192,17 +239,7 @@ async fn authenticate_with_url_action<F: Future<Output = ()>>(
         .map_err(|e| anyhow!("OAuth metadata discovery failed: {e}"))?;
     manager.set_metadata(metadata);
 
-    let scopes: Vec<String> = remote
-        .oauth_scope
-        .as_deref()
-        .map(|scope| {
-            scope
-                .split_whitespace()
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let scopes = authorization_scopes(&manager, remote.oauth_scope.as_deref());
 
     if let Some(client_id) = remote.oauth_client_id.as_deref() {
         let mut config =
@@ -220,10 +257,16 @@ async fn authenticate_with_url_action<F: Future<Output = ()>>(
     }
 
     let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
-    let auth_url = manager
+    let mut auth_url = manager
         .get_authorization_url(&scope_refs)
         .await
         .map_err(|e| anyhow!("failed to build authorization URL: {e}"))?;
+    if scopes.iter().any(|scope| scope == "offline_access") {
+        // OIDC offline access requires explicit consent to obtain refresh tokens.
+        let mut url = url::Url::parse(&auth_url)?;
+        url.query_pairs_mut().append_pair("prompt", "consent");
+        auth_url = url.into();
+    }
 
     let callback = tokio::time::timeout(
         BROWSER_AUTH_TIMEOUT,
@@ -341,6 +384,52 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use tokio::net::TcpStream;
+
+    #[tokio::test]
+    async fn scope_selection_preserves_explicit_scopes_and_adds_offline_access() {
+        let mut manager = AuthorizationManager::new("http://127.0.0.1:1/mcp")
+            .await
+            .unwrap();
+        let metadata = serde_json::from_value(serde_json::json!({
+            "authorization_endpoint":"http://127.0.0.1:1/authorize",
+            "token_endpoint":"http://127.0.0.1:1/token",
+            "scopes_supported":["tools:read", "offline_access"]
+        }))
+        .unwrap();
+        manager.set_metadata(metadata);
+        assert_eq!(
+            authorization_scopes(&manager, Some("  tools:write  ")),
+            vec!["tools:write", "offline_access"]
+        );
+        assert_eq!(
+            authorization_scopes(&manager, None),
+            vec!["tools:read", "offline_access"]
+        );
+        assert_eq!(
+            authorization_scopes(&manager, Some("tools:read offline_access")),
+            vec!["tools:read", "offline_access"]
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_selection_does_not_request_unsupported_offline_access() {
+        let mut manager = AuthorizationManager::new("http://127.0.0.1:1/mcp")
+            .await
+            .unwrap();
+        manager.set_metadata(
+            serde_json::from_value(serde_json::json!({
+                "authorization_endpoint":"http://127.0.0.1:1/authorize",
+                "token_endpoint":"http://127.0.0.1:1/token",
+                "scopes_supported":["tools:read"]
+            }))
+            .unwrap(),
+        );
+        assert_eq!(authorization_scopes(&manager, None), vec!["tools:read"]);
+        assert_eq!(
+            authorization_scopes(&manager, Some("tools:write")),
+            vec!["tools:write"]
+        );
+    }
 
     async fn send_callback(addr: std::net::SocketAddr, query: &str) {
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -532,13 +621,5 @@ mod tests {
     fn rejects_oauth_error() {
         let err = parse_callback_query("error=access_denied&error_description=nope").unwrap_err();
         assert!(err.to_string().contains("access_denied"));
-    }
-
-    #[test]
-    fn auth_error_heuristic() {
-        assert!(is_auth_error_message("Auth required"));
-        assert!(is_auth_error_message("HTTP 401 Unauthorized"));
-        assert!(is_auth_error_message("OAuth authorization required"));
-        assert!(!is_auth_error_message("connection refused"));
     }
 }
