@@ -219,6 +219,13 @@ pub fn merge_dialog_models(
 }
 
 fn is_openai_compatible(provider: &crate::config::CustomProviderConfig) -> bool {
+    if provider
+        .base_url
+        .as_deref()
+        .is_some_and(|base_url| !base_url.trim().is_empty())
+    {
+        return true;
+    }
     matches!(
         provider.npm.as_deref(),
         Some("@ai-sdk/openai-compatible" | "@ai-sdk/gateway" | "@openrouter/ai-sdk-provider")
@@ -1383,6 +1390,67 @@ mod tests {
         assert_eq!(models[0].name, "GPT-6 Astra");
         assert!(models[0].attachment);
         server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn custom_endpoint_discovery_is_additive_with_configured_models() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("connection");
+            let mut request = vec![0; 8192];
+            let count = stream.read(&mut request).await.expect("request");
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 52\r\nconnection: close\r\n\r\n{\"data\":[{\"id\":\"manual-model\"},{\"id\":\"live-model\"}]}"
+                )
+                .await
+                .expect("response");
+        });
+
+        let provider = CustomProviderConfig {
+            name: Some("Test Endpoint".to_string()),
+            npm: None,
+            base_url: Some(format!("http://{address}")),
+            api_key: None,
+            models: HashMap::from([(
+                "manual-model".to_string(),
+                CustomModelConfig {
+                    name: Some("Manual Model".to_string()),
+                    context_window: None,
+                    max_tokens: None,
+                    attachment: None,
+                    reasoning: None,
+                    reasoning_options: None,
+                    temperature: None,
+                    tool_call: None,
+                    modalities: None,
+                    launch: false,
+                },
+            )]),
+        };
+        let discovery =
+            Discovery::new_with_custom(Some(HashMap::from([("gateway".to_string(), provider)])))
+                .expect("discovery");
+
+        let discovered = discovery
+            .discover_custom_models_from_catalog(&HashMap::new())
+            .await;
+        assert_eq!(discovered.len(), 2);
+        server.await.expect("server");
+
+        let mut models = discovered;
+        discovery.apply_custom_models_to_dialog(&mut models);
+        models.sort_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "live-model");
+        assert_eq!(models[1].id, "manual-model");
+        assert_eq!(models[1].name, "Manual Model");
     }
 
     #[test]
