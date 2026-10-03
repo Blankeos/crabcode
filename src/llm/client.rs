@@ -1973,7 +1973,7 @@ async fn stream_provider_request(
     }
 }
 
-fn openai_request_instructions(
+pub(crate) fn openai_request_instructions(
     options: &OpenAIRequestOptions,
     messages: &[AisdkMessage],
 ) -> Option<String> {

@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::process::{Command as StdCommand, Stdio};
+use std::process::{Child, Command as StdCommand, Stdio};
 
 use super::ledger::{
     canonicalize_workdir, ensure_jobs_root, is_pid_alive, job_dir, load_meta, log_path,
@@ -20,7 +20,7 @@ pub struct SpawnDetachedOpts<'a> {
 /// Spawn a detached background job that survives crabcode exit.
 ///
 /// Unix: `/bin/sh -c command` in its own process group, stdout/stderr → output.log,
-/// Child dropped immediately (lazy status updates via prune).
+/// A detached waiter reaps the child (lazy status updates via prune).
 /// Windows: best-effort CREATE_NEW_PROCESS_GROUP + log redirect.
 pub async fn spawn_detached(opts: SpawnDetachedOpts<'_>) -> Result<JobMeta> {
     spawn_detached_blocking(opts)
@@ -97,14 +97,29 @@ fn spawn_detached_into(
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
+    // Start the waiter first: failure to create a thread must not leave a spawned
+    // child with nobody to reap it. Dropping the sender on spawn failure exits it.
+    // This thread neither keeps the app alive nor kills the job on app exit.
+    let (sender, receiver) = std::sync::mpsc::channel::<Child>();
+    std::thread::Builder::new()
+        .name("job-reaper".into())
+        .spawn(move || {
+            if let Ok(mut child) = receiver.recv() {
+                let _ = child.wait();
+            }
+        })
+        .context("start detached job reaper")?;
+
     let child = cmd
         .spawn()
         .with_context(|| format!("spawn detached: {}", opts.command))?;
 
     let pid = child.id();
 
-    // Detach: drop Child without waiting / killing.
-    drop(child);
+    // Only reap here; writing status from this thread could overwrite a kill or
+    // a newer incarnation of the same job after restart. Also hand off before
+    // saving metadata so an IO error there cannot leak a zombie.
+    sender.send(child).expect("job reaper receiver is waiting");
 
     let meta = JobMeta {
         id: id.clone(),
@@ -209,16 +224,26 @@ fn kill_process_group(pid: u32) {
 /// Read output.log from a byte offset. Returns (content, next_offset, file_len).
 pub fn read_log_from(id: &str, since_byte: usize) -> Result<(String, usize, usize)> {
     let path = log_path(id);
-    if !path.exists() {
-        return Ok((String::new(), since_byte, 0));
-    }
-    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-    let len = bytes.len();
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((String::new(), since_byte, 0));
+        }
+        Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
+    };
+    let len = usize::try_from(file.metadata()?.len()).context("log length exceeds usize")?;
     let start = since_byte.min(len);
-    let slice = &bytes[start..];
+    file.seek(SeekFrom::Start(start as u64))
+        .with_context(|| format!("seek {}", path.display()))?;
+    let mut bytes = Vec::new();
+    // Bound the read to this snapshot so a busy writer cannot extend it forever.
+    file.take((len - start) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    let next = start + bytes.len();
     // Lossy is fine for mixed binary-ish tool output.
-    let content = String::from_utf8_lossy(slice).into_owned();
-    Ok((content, len, len))
+    let content = String::from_utf8_lossy(&bytes).into_owned();
+    Ok((content, next, next))
 }
 
 /// Poll log growth / process death up to `wait_ms`.
@@ -267,6 +292,83 @@ mod tests {
     use crate::jobs::test_env::TempState;
     use std::time::Duration;
 
+    #[test]
+    fn log_offsets_and_lossy_utf8() {
+        let _state = TempState::new();
+        let id = "job_log_offsets";
+        assert_eq!(read_log_from(id, 17).unwrap(), (String::new(), 17, 0));
+        std::fs::create_dir_all(job_dir(id)).unwrap();
+        let path = log_path(id);
+        let bytes = b"a\xe2\x82\xac\xffz";
+        std::fs::write(&path, bytes).unwrap();
+        for offset in [0, 1, 2, 4, 6, 100, usize::MAX] {
+            assert_eq!(
+                read_log_from(id, offset).unwrap(),
+                (
+                    String::from_utf8_lossy(&bytes[offset.min(bytes.len())..]).into_owned(),
+                    bytes.len(),
+                    bytes.len(),
+                )
+            );
+        }
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"more")
+            .unwrap();
+        assert_eq!(read_log_from(id, 6).unwrap(), ("more".into(), 10, 10));
+        std::fs::write(&path, b"x").unwrap();
+        assert_eq!(read_log_from(id, 10).unwrap(), (String::new(), 1, 1));
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(read_log_from(id, 1).unwrap(), (String::new(), 0, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tail_of_sparse_log() {
+        let _state = TempState::new();
+        let id = "job_sparse_log";
+        std::fs::create_dir_all(job_dir(id)).unwrap();
+        let mut file = std::fs::File::create(log_path(id)).unwrap();
+        let offset = 64 * 1024 * 1024;
+        file.seek(SeekFrom::Start(offset as u64)).unwrap();
+        file.write_all(b"tail").unwrap();
+        assert_eq!(
+            read_log_from(id, offset).unwrap(),
+            ("tail".into(), offset + 4, offset + 4)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_child_is_reaped_and_lazily_finalized() {
+        let _state = TempState::new();
+        let mut meta = spawn_detached_blocking(SpawnDetachedOpts {
+            command: "exit 7",
+            name: "reap-test",
+            workdir: Path::new("."),
+            session_id: None,
+        })
+        .unwrap();
+        for _ in 0..100 {
+            if !is_pid_alive(meta.pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!is_pid_alive(meta.pid), "exited child was not reaped");
+        // A reaped child is no longer waitable by this parent.
+        let rc = unsafe { libc::waitpid(meta.pid as i32, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(rc, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        assert!(super::super::ledger::refresh_if_dead(&mut meta).unwrap());
+        assert_eq!(load_meta(&meta.id).unwrap().status, JobStatus::Exited);
+    }
+
     #[tokio::test]
     async fn spawn_and_kill_sleep() {
         let _state = TempState::new();
@@ -281,9 +383,14 @@ mod tests {
         assert!(is_pid_alive(meta.pid));
         let killed = kill_job(&meta.id).unwrap();
         assert_eq!(killed.status, JobStatus::Killed);
-        // Give the OS a moment.
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(!is_pid_alive(meta.pid) || killed.status == JobStatus::Killed);
+        for _ in 0..100 {
+            if !is_pid_alive(meta.pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!is_pid_alive(meta.pid));
+        assert_eq!(load_meta(&meta.id).unwrap().status, JobStatus::Killed);
     }
 
     #[tokio::test]
@@ -329,7 +436,9 @@ mod tests {
         assert_eq!(restarted.status, JobStatus::Running);
         assert!(restarted.ended_at.is_none());
         assert_ne!(restarted.pid, old_pid);
+        assert!(!is_pid_alive(old_pid));
         assert!(is_pid_alive(restarted.pid));
+        assert_eq!(load_meta(&meta.id).unwrap().pid, restarted.pid);
 
         let (log, _, _) = read_log_from(&meta.id, 0).unwrap();
         assert!(
@@ -362,7 +471,7 @@ mod tests {
         let restarted = restart_job(&meta.id).unwrap();
         assert_eq!(restarted.id, meta.id);
         assert_eq!(restarted.status, JobStatus::Running);
-        assert!(is_pid_alive(restarted.pid));
+        // `true` may already have exited and been reaped by this point.
         let _ = kill_job(&meta.id);
     }
 }

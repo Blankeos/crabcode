@@ -248,6 +248,32 @@ impl Input {
         }
     }
 
+    /// Native collapse: with an active selection, plain Left/Right clears
+    /// the highlight and jumps the caret to the selection edge (Left ->
+    /// start, Right -> end) instead of moving one char from the cursor.
+    /// Returns false when there is no selection to collapse.
+    fn collapse_selection_to_edge(&mut self, to_start: bool) -> bool {
+        let Some(((start_row, start_col), (end_row, end_col))) = self.textarea.selection_range()
+        else {
+            return false;
+        };
+        if (start_row, start_col) == (end_row, end_col) {
+            return false;
+        }
+        self.reveal_cursor_after_key_input();
+        self.preferred_visual_col = None;
+        let (row, col) = if to_start {
+            (start_row, start_col)
+        } else {
+            (end_row, end_col)
+        };
+        self.textarea.cancel_selection();
+        self.clear_selection_drag_state();
+        self.textarea
+            .move_cursor(CursorMove::Jump(row as u16, col as u16));
+        true
+    }
+
     /// Option+Arrow word jump (mirrors tui-textarea's Ctrl+Arrow handling,
     /// which terminals don't send for macOS Option). With `extend`, behaves
     /// like Shift+Arrow: starts/continues the selection instead of clearing.
@@ -821,6 +847,38 @@ impl Input {
             }
             KeyCode::Tab => false,
             KeyCode::Esc => false,
+            // Native behavior: plain Left/Right with an active selection
+            // collapses to the selection edge (Left -> start, Right -> end).
+            // Must come before the generic textarea.input() fallback, which
+            // would otherwise move one char from the cursor.
+            KeyCode::Left if event.modifiers == KeyModifiers::NONE && self.has_selection() => {
+                self.collapse_selection_to_edge(true);
+                true
+            }
+            KeyCode::Right if event.modifiers == KeyModifiers::NONE && self.has_selection() => {
+                self.collapse_selection_to_edge(false);
+                true
+            }
+            // Native behavior: Backspace/Delete with an active selection
+            // erases the selection. These must come before the placeholder
+            // fast-paths so a selection containing a placeholder deletes
+            // the whole selection (with sync cleanup), not just the placeholder.
+            KeyCode::Backspace if self.has_selection() => {
+                self.reveal_cursor_after_key_input();
+                self.preferred_visual_col = None;
+                self.textarea.delete_char();
+                self.sync_image_placeholders();
+                self.sync_pending_pastes();
+                true
+            }
+            KeyCode::Delete if self.has_selection() => {
+                self.reveal_cursor_after_key_input();
+                self.preferred_visual_col = None;
+                self.textarea.delete_next_char();
+                self.sync_image_placeholders();
+                self.sync_pending_pastes();
+                true
+            }
             KeyCode::Backspace if self.remove_placeholder_at_cursor(false) => true,
             KeyCode::Backspace if has_command_modifier(event.modifiers) => {
                 self.command_backspace_to_line_start();
@@ -1084,6 +1142,15 @@ impl Input {
     /// Delete the word before the cursor. Handles multi-byte emoji correctly
     /// (works around a tui-textarea bug in find_word_start_backward).
     fn delete_word_backward(&mut self) {
+        // Native behavior: word-delete with an active selection deletes the
+        // selection instead of a word. Without this guard the loop below
+        // would delete the selection AND extra characters, since the word
+        // boundary is computed from the selection edge.
+        if self.has_selection() {
+            self.textarea.delete_char();
+            return;
+        }
+
         let (row, cursor_col) = self.textarea.cursor();
         let lines = self.textarea.lines();
         let line = match lines.get(row) {
@@ -1178,7 +1245,7 @@ impl Input {
 
     fn command_query(&self) -> Option<String> {
         let text = self.get_text();
-        if !text.starts_with('/') || text.contains('\n') {
+        if !text.starts_with('/') || text.chars().any(char::is_whitespace) {
             return None;
         }
         Some(text.trim_start_matches('/').to_string())
@@ -2172,7 +2239,7 @@ impl Input {
                 let text = self.get_text();
                 self.replace_range(0..text.len(), &replacement);
             }
-            SuggestionKind::Agent => {
+            SuggestionKind::Agent | SuggestionKind::Skill => {
                 let Some(token) = self.current_at_token(true) else {
                     return;
                 };
@@ -2218,33 +2285,9 @@ impl Input {
     }
 
     pub fn get_autocomplete_selection(&self, is_chat: bool) -> Option<String> {
-        if let Some(autocomplete) = &self.autocomplete {
-            let suggestions = if let Some(filter) = self.command_query() {
-                autocomplete.command_auto.get_suggestions(&filter, is_chat)
-            } else if let Some(token) = self.current_at_token(true) {
-                let mut suggestions = Vec::new();
-                suggestions.extend(
-                    autocomplete
-                        .agents
-                        .iter()
-                        .filter(|agent| {
-                            agent
-                                .name
-                                .to_ascii_lowercase()
-                                .starts_with(&token.query.to_ascii_lowercase())
-                        })
-                        .cloned(),
-                );
-                suggestions.extend(autocomplete.file_auto.get_suggestions(&token.query));
-                suggestions
-            } else {
-                Vec::new()
-            };
-            if !suggestions.is_empty() {
-                return Some(suggestions[0].name.clone());
-            }
-        }
-        None
+        self.get_autocomplete_suggestions(is_chat)
+            .first()
+            .map(|suggestion| suggestion.name.clone())
     }
 
     pub fn get_text(&self) -> String {
@@ -2257,6 +2300,16 @@ impl Input {
 
     pub fn is_empty(&self) -> bool {
         self.get_text().is_empty()
+    }
+
+    /// Non-mutating draft check for pending-recall refusal.
+    /// Mirrors submit-time `!text.is_empty() || !images.is_empty()`: any
+    /// textarea text (including image/paste placeholders) or tracked
+    /// attachments counts as an existing draft that recall must not overwrite.
+    pub fn has_draft_content(&self) -> bool {
+        !self.get_text().is_empty()
+            || !self.local_images.is_empty()
+            || !self.pending_pastes.is_empty()
     }
 
     pub fn clear(&mut self) {
@@ -2375,21 +2428,7 @@ impl Input {
                 return autocomplete.command_auto.get_suggestions(&filter, is_chat);
             }
             if let Some(token) = self.current_at_token(true) {
-                let mut suggestions = Vec::new();
-                suggestions.extend(
-                    autocomplete
-                        .agents
-                        .iter()
-                        .filter(|agent| {
-                            agent
-                                .name
-                                .to_ascii_lowercase()
-                                .starts_with(&token.query.to_ascii_lowercase())
-                        })
-                        .cloned(),
-                );
-                suggestions.extend(autocomplete.file_auto.get_suggestions(&token.query));
-                return suggestions;
+                return autocomplete.mention_suggestions(&token.query);
             }
         }
         Vec::new()
@@ -2610,6 +2649,20 @@ mod tests {
 
         assert_eq!(input.get_text(), "see [Image #1] and [Image #2]");
         assert_eq!(input.local_image_paths_for_submission(), paths);
+    }
+
+    #[test]
+    fn test_has_draft_content_refuses_text_and_attachments() {
+        let mut input = Input::new();
+        assert!(!input.has_draft_content());
+
+        input.insert_str("draft");
+        assert!(input.has_draft_content());
+        input.clear();
+        assert!(!input.has_draft_content());
+
+        input.attach_image(PathBuf::from("/tmp/draft.png"));
+        assert!(input.has_draft_content());
     }
 
     #[test]
@@ -3013,7 +3066,7 @@ mod tests {
 
     #[test]
     fn test_input_cursor_uses_agent_color() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{backend::Backend, backend::TestBackend, Terminal};
 
         let mut input = Input::new();
         let mut colors = test_colors();
@@ -3037,13 +3090,32 @@ mod tests {
             })
             .unwrap();
 
-        let buffer = terminal.backend().buffer();
-        let cursor_cell = buffer.cell((3, 1)).expect("cursor cell").style();
-        assert_eq!(cursor_cell.bg, Some(colors.secondary));
+        // Agent color is still wired through the textarea cursor style.
+        // The visible caret is the hardware terminal cursor (single-caret
+        // design, see 99f3227); the buffer no longer carries a fake block.
+        let expected = input_cursor_style(colors.secondary);
+        assert_eq!(input.textarea.cursor_style(), expected);
+        assert_eq!(expected.bg, Some(colors.secondary));
         assert_eq!(
-            cursor_cell.fg,
+            expected.fg,
             Some(crate::theme::contrast_text(colors.secondary))
         );
+
+        // Single caret: fake block highlight is suppressed so complex emoji
+        // (ZWJ/VS16/flags) can't render two split carets. The buffer cell
+        // keeps the text/background style instead of the agent color.
+        let buffer = terminal.backend().buffer();
+        let cursor_cell = buffer.cell((3, 1)).expect("cursor cell").style();
+        assert_eq!(cursor_cell.bg, Some(colors.background_element));
+        assert_ne!(cursor_cell.bg, Some(colors.secondary));
+
+        // Hardware terminal cursor is the source of truth and sits on the
+        // textarea caret.
+        let pos = terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("hardware cursor");
+        assert_eq!((pos.x, pos.y), (3, 1));
     }
 
     #[test]
@@ -3064,6 +3136,76 @@ mod tests {
         assert!(suggestions
             .iter()
             .any(|s| s.kind == SuggestionKind::Agent && s.name == "general"));
+    }
+
+    #[test]
+    fn test_skill_autocomplete_is_discovered_with_mentions_not_slashes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut input = Input::new().with_autocomplete(
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::default(),
+                root.path(),
+                false,
+                Vec::new(),
+            )
+            .with_agents(vec![Suggestion::agent("explore", "Explore code")])
+            .with_skills(vec![
+                Suggestion::skill("ratatui", "Build terminal UIs"),
+                Suggestion::skill("codebase-design", "Design deep modules"),
+            ]),
+        );
+        for is_chat in [false, true] {
+            input.set_text("@");
+            let suggestions = input.get_autocomplete_suggestions(is_chat);
+            assert_eq!(suggestions[0].name, "codebase-design");
+            assert_eq!(suggestions[0].kind, SuggestionKind::Skill);
+            assert_eq!(suggestions[1].name, "ratatui");
+            assert_eq!(suggestions[2].kind, SuggestionKind::Agent);
+
+            input.set_text("@CODE");
+            assert_eq!(
+                input.get_autocomplete_suggestions(is_chat),
+                vec![Suggestion::skill("codebase-design", "Design deep modules")]
+            );
+            assert_eq!(
+                input.get_autocomplete_selection(is_chat).as_deref(),
+                Some("codebase-design")
+            );
+
+            input.set_text("/code");
+            assert!(input.get_autocomplete_suggestions(is_chat).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_skill_completion_replaces_only_current_mention() {
+        let mut input = Input::new();
+        input.set_text("Use @code and keep the rest");
+        input.textarea.move_cursor(CursorMove::Jump(0, 9));
+        input.apply_suggestion(&Suggestion::skill("codebase-design", "Design deep modules"));
+        assert_eq!(input.get_text(), "Use @codebase-design  and keep the rest");
+        assert_eq!(input.submission_text(), input.get_text());
+        assert!(!input.should_show_suggestions());
+    }
+
+    #[test]
+    fn test_skill_completion_inside_slash_command_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let mut input = Input::new().with_autocomplete(
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::default(),
+                root.path(),
+                false,
+                Vec::new(),
+            )
+            .with_skills(vec![Suggestion::skill(
+                "codebase-design",
+                "Design deep modules",
+            )]),
+        );
+        input.set_text("/review @code");
+        input.complete_selection(true);
+        assert_eq!(input.get_text(), "/review @codebase-design ");
     }
 
     #[test]
@@ -3556,5 +3698,89 @@ mod tests {
         assert!(input.has_selection());
         assert_eq!(input.get_selected_text(), "hello world");
         assert_eq!(input.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn plain_arrows_collapse_multiline_unicode_selection() {
+        for backwards in [false, true] {
+            for arrow in [KeyCode::Left, KeyCode::Right] {
+                let mut input = Input::new();
+                input.insert_str("aé🙂\n中xyz");
+                let (start, end) = ((0, 1), (1, 2));
+                let (anchor, edge) = if backwards {
+                    (end, start)
+                } else {
+                    (start, end)
+                };
+                input
+                    .textarea
+                    .move_cursor(CursorMove::Jump(anchor.0, anchor.1));
+                input.textarea.start_selection();
+                input.textarea.move_cursor(CursorMove::Jump(edge.0, edge.1));
+
+                assert!(input.handle_event(key_event(arrow)));
+                assert!(!input.has_selection());
+                assert_eq!(input.get_text(), "aé🙂\n中xyz");
+                assert_eq!(
+                    input.textarea.cursor(),
+                    if arrow == KeyCode::Left {
+                        (0, 1)
+                    } else {
+                        (1, 2)
+                    }
+                );
+
+                assert!(input.handle_event(key_event(arrow)));
+                assert_eq!(
+                    input.textarea.cursor(),
+                    if arrow == KeyCode::Left {
+                        (0, 0)
+                    } else {
+                        (1, 3)
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn backspace_deletes_shift_selection() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        for _ in 0..5 {
+            assert!(input.handle_event(modified_key_event(KeyCode::Left, KeyModifiers::SHIFT,)));
+        }
+        assert!(input.has_selection(), "expected selection after shift-left");
+        assert_eq!(input.get_selected_text(), "world");
+        assert!(input.handle_event(key_event(KeyCode::Backspace)));
+        assert_eq!(input.get_text(), "hello ");
+        assert!(!input.has_selection());
+    }
+
+    #[test]
+    fn backspace_deletes_opt_shift_selection() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Left,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert_eq!(input.get_selected_text(), "world");
+        assert!(input.handle_event(key_event(KeyCode::Backspace)));
+        assert_eq!(input.get_text(), "hello ");
+    }
+
+    #[test]
+    fn alt_backspace_with_selection_deletes_only_selection() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Left,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert!(input.handle_event(modified_key_event(KeyCode::Backspace, KeyModifiers::ALT,)));
+        assert_eq!(input.get_text(), "hello ");
     }
 }

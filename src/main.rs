@@ -18,6 +18,7 @@ mod mcp;
 mod model;
 mod notify;
 mod persistence;
+mod pr;
 mod prompt;
 mod remote;
 mod remote_mcp;
@@ -31,6 +32,7 @@ mod theme;
 mod toast;
 mod tools;
 mod ui;
+mod update;
 mod upgrade;
 mod utils;
 mod views;
@@ -545,14 +547,14 @@ async fn run_print_mode(
         let _ = completion_sender.send(crate::llm::ChunkMessage::End);
     });
 
+    let mut output = PrintOutput::default();
     while let Some(chunk) = receiver.recv().await {
+        if let Some(commentary) = output.observe(&chunk) {
+            eprintln!("{commentary}");
+        }
         match chunk {
-            crate::llm::ChunkMessage::Text(text) => {
-                print!("{}", text);
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            }
-            crate::llm::ChunkMessage::ToolCalls(_)
+            crate::llm::ChunkMessage::Text(_)
+            | crate::llm::ChunkMessage::ToolCalls(_)
             | crate::llm::ChunkMessage::ToolResult(_)
             | crate::llm::ChunkMessage::Metrics { .. }
             | crate::llm::ChunkMessage::Cancelled
@@ -566,7 +568,7 @@ async fn run_print_mode(
             | crate::llm::ChunkMessage::BackgroundJobEvent { .. }
             | crate::llm::ChunkMessage::TurnStopReason(_) => {}
             crate::llm::ChunkMessage::End => {
-                println!();
+                println!("{}", output.pending);
                 play_resolved_sound(&sounds, crate::sound::SoundEvent::Complete);
                 break;
             }
@@ -609,6 +611,42 @@ async fn run_print_mode(
 
     let _ = no_session_persistence;
     Ok(())
+}
+
+/// Buffer text until we know whether it is tool-step commentary or the final answer.
+/// Streaming every delta to stdout joins preambles directly onto machine-consumed output.
+#[derive(Default)]
+struct PrintOutput {
+    pending: String,
+}
+
+impl PrintOutput {
+    fn observe(&mut self, chunk: &crate::llm::ChunkMessage) -> Option<String> {
+        use crate::llm::ChunkMessage;
+        match chunk {
+            ChunkMessage::Text(text) => self.pending.push_str(text),
+            ChunkMessage::ToolCalls(calls) if !calls.is_empty() => {
+                return self.take_commentary();
+            }
+            // Some providers can emit text after announcing a tool call.
+            ChunkMessage::ToolResult(_) => return self.take_commentary(),
+            ChunkMessage::StreamRollback { text, .. } => {
+                if self.pending.ends_with(text) {
+                    self.pending.truncate(self.pending.len() - text.len());
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn take_commentary(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.pending))
+        }
+    }
 }
 
 fn play_resolved_sound(
@@ -691,6 +729,20 @@ pub fn remove_expired_toasts() {
     TOAST_MANAGER.lock().unwrap().remove_expired();
 }
 
+/// Drop expired toasts, reporting whether a redraw is needed. Separated from
+/// the void helper so the event loop can repaint exactly once at expiry
+/// without continuously animating.
+fn remove_expired_toasts_needs_redraw() -> bool {
+    TOAST_MANAGER.lock().unwrap().remove_expired()
+}
+
+/// How long until the next toast expires (for idle wakeup). Caps the idle
+/// `poll()` so a 4s toast wakes one redraw at expiry instead of lingering
+/// painted with a dead hitbox.
+fn time_until_next_toast_expiry() -> Option<std::time::Duration> {
+    TOAST_MANAGER.lock().unwrap().time_until_next_expiry()
+}
+
 pub fn get_toast_manager() -> &'static Mutex<ToastManager> {
     &TOAST_MANAGER
 }
@@ -705,7 +757,7 @@ pub(crate) struct Args {
     #[arg(short = 's', long = "session")]
     session: Option<String>,
 
-    /// Run in print mode (non-interactive, streams output to stdout)
+    /// Run non-interactively (final answer on stdout, tool-step commentary on stderr)
     #[arg(short = 'p', long = "print")]
     print_mode: bool,
 
@@ -795,6 +847,12 @@ enum Command {
     Upgrade {
         /// Target version (e.g. `0.0.12`) or `latest`
         target: Option<String>,
+    },
+
+    /// Fetch and checkout a GitHub PR branch, then run crabcode
+    Pr {
+        /// PR number to checkout
+        number: u64,
     },
 
     /// Show token usage and cost statistics
@@ -1037,6 +1095,9 @@ async fn main() -> Result<()> {
         Some(Command::Upgrade { target }) => {
             return crate::upgrade::upgrade(target.as_deref());
         }
+        Some(Command::Pr { number }) => {
+            return crate::pr::run(*number);
+        }
         Some(Command::Stats {
             days,
             tools,
@@ -1253,6 +1314,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn print_output_separates_tool_preambles_from_final_answer() {
+        use crate::llm::{ChunkMessage, FunctionCall, ToolCall, ToolCallResult};
+        let mut output = PrintOutput::default();
+        for preamble in [
+            "Fetching staged diff to draft the commit message.",
+            "Checking one more file.",
+        ] {
+            output.observe(&ChunkMessage::Text(preamble.into()));
+            let commentary = output.observe(&ChunkMessage::ToolCalls(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            }]));
+            assert_eq!(commentary.as_deref(), Some(preamble));
+            output.observe(&ChunkMessage::Text("Late commentary".into()));
+            assert_eq!(
+                output.observe(&ChunkMessage::ToolResult(ToolCallResult {
+                    tool_call_id: "call_1".into(),
+                    role: "tool".into(),
+                    name: "read".into(),
+                    content: "file contents".into(),
+                })),
+                Some("Late commentary".into())
+            );
+        }
+        output.observe(&ChunkMessage::Reasoning("private reasoning".into()));
+        output.observe(&ChunkMessage::Text(
+            "fix(session): preserve metadata".into(),
+        ));
+        output.observe(&ChunkMessage::Text("\n\n- cover snapshots".into()));
+        output.observe(&ChunkMessage::End);
+        assert_eq!(
+            output.pending,
+            "fix(session): preserve metadata\n\n- cover snapshots"
+        );
+    }
+
+    #[test]
+    fn print_output_preserves_direct_answers_and_applies_retry_rollbacks() {
+        use crate::llm::ChunkMessage;
+        let mut output = PrintOutput::default();
+        output.observe(&ChunkMessage::Text("fix: café".into()));
+        output.observe(&ChunkMessage::StreamRollback {
+            text: "café".into(),
+            reasoning: String::new(),
+        });
+        output.observe(&ChunkMessage::Text("retry".into()));
+        output.observe(&ChunkMessage::StreamRollback {
+            text: "not a suffix".into(),
+            reasoning: String::new(),
+        });
+        output.observe(&ChunkMessage::ToolCalls(vec![]));
+        output.observe(&ChunkMessage::End);
+        assert_eq!(output.pending, "fix: retry");
+    }
+
+    #[test]
     fn parses_model_after_print_prompt() {
         let args = Args::try_parse_from([
             "crabcode",
@@ -1467,6 +1588,8 @@ mod tests {
         assert!(help.contains("Generate or install shell completions"));
         assert!(help.contains("stats"));
         assert!(help.contains("Show token usage and cost statistics"));
+        assert!(help.contains("pr"));
+        assert!(help.contains("Fetch and checkout a GitHub PR branch, then run crabcode"));
         assert!(
             help.contains("serve        Host the current workspace for browser and CLI clients")
         );
@@ -1511,6 +1634,16 @@ mod tests {
         match args.command {
             Some(Command::Upgrade { target }) => assert_eq!(target.as_deref(), Some("0.1.0")),
             other => panic!("expected upgrade command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pr_command() {
+        let args = Args::try_parse_from(["crabcode", "pr", "123"]).unwrap();
+
+        match args.command {
+            Some(Command::Pr { number }) => assert_eq!(number, 123),
+            other => panic!("expected pr command, got {other:?}"),
         }
     }
 
@@ -1617,23 +1750,62 @@ async fn run_event_loop(
     // A short "idle" poll still burns needless redraws/sec; block until input instead.
     const FAST_POLL: Duration = Duration::from_millis(16); // ~60fps for interactive animations
     const STREAMING_POLL: Duration = Duration::from_millis(40); // 25fps, matches wave spinner
-    const IDLE_POLL: Duration = Duration::from_secs(30); // wake only on input / timeout
+                                                                // Background update/upgrade completion poll: wakes to drain the channel
+                                                                // without rendering (10Hz, no frames). Far cheaper than pinning 60fps
+                                                                // full renders for a 10s lookup or minutes-long install.
+    const BACKGROUND_POLL: Duration = Duration::from_millis(100);
+    // Discover cross-terminal job changes without forcing animation/redraws.
+    const IDLE_POLL: Duration = Duration::from_secs(1);
 
     let mut needs_redraw = true;
+    let mut first_frame_painted = false;
     let mut last_complete_frame: Option<Buffer> = None;
     let mut last_full_render_at = std::time::Instant::now();
+    let mut jobs_refresh: Option<tokio::task::JoinHandle<()>> = None;
+    let mut last_jobs_refresh = None::<std::time::Instant>;
+    let mut displayed_jobs_count = app.process_registry.running_count();
 
     while app.running {
         let loop_start = std::time::Instant::now();
 
-        let animation_needed = app.is_animation_running();
+        if jobs_refresh.as_ref().is_some_and(|task| task.is_finished()) {
+            jobs_refresh.take();
+        }
+        // First paint must not compete with spawning a worker or reading the ledger.
+        if first_frame_painted
+            && jobs_refresh.is_none()
+            && last_jobs_refresh.is_none_or(|last| last.elapsed() >= IDLE_POLL)
+        {
+            let registry = app.process_registry.clone();
+            jobs_refresh = Some(tokio::task::spawn_blocking(move || {
+                registry.refresh_running_jobs();
+            }));
+            last_jobs_refresh = Some(std::time::Instant::now());
+        }
+        let jobs_count = app.process_registry.running_count();
+        if jobs_count != displayed_jobs_count {
+            displayed_jobs_count = jobs_count;
+            needs_redraw = true;
+        }
 
-        let poll_duration = if animation_needed && app.is_streaming_animation_only() {
+        let animation_needed = app.is_animation_running();
+        let background_pending = app.has_pending_update_work();
+
+        let base_poll = if animation_needed && app.is_streaming_animation_only() {
             STREAMING_POLL
         } else if animation_needed {
             FAST_POLL
+        } else if background_pending {
+            BACKGROUND_POLL
         } else {
             IDLE_POLL
+        };
+        // Cap idle/background waits at the next toast expiry so a 4s toast
+        // wakes exactly one redraw at expiry (no stale paint + dead hitbox,
+        // no continuous animation).
+        let poll_duration = match time_until_next_toast_expiry() {
+            Some(until_expiry) => base_poll.min(until_expiry),
+            None => base_poll,
         };
 
         let elapsed_before_poll = loop_start.elapsed();
@@ -1691,6 +1863,15 @@ async fn run_event_loop(
                                         if next_mouse.kind == last_scroll.kind {
                                             scroll_count = scroll_count.saturating_add(1);
                                         } else {
+                                            // Flush before switching direction: dropping
+                                            // the accumulated ticks would eat the
+                                            // dominant gesture and let a stray
+                                            // opposite tick move the viewport the
+                                            // wrong way.
+                                            app.handle_coalesced_mouse_scroll(
+                                                last_scroll,
+                                                scroll_count,
+                                            );
                                             last_scroll = next_mouse;
                                             scroll_count = 1;
                                         }
@@ -1783,10 +1964,18 @@ async fn run_event_loop(
             needs_redraw = true;
         }
 
-        app.process_streaming_chunks();
+        // Background update/upgrade completion lands a toast: redraw once even
+        // when idle (no animation/input to carry the repaint).
+        if app.process_streaming_chunks() {
+            needs_redraw = true;
+        }
         app.update_animations();
         app.update_terminal_title_signal();
-        remove_expired_toasts();
+        // Toast expiry also needs exactly one redraw: without it the last
+        // frame stays painted while hit-testing already reports expired.
+        if remove_expired_toasts_needs_redraw() {
+            needs_redraw = true;
+        }
         let isolated_spinner_interval = app.isolated_subagent_spinner_interval();
         let full_render_due = isolated_spinner_interval.is_none_or(|interval| {
             last_complete_frame.is_none() || last_full_render_at.elapsed() >= interval
@@ -1824,6 +2013,7 @@ async fn run_event_loop(
                 last_full_render_at = std::time::Instant::now();
             }
             needs_redraw = false;
+            first_frame_painted = true;
 
             // Hydrate config/prefs/themes/skills, then session index, after first paint.
             if !startup_hydrated {
@@ -1836,6 +2026,8 @@ async fn run_event_loop(
                 session_history_loaded = true;
                 needs_redraw = true;
             }
+            // Lazy nonblocking update check (24h cache, silent failures).
+            app.maybe_start_update_check();
         }
     }
     Ok(())

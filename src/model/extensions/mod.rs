@@ -402,15 +402,7 @@ mod tests {
     fn catalog_extensions_parse_jsonc() {
         // The file is JSONC: comments and trailing commas must not break it.
         let catalog = parse_catalog_extensions();
-
-        // Comments next to the crof overrides are part of the file, so every
-        // override entry must parse.
-        let crof = catalog.get("crof").expect("crof catalog extension");
-        let models = crof.get("models").expect("crof models");
-        assert!(models.get("deepseek-v4-flash-0731").is_some());
-        assert!(models.get("deepseek-v4-flash").is_some());
-        assert!(models.get("greg-1-mini").is_some());
-        assert!(models.get("kimi-k2.5-lightning").is_some());
+        assert!(catalog.get("xai").is_some());
     }
 
     #[test]
@@ -421,29 +413,29 @@ mod tests {
         // until models.dev carries the model or the spec is completed.
         let mut providers = HashMap::new();
         providers.insert(
-            "crof".to_string(),
+            "acme".to_string(),
             Provider {
-                id: "crof".to_string(),
-                name: "Crof".to_string(),
+                id: "acme".to_string(),
+                name: "Acme".to_string(),
                 api: String::new(),
                 doc: String::new(),
-                env: vec!["CROF_API_KEY".to_string()],
+                env: vec!["ACME_API_KEY".to_string()],
                 npm: "@ai-sdk/openai-compatible".to_string(),
                 models: HashMap::new(),
             },
         );
         let mut extensions = serde_json::Map::new();
         extensions.insert(
-            "crof".to_string(),
+            "acme".to_string(),
             serde_json::json!({
                 "models": {
-                    "kimi-k2.5-lightning": { "attachment": true }
+                    "flash-mini": { "attachment": true }
                 }
             }),
         );
 
         assert!(!merge_catalog(&mut providers, &extensions));
-        assert!(!providers["crof"].models.contains_key("kimi-k2.5-lightning"));
+        assert!(!providers["acme"].models.contains_key("flash-mini"));
     }
 
     #[test]
@@ -499,25 +491,24 @@ mod tests {
 
     #[test]
     fn catalog_extensions_override_existing_model() {
-        // models.dev reports greg-1-mini as text-only, but crof.ai/pricing
-        // lists it in its `visionModels` array. The extension must flip
-        // attachment on while preserving the rest of the models.dev entry.
+        // Patch fragments on an existing models.dev entry must win on specified
+        // fields and preserve everything else.
         let mut providers = HashMap::new();
         providers.insert(
-            "crof".to_string(),
+            "acme".to_string(),
             Provider {
-                id: "crof".to_string(),
-                name: "Crof".to_string(),
+                id: "acme".to_string(),
+                name: "Acme".to_string(),
                 api: String::new(),
                 doc: String::new(),
-                env: vec!["CROF_API_KEY".to_string()],
+                env: vec!["ACME_API_KEY".to_string()],
                 npm: String::new(),
                 models: HashMap::from([(
-                    "greg-1-mini".to_string(),
+                    "flash-mini".to_string(),
                     Model {
-                        id: "greg-1-mini".to_string(),
-                        name: "Greg 1 Mini".to_string(),
-                        family: "greg".to_string(),
+                        id: "flash-mini".to_string(),
+                        name: "Flash Mini".to_string(),
+                        family: "flash".to_string(),
                         attachment: false,
                         reasoning: false,
                         reasoning_options: Vec::new(),
@@ -543,12 +534,24 @@ mod tests {
                 )]),
             },
         );
+        let mut extensions = serde_json::Map::new();
+        extensions.insert(
+            "acme".to_string(),
+            serde_json::json!({
+                "models": {
+                    "flash-mini": {
+                        "attachment": true,
+                        "modalities": { "input": ["text", "image"] }
+                    }
+                }
+            }),
+        );
 
-        assert!(merge_catalog_extensions(&mut providers));
+        assert!(merge_catalog(&mut providers, &extensions));
         // Idempotent: a second pass must not rewrite the cache.
-        assert!(!merge_catalog_extensions(&mut providers));
+        assert!(!merge_catalog(&mut providers, &extensions));
 
-        let model = &providers["crof"].models["greg-1-mini"];
+        let model = &providers["acme"].models["flash-mini"];
         assert!(model.attachment);
         assert!(model
             .modalities
@@ -559,27 +562,27 @@ mod tests {
             model.limit.as_ref().map(|limit| limit.context),
             Some(229_376)
         );
-        assert_eq!(model.name, "Greg 1 Mini");
+        assert_eq!(model.name, "Flash Mini");
         assert!(model.tool_call);
     }
 
     #[test]
-    fn catalog_extensions_add_max_effort_to_crof_deepseek_flash() {
+    fn catalog_extensions_override_reasoning_efforts() {
         let mut providers = HashMap::from([(
-            "crof".to_string(),
+            "acme".to_string(),
             Provider {
-                id: "crof".to_string(),
-                name: "Crof".to_string(),
+                id: "acme".to_string(),
+                name: "Acme".to_string(),
                 api: String::new(),
                 doc: String::new(),
-                env: vec!["CROF_API_KEY".to_string()],
+                env: vec!["ACME_API_KEY".to_string()],
                 npm: String::new(),
                 models: HashMap::from([(
-                    "deepseek-v4-flash-0731".to_string(),
+                    "flash".to_string(),
                     Model {
-                        id: "deepseek-v4-flash-0731".to_string(),
-                        name: "DeepSeek V4 Flash 0731".to_string(),
-                        family: "deepseek".to_string(),
+                        id: "flash".to_string(),
+                        name: "Flash".to_string(),
+                        family: "flash".to_string(),
                         attachment: false,
                         reasoning: true,
                         reasoning_options: vec![crate::model::reasoning::ReasoningOption {
@@ -602,10 +605,23 @@ mod tests {
                 )]),
             },
         )]);
+        let mut extensions = serde_json::Map::new();
+        extensions.insert(
+            "acme".to_string(),
+            serde_json::json!({
+                "models": {
+                    "flash": {
+                        "reasoning_options": [
+                            { "type": "effort", "values": ["none", "low", "medium", "high", "max"] }
+                        ]
+                    }
+                }
+            }),
+        );
 
-        assert!(merge_catalog_extensions(&mut providers));
+        assert!(merge_catalog(&mut providers, &extensions));
 
-        let efforts = providers["crof"].models["deepseek-v4-flash-0731"]
+        let efforts = providers["acme"].models["flash"]
             .reasoning_efforts()
             .expect("reasoning efforts");
         assert!(efforts.contains(&crate::model::reasoning::ReasoningEffort::Max));

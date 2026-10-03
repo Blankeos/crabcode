@@ -12,7 +12,7 @@ Set `editor.open` to a shell template when you want clicks to jump into an edito
 ```jsonc title="crabcode.jsonc"
 {
   "editor": {
-    "open": "herdr pane run \"$(herdr tab create --focus --label hx | jq -r .result.root_pane.pane_id)\" hx -- {pathname}:{line}:{column}",
+    "open": "tab=$(herdr tab create --focus --label hx) && pane=$(printf '%s\\n' \"$tab\" | jq -er '.result.root_pane.pane_id // empty') && herdr pane run \"$pane\" hx -- {location}",
   },
 }
 ```

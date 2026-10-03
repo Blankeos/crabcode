@@ -1,16 +1,16 @@
 use crate::theme::ThemeColors;
-use crate::tools::process_registry::{JobKind, JobStatus, ProcessJobSnapshot, ProcessRegistry};
+use crate::tools::process_registry::{JobStatus, ProcessJobSnapshot, ProcessRegistry};
 use crate::ui::components::dialog::{
-    Dialog, DialogAction as FooterAction, DialogItem, DialogPosition,
+    dim_backdrop, Dialog, DialogAction as FooterAction, DialogItem, DialogPosition,
 };
 use crate::ui::selection::{extract_selected_text, Selection};
 use crate::views::sessions_dialog::session_loading_glyph;
 use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{layout::Rect, Frame};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
@@ -22,12 +22,16 @@ pub enum JobsDialogAction {
     Close,
     Handled,
     NotHandled,
-    /// Restore interactive PTY overlay for this job id
-    FocusInteractive(String),
     /// Kill selected job
     Kill(String),
     /// Restart selected job (same id / command / cwd)
     Restart(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailRun {
+    Ledger(chrono::DateTime<chrono::Utc>),
+    Memory(std::time::Instant),
 }
 
 #[derive(Debug)]
@@ -38,6 +42,8 @@ pub struct JobsDialogState {
     pub detail_scroll: u16,
     detail_text: String,
     detail_lines: Vec<String>,
+    detail_rows: Vec<DetailRow>,
+    detail_revision: Option<(DetailRun, u64)>,
     detail_title: String,
     detail_command: String,
     detail_content_area: Rect,
@@ -56,6 +62,8 @@ impl JobsDialogState {
             detail_scroll: 0,
             detail_text: String::new(),
             detail_lines: Vec::new(),
+            detail_rows: Vec::new(),
+            detail_revision: None,
             detail_title: String::new(),
             detail_command: String::new(),
             detail_content_area: Rect::default(),
@@ -69,6 +77,8 @@ impl JobsDialogState {
         self.detail_scroll = 0;
         self.detail_text.clear();
         self.detail_lines.clear();
+        self.detail_rows.clear();
+        self.detail_revision = None;
         self.detail_command.clear();
         self.detail_stick_to_bottom = true;
         self.selection.clear();
@@ -80,6 +90,8 @@ impl JobsDialogState {
         self.detail_scroll = 0;
         self.detail_text.clear();
         self.detail_lines.clear();
+        self.detail_rows.clear();
+        self.detail_revision = None;
         self.detail_command.clear();
         self.selection.clear();
         self.dialog.hide();
@@ -99,6 +111,17 @@ impl JobsDialogState {
 
     pub fn detail_content_area(&self) -> Rect {
         self.detail_content_area
+    }
+
+    pub fn selection_visible_row(&self) -> u16 {
+        let ((line, column), _) = self.selection.range();
+        let row = self
+            .detail_rows
+            .iter()
+            .rposition(|row| row.line < line || (row.line == line && row.column <= column))
+            .unwrap_or(0);
+        row.saturating_sub(self.detail_scroll as usize)
+            .min(u16::MAX as usize) as u16
     }
 
     pub fn selected_text(&self) -> Option<String> {
@@ -149,12 +172,23 @@ impl JobsDialogState {
             Some(id) => snaps.iter().find(|s| s.id == id),
             None => None,
         };
-        self.dialog.set_items(items);
-        self.dialog.actions = list_actions(selected);
+        // Live refresh (spinner ticks every 160ms while open): preserve the
+        // viewport and selection by id. `set_items` + re-select would yank
+        // scroll_offset back to the selected row on every tick, fighting
+        // wheel scrolling (viewport jitters back / sticks in place).
+        self.dialog.set_items_preserve_ui(items);
 
-        if let Some(id) = selected_id {
-            let _ = self.dialog.select_item_by_id(&id);
+        // Only jump selection if the explicit target (previous selection or
+        // the detail job) isn't selected — e.g. returning from detail.
+        // Routine ticks must not touch the viewport.
+        if let Some(id) = selected_id.as_deref() {
+            let cur = self.dialog.get_selected().map(|item| item.id.as_str());
+            if cur != Some(id) {
+                let _ = self.dialog.select_item_by_id(id);
+            }
         }
+
+        self.dialog.actions = list_actions(selected);
     }
 
     /// Re-fetch running job output while detail is open. Preserves scroll unless
@@ -187,36 +221,44 @@ impl JobsDialogState {
     }
 
     fn open_detail_from_snapshot(&mut self, snap: &ProcessJobSnapshot, registry: &ProcessRegistry) {
-        let was_stuck =
-            self.detail_stick_to_bottom || self.detail_task_id.as_deref() != Some(snap.id.as_str());
-        let prev_scroll = self.detail_scroll;
-
-        // Never wait on the UI thread — a wait here freezes the whole app
-        // (including Esc-to-close) until the timeout fires.
-        let output = registry
-            .output_blocking(&snap.id, None, Some(0))
-            .map(|o| o.text)
-            .unwrap_or_default();
-        let text = truncate_detail(&output);
-        let lines: Vec<String> = text.lines().map(str::to_string).collect();
-
+        // Ledger snapshots reconstruct Instant from wall time on every poll.
+        // Use the persisted timestamp when available to avoid jitter invalidations.
+        let run = crate::jobs::ledger::load_meta(&snap.id)
+            .map(|meta| DetailRun::Ledger(meta.started_at))
+            .unwrap_or(DetailRun::Memory(snap.started_at));
+        let reset = self.detail_task_id.as_deref() != Some(snap.id.as_str())
+            || self
+                .detail_revision
+                .is_some_and(|(started, bytes)| started != run || snap.bytes_total < bytes);
         self.detail_task_id = Some(snap.id.clone());
         self.detail_title = derive_job_name(&snap.description, &snap.command);
         self.detail_command = snap.command.clone();
-        self.detail_text = text;
-        self.detail_lines = lines;
-        if was_stuck {
-            self.detail_scroll = u16::MAX;
-            self.detail_stick_to_bottom = true;
-        } else {
-            self.detail_scroll = prev_scroll;
-        }
-        // Selection stays unless content shrank past it — keep simple and clear.
-        if self.selection.active {
-            let max_line = self.detail_lines.len().saturating_sub(1);
-            if self.selection.start_line > max_line || self.selection.end_line > max_line {
+        let revision = (run, snap.bytes_total);
+        if reset || self.detail_revision != Some(revision) {
+            // `since_byte` is an absolute byte offset, not a length. Explicit offsets
+            // also avoid relying on the registry's shared since-last cursor.
+            let since = snap.bytes_total.saturating_sub(DETAIL_OUTPUT_CAP as u64);
+            if let Ok(output) = registry.output_blocking(&snap.id, None, Some(since)) {
+                let mut text = truncate_detail(&output.text);
+                if since > 0 && !text.starts_with("…[truncated]\n") {
+                    text.insert_str(0, "…[truncated]\n");
+                }
+                if reset || text != self.detail_text {
+                    self.selection.clear();
+                }
+                self.detail_lines = text.lines().map(str::to_string).collect();
+                self.detail_text = text;
+                self.detail_revision = Some(revision);
+            } else if reset {
+                self.detail_text.clear();
+                self.detail_lines.clear();
+                self.detail_revision = None;
                 self.selection.clear();
             }
+        }
+        if reset || self.detail_stick_to_bottom {
+            self.detail_scroll = u16::MAX;
+            self.detail_stick_to_bottom = true;
         }
         self.dialog.actions = detail_actions(snap);
     }
@@ -226,6 +268,8 @@ impl JobsDialogState {
         self.detail_scroll = 0;
         self.detail_text.clear();
         self.detail_lines.clear();
+        self.detail_rows.clear();
+        self.detail_revision = None;
         self.detail_command.clear();
         self.detail_stick_to_bottom = true;
         self.selection.clear();
@@ -385,11 +429,11 @@ fn list_actions(_selected: Option<&ProcessJobSnapshot>) -> Vec<FooterAction> {
             label: "view".into(),
         },
         FooterAction {
-            key: "x".into(),
+            key: "ctrl+x".into(),
             label: "kill".into(),
         },
         FooterAction {
-            key: "r".into(),
+            key: "ctrl+r".into(),
             label: "restart".into(),
         },
     ]
@@ -407,11 +451,11 @@ fn detail_actions(_snap: &ProcessJobSnapshot) -> Vec<FooterAction> {
             label: "scroll".into(),
         },
         FooterAction {
-            key: "x".into(),
+            key: "ctrl+x".into(),
             label: "kill".into(),
         },
         FooterAction {
-            key: "r".into(),
+            key: "ctrl+r".into(),
             label: "restart".into(),
         },
         FooterAction {
@@ -468,6 +512,7 @@ fn render_detail(f: &mut Frame, state: &mut JobsDialogState, area: Rect, colors:
     // Keep for mouse hit-testing / selection bar placement.
     state.dialog.dialog_area = panel;
 
+    dim_backdrop(f, area, panel);
     f.render_widget(Clear, panel);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -483,6 +528,7 @@ fn render_detail(f: &mut Frame, state: &mut JobsDialogState, area: Rect, colors:
             ratatui::layout::Constraint::Length(1), // $ command
             ratatui::layout::Constraint::Length(1), // blank
             ratatui::layout::Constraint::Min(3),    // output
+            ratatui::layout::Constraint::Length(1), // padding above footer
             ratatui::layout::Constraint::Length(1), // footer
         ])
         .split(inner);
@@ -496,8 +542,9 @@ fn render_detail(f: &mut Frame, state: &mut JobsDialogState, area: Rect, colors:
     let content_area = chunks[2];
     state.detail_content_area = content_area;
 
+    state.detail_rows = wrap_detail_lines(&state.detail_lines, content_area.width);
     let max_scroll = state
-        .detail_lines
+        .detail_rows
         .len()
         .saturating_sub(content_area.height as usize);
     if state.detail_stick_to_bottom || state.detail_scroll == u16::MAX {
@@ -508,38 +555,85 @@ fn render_detail(f: &mut Frame, state: &mut JobsDialogState, area: Rect, colors:
     }
 
     let start = state.detail_scroll as usize;
-    let end = (start + content_area.height as usize).min(state.detail_lines.len());
-    let mut lines: Vec<Line> = Vec::with_capacity(end.saturating_sub(start));
-    for line_text in &state.detail_lines[start..end] {
-        lines.push(Line::from(Span::styled(
-            line_text.clone(),
-            Style::default().fg(colors.text),
-        )));
+    let end = (start + content_area.height as usize).min(state.detail_rows.len());
+    let mut lines = Vec::with_capacity(end.saturating_sub(start));
+    for row in &state.detail_rows[start..end] {
+        let mut col = row.column;
+        let span = Span::raw(row.text.as_str());
+        let spans = span
+            .styled_graphemes(Style::default())
+            .map(|grapheme| {
+                let g = grapheme.symbol;
+                let width = g.width();
+                let selected = state.selection.overlaps(row.line, col, col + width);
+                col += width;
+                let style = if selected {
+                    Style::default()
+                        .bg(colors.accent)
+                        .fg(crate::theme::contrast_text(colors.accent))
+                } else {
+                    Style::default().fg(colors.text)
+                };
+                Span::styled(g.to_string(), style)
+            })
+            .collect::<Vec<_>>();
+        lines.push(Line::from(spans));
     }
-    let lines = crate::ui::selection::apply_selection_to_lines_with_offset(
-        lines,
-        &state.selection,
-        colors.accent,
-        start,
-    );
-
     f.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(colors.background))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(lines).style(Style::default().bg(colors.background)),
         content_area,
     );
 
     // Match Dialog/models footer: label primary+bold, key text_weak+dim
-    let footer_lines = state.dialog.footer_lines(chunks[3].width, colors);
-    f.render_widget(Paragraph::new(footer_lines), chunks[3]);
+    let footer_lines = state.dialog.footer_lines(chunks[4].width, colors);
+    f.render_widget(Paragraph::new(footer_lines), chunks[4]);
+}
+
+/// Visual rows retain source coordinates so soft wraps never insert copied newlines.
+#[derive(Debug)]
+struct DetailRow {
+    text: String,
+    line: usize,
+    column: usize,
+}
+
+fn wrap_detail_lines(lines: &[String], width: u16) -> Vec<DetailRow> {
+    let width = usize::from(width.max(1));
+    let mut rows = Vec::new();
+    for (line, text) in lines.iter().enumerate() {
+        let mut row = DetailRow {
+            text: String::new(),
+            line,
+            column: 0,
+        };
+        let mut used = 0;
+        let span = Span::raw(text.as_str());
+        for grapheme in span.styled_graphemes(Style::default()) {
+            let g = grapheme.symbol;
+            let w = g.width();
+            if used > 0 && used + w > width {
+                let column = row.column + used;
+                rows.push(row);
+                row = DetailRow {
+                    text: String::new(),
+                    line,
+                    column,
+                };
+                used = 0;
+            }
+            row.text.push_str(g);
+            used += w;
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 fn detail_mouse_to_pos(
     mouse: MouseEvent,
     content_area: Rect,
     scroll: u16,
-    lines: &[String],
+    rows: &[DetailRow],
 ) -> Option<(usize, usize)> {
     if mouse.column < content_area.x
         || mouse.row < content_area.y
@@ -551,14 +645,13 @@ fn detail_mouse_to_pos(
     let rel_row = (mouse.row - content_area.y) as usize;
     let rel_col = (mouse.column - content_area.x) as usize;
     let line_idx = scroll as usize + rel_row;
-    if line_idx >= lines.len() {
-        // Allow selecting past last line as end-of-last-line.
-        let last = lines.len().saturating_sub(1);
-        let col = lines.get(last).map(|l| l.width()).unwrap_or(0);
-        return Some((last, col));
-    }
-    let line_width = lines[line_idx].width();
-    Some((line_idx, rel_col.min(line_width)))
+    let row = rows.get(line_idx).or_else(|| rows.last())?;
+    let col = if line_idx >= rows.len() {
+        row.text.width()
+    } else {
+        rel_col.min(row.text.width())
+    };
+    Some((row.line, row.column + col))
 }
 
 pub fn handle_jobs_dialog_key_event(
@@ -571,6 +664,14 @@ pub fn handle_jobs_dialog_key_event(
         return JobsDialogAction::NotHandled;
     }
 
+    if key.kind == KeyEventKind::Release
+        || (key.kind == KeyEventKind::Repeat
+            && key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Char('x' | 'r')))
+    {
+        return JobsDialogAction::Handled;
+    }
+
     if state.detail_task_id.is_some() {
         return handle_detail_key(state, key, registry, spinner_frame);
     }
@@ -581,18 +682,7 @@ pub fn handle_jobs_dialog_key_event(
             state.open_detail(registry);
             JobsDialogAction::Handled
         }
-        (KeyCode::Char('f'), _) => {
-            if let Some(item) = state.dialog.get_selected() {
-                let id = item.id.clone();
-                if let Some(snap) = registry.get_blocking(&id) {
-                    if matches!(snap.kind, JobKind::Interactive) {
-                        return JobsDialogAction::FocusInteractive(id);
-                    }
-                }
-            }
-            JobsDialogAction::Handled
-        }
-        (KeyCode::Char('x'), _) => {
+        (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
             if let Some(item) = state.dialog.get_selected() {
                 let id = item.id.clone();
                 if let Some(snap) = registry.get_blocking(&id) {
@@ -604,10 +694,6 @@ pub fn handle_jobs_dialog_key_event(
             JobsDialogAction::Handled
         }
         (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
-            state.refresh_from_registry(registry, spinner_frame);
-            JobsDialogAction::Handled
-        }
-        (KeyCode::Char('r'), _) => {
             if let Some(item) = state.dialog.get_selected() {
                 return JobsDialogAction::Restart(item.id.clone());
             }
@@ -639,17 +725,7 @@ fn handle_detail_key(
             state.close_detail(registry, spinner_frame);
             JobsDialogAction::Handled
         }
-        (KeyCode::Char('f'), _) => {
-            if let Some(id) = state.detail_task_id.clone() {
-                if let Some(snap) = registry.get_blocking(&id) {
-                    if matches!(snap.kind, JobKind::Interactive) {
-                        return JobsDialogAction::FocusInteractive(id);
-                    }
-                }
-            }
-            JobsDialogAction::Handled
-        }
-        (KeyCode::Char('x'), _) => {
+        (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
             if let Some(id) = state.detail_task_id.clone() {
                 if let Some(snap) = registry.get_blocking(&id) {
                     if matches!(snap.status, JobStatus::Running) {
@@ -659,7 +735,7 @@ fn handle_detail_key(
             }
             JobsDialogAction::Handled
         }
-        (KeyCode::Char('r'), _) => {
+        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
             if let Some(id) = state.detail_task_id.clone() {
                 return JobsDialogAction::Restart(id);
             }
@@ -759,7 +835,7 @@ fn handle_detail_mouse(
         }
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some((line, col)) =
-                detail_mouse_to_pos(mouse, content, state.detail_scroll, &state.detail_lines)
+                detail_mouse_to_pos(mouse, content, state.detail_scroll, &state.detail_rows)
             {
                 state.selection.start(line, col);
                 JobsDialogAction::Handled
@@ -776,7 +852,7 @@ fn handle_detail_mouse(
         MouseEventKind::Drag(MouseButton::Left) => {
             if state.selection.is_dragging {
                 if let Some((line, col)) =
-                    detail_mouse_to_pos(mouse, content, state.detail_scroll, &state.detail_lines)
+                    detail_mouse_to_pos(mouse, content, state.detail_scroll, &state.detail_rows)
                 {
                     state.selection.extend(line, col);
                 }
@@ -804,8 +880,140 @@ fn handle_detail_mouse(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::process_registry::JobKind;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn wrapped_bottom_selection_and_dim() {
+        use ratatui::{
+            backend::TestBackend,
+            style::{Color, Modifier},
+            Terminal,
+        };
+        let mut state = init_jobs_dialog();
+        state.show();
+        state.detail_task_id = Some("test".into());
+        state.detail_lines = vec![format!("{}TAIL", "界e\u{301}".repeat(300))];
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let mut terminal = Terminal::new(TestBackend::new(50, 16)).unwrap();
+        terminal
+            .draw(|f| {
+                f.render_widget(
+                    Block::default().style(
+                        Style::default()
+                            .fg(Color::Rgb(100, 100, 100))
+                            .bg(Color::Rgb(100, 100, 100)),
+                    ),
+                    f.area(),
+                );
+                render_detail(f, &mut state, f.area(), colors);
+            })
+            .unwrap();
+        assert_eq!(
+            state.detail_scroll as usize,
+            state.detail_rows.len() - state.detail_content_area.height as usize
+        );
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(0, 0)].fg, Color::Rgb(50, 50, 50));
+        assert_eq!(buf[(0, 0)].bg, Color::Rgb(40, 40, 40));
+        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM));
+        let bottom = state.detail_content_area.bottom() - 1;
+        let rendered: String = (state.detail_content_area.x..state.detail_content_area.right())
+            .map(|x| buf[(x, bottom)].symbol())
+            .collect();
+        assert!(rendered.contains("TAIL"), "{rendered}");
+        let rows = wrap_detail_lines(&["abcdefghij".into()], 4);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            detail_mouse_to_pos(mouse, Rect::new(0, 0, 4, 2), 1, &rows),
+            Some((0, 5))
+        );
+        state.detail_lines = vec!["abcdefghij".into()];
+        state.selection.start(0, 2);
+        state.selection.extend(0, 9);
+        assert_eq!(state.selected_text().as_deref(), Some("cdefghi"));
+        state.detail_rows = rows;
+        state.detail_scroll = 0;
+        state.selection.start(0, 5);
+        assert_eq!(state.selection_visible_row(), 1);
+    }
+
+    #[test]
+    fn detail_tail_refreshes_on_growth_and_same_size_restart() {
+        let _env = crate::jobs::test_env::TempState::new();
+        let workdir = tempfile::tempdir().unwrap();
+        let registry = ProcessRegistry::with_workdir(workdir.path().to_path_buf());
+        let mut meta = crate::jobs::ledger::JobMeta {
+            id: "job_detail_cache".into(),
+            pid: 0,
+            pgid: None,
+            command: "test".into(),
+            name: "test".into(),
+            workdir: workdir.path().to_string_lossy().into_owned(),
+            session_id: None,
+            started_at: chrono::Utc::now(),
+            ended_at: Some(chrono::Utc::now()),
+            status: crate::jobs::ledger::JobStatus::Exited,
+            exit_code: Some(0),
+        };
+        crate::jobs::ledger::save_meta(&meta).unwrap();
+        let path = crate::jobs::ledger::log_path(&meta.id);
+        std::fs::write(&path, format!("{}TAIL", "a".repeat(DETAIL_OUTPUT_CAP))).unwrap();
+        let mut state = init_jobs_dialog();
+        state.show();
+        state.open_detail_from_snapshot(&registry.get_blocking(&meta.id).unwrap(), &registry);
+        assert!(state.detail_text.starts_with("…[truncated]\n"));
+        assert!(state.detail_text.ends_with("TAIL"));
+        state.selection.start(1, 1);
+        state.selection.extend(1, 2);
+        state.refresh_detail_output(&registry);
+        assert!(state.selection.active, "unchanged output retains selection");
+        std::fs::write(&path, "new").unwrap();
+        state.refresh_detail_output(&registry);
+        assert_eq!(state.detail_text, "new");
+        assert!(!state.selection.active);
+        meta.started_at += chrono::Duration::seconds(1);
+        crate::jobs::ledger::save_meta(&meta).unwrap();
+        std::fs::write(&path, "end").unwrap();
+        state.refresh_detail_output(&registry);
+        assert_eq!(state.detail_text, "end");
+    }
+
+    #[test]
+    fn shortcuts_leave_plain_letters_for_search() {
+        assert!(list_actions(None)
+            .iter()
+            .all(|action| action.key != "ctrl+o" && action.label != "focus"));
+        let workdir = tempfile::tempdir().unwrap();
+        let registry = ProcessRegistry::with_workdir(workdir.path().to_path_buf());
+        let mut state = init_jobs_dialog();
+        state.show();
+        for c in ['x', 'r', 'f'] {
+            handle_jobs_dialog_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                &registry,
+                0,
+            );
+        }
+        assert_eq!(state.dialog.search_query, "xrf");
+        for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
+            for c in ['x', 'r'] {
+                let key = KeyEvent::new_with_kind(KeyCode::Char(c), KeyModifiers::CONTROL, kind);
+                assert_eq!(
+                    handle_jobs_dialog_key_event(&mut state, key, &registry, 0),
+                    JobsDialogAction::Handled
+                );
+            }
+        }
+        assert_eq!(state.dialog.search_query, "xrf");
+    }
 
     #[test]
     fn format_job_duration_buckets() {
@@ -849,7 +1057,7 @@ mod tests {
     fn footer_actions_include_restart() {
         assert!(list_actions(None)
             .iter()
-            .any(|a| a.key == "r" && a.label == "restart"));
+            .any(|a| a.key == "ctrl+r" && a.label == "restart"));
         let snap = ProcessJobSnapshot {
             id: "job_test".into(),
             kind: JobKind::Background,
@@ -865,7 +1073,7 @@ mod tests {
         };
         assert!(detail_actions(&snap)
             .iter()
-            .any(|a| a.key == "r" && a.label == "restart"));
+            .any(|a| a.key == "ctrl+r" && a.label == "restart"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -934,5 +1142,73 @@ mod tests {
             "name should start with status icon, got {:?}",
             item.name
         );
+    }
+
+    fn live_list_snaps(n: usize, running_first: bool) -> Vec<ProcessJobSnapshot> {
+        (0..n)
+            .map(|i| ProcessJobSnapshot {
+                id: format!("job-{i:02}"),
+                kind: JobKind::Background,
+                command: format!("sleep {i}"),
+                description: format!("job {i}"),
+                workdir: std::path::PathBuf::from("/tmp"),
+                status: if running_first && i == 0 {
+                    JobStatus::Running
+                } else {
+                    JobStatus::Exited
+                },
+                exit_code: Some(0),
+                started_at: std::time::Instant::now(),
+                ended_at: None,
+                bytes_total: 0,
+                truncated: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn live_refresh_preserves_wheel_viewport_and_selection() {
+        let mut state = init_jobs_dialog();
+        state.show();
+        let snaps = live_list_snaps(30, false);
+        state.refresh_from_snapshots(&snaps, 0);
+        assert!(state.dialog.select_item_by_id("job-05"));
+
+        // User wheels the viewport away from the selected row; selection stays.
+        state.dialog.scroll_offset = 12;
+        let selected_before = state.dialog.get_selected().map(|item| item.id.clone());
+
+        // Spinner tick refresh (icons/durations rebuild items): viewport and
+        // selection must not move, or scrolling jitters back every 160ms.
+        state.refresh_from_snapshots(&snaps, 3);
+        assert_eq!(
+            state.dialog.get_selected().map(|item| item.id.clone()),
+            selected_before
+        );
+        assert_eq!(
+            state.dialog.scroll_offset, 12,
+            "live refresh must not yank the wheel viewport back to selection"
+        );
+    }
+
+    #[test]
+    fn live_refresh_tracks_selection_by_id_across_reorder() {
+        let mut state = init_jobs_dialog();
+        state.show();
+        let snaps = live_list_snaps(30, false);
+        state.refresh_from_snapshots(&snaps, 0);
+        assert!(state.dialog.select_item_by_id("job-10"));
+        state.dialog.scroll_offset = 8;
+
+        // Running-first sort flips the order; selection must follow the same
+        // job id (not the row index) and the viewport must stay put.
+        let mut reordered = snaps.clone();
+        reordered.reverse();
+        state.refresh_from_snapshots(&reordered, 1);
+        assert_eq!(
+            state.dialog.get_selected().map(|item| item.id.as_str()),
+            Some("job-10")
+        );
+        assert_eq!(state.dialog.scroll_offset, 8);
     }
 }

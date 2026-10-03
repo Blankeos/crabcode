@@ -6,6 +6,7 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SuggestionKind {
     Command,
+    Skill,
     Agent,
     File,
 }
@@ -27,6 +28,17 @@ impl Suggestion {
             name,
             description: description.into(),
             kind: SuggestionKind::Command,
+            is_directory: false,
+        }
+    }
+
+    pub fn skill(name: impl Into<String>, description: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            replacement: name.clone(),
+            name,
+            description: description.into(),
+            kind: SuggestionKind::Skill,
             is_directory: false,
         }
     }
@@ -60,7 +72,7 @@ impl Suggestion {
     pub fn display_prefix(&self) -> &'static str {
         match self.kind {
             SuggestionKind::Command => "/",
-            SuggestionKind::Agent => "@",
+            SuggestionKind::Agent | SuggestionKind::Skill => "@",
             SuggestionKind::File => "",
         }
     }

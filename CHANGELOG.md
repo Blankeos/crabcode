@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.13] - 2026-09-14
+
+### Bug Fixes
+
+- Reap detached children, refresh job state in background, and harden jobs overlay focus by @Blankeos
+- Improve Termux compatibility (#53) by @yan-ad in [#53](https://github.com/Blankeos/crabcode/pull/53)
+- Make warning toasts copyable by @Blankeos
+- Remove client-side OAuth model allowlist by @Blankeos
+- Suppress fake block cursor to keep single caret on complex emoji by @Blankeos
+- Use terminal hardware cursor for custom answer input by @Blankeos
+- Support Alt+b/f word movement from Ghostty's Option+Arrow encoding by @Blankeos
+- Apply theme colors to dialog list items and search textarea by @Blankeos
+- Show correct removed message count in undo toast by @Blankeos
+- Keep item menu open across background refreshes by @Blankeos
+- Track hardware terminal cursor with focused text field by @Blankeos
+- Stash in-progress edits when navigating prompt history by @Blankeos
+
+### Features
+
+- Collapse text selection on plain arrow keys by @Blankeos
+- Apply edit keys to the input selection instead of dismissing it by @Blankeos
+- Add pull request checkout command (#50) by @yan-ad in [#50](https://github.com/Blankeos/crabcode/pull/50)
+- Lazy version check with clickable upgrade toast (#54) by @Blankeos in [#54](https://github.com/Blankeos/crabcode/pull/54)
+- Add click and hover actions for pending message header by @Blankeos
+- Copy full error message by clicking error toasts by @Blankeos
+- Attach OpenCode session routing headers to LLM requests by @Blankeos
+- Support Ctrl+W to delete word backward in input by @Blankeos
+- Add lazygit-style per-item options menu in sessions dialog by @Blankeos
+- Add keyboard selection support with word/line/paragraph jumps by @Blankeos
+- Add chat input copy option and which-key shortcut for copy dialog by @Blankeos
+- Increase chat input to height to 9 by @Blankeos
+
+### Performance
+
+- Serve model catalogs from warm snapshot without subprocess spawns by @Blankeos
+
+### Refactor
+
+- Set default headers at build time and harden OpenCode session header merging by @Blankeos
+
+### Doc
+
+- Update herdr opening guide for helix and neovim by @Blankeos
+
 ## [0.0.12] - 2026-09-03
 
 ### Bug Fixes
@@ -229,55 +273,55 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
-- Classify SSE errors as retryable/permanent and enforce stream termination by @Blankeos
+- Classify SSE errors as retryable/permanent and enforce stream termination by Blankeos
 
 ### Chores
 
-- Add per-task model selection and hard-task defaults by @Blankeos
+- Add per-task model selection and hard-task defaults by Blankeos
 
 ### Features
 
 - Add watched file indexer for completion suggestions by @Blankeos
-- Support mouse handling for permission/question dialogs by @Blankeos
-- Play notification sounds for print-mode lifecycle events by @Blankeos
-- Add configurable terminal title composition by @Blankeos
-- Add dedicated subagent completion notification event by @Blankeos
+- Support mouse handling for permission/question dialogs by Blankeos
+- Play notification sounds for print-mode lifecycle events by Blankeos
+- Add configurable terminal title composition by Blankeos
+- Add dedicated subagent completion notification event by Blankeos
 
 ### Performance
 
-- Improve subagent-aware chunk coalescing and markdown render performance by @Blankeos
+- Improve subagent-aware chunk coalescing and markdown render performance by Blankeos
 
 ## [0.0.6] - 2026-07-09
 
 ### Bug Fixes
 
-- Make active tool marker animation stateless by @Blankeos
-- Infer apply_patch hunk line numbers from surrounding context by @Blankeos
-- Preserve selection when restoring and updating search filters by @Blankeos
-- Infer commandcode image support from capabilities by @Blankeos
-- Surface websocket fallback warnings for stream disconnects by @Blankeos
-- Add provider alias for connect autocomplete by @Blankeos
-- Preserve chat input draft when running command palette commands by @Blankeos
+- Make active tool marker animation stateless by Blankeos
+- Infer apply_patch hunk line numbers from surrounding context by Blankeos
+- Preserve selection when restoring and updating search filters by Blankeos
+- Infer commandcode image support from capabilities by Blankeos
+- Surface websocket fallback warnings for stream disconnects by Blankeos
+- Add provider alias for connect autocomplete by Blankeos
+- Preserve chat input draft when running command palette commands by Blankeos
 
 ### Features
 
-- Prioritize current workspace sessions in search by @Blankeos
-- Add expandable large paste placeholders with hover tooltip by @Blankeos
-- Prioritize reasoning effort options from discovery metadata by @Blankeos
-- Add editor-anchored opening for chat selections and file links by @Blankeos
-- Scroll into view on load by @Blankeos
-- Reuse Enter key for repeat navigation after search by @Blankeos
+- Prioritize current workspace sessions in search by Blankeos
+- Add expandable large paste placeholders with hover tooltip by Blankeos
+- Prioritize reasoning effort options from discovery metadata by Blankeos
+- Add editor-anchored opening for chat selections and file links by Blankeos
+- Scroll into view on load by Blankeos
+- Reuse Enter key for repeat navigation after search by Blankeos
 
 ### Performance
 
-- Optimize streaming rendering and token usage updates by @Blankeos
+- Optimize streaming rendering and token usage updates by Blankeos
 
 ## [0.0.5] - 2026-06-30
 
 ### Bug Fixes
 
-- Clear command input before processing command submissions by @Blankeos
-- Derive fork titles from session name by @Blankeos
+- Clear command input before processing command submissions by Blankeos
+- Derive fork titles from session name by Blankeos
 - Exclude non-decode waits from streaming TPS and duration metrics by @Blankeos
 - Jump to latest child session for subagent navigation by @Blankeos
 - Propagate cancellation between parent and subagent sessions by @Blankeos
@@ -294,7 +338,7 @@ All notable changes to this project will be documented in this file.
 
 ### Chores
 
-- Fix release yml by @Blankeos
+- Fix release yml by Blankeos
 
 ### Features
 
@@ -317,7 +361,7 @@ All notable changes to this project will be documented in this file.
 
 ### Doc
 
-- Mcp docs up-to-date by @Blankeos
+- Mcp docs up-to-date by Blankeos
 
 ## [0.0.4] - 2026-06-14
 

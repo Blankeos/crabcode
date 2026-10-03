@@ -48,11 +48,25 @@ impl ToastLevel {
     }
 }
 
+/// Ephemeral toast shown when a cached version check finds a newer release.
+/// Clicking it explicitly starts `crabcode upgrade`. Keep exact.
+pub const UPDATE_AVAILABLE_MESSAGE: &str = "New version available · Upgrade";
+
+/// Toast shown after `crabcode upgrade` finishes. Keep exact.
+pub const UPDATED_MESSAGE: &str = "Updated · Restart to apply";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastAction {
+    /// Clicking the toast runs `crabcode upgrade` (no confirm, no auto-install).
+    Upgrade,
+}
+
 #[derive(Debug, Clone)]
 pub struct Toast {
     message: String,
     level: ToastLevel,
     expires_at: Instant,
+    action: Option<ToastAction>,
 }
 
 impl Toast {
@@ -62,7 +76,41 @@ impl Toast {
             message: message.into(),
             level,
             expires_at: Instant::now() + duration,
+            action: None,
         }
+    }
+
+    pub fn with_action(mut self, action: ToastAction) -> Self {
+        self.action = Some(action);
+        self
+    }
+
+    /// Ephemeral update nudge. Info level so it never becomes copyable text.
+    pub fn update_available() -> Self {
+        Self::new(UPDATE_AVAILABLE_MESSAGE, ToastLevel::Info, None)
+            .with_action(ToastAction::Upgrade)
+    }
+
+    /// Exact success toast after `crabcode upgrade` completes.
+    pub fn updated() -> Self {
+        Self::new(UPDATED_MESSAGE, ToastLevel::Success, None)
+    }
+
+    /// Upgrade failure toast (Error level, full message preserved for copy).
+    pub fn upgrade_failed(message: impl Into<String>) -> Self {
+        Self::new(message.into(), ToastLevel::Error, None)
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn level(&self) -> ToastLevel {
+        self.level
+    }
+
+    pub fn action(&self) -> Option<ToastAction> {
+        self.action
     }
 
     fn is_expired(&self, now: Instant) -> bool {
@@ -89,9 +137,31 @@ impl ToastManager {
         }
     }
 
-    pub fn remove_expired(&mut self) {
+    /// Drop expired toasts. Returns true when anything was removed so the
+    /// event loop can schedule a redraw — otherwise the last toast frame
+    /// stays painted with a dead hitbox (layout already filters expired).
+    pub fn remove_expired(&mut self) -> bool {
         let now = Instant::now();
+        let before = self.toasts.len();
         self.toasts.retain(|toast| !toast.is_expired(now));
+        self.toasts.len() != before
+    }
+
+    /// How long until the next toast expires. `None` when no toasts are
+    /// queued. The idle event loop caps its blocking `poll()` at this
+    /// duration so expiry wakes exactly one redraw (no 60fps animation).
+    pub fn time_until_next_expiry(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.toasts
+            .iter()
+            .filter_map(|toast| toast.expires_at.checked_duration_since(now))
+            .min()
+    }
+
+    /// True when any toast is currently visible (used to bound idle wakeups).
+    pub fn has_visible_toasts(&self) -> bool {
+        let now = Instant::now();
+        self.toasts.iter().any(|toast| !toast.is_expired(now))
     }
 
     pub fn copyable_message_at(
@@ -103,6 +173,25 @@ impl ToastManager {
             .into_iter()
             .find(|laid| laid.toast.level.is_copyable() && laid.area.contains(position))
             .map(|laid| (laid.toast.message.clone(), laid.toast.level))
+    }
+
+    /// Hit-test for actionable toasts (e.g. the Upgrade nudge). Matches the
+    /// whole toast area: the entire toast is the Upgrade affordance.
+    pub fn action_at(&self, frame: Rect, position: Position) -> Option<(ToastAction, String)> {
+        layout_visible_toasts(frame, self, Instant::now())
+            .into_iter()
+            .find(|laid| laid.toast.action.is_some() && laid.area.contains(position))
+            .and_then(|laid| {
+                laid.toast
+                    .action
+                    .map(|action| (action, laid.toast.message.clone()))
+            })
+    }
+
+    /// Dismiss toasts carrying the given action (used to retire the Upgrade
+    /// nudge the moment its upgrade starts, preventing double-runs).
+    pub fn remove_action(&mut self, action: ToastAction) {
+        self.toasts.retain(|toast| toast.action != Some(action));
     }
 }
 
@@ -425,5 +514,123 @@ mod tests {
                 .as_deref(),
             Some("older error")
         );
+    }
+
+    #[test]
+    fn update_available_toast_has_exact_message_and_upgrade_action() {
+        let toast = Toast::update_available();
+        assert_eq!(toast.message(), "New version available · Upgrade");
+        assert_eq!(toast.message(), UPDATE_AVAILABLE_MESSAGE);
+        assert_eq!(toast.action(), Some(ToastAction::Upgrade));
+        assert_eq!(toast.level(), ToastLevel::Info);
+    }
+
+    #[test]
+    fn updated_toast_has_exact_success_message() {
+        let toast = Toast::updated();
+        assert_eq!(toast.message(), "Updated · Restart to apply");
+        assert_eq!(toast.message(), UPDATED_MESSAGE);
+        assert_eq!(toast.level(), ToastLevel::Success);
+        assert_eq!(toast.action(), None);
+    }
+
+    #[test]
+    fn upgrade_failed_toast_is_error_level() {
+        let toast = Toast::upgrade_failed("Update failed: boom");
+        assert_eq!(toast.level(), ToastLevel::Error);
+        assert_eq!(toast.action(), None);
+        assert!(toast.message().starts_with("Update failed:"));
+    }
+
+    #[test]
+    fn clicking_update_toast_returns_upgrade_action() {
+        let mut manager = ToastManager::new();
+        manager.add(Toast::update_available());
+
+        let laid = layout_visible_toasts(frame(), &manager, Instant::now());
+        assert_eq!(laid.len(), 1);
+        let area = laid[0].area;
+
+        let hit = manager.action_at(frame(), Position::new(area.x, area.y));
+        assert!(hit.is_some());
+        let (action, message) = hit.unwrap();
+        assert_eq!(action, ToastAction::Upgrade);
+        assert_eq!(message, UPDATE_AVAILABLE_MESSAGE);
+    }
+
+    #[test]
+    fn update_toast_is_not_copyable() {
+        // The Upgrade nudge is Info level, so the error-copy handler ignores it
+        // and the update-click handler owns the hit area.
+        let mut manager = ToastManager::new();
+        manager.add(Toast::update_available());
+
+        let laid = layout_visible_toasts(frame(), &manager, Instant::now());
+        assert_eq!(laid.len(), 1);
+        assert!(manager
+            .copyable_message_at(frame(), Position::new(laid[0].area.x, laid[0].area.y))
+            .is_none());
+    }
+
+    #[test]
+    fn click_outside_update_toast_has_no_action() {
+        let mut manager = ToastManager::new();
+        manager.add(Toast::update_available());
+        assert!(manager.action_at(frame(), Position::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn remove_action_dismisses_only_upgrade_toasts() {
+        let mut manager = ToastManager::new();
+        manager.add(Toast::update_available());
+        manager.add(long_lived("plain info", ToastLevel::Info));
+
+        manager.remove_action(ToastAction::Upgrade);
+
+        let laid = layout_visible_toasts(frame(), &manager, Instant::now());
+        assert_eq!(laid.len(), 1);
+        assert_eq!(laid[0].toast.message(), "plain info");
+        assert!(manager
+            .action_at(frame(), Position::new(laid[0].area.x, laid[0].area.y))
+            .is_none());
+    }
+
+    #[test]
+    fn remove_expired_reports_whether_redraw_is_needed() {
+        let mut manager = ToastManager::new();
+        assert!(!manager.remove_expired(), "empty queue needs no redraw");
+        manager.add(long_lived("fresh", ToastLevel::Info));
+        assert!(
+            !manager.remove_expired(),
+            "fresh toast must not trigger expiry redraw"
+        );
+        manager.add(Toast::new("gone", ToastLevel::Info, Some(Duration::ZERO)));
+        // Zero-duration toast is already expired at `Instant::now()`.
+        assert!(
+            manager.remove_expired(),
+            "expired toast must request exactly one redraw"
+        );
+        assert!(!manager.remove_expired(), "second sweep is a no-op");
+    }
+
+    #[test]
+    fn time_until_next_expiry_bounds_idle_wakeup() {
+        let mut manager = ToastManager::new();
+        assert_eq!(manager.time_until_next_expiry(), None);
+        manager.add(Toast::new(
+            "short",
+            ToastLevel::Info,
+            Some(Duration::from_secs(4)),
+        ));
+        let until = manager.time_until_next_expiry().expect("toast pending");
+        assert!(until <= Duration::from_secs(4) && !until.is_zero());
+        assert!(manager.has_visible_toasts());
+        manager.add(Toast::new("gone", ToastLevel::Info, Some(Duration::ZERO)));
+        // Expired entries are ignored for wakeups (they need an immediate
+        // redraw instead, via `remove_expired`).
+        let until2 = manager
+            .time_until_next_expiry()
+            .expect("fresh still pending");
+        assert!(until2 <= Duration::from_secs(4));
     }
 }

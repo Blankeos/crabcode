@@ -353,6 +353,7 @@ pub fn image_paths_from_paste(text: &str) -> Vec<PathBuf> {
     paths
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn paste_image_to_temp_png() -> Result<PathBuf> {
     let mut clipboard = arboard::Clipboard::new().context("failed to access clipboard")?;
 
@@ -382,6 +383,55 @@ pub fn paste_image_to_temp_png() -> Result<PathBuf> {
         .context("failed to write clipboard image file")?;
     let (_file, path) = temp.keep().context("failed to persist clipboard image")?;
     Ok(path)
+}
+
+#[cfg(target_os = "android")]
+pub fn paste_image_to_temp_png() -> Result<PathBuf> {
+    let temp = tempfile::Builder::new()
+        .prefix("crabcode-attachment-")
+        .suffix(".tmp")
+        .tempfile()
+        .context("failed to create image picker output file")?;
+    let (_file, path) = temp
+        .keep()
+        .context("failed to persist image picker output file")?;
+
+    let status = Command::new("termux-storage-get")
+        .arg(&path)
+        .status()
+        .context(
+            "failed to run termux-storage-get; install Termux:API and the termux-api package",
+        )?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        anyhow::bail!("Termux image picker was cancelled or failed")
+    }
+
+    let Some(extension) = detected_image_extension(&path) else {
+        let _ = std::fs::remove_file(&path);
+        anyhow::bail!("Termux image picker did not return a supported image")
+    };
+
+    let image_path = path.with_extension(extension);
+    std::fs::rename(&path, &image_path).context("failed to save selected Termux image")?;
+
+    Ok(image_path)
+}
+
+#[cfg(target_os = "android")]
+fn detected_image_extension(path: &Path) -> Option<&'static str> {
+    let bytes = std::fs::read(path).ok()?;
+    image_extension(image::guess_format(&bytes).ok()?)
+}
+
+fn image_extension(format: ImageFormat) -> Option<&'static str> {
+    match format {
+        ImageFormat::Png => Some("png"),
+        ImageFormat::Jpeg => Some("jpg"),
+        ImageFormat::Gif => Some("gif"),
+        ImageFormat::WebP => Some("webp"),
+        _ => None,
+    }
 }
 
 pub fn open_path(path: &Path, config: &crate::config::ImagesConfig) -> Result<()> {
@@ -799,6 +849,15 @@ fn file_url_to_path(value: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_extension_matches_supported_image_formats() {
+        assert_eq!(image_extension(ImageFormat::Png), Some("png"));
+        assert_eq!(image_extension(ImageFormat::Jpeg), Some("jpg"));
+        assert_eq!(image_extension(ImageFormat::Gif), Some("gif"));
+        assert_eq!(image_extension(ImageFormat::WebP), Some("webp"));
+        assert_eq!(image_extension(ImageFormat::Bmp), None);
+    }
 
     #[test]
     fn editor_location_args_use_zed_path_line_column_syntax() {

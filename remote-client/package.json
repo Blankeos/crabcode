@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bunx --bun vike dev --host --port 4271",
-    "build": "bunx --bun vike build",
+    "dev": "vike dev --host --port 4271",
+    "build": "vike build",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -433,10 +433,10 @@ impl Provider for OpenAI {
                         drop(state);
                         fallback_warning = Some(websocket_fallback_warning(&err));
                     }
-                    eprintln!(
+                    crate::log::log(&format!(
                         "[AISDK_OPENAI] websocket transport failed; falling back to HTTP Responses: {}",
                         err
-                    );
+                    ));
                 }
             }
         }

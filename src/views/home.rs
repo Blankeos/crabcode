@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Paragraph},
@@ -91,11 +91,14 @@ pub fn render_home(
     mcp_summary: McpSummary,
     colors: &ThemeColors,
     usage_text: &str,
+    running_jobs: usize,
+    jobs_chip_area: &mut Option<Rect>,
     btw_entry: Option<&crate::app::BtwEntry>,
     btw_scroll: usize,
     btw_panel_area: &mut Option<ratatui::layout::Rect>,
     show_terminal_cursor: bool,
 ) {
+    *jobs_chip_area = None;
     let size = f.area();
 
     let main_chunks = Layout::default()
@@ -257,12 +260,28 @@ pub fn render_home(
         colors,
     );
 
-    let help_text = vec![
+    let mut help_text = Vec::new();
+    let chip_label = match running_jobs {
+        0 => String::new(),
+        1 => "● 1 job".to_string(),
+        count => format!("● {count} jobs"),
+    };
+    let chip_width = UnicodeWidthStr::width(chip_label.as_str()) as u16;
+    if running_jobs > 0 {
+        help_text.push(Span::styled(
+            chip_label,
+            Style::default()
+                .fg(colors.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+        help_text.push(Span::raw("  "));
+    }
+    help_text.extend([
         Span::styled("tab", Style::default().fg(colors.info)),
         Span::raw(" agents  "),
         Span::styled("ctrl+p", Style::default().fg(colors.info)),
         Span::raw(" commands"),
-    ];
+    ]);
     let help_line = Line::from(help_text);
     let help_width = help_line.width() as u16;
     let available_width = home_chunks[3].width;
@@ -309,6 +328,16 @@ pub fn render_home(
 
     let help = Paragraph::new(help_line).alignment(Alignment::Right);
     f.render_widget(help, status_chunks[2]);
+    let help_area = status_chunks[2];
+    if chip_width > 0 && help_area.width > 0 && help_area.height > 0 {
+        // Paragraph truncates from the right; only visible chip cells are clickable.
+        *jobs_chip_area = Some(Rect {
+            x: help_area.x + help_area.width.saturating_sub(help_width),
+            y: help_area.y,
+            width: chip_width.min(help_area.width),
+            height: 1,
+        });
+    }
 
     // Keep spacer on theme canvas (don't Reset over solid bg).
     f.render_widget(
@@ -322,7 +351,100 @@ pub fn render_home(
 
 #[cfg(test)]
 mod tests {
-    use super::{mcp_status, McpSummary};
+    use super::*;
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    fn render_jobs(width: u16, height: u16, count: usize, hitbox: &mut Option<Rect>) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        let mut input = Input::new();
+        terminal
+            .draw(|f| {
+                render_home(
+                    f,
+                    &mut input,
+                    &HomeState::new(),
+                    "test".into(),
+                    "/tmp".into(),
+                    None,
+                    "build".into(),
+                    "model".into(),
+                    "provider".into(),
+                    None,
+                    false,
+                    McpSummary {
+                        connected: 1,
+                        enabled: 1,
+                        has_error: false,
+                    },
+                    &colors,
+                    "usage",
+                    count,
+                    hitbox,
+                    None,
+                    0,
+                    &mut None,
+                    false,
+                );
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn text_in(buffer: &Buffer, area: Rect) -> String {
+        (area.x..area.right())
+            .map(|x| buffer[(x, area.y)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn jobs_chip_shows_running_count_and_exact_hitbox() {
+        for (count, label) in [(1, "● 1 job"), (12, "● 12 jobs")] {
+            let mut hitbox = None;
+            let buffer = render_jobs(100, 30, count, &mut hitbox);
+            let area = hitbox.unwrap();
+            assert_eq!(text_in(&buffer, area), label);
+            assert_eq!(area.height, 1);
+            let suffix = Rect::new(area.right(), area.y, 29, 1);
+            assert_eq!(text_in(&buffer, suffix), "  tab agents  ctrl+p commands");
+            let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+            assert_eq!(buffer[(area.x, area.y)].fg, colors.warning);
+            assert!(buffer[(area.x, area.y)].modifier.contains(Modifier::BOLD));
+        }
+    }
+
+    #[test]
+    fn jobs_chip_clears_stale_hitbox_when_jobs_finish() {
+        let mut hitbox = None;
+        render_jobs(100, 30, 1, &mut hitbox);
+        assert!(hitbox.is_some());
+        let buffer = render_jobs(100, 30, 0, &mut hitbox);
+        assert_eq!(hitbox, None);
+        assert!(!buffer
+            .content
+            .iter()
+            .any(|cell| cell.symbol() == "●" && cell.modifier.contains(Modifier::BOLD)));
+    }
+
+    #[test]
+    fn jobs_chip_hitbox_is_clipped_to_visible_cells() {
+        let mut hitbox = Some(Rect::new(50, 20, 7, 1));
+        let buffer = render_jobs(4, 30, 12, &mut hitbox);
+        let area = hitbox.unwrap();
+        assert_eq!(area.width, 4);
+        assert_eq!(text_in(&buffer, area), "● 12");
+        assert!(buffer.area.contains((area.x, area.y).into()));
+        assert!(area.right() <= buffer.area.right());
+    }
+
+    #[test]
+    fn jobs_chip_clears_stale_hitbox_without_visible_status_row() {
+        for (width, height) in [(0, 30), (100, 0), (100, 1)] {
+            let mut hitbox = Some(Rect::new(50, 20, 7, 1));
+            render_jobs(width, height, 1, &mut hitbox);
+            assert_eq!(hitbox, None, "terminal {width}x{height}");
+        }
+    }
 
     #[test]
     fn mcp_status_hides_when_no_servers_are_enabled() {
