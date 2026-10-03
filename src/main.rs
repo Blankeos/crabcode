@@ -756,6 +756,9 @@ enum Command {
         /// Working directory used for the initial ACP workspace
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Connect a provider interactively, then exit (no ACP server or chat)
+        #[arg(long)]
+        login: bool,
     },
 
     /// Generate or install shell completions
@@ -1002,8 +1005,12 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Some(Command::Acp { cwd }) => {
-            return crate::acp::run(cwd.clone()).await;
+        Some(Command::Acp { cwd, login }) => {
+            return if *login {
+                crate::acp::login(cwd.clone()).await
+            } else {
+                crate::acp::run(cwd.clone()).await
+            };
         }
         Some(Command::Completion { shell, install }) => {
             crate::completion::run(
@@ -1335,9 +1342,25 @@ mod tests {
         let args = Args::try_parse_from(["crabcode", "acp", "--cwd", "/tmp/workspace"]).unwrap();
 
         match args.command {
-            Some(Command::Acp { cwd }) => assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace"))),
+            Some(Command::Acp { cwd, login }) => {
+                assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace")));
+                assert!(!login);
+            }
             other => panic!("expected acp command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_acp_login_only_command() {
+        let args = Args::try_parse_from(["crabcode", "acp", "--cwd", "/tmp/workspace", "--login"])
+            .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Acp {
+                login: true,
+                cwd: Some(_)
+            })
+        ));
     }
 
     #[test]

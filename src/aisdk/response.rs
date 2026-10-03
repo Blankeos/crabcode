@@ -626,11 +626,11 @@ pub async fn stream_with_tools_options<P: Provider>(
                 // it as a finished turn or append it to the conversation.
                 // `.devrefs/.../xai-grok-sampler/src/actor/request_task.rs`
                 // `AttemptOutcome::Empty` + `ConversationResponse::empty_reason`.
-                // Content-filter empties are deterministic and must not retry.
+                // Provider terminal outcomes are authoritative, even without visible text.
                 if !has_tool_call
                     && !had_provider_tool_call
                     && accumulated_text.trim().is_empty()
-                    && !matches!(provider_finish_reason, Some(FinishReason::ContentFilter))
+                    && provider_terminal_stop_reason(provider_finish_reason.as_ref()).is_none()
                 {
                     let had_reasoning = !accumulated_reasoning.is_empty()
                         || reasoning_replay_items.iter().any(|item| !item.is_empty());
@@ -790,6 +790,14 @@ pub async fn stream_with_tools_options<P: Provider>(
                 let assistant_msg = Message::assistant(&assistant_text);
                 current_messages.push(assistant_msg.clone());
                 messages_arc.lock().await.push(assistant_msg);
+            }
+
+            // Drain the provider stream first to retain trailing usage, and save
+            // partial text/reasoning above. Never execute tool arguments from a
+            // truncated or rejected response, even if they happen to parse.
+            if let Some(reason) = provider_terminal_stop_reason(provider_finish_reason.as_ref()) {
+                *stop_reason_arc.lock().await = Some(reason);
+                break;
             }
 
             if !has_tool_call {
@@ -1036,6 +1044,14 @@ pub async fn stream_with_tools_options<P: Provider>(
 
     response.add_handle(handle);
     Ok(response)
+}
+
+fn provider_terminal_stop_reason(reason: Option<&FinishReason>) -> Option<StopReason> {
+    match reason {
+        Some(FinishReason::Length) => Some(StopReason::MaxTokens),
+        Some(FinishReason::Refusal | FinishReason::ContentFilter) => Some(StopReason::Refusal),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1928,6 +1944,131 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
+
+    #[derive(Debug, Clone)]
+    struct TerminalOutcomeProvider {
+        requests: Arc<AtomicUsize>,
+        reason: FinishReason,
+        text: String,
+        arguments: Option<String>,
+        conflicting_follow_up: bool,
+    }
+
+    #[async_trait]
+    impl Provider for TerminalOutcomeProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        async fn stream_text(
+            &self,
+            _messages: &[Message],
+            tools: &[Tool],
+            _headers: &HashMap<String, String>,
+        ) -> crate::error::Result<ProviderStream> {
+            assert!(!tools.is_empty());
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            let mut chunks = Vec::new();
+            if self.conflicting_follow_up {
+                chunks.push(Ok(ChunkType::AssistantMessagePhase {
+                    phase: Some(MessagePhase::Commentary),
+                }));
+                chunks.push(Ok(ChunkType::response_completed(Some(false))));
+            }
+            chunks.push(Ok(ChunkType::Text(self.text.clone())));
+            if let Some(arguments) = &self.arguments {
+                chunks.push(Ok(ChunkType::ToolCall(
+                    serde_json::json!([{
+                        "index": 0, "id": "call_terminal", "type": "function",
+                        "function": { "name": "list", "arguments": arguments },
+                    }])
+                    .to_string(),
+                )));
+            }
+            chunks.push(Ok(ChunkType::End {
+                reason: Some(self.reason.clone()),
+            }));
+            // Providers may report usage after their finish reason.
+            chunks.push(Ok(ChunkType::Usage(crate::chunk::TokenUsage {
+                input: 12,
+                output: 3,
+                cache_read: 4,
+                cache_write: 5,
+            })));
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_terminal_outcomes_preserve_text_and_usage_without_follow_up() {
+        for (reason, expected) in [
+            (FinishReason::Length, StopReason::MaxTokens),
+            (FinishReason::Refusal, StopReason::Refusal),
+            (FinishReason::ContentFilter, StopReason::Refusal),
+        ] {
+            for text in ["", "partial response"] {
+                for arguments in [None, Some("{\"path\":"), Some("{}")] {
+                    for conflicting_follow_up in [false, true] {
+                        let provider = TerminalOutcomeProvider {
+                            requests: Arc::new(AtomicUsize::new(0)),
+                            reason: reason.clone(),
+                            text: text.to_string(),
+                            arguments: arguments.map(str::to_string),
+                            conflicting_follow_up,
+                        };
+                        let executions = Arc::new(AtomicUsize::new(0));
+                        let mut response = stream_with_tools(
+                            provider.clone(),
+                            vec![Message::user("continue")],
+                            vec![list_tool(executions.clone())],
+                            Some(5),
+                            None,
+                            HashMap::new(),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                        let mut seen_text = String::new();
+                        let mut usage_count = 0;
+                        while let Some(chunk) = response.stream.next().await {
+                            match chunk {
+                                ChunkType::Text(text) => seen_text.push_str(&text),
+                                ChunkType::Usage(usage) => {
+                                    assert_eq!(usage.input, 12);
+                                    assert_eq!(usage.output, 3);
+                                    assert_eq!(usage.cache_read, 4);
+                                    assert_eq!(usage.cache_write, 5);
+                                    usage_count += 1;
+                                }
+                                ChunkType::Retry(_)
+                                | ChunkType::Failed(_)
+                                | ChunkType::StreamRollback { .. } => {
+                                    panic!("unexpected terminal outcome chunk: {chunk:?}")
+                                }
+                                _ => {}
+                            }
+                        }
+                        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+                        assert_eq!(executions.load(Ordering::SeqCst), 0);
+                        assert_eq!(response.stop_reason().await, Some(expected.clone()));
+                        assert_eq!(usage_count, 1);
+                        assert_eq!(seen_text, text);
+                        let messages = response.messages().await;
+                        assert_eq!(messages.len(), usize::from(!text.is_empty()));
+                        if !text.is_empty() {
+                            assert_eq!(
+                                serde_json::to_value(&messages[0]).unwrap(),
+                                serde_json::to_value(Message::assistant(text)).unwrap()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn doom_loop_trigger_threshold_matches_grok_build() {
@@ -4069,7 +4210,7 @@ mod tests {
         assert!(!empty_logged);
         assert_eq!(retries, 0);
         assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
-        assert_eq!(response.stop_reason().await, Some(StopReason::Finish));
+        assert_eq!(response.stop_reason().await, Some(StopReason::Refusal));
     }
 
     #[tokio::test]

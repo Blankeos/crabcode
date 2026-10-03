@@ -76,7 +76,7 @@ mod usage_part_tests {
         assert!(restored[0].usage_authoritative);
         assert_eq!(restored[0].tokens_per_sec, Some(50.0));
         let session = dao.get_session(session_id).unwrap().unwrap();
-        assert_eq!(session.total_tokens, 125);
+        assert_eq!(session.total_tokens, 195);
         assert!((session.total_cost - 0.0125).abs() < f64::EPSILON);
     }
 }
@@ -86,7 +86,9 @@ fn message_total_tokens(message: &Message) -> i32 {
         let total = message
             .input_tokens
             .unwrap_or(0)
-            .saturating_add(message.output_tokens.unwrap_or(0));
+            .saturating_add(message.output_tokens.unwrap_or(0))
+            .saturating_add(message.cache_read_tokens.unwrap_or(0))
+            .saturating_add(message.cache_write_tokens.unwrap_or(0));
         i32::try_from(total).unwrap_or(i32::MAX)
     } else {
         message.tokens_used

@@ -17,7 +17,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Client, ConnectionTo, Error};
 use base64::Engine as _;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
@@ -25,9 +25,46 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct AcpService {
-    sessions: Arc<AsyncMutex<HashMap<String, AcpSession>>>,
+    sessions: Arc<AsyncMutex<AcpSessions>>,
     session_manager: Arc<Mutex<SessionManager>>,
     client_capabilities: Arc<Mutex<agent_client_protocol::schema::v1::ClientCapabilities>>,
+}
+
+// Attachments detach immediately on close, but a turn retains ownership until all
+// transcript/status finalization finishes. Both are protected by the same lock.
+#[derive(Default)]
+struct AcpSessions {
+    attachments: HashMap<String, AcpSession>,
+    active_prompts: HashSet<String>,
+}
+
+impl AcpSessions {
+    fn ensure_attachable(&self, session_id: &str) -> Result<(), Error> {
+        if self.active_prompts.contains(session_id) {
+            return Err(Error::invalid_params().data("session already has an active prompt"));
+        }
+        Ok(())
+    }
+
+    fn begin_prompt(&mut self, session_id: &str) -> Result<CancellationToken, Error> {
+        self.ensure_attachable(session_id)?;
+        let session = self
+            .attachments
+            .get_mut(session_id)
+            .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+        let cancellation = CancellationToken::new();
+        session.cancellation = Some(cancellation.clone());
+        self.active_prompts.insert(session_id.to_string());
+        Ok(cancellation)
+    }
+
+    // Call only after the stream and wrapper have finished every persisted write.
+    fn finish_prompt(&mut self, session_id: &str) {
+        if let Some(session) = self.attachments.get_mut(session_id) {
+            session.cancellation = None;
+        }
+        self.active_prompts.remove(session_id);
+    }
 }
 
 fn permission_options() -> Vec<PermissionOption> {
@@ -177,22 +214,51 @@ fn permission_tool_content(
         "edit" => permission_edit_diff(&prompt.raw_input, cwd)
             .into_iter()
             .collect(),
-        "apply_patch" => crate::tools::patch::preview_patch(&prompt.raw_input, cwd)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|change| {
-                agent_client_protocol::schema::v1::Diff::new(change.path, change.new_text)
-                    .old_text(change.old_text)
-                    .into()
-            })
-            .collect(),
+        "apply_patch"
+            if crate::tools::patch::patch_paths_from_params(&prompt.raw_input)
+                .iter()
+                .all(|path| preview_read_allowed(&absolute_tool_path(path, cwd), cwd)) =>
+        {
+            crate::tools::patch::preview_patch(&prompt.raw_input, cwd)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|change| {
+                    agent_client_protocol::schema::v1::Diff::new(change.path, change.new_text)
+                        .old_text(change.old_text)
+                        .into()
+                })
+                .collect()
+        }
         _ => Vec::new(),
+    }
+}
+
+// A write/edit approval is not a read approval. Keep ordinary workspace previews,
+// but never acquire protected file contents just to display a permission request.
+fn preview_read_allowed(path: &Path, cwd: &Path) -> bool {
+    !crate::tools::permission::is_outside_workdir(path, cwd)
+        && !crate::tools::permission::is_sensitive_path(path)
+        && !std::fs::canonicalize(path)
+            .ok()
+            .is_some_and(|resolved| crate::tools::permission::is_sensitive_path(&resolved))
+}
+
+async fn cancellable<T>(
+    token: &CancellationToken,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => None,
+        result = future => Some(result),
     }
 }
 
 fn preflight_diff(path: &str, new_text: &str, cwd: &Path) -> ToolCallContent {
     let path = absolute_tool_path(path, cwd);
-    let old_text = std::fs::read_to_string(&path).ok();
+    let old_text = preview_read_allowed(&path, cwd)
+        .then(|| std::fs::read_to_string(&path).ok())
+        .flatten();
     agent_client_protocol::schema::v1::Diff::new(path, new_text.to_string())
         .old_text(old_text)
         .into()
@@ -206,6 +272,9 @@ fn permission_edit_diff(input: &serde_json::Value, cwd: &Path) -> Option<ToolCal
     let old_string = input.get("old_string")?.as_str()?;
     let new_string = input.get("new_string")?.as_str()?;
     let absolute = absolute_tool_path(path, cwd);
+    if !preview_read_allowed(&absolute, cwd) {
+        return None;
+    }
     let old_text = std::fs::read_to_string(&absolute).ok()?;
     let new_text = if input
         .get("replace_all")
@@ -783,7 +852,7 @@ impl AcpService {
             .with_history_for_workspace(initial_workspace)
             .map_err(|_| internal_error())?;
         Ok(Self {
-            sessions: Arc::new(AsyncMutex::new(HashMap::new())),
+            sessions: Arc::new(AsyncMutex::new(AcpSessions::default())),
             session_manager: Arc::new(Mutex::new(session_manager)),
             client_capabilities: Arc::new(Mutex::new(Default::default())),
         })
@@ -820,6 +889,7 @@ impl AcpService {
     ) -> Result<AvailableCommandsUpdate, Error> {
         let sessions = self.sessions.lock().await;
         let session = sessions
+            .attachments
             .get(session_id)
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
         Ok(AvailableCommandsUpdate::new(available_commands(session)))
@@ -865,7 +935,7 @@ impl AcpService {
 
         let skills = crate::skill::SkillStore::load(&config.xdg_config_home, &config.project_root);
         let tool_permissions = configured_tool_permissions(&cwd, &config);
-        self.sessions.lock().await.insert(
+        self.sessions.lock().await.attachments.insert(
             session_id.clone(),
             AcpSession {
                 cwd,
@@ -887,6 +957,7 @@ impl AcpService {
             .sessions
             .lock()
             .await
+            .attachments
             .get(&session_id)
             .cloned()
             .ok_or_else(internal_error)?;
@@ -985,7 +1056,7 @@ impl AcpService {
             }
             fork_id
         };
-        self.sessions.lock().await.insert(
+        self.sessions.lock().await.attachments.insert(
             fork_id.clone(),
             AcpSession {
                 tool_permissions: configured_tool_permissions(&source.cwd, &source.config),
@@ -998,7 +1069,7 @@ impl AcpService {
     }
 
     pub async fn close_session(&self, session_id: &str) {
-        if let Some(session) = self.sessions.lock().await.remove(session_id) {
+        if let Some(session) = self.sessions.lock().await.attachments.remove(session_id) {
             if let Some(cancellation) = session.cancellation {
                 cancellation.cancel();
             }
@@ -1016,7 +1087,7 @@ impl AcpService {
     }
 
     pub async fn cancel_session(&self, session_id: &str) {
-        if let Some(session) = self.sessions.lock().await.get(session_id) {
+        if let Some(session) = self.sessions.lock().await.attachments.get(session_id) {
             if let Some(cancellation) = &session.cancellation {
                 cancellation.cancel();
             }
@@ -1030,6 +1101,7 @@ impl AcpService {
     ) -> Result<SetSessionConfigOptionResponse, Error> {
         let mut sessions = self.sessions.lock().await;
         let session = sessions
+            .attachments
             .get_mut(session_id)
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
         if session
@@ -1054,6 +1126,7 @@ impl AcpService {
     ) -> Result<SetSessionConfigOptionResponse, Error> {
         let mut sessions = self.sessions.lock().await;
         let session = sessions
+            .attachments
             .get_mut(session_id)
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
         let model = find_selectable_model(&session.models, model_ref)?;
@@ -1078,6 +1151,7 @@ impl AcpService {
     ) -> Result<SetSessionConfigOptionResponse, Error> {
         let mut sessions = self.sessions.lock().await;
         let session = sessions
+            .attachments
             .get_mut(session_id)
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
         let requested = value
@@ -1095,13 +1169,28 @@ impl AcpService {
         session_id: &str,
         cwd: PathBuf,
     ) -> Result<(AcpSession, Vec<crate::session::types::Message>), Error> {
+        // Fail promptly during close cleanup, before model/config discovery. Recheck
+        // below after awaits and hold the lock through the actual attachment.
+        self.sessions.lock().await.ensure_attachable(session_id)?;
         let cwd = workspace_path(&cwd)?;
+        // Invalid load/resume requests must not wait on network model discovery.
+        {
+            let manager = self.session_manager.lock().map_err(|_| internal_error())?;
+            let stored = manager
+                .get_session_ref(session_id)
+                .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+            if stored.workspace_path != cwd.to_string_lossy() {
+                return Err(Error::invalid_params().data("session does not belong to cwd"));
+            }
+        }
         let config = crate::config::ConfigLoader::load_for(&cwd).map_err(|_| internal_error())?;
         crate::skill::init_skill_store(&config.xdg_config_home, &config.project_root);
         let models = crate::model::catalog::selectable_models(&config, None)
             .await
             .map_err(|_| internal_error())?;
 
+        let mut sessions = self.sessions.lock().await;
+        sessions.ensure_attachable(session_id)?;
         let messages = {
             let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
             let stored = manager
@@ -1158,9 +1247,8 @@ impl AcpService {
             context_window,
             cancellation: None,
         };
-        self.sessions
-            .lock()
-            .await
+        sessions
+            .attachments
             .insert(session_id.to_string(), session.clone());
         Ok((session, messages))
     }
@@ -1171,10 +1259,57 @@ impl AcpService {
         prompt: Vec<ContentBlock>,
         connection: ConnectionTo<Client>,
     ) -> Result<PromptResponse, Error> {
+        let cancellation = self.sessions.lock().await.begin_prompt(&session_id)?;
+        // Only individual blocking operations are cancellable. Dropping prompt_inner
+        // would skip transcript persistence and leave the session marked active.
+        let mut result = self
+            .prompt_inner(session_id.clone(), prompt, connection, cancellation.clone())
+            .await;
+        if cancellation.is_cancelled() {
+            result = Ok(PromptResponse::new(StopReason::Cancelled));
+        }
+        // Cover setup errors and local commands as well as stream/compaction exits.
+        if let Ok(mut manager) = self.session_manager.lock() {
+            let status = if cancellation.is_cancelled()
+                || result
+                    .as_ref()
+                    .is_ok_and(|response| response.stop_reason == StopReason::Cancelled)
+            {
+                crate::session::types::SessionStatus::Interrupted
+            } else if result.is_err() {
+                crate::session::types::SessionStatus::Failed
+            } else {
+                crate::session::types::SessionStatus::Idle
+            };
+            if manager.get_session_ref(&session_id).is_some() {
+                if manager
+                    .set_session_status(&session_id, status, None)
+                    .is_err()
+                {
+                    result = Err(internal_error());
+                }
+            }
+        } else {
+            result = Err(internal_error());
+        }
+        // Also stop any detached producer after an error or early return.
+        cancellation.cancel();
+        self.sessions.lock().await.finish_prompt(&session_id);
+        result
+    }
+
+    async fn prompt_inner(
+        &self,
+        session_id: String,
+        prompt: Vec<ContentBlock>,
+        connection: ConnectionTo<Client>,
+        cancellation: CancellationToken,
+    ) -> Result<PromptResponse, Error> {
         let mut session = self
             .sessions
             .lock()
             .await
+            .attachments
             .get(&session_id)
             .cloned()
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
@@ -1186,10 +1321,17 @@ impl AcpService {
             {
                 return Err(Error::invalid_params().data("/compact does not accept attachments"));
             }
-            return self.compact_session(&session_id, session, connection).await;
+            return self
+                .compact_session(&session_id, session, connection, cancellation)
+                .await;
         }
         let expansion = if compact_text.trim_start().starts_with('/') {
-            Some(expand_slash_command(&session, &compact_text).await?)
+            let Some(expansion) =
+                cancellable(&cancellation, expand_slash_command(&session, &compact_text)).await
+            else {
+                return Ok(PromptResponse::new(StopReason::Cancelled));
+            };
+            Some(expansion?)
         } else {
             None
         };
@@ -1248,7 +1390,7 @@ impl AcpService {
                     return Err(Error::invalid_params().data("/btw does not accept attachments"));
                 }
                 return self
-                    .btw_session(&session_id, session, question, connection)
+                    .btw_session(&session_id, session, question, connection, cancellation)
                     .await;
             }
             None => None,
@@ -1274,18 +1416,6 @@ impl AcpService {
         if prompt.trim().is_empty() {
             return Err(Error::invalid_params().data("prompt must include text content"));
         }
-        let cancellation = CancellationToken::new();
-        {
-            let mut sessions = self.sessions.lock().await;
-            let Some(current) = sessions.get_mut(&session_id) else {
-                return Err(Error::invalid_params().data("unknown session"));
-            };
-            if current.cancellation.is_some() {
-                return Err(Error::invalid_params().data("session already has an active prompt"));
-            }
-            current.cancellation = Some(cancellation.clone());
-        }
-
         let mut messages = {
             let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
             let stored = manager
@@ -1308,9 +1438,6 @@ impl AcpService {
             )
             .await?;
         if cancellation.is_cancelled() {
-            if let Some(current) = self.sessions.lock().await.get_mut(&session_id) {
-                current.cancellation = None;
-            }
             return Ok(PromptResponse::new(StopReason::Cancelled));
         }
         if auto_compacted {
@@ -1338,33 +1465,45 @@ impl AcpService {
         }
         messages.push(user_message);
 
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let process_registry = std::sync::Arc::new(crate::tools::ProcessRegistry::new());
-        let prompt_registry = crate::tools::initialize_tool_registry_with_dynamic_config(
-            Some(sender.clone()),
-            tool_permissions(&session),
-            session.config.merged_config.agent_registry.clone(),
-            cancellation.clone(),
-            Some(&session.provider),
-            &session.config.merged_config.websearch,
-            &session.config.merged_config.mcp,
-            &session.cwd,
-            process_registry.clone(),
+        let prompt_registry = cancellable(
+            &cancellation,
+            crate::tools::initialize_tool_registry_with_dynamic_config(
+                Some(sender.clone()),
+                tool_permissions(&session),
+                session.config.merged_config.agent_registry.clone(),
+                cancellation.clone(),
+                Some(&session.provider),
+                &session.config.merged_config.websearch,
+                &session.config.merged_config.mcp,
+                &session.cwd,
+                process_registry.clone(),
+            ),
         )
         .await;
+        let Some(prompt_registry) = prompt_registry else {
+            return Ok(PromptResponse::new(StopReason::Cancelled));
+        };
         let is_git_repo =
             crate::utils::git::is_git_repo(&session.cwd.to_string_lossy()).unwrap_or(false);
-        let system_prompt = crate::prompt::SystemPromptComposer::new(
-            &session.model,
-            session.cwd.to_string_lossy(),
-            is_git_repo,
-            std::env::consts::OS,
+        let system_prompt = cancellable(
+            &cancellation,
+            crate::prompt::SystemPromptComposer::new(
+                &session.model,
+                session.cwd.to_string_lossy(),
+                is_git_repo,
+                std::env::consts::OS,
+            )
+            .with_tool_registry(prompt_registry.clone())
+            .with_agent_registry(session.config.merged_config.agent_registry.clone())
+            .with_active_agent(session.agent.clone())
+            .compose(),
         )
-        .with_tool_registry(prompt_registry.clone())
-        .with_agent_registry(session.config.merged_config.agent_registry.clone())
-        .with_active_agent(session.agent.clone())
-        .compose()
         .await;
+        let Some(system_prompt) = system_prompt else {
+            return Ok(PromptResponse::new(StopReason::Cancelled));
+        };
         messages.insert(0, crate::session::types::Message::system(system_prompt));
         let base_context_tokens = crate::session::compaction::total_context_tokens(&messages);
         let base_cost = messages
@@ -1418,6 +1557,36 @@ impl AcpService {
             let _ = stream_sender.send(crate::llm::ChunkMessage::End);
         });
 
+        let response = self
+            .receive_prompt_stream(
+                &session_id,
+                &session,
+                &connection,
+                &cancellation,
+                receiver,
+                base_context_tokens,
+                base_cost,
+            )
+            .await?;
+        if !cancellation.is_cancelled() && response.stop_reason != StopReason::Cancelled {
+            let _ = self
+                .maybe_auto_compact_session(&session_id, &session, cancellation.clone(), 0)
+                .await?;
+        }
+        Ok(response)
+    }
+
+    // Keep finalization outside every cancellable await, including client requests.
+    async fn receive_prompt_stream(
+        &self,
+        session_id: &str,
+        session: &AcpSession,
+        connection: &ConnectionTo<Client>,
+        cancellation: &CancellationToken,
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::llm::ChunkMessage>,
+        base_context_tokens: usize,
+        base_cost: f64,
+    ) -> Result<PromptResponse, Error> {
         let mut assistant = crate::session::types::Message::incomplete("");
         let message_id = assistant.id.clone();
         assistant.provider = Some(session.provider.clone());
@@ -1428,172 +1597,188 @@ impl AcpService {
         let mut turn_stop_reason = None;
         let mut live_usage = AcpLiveUsage::default();
 
-        while let Some(chunk) = receiver.recv().await {
-            match chunk {
-                crate::llm::ChunkMessage::Text(text) => {
-                    assistant.append(&text);
-                    send_text(&connection, &session_id, &message_id, text, false)?;
-                    send_live_usage(
-                        &connection,
-                        &session_id,
-                        &session,
-                        base_context_tokens,
-                        base_cost,
-                        &assistant,
-                        &live_usage,
-                    )?;
-                }
-                crate::llm::ChunkMessage::Reasoning(text) => {
-                    assistant.append_reasoning(&text);
-                    send_text(&connection, &session_id, &message_id, text, true)?;
-                    send_live_usage(
-                        &connection,
-                        &session_id,
-                        &session,
-                        base_context_tokens,
-                        base_cost,
-                        &assistant,
-                        &live_usage,
-                    )?;
-                }
-                crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
-                    for tool_call in &tool_calls {
-                        record_tool_call(&mut assistant, tool_call);
+        // Notification failures must take the same persistence path as cancellation.
+        let stream_result: Result<(), Error> = async {
+            while let Some(chunk) = cancellable(cancellation, receiver.recv()).await.flatten() {
+                match chunk {
+                    crate::llm::ChunkMessage::Text(text) => {
+                        assistant.append(&text);
+                        send_text(connection, session_id, &message_id, text, false)?;
+                        send_live_usage(
+                            connection,
+                            session_id,
+                            session,
+                            base_context_tokens,
+                            base_cost,
+                            &assistant,
+                            &live_usage,
+                        )?;
                     }
-                    for tool_call in tool_calls {
-                        send_tool_call(&connection, &session_id, tool_call, &session.cwd)?;
+                    crate::llm::ChunkMessage::Reasoning(text) => {
+                        assistant.append_reasoning(&text);
+                        send_text(connection, session_id, &message_id, text, true)?;
+                        send_live_usage(
+                            connection,
+                            session_id,
+                            session,
+                            base_context_tokens,
+                            base_cost,
+                            &assistant,
+                            &live_usage,
+                        )?;
                     }
-                    send_live_usage(
-                        &connection,
-                        &session_id,
-                        &session,
-                        base_context_tokens,
-                        base_cost,
-                        &assistant,
-                        &live_usage,
-                    )?;
-                }
-                crate::llm::ChunkMessage::ToolResult(result) => {
-                    record_tool_result(&mut assistant, &result);
-                    send_tool_result(&connection, &session_id, result, &session.cwd)?;
-                    send_live_usage(
-                        &connection,
-                        &session_id,
-                        &session,
-                        base_context_tokens,
-                        base_cost,
-                        &assistant,
-                        &live_usage,
-                    )?;
-                }
-                crate::llm::ChunkMessage::Metrics {
-                    token_count,
-                    duration_ms,
-                    usage,
-                    cost,
-                } => {
-                    assistant.token_count = Some(token_count);
-                    assistant.duration_ms = Some(duration_ms);
-                    if let Some(usage) = usage {
-                        assistant.apply_usage(usage, cost);
-                        live_usage.cumulative = usage;
+                    crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
+                        for tool_call in &tool_calls {
+                            record_tool_call(&mut assistant, tool_call);
+                        }
+                        for tool_call in tool_calls {
+                            send_tool_call(connection, session_id, tool_call, &session.cwd)?;
+                        }
+                        send_live_usage(
+                            connection,
+                            session_id,
+                            session,
+                            base_context_tokens,
+                            base_cost,
+                            &assistant,
+                            &live_usage,
+                        )?;
                     }
-                    live_usage.cost = cost.unwrap_or(live_usage.cost);
-                    send_usage(
-                        &connection,
-                        &session_id,
-                        &session,
-                        live_usage
-                            .context_tokens(base_context_tokens, &assistant)
-                            .max(base_context_tokens.saturating_add(token_count)),
-                        cumulative_cost(base_cost, live_usage.cost),
+                    crate::llm::ChunkMessage::ToolResult(result) => {
+                        record_tool_result(&mut assistant, &result);
+                        send_tool_result(connection, session_id, result, &session.cwd)?;
+                        send_live_usage(
+                            connection,
+                            session_id,
+                            session,
+                            base_context_tokens,
+                            base_cost,
+                            &assistant,
+                            &live_usage,
+                        )?;
+                    }
+                    crate::llm::ChunkMessage::Metrics {
+                        token_count,
+                        duration_ms,
                         usage,
-                    )?;
-                }
-                crate::llm::ChunkMessage::Usage(usage) => {
-                    live_usage.observe_provider_usage(&assistant, usage);
-                    live_usage.cost += estimate_session_usage_cost(&session, &usage);
-                    assistant
-                        .parts
-                        .push(crate::session::types::MessagePart::usage(
-                            usage.input,
-                            usage.output,
-                            usage.cache_read,
-                            usage.cache_write,
-                            estimate_session_usage_cost(&session, &usage),
-                        ));
-                    if usage.output > 0 {
-                        assistant.output_tokens = Some(
-                            assistant
-                                .output_tokens
-                                .unwrap_or(0)
-                                .saturating_add(usage.output as usize),
-                        );
+                        cost,
+                    } => {
+                        assistant.token_count = Some(token_count);
+                        assistant.duration_ms = Some(duration_ms);
+                        if let Some(usage) = usage {
+                            assistant.apply_usage(usage, cost);
+                            live_usage.cumulative = usage;
+                        }
+                        live_usage.cost = cost.unwrap_or(live_usage.cost);
+                        send_usage(
+                            connection,
+                            session_id,
+                            session,
+                            live_usage
+                                .context_tokens(base_context_tokens, &assistant)
+                                .max(base_context_tokens.saturating_add(token_count)),
+                            cumulative_cost(base_cost, live_usage.cost),
+                            usage,
+                        )?;
                     }
-                    send_live_usage(
-                        &connection,
-                        &session_id,
-                        &session,
-                        base_context_tokens,
-                        base_cost,
-                        &assistant,
-                        &live_usage,
-                    )?;
-                }
-                crate::llm::ChunkMessage::Cancelled => cancelled = true,
-                crate::llm::ChunkMessage::Failed(error) => failed = Some(error),
-                crate::llm::ChunkMessage::TurnStopReason(reason) => turn_stop_reason = Some(reason),
-                crate::llm::ChunkMessage::PermissionRequest(prompt) => {
-                    let response = request_permission(&connection, &session_id, &prompt).await;
-                    let _ = prompt.response_tx.send(response);
-                }
-                crate::llm::ChunkMessage::QuestionRequest {
-                    tool_call_id,
-                    questions,
-                    response_tx,
-                } => {
-                    let response = if self.supports_form_elicitation() {
-                        request_questions(
-                            &connection,
-                            &session_id,
-                            tool_call_id.as_deref(),
-                            &questions,
-                            &cancellation,
+                    crate::llm::ChunkMessage::Usage(usage) => {
+                        live_usage.observe_provider_usage(&assistant, usage);
+                        live_usage.cost += estimate_session_usage_cost(session, &usage);
+                        assistant
+                            .parts
+                            .push(crate::session::types::MessagePart::usage(
+                                usage.input,
+                                usage.output,
+                                usage.cache_read,
+                                usage.cache_write,
+                                estimate_session_usage_cost(session, &usage),
+                            ));
+                        if usage.output > 0 {
+                            assistant.output_tokens = Some(
+                                assistant
+                                    .output_tokens
+                                    .unwrap_or(0)
+                                    .saturating_add(usage.output as usize),
+                            );
+                        }
+                        send_live_usage(
+                            connection,
+                            session_id,
+                            session,
+                            base_context_tokens,
+                            base_cost,
+                            &assistant,
+                            &live_usage,
+                        )?;
+                    }
+                    crate::llm::ChunkMessage::Cancelled => {
+                        cancelled = true;
+                        break;
+                    }
+                    crate::llm::ChunkMessage::Failed(error) => failed = Some(error),
+                    crate::llm::ChunkMessage::TurnStopReason(reason) => {
+                        turn_stop_reason = Some(reason)
+                    }
+                    crate::llm::ChunkMessage::PermissionRequest(prompt) => {
+                        let response = cancellable(
+                            cancellation,
+                            request_permission(connection, session_id, &prompt),
                         )
                         .await
-                    } else {
-                        skipped_question_answers(&questions)
-                    };
-                    let _ = response_tx.send(response);
-                }
-                crate::llm::ChunkMessage::TerminalSessionRequest(request) => {
-                    if self.supports_terminals() {
-                        bridge_terminal_session(
-                            &connection,
-                            &session_id,
-                            &session.cwd,
-                            request,
-                            &cancellation,
-                        )
-                        .await;
-                    } else {
-                        let _ = request
-                            .control_tx
-                            .send(crate::tools::TerminalSessionControl::Stop);
+                        .unwrap_or(crate::tools::PermissionResponse::Deny);
+                        let _ = prompt.response_tx.send(response);
                     }
+                    crate::llm::ChunkMessage::QuestionRequest {
+                        tool_call_id,
+                        questions,
+                        response_tx,
+                    } => {
+                        let response = if self.supports_form_elicitation() {
+                            request_questions(
+                                connection,
+                                session_id,
+                                tool_call_id.as_deref(),
+                                &questions,
+                                cancellation,
+                            )
+                            .await
+                        } else {
+                            skipped_question_answers(&questions)
+                        };
+                        let _ = response_tx.send(response);
+                    }
+                    crate::llm::ChunkMessage::TerminalSessionRequest(request) => {
+                        if self.supports_terminals() {
+                            bridge_terminal_session(
+                                connection,
+                                session_id,
+                                &session.cwd,
+                                request,
+                                cancellation,
+                            )
+                            .await;
+                        } else {
+                            let _ = request
+                                .control_tx
+                                .send(crate::tools::TerminalSessionControl::Stop);
+                        }
+                    }
+                    crate::llm::ChunkMessage::End => break,
+                    _ => {}
                 }
-                crate::llm::ChunkMessage::End => break,
-                _ => {}
             }
-        }
 
+            Ok(())
+        }
+        .await;
+        if stream_result.is_err() && failed.is_none() {
+            failed = Some("ACP stream notification failed".to_string());
+        }
         assistant.is_complete = true;
         assistant.was_interrupted = cancelled || cancellation.is_cancelled();
         {
             let mut manager = self.session_manager.lock().map_err(|_| internal_error())?;
-            manager
-                .add_message_to_session(&session_id, &assistant)
-                .map_err(|_| internal_error())?;
+            let persist_result = manager.add_message_to_session(session_id, &assistant);
             let status = if assistant.was_interrupted {
                 crate::session::types::SessionStatus::Interrupted
             } else if failed.is_some() {
@@ -1602,26 +1787,16 @@ impl AcpService {
                 crate::session::types::SessionStatus::Idle
             };
             manager
-                .set_session_status(&session_id, status, failed.as_deref())
+                .set_session_status(session_id, status, failed.as_deref())
                 .map_err(|_| internal_error())?;
+            persist_result.map_err(|_| internal_error())?;
         }
         if assistant.was_interrupted {
-            if let Some(current) = self.sessions.lock().await.get_mut(&session_id) {
-                current.cancellation = None;
-            }
             return Ok(PromptResponse::new(StopReason::Cancelled));
         }
+        stream_result?;
         if let Some(error) = failed {
-            if let Some(current) = self.sessions.lock().await.get_mut(&session_id) {
-                current.cancellation = None;
-            }
             return Err(internal_error_with(&error));
-        }
-        let _ = self
-            .maybe_auto_compact_session(&session_id, &session, cancellation.clone(), 0)
-            .await?;
-        if let Some(current) = self.sessions.lock().await.get_mut(&session_id) {
-            current.cancellation = None;
         }
         Ok(PromptResponse::new(acp_stop_reason(turn_stop_reason)))
     }
@@ -1631,18 +1806,8 @@ impl AcpService {
         session_id: &str,
         session: AcpSession,
         connection: ConnectionTo<Client>,
+        cancellation: CancellationToken,
     ) -> Result<PromptResponse, Error> {
-        let cancellation = CancellationToken::new();
-        {
-            let mut sessions = self.sessions.lock().await;
-            let current = sessions
-                .get_mut(session_id)
-                .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
-            if current.cancellation.is_some() {
-                return Err(Error::invalid_params().data("session already has an active prompt"));
-            }
-            current.cancellation = Some(cancellation.clone());
-        }
         let status_result = self
             .session_manager
             .lock()
@@ -1653,22 +1818,24 @@ impl AcpService {
                 None,
             );
         if status_result.is_err() {
-            if let Some(current) = self.sessions.lock().await.get_mut(session_id) {
-                current.cancellation = None;
-            }
             return Err(internal_error());
         }
 
         let result = self
             .run_compaction(session_id, &session, cancellation.clone(), 0)
             .await;
-        if let Some(current) = self.sessions.lock().await.get_mut(session_id) {
-            current.cancellation = None;
-        }
         self.session_manager
             .lock()
             .map_err(|_| internal_error())?
-            .set_session_status(session_id, crate::session::types::SessionStatus::Idle, None)
+            .set_session_status(
+                session_id,
+                if cancellation.is_cancelled() {
+                    crate::session::types::SessionStatus::Interrupted
+                } else {
+                    crate::session::types::SessionStatus::Idle
+                },
+                None,
+            )
             .map_err(|_| internal_error())?;
 
         match result {
@@ -1699,6 +1866,7 @@ impl AcpService {
         session: AcpSession,
         question: String,
         connection: ConnectionTo<Client>,
+        cancellation: CancellationToken,
     ) -> Result<PromptResponse, Error> {
         let history = self
             .session_manager
@@ -1707,14 +1875,27 @@ impl AcpService {
             .get_session_ref(session_id)
             .map(|stored| stored.messages.clone())
             .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
-        let answer = crate::llm::client::generate_btw_answer(
-            session.provider,
-            session.model,
-            question,
-            history,
-        )
-        .await
-        .map_err(|error| internal_error_with(&error.to_string()))?;
+        let answer = {
+            let result = cancellable(
+                &cancellation,
+                crate::llm::client::generate_btw_answer(
+                    session.provider,
+                    session.model,
+                    question,
+                    history,
+                ),
+            )
+            .await;
+            let Some(result) = result else {
+                return Ok(PromptResponse::new(StopReason::Cancelled));
+            };
+            result.map_err(|error| internal_error_with(&error.to_string()))?
+        };
+        // Serialize notification with close/delete, which cancel under this same lock.
+        let sessions = self.sessions.lock().await;
+        if cancellation.is_cancelled() || !sessions.attachments.contains_key(session_id) {
+            return Ok(PromptResponse::new(StopReason::Cancelled));
+        }
         send_text(&connection, session_id, &cuid2::create_id(), answer, false)?;
         Ok(PromptResponse::new(StopReason::EndTurn))
     }
@@ -1743,14 +1924,18 @@ impl AcpService {
         let before_messages =
             crate::session::compaction::filter_messages_for_context(&messages).len();
         let prompt = crate::session::compaction::build_prompt(&selection.messages_to_summarize);
-        let summary = crate::llm::client::summarize_for_compaction(
-            session.provider.clone(),
-            session.model.clone(),
-            compaction_reasoning(session),
-            prompt,
-            cancellation.clone(),
+        let summary = cancellable(
+            &cancellation,
+            crate::llm::client::summarize_for_compaction(
+                session.provider.clone(),
+                session.model.clone(),
+                compaction_reasoning(session),
+                prompt,
+                cancellation.clone(),
+            ),
         )
         .await
+        .ok_or_else(|| internal_error_with("Compaction cancelled by user"))?
         .map_err(|error| internal_error_with(&error.to_string()))?;
         if cancellation.is_cancelled() {
             return Err(internal_error_with("Compaction cancelled by user"));
@@ -1815,14 +2000,22 @@ impl AcpService {
             .run_compaction(
                 session_id,
                 session,
-                cancellation,
+                cancellation.clone(),
                 crate::session::compaction::MIN_COMPACTABLE_TOKENS,
             )
             .await;
         self.session_manager
             .lock()
             .map_err(|_| internal_error())?
-            .set_session_status(session_id, crate::session::types::SessionStatus::Idle, None)
+            .set_session_status(
+                session_id,
+                if cancellation.is_cancelled() {
+                    crate::session::types::SessionStatus::Interrupted
+                } else {
+                    crate::session::types::SessionStatus::Idle
+                },
+                None,
+            )
             .map_err(|_| internal_error())?;
         match result {
             Ok(_) => Ok(true),
@@ -2571,6 +2764,65 @@ async fn bridge_terminal_session(
     request: crate::tools::TerminalSessionRequest,
     cancellation: &CancellationToken,
 ) {
+    // Connection-owned task retains the create response even when the prompt stops.
+    // Do not tokio::spawn SDK block_task futures: they need the connection task context.
+    let worker_connection = connection.clone();
+    let worker_session_id = session_id.to_string();
+    let worker_cwd = session_cwd.to_path_buf();
+    let worker_cancellation = cancellation.clone();
+    let control_tx = request.control_tx.clone();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    if connection
+        .spawn(async move {
+            terminal_session_worker(
+                &worker_connection,
+                &worker_session_id,
+                &worker_cwd,
+                request,
+                &worker_cancellation,
+            )
+            .await;
+            let _ = done_tx.send(());
+            Ok(())
+        })
+        .is_err()
+    {
+        let _ = control_tx.send(crate::tools::TerminalSessionControl::Stop);
+        return;
+    }
+    if cancellable(cancellation, done_rx).await.is_none() {
+        let _ = control_tx.send(crate::tools::TerminalSessionControl::Stop);
+    }
+}
+
+async fn cleanup_terminal(
+    connection: &ConnectionTo<Client>,
+    session_id: &str,
+    terminal_id: agent_client_protocol::schema::v1::TerminalId,
+) {
+    // Issue both requests even if a client never acknowledges kill.
+    let kill = connection
+        .send_request(KillTerminalRequest::new(
+            session_id.to_string(),
+            terminal_id.clone(),
+        ))
+        .block_task();
+    let release = connection
+        .send_request(ReleaseTerminalRequest::new(
+            session_id.to_string(),
+            terminal_id,
+        ))
+        .block_task();
+    let _ = tokio::join!(kill, release);
+}
+
+async fn terminal_session_worker(
+    connection: &ConnectionTo<Client>,
+    session_id: &str,
+    session_cwd: &Path,
+    request: crate::tools::TerminalSessionRequest,
+    cancellation: &CancellationToken,
+) {
     let start = request.start;
     let control_tx = request.control_tx;
     let cwd = start
@@ -2583,19 +2835,7 @@ async fn bridge_terminal_session(
         .args(vec!["-c".to_string(), start.command.clone()])
         .cwd(cwd)
         .output_byte_limit(crate::tools::terminal_session::MAX_TRANSCRIPT_BYTES as u64);
-    let create_request = connection.send_request(create).block_task();
-    tokio::pin!(create_request);
-    let terminal_id = match tokio::select! {
-        _ = cancellation.cancelled() => {
-            let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalResult(
-                crate::tools::terminal_session::external_terminal_result(
-                    &start, "", false, None, true,
-                ),
-            ));
-            return;
-        }
-        response = &mut create_request => response,
-    } {
+    let terminal_id = match connection.send_request(create).block_task().await {
         Ok(response) => response.terminal_id,
         Err(error) => {
             let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalError(
@@ -2604,6 +2844,11 @@ async fn bridge_terminal_session(
             return;
         }
     };
+
+    if cancellation.is_cancelled() {
+        cleanup_terminal(connection, session_id, terminal_id).await;
+        return;
+    }
 
     let terminal_update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
         start.tool_call_id.clone(),
@@ -2618,13 +2863,7 @@ async fn bridge_terminal_session(
         ))
         .is_err()
     {
-        let _ = connection
-            .send_request(ReleaseTerminalRequest::new(
-                session_id.to_string(),
-                terminal_id,
-            ))
-            .block_task()
-            .await;
+        cleanup_terminal(connection, session_id, terminal_id).await;
         let _ = control_tx.send(crate::tools::TerminalSessionControl::ExternalError(
             "ACP client could not embed terminal".to_string(),
         ));
@@ -2640,11 +2879,8 @@ async fn bridge_terminal_session(
     tokio::pin!(wait);
     let (stopped_by_user, exit_code, wait_error) = tokio::select! {
         _ = cancellation.cancelled() => {
-            let _ = connection
-                .send_request(KillTerminalRequest::new(session_id.to_string(), terminal_id.clone()))
-                .block_task()
-                .await;
-            (true, None, None)
+            cleanup_terminal(connection, session_id, terminal_id).await;
+            return;
         }
         response = &mut wait => match response {
             Ok(response) => (
@@ -2656,13 +2892,20 @@ async fn bridge_terminal_session(
         }
     };
 
-    let output = connection
-        .send_request(TerminalOutputRequest::new(
-            session_id.to_string(),
-            terminal_id.clone(),
-        ))
-        .block_task()
-        .await;
+    let output = cancellable(
+        cancellation,
+        connection
+            .send_request(TerminalOutputRequest::new(
+                session_id.to_string(),
+                terminal_id.clone(),
+            ))
+            .block_task(),
+    )
+    .await;
+    let Some(output) = output else {
+        cleanup_terminal(connection, session_id, terminal_id).await;
+        return;
+    };
     let _ = connection
         .send_request(ReleaseTerminalRequest::new(
             session_id.to_string(),
@@ -3981,6 +4224,174 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_stream_persists_partial_transcript_and_interrupted_status() {
+        cancelled_stream_finalizes(false, false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_permission_persists_partial_transcript_and_interrupted_status() {
+        cancelled_stream_finalizes(true, false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn close_reopen_waits_for_old_prompt_finalization() {
+        cancelled_stream_finalizes(false, true).await;
+    }
+
+    async fn cancelled_stream_finalizes(pending_permission: bool, close_reopen: bool) {
+        use agent_client_protocol::schema::v1::RequestPermissionResponse;
+        use agent_client_protocol::{Agent, Responder};
+        use std::time::Duration;
+
+        tokio::task::LocalSet::new().run_until(async {
+            let workspace = tempfile::tempdir().unwrap();
+            let mut manager = SessionManager::new()
+                .with_history_for_workspace(workspace.path()).unwrap();
+            let session_id = manager.create_session(Some("ACP cancellation regression".into()));
+            let db_id = manager.get_db_id(&session_id).unwrap();
+            manager.set_session_status(
+                &session_id, crate::session::types::SessionStatus::Streaming, None,
+            ).unwrap();
+            let service = AcpService {
+                sessions: Arc::new(AsyncMutex::new(AcpSessions::default())),
+                session_manager: Arc::new(Mutex::new(manager)),
+                client_capabilities: Arc::new(Mutex::new(Default::default())),
+            };
+            let session = session_with_config(empty_config());
+            service.sessions.lock().await.attachments.insert(session_id.clone(), session.clone());
+            let cancellation = service.sessions.lock().await.begin_prompt(&session_id).unwrap();
+            let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (permission_tx, mut permission_rx) = tokio::sync::mpsc::unbounded_channel();
+            let client = Client.builder().on_receive_request(
+                async move |_request: RequestPermissionRequest,
+                            responder: Responder<RequestPermissionResponse>, _connection| {
+                    permission_tx.send(responder).unwrap();
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            ).on_receive_notification(
+                async move |notification: SessionNotification, _connection| {
+                    if matches!(notification.update, SessionUpdate::AgentMessageChunk(_)) {
+                        let _ = observed_tx.send(());
+                    }
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            );
+            Agent.builder().connect_with(client, async move |connection| {
+                let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                sender.send(crate::llm::ChunkMessage::Text("partial answer".into())).unwrap();
+                sender.send(crate::llm::ChunkMessage::Reasoning("partial reasoning".into())).unwrap();
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                if pending_permission {
+                    sender.send(crate::llm::ChunkMessage::PermissionRequest(crate::tools::PermissionPrompt {
+                        tool_call_id: Some("pending-tool".into()),
+                        tool_id: "bash".into(),
+                        action: crate::tools::PermissionAction::Write,
+                        permission: "bash".into(),
+                        patterns: Vec::new(),
+                        target: None,
+                        command: Some("mock-command".into()),
+                        workdir: None,
+                        workspace: workspace.path().to_string_lossy().into_owned(),
+                        reason: "regression test".into(),
+                        raw_input: serde_json::json!({"command": "mock-command"}),
+                        response_tx,
+                    })).unwrap();
+                }
+                let stream = service.receive_prompt_stream(
+                    &session_id, &session, &connection, &cancellation, receiver, 0, 0.0,
+                );
+                tokio::pin!(stream);
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    tokio::select! {
+                        _ = observed_rx.recv() => {},
+                        result = &mut stream => panic!("stream ended before cancellation: {result:?}"),
+                    }
+                }).await.unwrap();
+                let _pending_responder = if pending_permission {
+                    Some(tokio::time::timeout(Duration::from_secs(2), async {
+                        tokio::select! {
+                            responder = permission_rx.recv() => responder.unwrap(),
+                            result = &mut stream => panic!("stream ended before permission: {result:?}"),
+                        }
+                    }).await.unwrap())
+                } else {
+                    None
+                };
+                if close_reopen {
+                    service.close_session(&session_id).await;
+                    assert!(cancellation.is_cancelled());
+                    assert!(!service.sessions.lock().await.attachments.contains_key(&session_id));
+                    assert!(service.available_commands(&session_id).await.is_err());
+                    assert!(service.set_mode(&session_id, "Build").await.is_err());
+                    assert!(service.set_model(&session_id, "unused").await.is_err());
+                    assert!(service.set_reasoning_effort(&session_id, "none").await.is_err());
+                    // The same guard serves load and resume. Resume must fail before
+                    // any provider discovery, while the old stream still owns writes.
+                    assert!(service.resume_session(session_id.clone(), workspace.path().into()).await.is_err());
+                    assert!(service.load_session(session_id.clone(), workspace.path().into(), connection.clone()).await.is_err());
+                    assert!(service.sessions.lock().await.begin_prompt(&session_id).is_err());
+                } else {
+                    cancellation.cancel();
+                }
+                let response = tokio::time::timeout(Duration::from_secs(1), &mut stream)
+                    .await.unwrap().unwrap();
+                assert_eq!(response.stop_reason, StopReason::Cancelled);
+                if pending_permission {
+                    assert!(matches!(response_rx.await.unwrap(), crate::tools::PermissionResponse::Deny));
+                }
+                let manager = service.session_manager.lock().unwrap();
+                let stored = manager.get_session_ref(&session_id).unwrap();
+                assert_eq!(stored.status, crate::session::types::SessionStatus::Interrupted);
+                assert_eq!(stored.messages.len(), 1);
+                let assistant = &stored.messages[0];
+                assert_eq!(assistant.content, "partial answer");
+                assert!(assistant.is_complete);
+                assert!(assistant.was_interrupted);
+                drop(manager);
+                // A fresh DAO verifies the real database, not just the in-memory message.
+                let dao = crate::persistence::HistoryDAO::new_for_workspace(workspace.path()).unwrap();
+                assert_eq!(dao.get_session(db_id).unwrap().unwrap().status, "interrupted");
+                let messages = dao.get_messages(db_id).unwrap();
+                assert_eq!(messages.len(), 1);
+                assert!(messages[0].parts.iter().any(|part|
+                    part.part_type == "text" && part.data["text"] == "partial answer"
+                ));
+                drop(dao);
+                if close_reopen {
+                    // Stream persistence has ended, but wrapper finalization has not:
+                    // reopen must stay blocked through that second status write too.
+                    assert!(service.resume_session(session_id.clone(), workspace.path().into()).await.is_err());
+                    service.session_manager.lock().unwrap().set_session_status(
+                        &session_id, crate::session::types::SessionStatus::Interrupted, None,
+                    ).unwrap();
+                    service.sessions.lock().await.finish_prompt(&session_id);
+                    let mut sessions = service.sessions.lock().await;
+                    sessions.ensure_attachable(&session_id).unwrap();
+                    sessions.attachments.insert(session_id.clone(), session.clone());
+                    let next = sessions.begin_prompt(&session_id).unwrap();
+                    drop(sessions);
+                    service.session_manager.lock().unwrap().set_session_status(
+                        &session_id, crate::session::types::SessionStatus::Streaming, None,
+                    ).unwrap();
+                    assert!(!next.is_cancelled());
+                    assert!(service.sessions.lock().await.active_prompts.contains(&session_id));
+                    let dao = crate::persistence::HistoryDAO::new_for_workspace(workspace.path()).unwrap();
+                    assert_eq!(dao.get_session(db_id).unwrap().unwrap().status, "streaming");
+                    service.cancel_session(&session_id).await;
+                    assert!(next.is_cancelled(), "the new turn retains its cancellation token");
+                    service.sessions.lock().await.finish_prompt(&session_id);
+                } else {
+                    service.sessions.lock().await.finish_prompt(&session_id);
+                }
+                service.session_manager.lock().unwrap().try_delete_session(&session_id).unwrap();
+                Ok(())
+            }).await.unwrap();
+        }).await;
+    }
+
     #[test]
     fn advertises_custom_commands_with_argument_input() {
         let config = config_with_command(crate::command::custom::CustomCommand {
@@ -4331,5 +4742,245 @@ mod tests {
             cache_write: 0,
         };
         assert_eq!(estimate_session_usage_cost(&session, &usage), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_lifecycle_tests {
+    use super::*;
+
+    async fn delayed_terminal_creation_cleanup(acknowledge_kill: bool) {
+        use agent_client_protocol::schema::v1::{
+            CreateTerminalResponse, KillTerminalResponse, ReleaseTerminalResponse,
+        };
+        use agent_client_protocol::{Agent, Responder};
+        use std::time::Duration;
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let cancellation = CancellationToken::new();
+                let (create_tx, mut create_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (cleanup_tx, mut cleanup_rx) = tokio::sync::mpsc::unbounded_channel();
+                let kill_tx = cleanup_tx.clone();
+                let (pending_kill_tx, mut pending_kill_rx) =
+                    tokio::sync::mpsc::unbounded_channel();
+                let client = Client
+                    .builder()
+                    .on_receive_request(
+                        async move |request: CreateTerminalRequest,
+                                    responder: Responder<CreateTerminalResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            assert_eq!(request.session_id.to_string(), "cancelled-session");
+                            assert_eq!(request.command, "bash");
+                            // Retain the response until the prompt-side bridge has returned.
+                            create_tx.send(responder).unwrap();
+                            Ok(())
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |request: KillTerminalRequest,
+                                    responder: Responder<KillTerminalResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            kill_tx
+                                .send(("kill", request.session_id, request.terminal_id))
+                                .unwrap();
+                            if acknowledge_kill {
+                                responder.respond(KillTerminalResponse::new())
+                            } else {
+                                // Handlers run in the client's dispatch loop: waiting here
+                                // would prevent it from dispatching terminal/release at all.
+                                // Retain the responder without replying, but let dispatch
+                                // continue so release must arrive with kill still outstanding.
+                                pending_kill_tx.send(responder).unwrap();
+                                Ok(())
+                            }
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .on_receive_request(
+                        async move |request: ReleaseTerminalRequest,
+                                    responder: Responder<ReleaseTerminalResponse>,
+                                    _cx: ConnectionTo<Agent>| {
+                            cleanup_tx
+                                .send(("release", request.session_id, request.terminal_id))
+                                .unwrap();
+                            responder.respond(ReleaseTerminalResponse::new())
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    );
+
+                let result = Agent
+                    .builder()
+                    .connect_with(client, async move |connection| {
+                        let (control_tx, mut control_rx) =
+                            tokio::sync::mpsc::unbounded_channel();
+                        let request = crate::tools::TerminalSessionRequest {
+                            start: crate::tools::TerminalSessionStart {
+                                session_id: "cancelled-session".to_string(),
+                                tool_call_id: "terminal-call".to_string(),
+                                command: "mock-command-never-executed".to_string(),
+                                description: "Delayed mock terminal".to_string(),
+                                workdir: None,
+                                cols: 80,
+                                rows: 24,
+                                job_id: None,
+                            },
+                            control_tx,
+                        };
+                        let bridge = bridge_terminal_session(
+                            &connection,
+                            "cancelled-session",
+                            Path::new("/tmp"),
+                            request,
+                            &cancellation,
+                        );
+                        tokio::pin!(bridge);
+                        let responder = tokio::time::timeout(Duration::from_secs(2), async {
+                            tokio::select! {
+                                responder = create_rx.recv() => responder.unwrap(),
+                                _ = &mut bridge => panic!("bridge returned before creation or cancellation"),
+                            }
+                        })
+                        .await
+                        .expect("mock client did not receive terminal/create");
+
+                        cancellation.cancel();
+                        tokio::time::timeout(Duration::from_secs(1), &mut bridge)
+                            .await
+                            .expect("prompt-side bridge waited for delayed terminal creation");
+                        assert!(matches!(
+                            control_rx.try_recv(),
+                            Ok(crate::tools::TerminalSessionControl::Stop)
+                        ));
+                        assert!(cleanup_rx.try_recv().is_err());
+
+                        // The terminal is only allocated after cancellation has returned.
+                        responder.respond(CreateTerminalResponse::new("late-terminal"))?;
+                        let mut cleanup = Vec::new();
+                        for _ in 0..2 {
+                            let (method, session_id, terminal_id) =
+                                tokio::time::timeout(Duration::from_secs(2), cleanup_rx.recv())
+                                    .await
+                                    .expect("late terminal did not receive both cleanup requests")
+                                    .expect("mock cleanup channel closed");
+                            assert_eq!(session_id.to_string(), "cancelled-session");
+                            assert_eq!(terminal_id.to_string(), "late-terminal");
+                            cleanup.push(method);
+                        }
+                        cleanup.sort_unstable();
+                        assert_eq!(cleanup, ["kill", "release"]);
+                        if !acknowledge_kill {
+                            // Only drop the unanswered kill responder after observing release.
+                            // Dropping it earlier would send an error response and accidentally
+                            // allow cleanup that waits for kill acknowledgement to pass.
+                            let pending_kill = pending_kill_rx
+                                .try_recv()
+                                .expect("kill must remain unanswered until release arrives");
+                            drop(pending_kill);
+                        }
+                        Ok(())
+                    })
+                    .await;
+                result.expect("mock ACP connection failed");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_terminal_creation_cleans_up_delayed_response() {
+        delayed_terminal_creation_cleanup(true).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_terminal_creation_releases_without_kill_acknowledgement() {
+        delayed_terminal_creation_cleanup(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_pending_generation_without_waiting() {
+        struct OnDrop(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let token = CancellationToken::new();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = OnDrop(dropped.clone());
+        let future = async move {
+            let _guard = guard;
+            std::future::pending::<String>().await
+        };
+        let cancel = token.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            cancel.cancel();
+        });
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            cancellable(&token, future)
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_over_already_ready_answer() {
+        let token = CancellationToken::new();
+        token.cancel();
+        assert!(cancellable(&token, std::future::ready("answer"))
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn previews_keep_workspace_diffs_but_do_not_read_protected_files() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let ordinary = workspace.path().join("hello.txt");
+        std::fs::write(&ordinary, "before").unwrap();
+        let preview =
+            serde_json::to_string(&preflight_diff("hello.txt", "after", workspace.path())).unwrap();
+        assert!(preview.contains("before"));
+        for path in [
+            workspace.path().join(".env"),
+            external.path().join("secret.txt"),
+        ] {
+            std::fs::write(&path, "secret-never-preview").unwrap();
+            let preview = serde_json::to_string(&preflight_diff(
+                path.to_str().unwrap(),
+                "after",
+                workspace.path(),
+            ))
+            .unwrap();
+            assert!(!preview.contains("secret-never-preview"));
+            assert!(permission_edit_diff(
+                &serde_json::json!({
+                    "file_path": path, "old_string": "secret", "new_string": "public"
+                }),
+                workspace.path()
+            )
+            .is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn previews_reject_symlink_escape_and_sensitive_alias() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let secret = external.path().join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let link = workspace.path().join("alias.txt");
+        std::os::unix::fs::symlink(secret, &link).unwrap();
+        assert!(!preview_read_allowed(&link, workspace.path()));
+        let env = workspace.path().join(".env");
+        std::fs::write(&env, "secret").unwrap();
+        let alias = workspace.path().join("config.txt");
+        std::os::unix::fs::symlink(env, &alias).unwrap();
+        assert!(!preview_read_allowed(&alias, workspace.path()));
     }
 }

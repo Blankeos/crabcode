@@ -36,7 +36,27 @@ For Zed, add an agent server to `~/.config/zed/settings.json`:
 }
 ```
 
-Configure a provider in the Crabcode TUI with `/connect` before starting an ACP session. Credentials remain in Crabcode's normal state directory; the editor does not receive API keys or OAuth tokens.
+## Provider login
+
+Connect a provider in an interactive terminal without starting chat:
+
+```bash
+crabcode acp --login
+```
+
+Choose a provider ID, then use the existing OpenAI/xAI OAuth flow or enter an API key (hidden). Local providers do not need credentials. Existing credentials can be kept or replaced. The command exits after setup; restart or reconnect your ACP client afterward. The normal TUI `/connect` flow remains available.
+
+Clients advertising `clientCapabilities.auth.terminal` discover terminal login automatically. Modern terminal-auth arguments append `--login` to the configured `crabcode acp` invocation. Older registry clients opting in through `_meta["terminal-auth"]` receive replacement arguments `acp --login`. Terminal-tool hosting alone does not imply login support. Clients without terminal-auth support should use manual setup.
+
+Credentials remain in Crabcode's normal state directory; the editor does not receive API keys or OAuth tokens. Login is interactive and rejects piped input; normal ACP stdout remains JSON-RPC-only.
+
+## Registry distribution
+
+Registry submission is separate from ACP support and is not automatic. Native releases use `.tar.gz` on macOS/Linux and `.zip` on Windows, with checksums. The npm installer also supports older `.tar.xz` releases and writes installation diagnostics to stderr.
+
+Before submitting an entry to the [ACP Registry](https://github.com/agentclientprotocol/registry), publish a release, verify its actual archives and executable paths, run the registry's clean-home authentication check, and smoke-test a client such as Codync. A provider-free local handshake check is available with `python3 scripts/verify-acp-registry.py /path/to/crabcode`. This checks discovery only, not real OAuth or API-key validity.
+
+The entry requires `crabcode/agent.json` and a monochrome 16×16 `crabcode/icon.svg`. No registry entry is submitted by the release workflow.
 
 ## Capability Matrix
 
@@ -49,7 +69,7 @@ All Crabcode-side capabilities in this matrix are implemented. Conditions in the
 | Prompts | Text, embedded resources, PNG/JPEG/GIF/WebP images, and WAV/MP3 audio; assistant text and reasoning stream back to the editor. Attachments use private per-session storage, survive load/resume, copy independently on fork, delete with persisted sessions, and readable legacy paths migrate automatically on load. | Full | The selected model route must advertise the matching input modality. Audio uses verified OpenAI-compatible Chat Completions `input_audio`; unsupported provider transports return a clear error instead of dropping media. |
 | Modes and models | Visible primary agents, selectable model catalog entries, and supported reasoning-effort values are session-local ACP configuration options. | Full | Available reasoning values follow the selected model's catalog capability. |
 | Tools | Pending and completed/failed tool calls include ACP kinds, titles, raw input/output, full text plus bounded previews, normalized locations, native editor images/audio/resources, annotations, metadata, and full-file diffs. The model receives the structured textual/raw representation and supported image results. Unknown future MCP blocks are preserved in raw output and rendered as readable JSON text instead of being dropped. OpenAI and OpenAI-compatible requests recursively sanitize unsupported regex lookaround constraints from model-facing MCP tool schemas while preserving server-side validation. | Full | A future content type can only be native when ACP defines a matching content block; the lossless text/raw fallback remains available otherwise. |
-| Permissions | Permission requests carry the originating tool-call ID, raw input, normalized locations, and preflight full-file diffs for `edit`, `write`, `write_files`, and multi-file `apply_patch`, with allow once, always allow for this session, and reject choices. Session grants are shared across turns and cover later accesses within the approved folder scope. Patch previews use the same hunk matching without mutating disk. | Full | If an invalid patch cannot be simulated, the request still shows its raw patch and target locations and remains blocked until the user decides. |
+| Permissions | Permission requests carry the originating tool-call ID, raw input, normalized locations, and preflight full-file diffs for `edit`, `write`, `write_files`, and multi-file `apply_patch`, with allow once, always allow for this session, and reject choices. Session grants are shared across turns and cover later accesses within the approved folder scope. Patch previews use the same hunk matching without mutating disk. | Full | Previews never read protected external or sensitive files before approval. Those requests show proposed/raw input and locations without existing contents. Mixed protected patches omit their whole preflight diff. Invalid patches also retain raw input and remain blocked until the user decides. |
 | Cancellation | `session/cancel` interrupts model turns, questions, compaction, and terminal creation/execution while keeping the session reusable. Crabcode maps completion, output limit, configured turn limit, refusal/content filtering, and cancellation to ACP `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, and `cancelled`. | Full | Provider failures that are not normal stop conditions remain JSON-RPC/tool errors, as required by ACP's stop-reason model. |
 | Commands and skills | Session updates publish global/workspace skills, project custom commands, and `/skills`, `/mcp`, `/compact`, and `/btw`. Commands are dispatched from regular ACP text prompts as required by the protocol. Custom command agent/model overrides apply to that turn while embedded resources and media remain attached. `/skills` and `/mcp` return local results without spending or persisting a model turn; `/mcp` reports live connection/auth/failure status. `/compact` rewrites persisted context, while OpenCode-compatible `compaction.auto`, `compaction.prune`, and `compaction.reserved` also apply to normal ACP turns. `/btw` runs a no-tools side question without changing the main transcript. Unknown slash commands return an explicit error. | Full | Editor-native session/model/mode operations replace TUI-only navigation dialogs and pickers rather than duplicating their terminal UI commands. |
 | MCP | Project MCP and client-supplied stdio, HTTP, and SSE servers merge into the session. Static headers, structured results, live status, resources, annotations, images, audio, and metadata are preserved. Project-configured remote MCP continues to use Crabcode's OAuth credential flow. | Full | ACP currently advertises only the HTTP/SSE transport flags; its client-server schema has no stdio flag or remote OAuth fields. Client-supplied remote auth can still be provided through headers. |
