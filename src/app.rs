@@ -3976,6 +3976,23 @@ impl App {
             self.record_overlay_close_after_key(overlay_before_key);
             return;
         }
+        // Ctrl+D quits when there is no draft (EOF semantics, like opencode).
+        // Non-empty input falls through to the input handler where tui-textarea
+        // maps Ctrl+D to delete-forward, preserving emacs editing. Guarded to
+        // chat-level focus so ConnectDialog disconnect, sessions search/item
+        // menu, and other dialog Ctrl+D actions keep working.
+        if key.code == KeyCode::Char('d')
+            && key.modifiers == event::KeyModifiers::CONTROL
+            && matches!(
+                self.overlay_focus,
+                OverlayFocus::None | OverlayFocus::SuggestionsPopup
+            )
+            && !self.input.has_draft_content()
+        {
+            self.quit();
+            self.record_overlay_close_after_key(overlay_before_key);
+            return;
+        }
 
         if self.handle_selection_action_key(key) {
             self.record_overlay_close_after_key(overlay_before_key);
@@ -17992,6 +18009,87 @@ mod tests {
 
         assert_eq!(app.overlay_focus, OverlayFocus::None);
         assert!(!app.chat_state.chat.thinking_visible());
+    }
+
+    #[test]
+    fn ctrl_d_quits_when_input_empty() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        assert!(app.running);
+        assert!(!app.input.has_draft_content());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn ctrl_d_does_not_quit_when_input_has_text() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        app.input.insert_str("draft prompt");
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        // Non-empty input keeps emacs delete-forward behavior instead of quitting.
+        assert!(app.running);
+        assert_eq!(app.input.get_text(), "draft prompt");
+    }
+
+    #[test]
+    fn ctrl_d_does_not_quit_when_connect_dialog_focused() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::ConnectDialog;
+        app.connect_dialog_state.dialog.show();
+        assert!(app.input.is_empty());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        // ConnectDialog reserves Ctrl+D for Disconnect.
+        assert!(app.running);
+    }
+
+    #[test]
+    fn ctrl_d_does_not_quit_when_sessions_dialog_focused() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.open_sessions_dialog();
+        assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
+        assert!(app.input.is_empty());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(app.running);
+    }
+
+    #[test]
+    fn ctrl_d_quits_when_suggestions_popup_open_and_input_empty() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::SuggestionsPopup;
+        assert!(!app.input.has_draft_content());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(!app.running);
     }
 
     #[test]
