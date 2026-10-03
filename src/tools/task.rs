@@ -15,6 +15,42 @@ pub struct TaskTool {
     permissions: Option<crate::tools::ToolPermissions>,
     agent_registry: AgentRegistry,
     cancel_token: CancellationToken,
+    subagents_disabled: bool,
+}
+
+/// Env var that disables subagents (`task` tool) in every runtime
+/// (TUI, print mode, ACP, serve). Truthy values: `1`, `true`, `yes`,
+/// `y`, `on` (case-insensitive). Same convention as
+/// `CRABCODE_DISABLE_CLAUDE_CODE`.
+pub const DISABLE_SUBAGENTS_ENV: &str = "CRABCODE_DISABLE_SUBAGENTS";
+
+fn env_truthy_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
+/// Returns true when subagents are disabled via [`DISABLE_SUBAGENTS_ENV`].
+/// Pure env read so every runtime (including ACP/serve, which have no CLI
+/// flag threading) enforces the same seam without extra plumbing.
+pub fn subagents_disabled() -> bool {
+    std::env::var(DISABLE_SUBAGENTS_ENV)
+        .map(|value| env_truthy_value(&value))
+        .unwrap_or(false)
+}
+
+/// Flag/env precedence: an explicit `--disable-subagents` flag or a truthy
+/// env value disables subagents. There is no re-enable override: once
+/// either source says disabled, subagents stay disabled.
+pub fn resolve_subagents_disabled(cli_flag: bool) -> bool {
+    cli_flag || subagents_disabled()
+}
+
+#[cfg(test)]
+pub(crate) fn disable_subagents_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn stream_chunk_can_batch(chunk: &crate::llm::ChunkMessage) -> bool {
@@ -275,6 +311,50 @@ mod tests {
             Some("parent-model")
         );
     }
+
+    #[test]
+    fn disable_env_truthy_values_match_existing_conventions() {
+        for truthy in ["1", "true", "TRUE", "yes", "y", "on", "On"] {
+            assert!(env_truthy_value(truthy), "{truthy} should disable");
+        }
+        for falsy in ["", "0", "false", "no", "off", "2", "maybe"] {
+            assert!(!env_truthy_value(falsy), "{falsy} should not disable");
+        }
+    }
+
+    #[test]
+    fn resolve_flag_or_env_disables_with_flag_winning() {
+        // Serialized: mutates the process env. When the env is unset,
+        // the flag alone decides.
+        let _lock = disable_subagents_env_lock();
+        let prev = std::env::var(DISABLE_SUBAGENTS_ENV).ok();
+        std::env::remove_var(DISABLE_SUBAGENTS_ENV);
+        assert!(!resolve_subagents_disabled(false));
+        assert!(resolve_subagents_disabled(true));
+        match prev {
+            Some(value) => std::env::set_var(DISABLE_SUBAGENTS_ENV, value),
+            None => std::env::remove_var(DISABLE_SUBAGENTS_ENV),
+        }
+    }
+
+    #[test]
+    fn disabled_task_tool_rejects_without_running_subagent() {
+        let task = TaskTool::new(ToolRegistry::new()).with_subagents_disabled(true);
+        let params = serde_json::json!({
+            "subagent_type": "explore",
+            "description": "test",
+            "prompt": "look around"
+        });
+        let ctx =
+            ToolContext::from_cancel_token("session", "message", "Build", CancellationToken::new());
+
+        let result = tokio_test::block_on(task.execute(params, &ctx));
+        assert!(
+            matches!(result, Err(ToolError::Permission(ref msg)) if msg.contains("Subagents are disabled")),
+            "expected disabled rejection, got {:?}",
+            result
+        );
+    }
 }
 
 impl TaskTool {
@@ -285,7 +365,20 @@ impl TaskTool {
             permissions: None,
             agent_registry: AgentRegistry::default(),
             cancel_token: CancellationToken::new(),
+            subagents_disabled: false,
         }
+    }
+
+    /// Explicit opt-out without touching the process env. Preferred in
+    /// tests and in call sites that already resolved the CLI flag, so
+    /// regression tests avoid global env races.
+    pub fn with_subagents_disabled(mut self, disabled: bool) -> Self {
+        self.subagents_disabled = disabled;
+        self
+    }
+
+    fn subagents_disabled_effective(&self) -> bool {
+        self.subagents_disabled || subagents_disabled()
     }
 
     pub fn with_sender_opt(mut self, sender: Option<crate::llm::ChunkSender>) -> Self {
@@ -364,6 +457,12 @@ impl ToolHandler for TaskTool {
     }
 
     async fn execute(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        if self.subagents_disabled_effective() {
+            return Err(ToolError::Permission(
+                "Subagents are disabled (task tool). Re-run without --disable-subagents or unset CRABCODE_DISABLE_SUBAGENTS to enable them.".to_string(),
+            ));
+        }
+
         let subagent_type_str = get_string_param(&params, "subagent_type").unwrap_or_default();
         let description = get_string_param(&params, "description").unwrap_or_default();
         let prompt = get_string_param(&params, "prompt").unwrap_or_default();

@@ -393,6 +393,7 @@ async fn run_print_mode(
     reasoning_override: Option<crate::model::reasoning::ReasoningEffort>,
     no_session_persistence: bool,
     dangerously_skip_permissions: bool,
+    disable_subagents: bool,
     cli_agent: Option<&str>,
 ) -> Result<()> {
     use crate::llm::client::stream_llm_with_cancellation;
@@ -448,6 +449,7 @@ async fn run_print_mode(
         crate::config::ConfigRuntimeOptions {
             print_mode: true,
             dangerously_skip_permissions,
+            disable_subagents,
         },
     );
     let discovery = runtime.discovery;
@@ -785,6 +787,12 @@ pub(crate) struct Args {
     #[arg(long = "dangerously-skip-permissions")]
     dangerously_skip_permissions: bool,
 
+    /// Disable subagents (hides the `task` tool and rejects subagent calls).
+    /// Same as setting `CRABCODE_DISABLE_SUBAGENTS=1`. Applies to TUI,
+    /// print mode, ACP, and serve.
+    #[arg(long = "disable-subagents", global = true)]
+    disable_subagents: bool,
+
     #[arg(long = "emit-logs", hide = true)]
     emit_logs: bool,
 
@@ -1042,6 +1050,14 @@ async fn main() -> Result<()> {
         let _ = crate::logging::log(msg);
     });
 
+    // Converge flag + env into the single `CRABCODE_DISABLE_SUBAGENTS`
+    // seam before any runtime (TUI, print, ACP, serve) is constructed, so
+    // permission checks, registry omission, prompt suppression, and
+    // `TaskTool::execute` all agree without threading a bool everywhere.
+    if args.disable_subagents {
+        std::env::set_var(crate::tools::task::DISABLE_SUBAGENTS_ENV, "1");
+    }
+
     if args.test_notification {
         send_test_notification()?;
         return Ok(());
@@ -1222,6 +1238,7 @@ async fn main() -> Result<()> {
             args.reasoning_effort,
             args.no_session_persistence,
             args.dangerously_skip_permissions,
+            crate::tools::task::resolve_subagents_disabled(args.disable_subagents),
             args.agent.as_deref(),
         )
         .await;
@@ -1429,6 +1446,21 @@ mod tests {
         let args = Args::try_parse_from(["crabcode", "-p", "hi", "--agent", "plan"]).unwrap();
 
         assert_eq!(args.agent.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn disable_subagents_defaults_off_and_parses_flag() {
+        let args = Args::try_parse_from(["crabcode", "-p", "hi"]).unwrap();
+        assert!(!args.disable_subagents);
+
+        let args = Args::try_parse_from(["crabcode", "-p", "hi", "--disable-subagents"]).unwrap();
+        assert!(args.disable_subagents);
+    }
+
+    #[test]
+    fn disable_subagents_flag_is_global_for_subcommands() {
+        let args = Args::try_parse_from(["crabcode", "--disable-subagents", "acp"]).unwrap();
+        assert!(args.disable_subagents);
     }
 
     #[test]

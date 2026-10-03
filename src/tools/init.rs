@@ -179,13 +179,20 @@ pub async fn register_dynamic_tools(
         ))
         .await;
 
-    registry
-        .register(Arc::new(
-            TaskTool::new(registry.clone())
-                .with_sender_opt(sender.clone())
-                .with_runtime_options(permissions, agent_registry, cancel_token),
-        ))
-        .await;
+    // Omit (don't just deny) when disabled so `registry.get("task")` is
+    // None and the model never sees the tool. The flag path sets
+    // `CRABCODE_DISABLE_SUBAGENTS=1` early in `main`, so this single env
+    // check covers flag + env without threading a bool through every
+    // `register_dynamic_tools` call site (TUI, print, ACP, serve).
+    if !super::task::subagents_disabled() {
+        registry
+            .register(Arc::new(
+                TaskTool::new(registry.clone())
+                    .with_sender_opt(sender.clone())
+                    .with_runtime_options(permissions, agent_registry, cancel_token),
+            ))
+            .await;
+    }
 
     // Keep terminal_session as a thin interactive alias for back-compat.
     registry
@@ -277,6 +284,9 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_registry_contains_runtime_tools() {
+        let _lock = crate::tools::task::disable_subagents_env_lock();
+        let prev = std::env::var(crate::tools::task::DISABLE_SUBAGENTS_ENV).ok();
+        std::env::remove_var(crate::tools::task::DISABLE_SUBAGENTS_ENV);
         let registry = initialize_tool_registry_with_dynamic(
             None,
             ToolPermissions::new("."),
@@ -292,10 +302,40 @@ mod tests {
         assert!(registry.get("bash_output").await.is_some());
         assert!(registry.get("bash_kill").await.is_some());
         assert!(registry.get("bash_restart").await.is_some());
+        match prev {
+            Some(value) => std::env::set_var(crate::tools::task::DISABLE_SUBAGENTS_ENV, value),
+            None => std::env::remove_var(crate::tools::task::DISABLE_SUBAGENTS_ENV),
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_env_omits_task_tool_from_dynamic_registry() {
+        let _lock = crate::tools::task::disable_subagents_env_lock();
+        let prev = std::env::var(crate::tools::task::DISABLE_SUBAGENTS_ENV).ok();
+        std::env::set_var(crate::tools::task::DISABLE_SUBAGENTS_ENV, "1");
+        let registry = initialize_tool_registry_with_dynamic(
+            None,
+            ToolPermissions::new("."),
+            crate::agent::definition::AgentRegistry::default(),
+            CancellationToken::new(),
+            Arc::new(ProcessRegistry::new()),
+        )
+        .await;
+
+        assert!(registry.get("task").await.is_none());
+        // Interactive tools stay registered.
+        assert!(registry.get("question").await.is_some());
+        match prev {
+            Some(value) => std::env::set_var(crate::tools::task::DISABLE_SUBAGENTS_ENV, value),
+            None => std::env::remove_var(crate::tools::task::DISABLE_SUBAGENTS_ENV),
+        }
     }
 
     #[tokio::test]
     async fn scoped_plan_registry_hides_mutating_tools() {
+        let _lock = crate::tools::task::disable_subagents_env_lock();
+        let prev = std::env::var(crate::tools::task::DISABLE_SUBAGENTS_ENV).ok();
+        std::env::remove_var(crate::tools::task::DISABLE_SUBAGENTS_ENV);
         let permissions = ToolPermissions::new(".");
         let registry = initialize_tool_registry_with_dynamic(
             None,
@@ -317,6 +357,10 @@ mod tests {
         assert!(scoped.get("apply_patch").await.is_none());
         assert!(scoped.get("write").await.is_none());
         assert!(scoped.get("edit").await.is_none());
+        match prev {
+            Some(value) => std::env::set_var(crate::tools::task::DISABLE_SUBAGENTS_ENV, value),
+            None => std::env::remove_var(crate::tools::task::DISABLE_SUBAGENTS_ENV),
+        }
     }
 
     #[tokio::test]

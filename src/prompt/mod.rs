@@ -418,7 +418,14 @@ Your output will be displayed on a command line interface. Your responses should
                 }
             }
         }
-        let subagents = registry.visible_subagents();
+        // Add available subagents listing (suppressed when subagents are
+        // disabled so the model does not spend tokens attempting `task`
+        // calls that will be rejected).
+        let subagents = if crate::tools::task::subagents_disabled() {
+            Vec::new()
+        } else {
+            registry.visible_subagents()
+        };
         if !subagents.is_empty() {
             let subagents_xml = subagents
                 .iter()

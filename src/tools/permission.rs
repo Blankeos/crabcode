@@ -299,6 +299,14 @@ impl ToolPermissions {
     }
 
     pub fn is_tool_allowed_for_agent(&self, agent_mode: &str, tool_id: &str) -> bool {
+        // Central kill-switch: `CRABCODE_DISABLE_SUBAGENTS=1` hides the
+        // `task` tool in every runtime (TUI, print, ACP, serve) without
+        // threading a flag through each entrypoint. Explicit
+        // `--disable-subagents` sets this env early in `main`, so both
+        // sources converge here plus the `ConfigRuntime` deny rule.
+        if tool_id == "task" && super::task::subagents_disabled() {
+            return false;
+        }
         self.agent_policies.is_allowed(agent_mode, tool_id)
             && self
                 .global_tool_config

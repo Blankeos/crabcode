@@ -207,6 +207,20 @@ Subagents do not inherit the parent model's reasoning effort. Set `reasoningEffo
 
 Direct `@agent` invocation is available for visible `subagent` and `all` agents. For example, `@explore trace config loading` starts a child session through the Task flow.
 
+## Disabling subagents
+
+When subagents waste tokens (for example, a child agent returns an empty result), turn them off. The `task` tool is hidden from the model and any `task` call — including direct `@agent` mentions, which run through the same Task flow — is rejected with a permission error.
+
+```sh
+crabcode --disable-subagents
+crabcode --disable-subagents -p "fix the failing test"
+CRABCODE_DISABLE_SUBAGENTS=1 crabcode
+```
+
+The flag is global, so it also applies before subcommands (`crabcode --disable-subagents acp`, `crabcode --disable-subagents serve`). Remote `serve` hosts enforce whatever value was set in the host process environment.
+
+`CRABCODE_DISABLE_SUBAGENTS` accepts `1`, `true`, `yes`, `y`, or `on` (case-insensitive); anything else, including an unset variable, keeps subagents enabled. Either source disables — there is no re-enable override once one of them says disabled.
+
 ## What belongs where
 
 | Need | Put it in |

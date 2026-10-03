@@ -18,6 +18,9 @@ pub struct ConfigRuntimeOptions {
     pub print_mode: bool,
     /// Skip permission prompts (print-mode `--dangerously-skip-permissions`).
     pub dangerously_skip_permissions: bool,
+    /// Hide the `task` tool and reject subagent calls. Set from
+    /// `--disable-subagents` / `CRABCODE_DISABLE_SUBAGENTS`.
+    pub disable_subagents: bool,
 }
 
 /// Runtime pieces derived from merged config.
@@ -44,7 +47,10 @@ impl ConfigRuntime {
 
         let mut permission_rules = merged.permission_rules.clone();
         if options.print_mode {
-            permission_rules = deny_print_mode_interactive_tools(permission_rules);
+            permission_rules = deny_tools(permission_rules, &["question", "update_plan"]);
+        }
+        if options.disable_subagents || crate::tools::task::subagents_disabled() {
+            permission_rules = deny_tools(permission_rules, &["task"]);
         }
 
         let tool_permissions = ToolPermissions::new(cwd)
@@ -78,8 +84,8 @@ impl ConfigRuntime {
     }
 }
 
-fn deny_print_mode_interactive_tools(mut rules: PermissionRules) -> PermissionRules {
-    for tool_id in ["question", "update_plan"] {
+fn deny_tools(mut rules: PermissionRules, tool_ids: &[&str]) -> PermissionRules {
+    for tool_id in tool_ids {
         rules.push(PermissionRule {
             permission: tool_id.to_string(),
             pattern: "*".to_string(),
@@ -165,6 +171,43 @@ mod tests {
         assert!(!discovery.provider_is_enabled("openai"));
         assert!(!discovery.provider_is_enabled("other")); // not in allowlist
         assert!(discovery.provider_is_enabled("anthropic"));
+    }
+
+    #[test]
+    fn disable_subagents_denies_task_tool_only() {
+        // Ensure the env seam does not leak into this explicit-flag test.
+        let _lock = crate::tools::task::disable_subagents_env_lock();
+        let prev = std::env::var(crate::tools::task::DISABLE_SUBAGENTS_ENV).ok();
+        std::env::remove_var(crate::tools::task::DISABLE_SUBAGENTS_ENV);
+
+        let merged = MergedConfig::default();
+        let disabled_rt = ConfigRuntime::from_merged(
+            &merged,
+            "/tmp/workspace",
+            ConfigRuntimeOptions {
+                disable_subagents: true,
+                ..Default::default()
+            },
+        );
+        let default_rt =
+            ConfigRuntime::from_merged(&merged, "/tmp/workspace", ConfigRuntimeOptions::default());
+
+        assert!(!disabled_rt
+            .tool_permissions
+            .is_tool_visible_for_agent("build", "task"));
+        // Other tools stay available.
+        assert!(disabled_rt
+            .tool_permissions
+            .is_tool_visible_for_agent("build", "read"));
+        // Default keeps subagents enabled.
+        assert!(default_rt
+            .tool_permissions
+            .is_tool_visible_for_agent("build", "task"));
+
+        match prev {
+            Some(value) => std::env::set_var(crate::tools::task::DISABLE_SUBAGENTS_ENV, value),
+            None => std::env::remove_var(crate::tools::task::DISABLE_SUBAGENTS_ENV),
+        }
     }
 
     #[test]
