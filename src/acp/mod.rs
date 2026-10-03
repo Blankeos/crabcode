@@ -4,6 +4,7 @@
 //! avoids constructing the Ratatui application so editors can launch Crabcode
 //! as a normal subprocess.
 
+mod login;
 mod server;
 mod service;
 
@@ -12,4 +13,8 @@ use std::path::PathBuf;
 
 pub async fn run(cwd: Option<PathBuf>) -> Result<()> {
     server::run(cwd).await
+}
+
+pub async fn login(cwd: Option<PathBuf>) -> Result<()> {
+    login::run(cwd).await
 }

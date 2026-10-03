@@ -1934,6 +1934,29 @@ impl Chat {
         self.invalidate_cache();
     }
 
+    pub fn apply_streaming_usage(
+        &mut self,
+        usage: crate::aisdk::chunk::TokenUsage,
+        cost: Option<f64>,
+        duration_ms: u64,
+    ) {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .rfind(|message| message.role == MessageRole::Assistant)
+        {
+            message.input_tokens = Some(usize::try_from(usage.input).unwrap_or(usize::MAX));
+            message.output_tokens = Some(usize::try_from(usage.output).unwrap_or(usize::MAX));
+            message.cache_read_tokens =
+                Some(usize::try_from(usage.cache_read).unwrap_or(usize::MAX));
+            message.cache_write_tokens =
+                Some(usize::try_from(usage.cache_write).unwrap_or(usize::MAX));
+            message.cost = cost;
+            message.usage_authoritative = true;
+            message.duration_ms = Some(duration_ms);
+        }
+    }
+
     pub fn truncate_messages(&mut self, len: usize) {
         self.messages.truncate(len);
         self.invalidate_cache();
@@ -2326,6 +2349,8 @@ impl Chat {
             std::mem::discriminant(&msg.role).hash(&mut h);
             msg.content.hash(&mut h);
             msg.reasoning.hash(&mut h);
+            msg.local_image_paths.hash(&mut h);
+            msg.local_audio_paths.hash(&mut h);
             for part in &msg.parts {
                 part.part_type.hash(&mut h);
                 part.data.to_string().hash(&mut h);
@@ -2678,7 +2703,9 @@ impl Chat {
                 upstream_tokens_per_sec(billed_output, decode_duration_ms).or(sample_tps);
             self.cached_tokens_per_sec = final_tps;
             if let Some(msg) = self.messages.get_mut(idx) {
-                msg.output_tokens = Some(msg.output_tokens.unwrap_or(token_count));
+                if !msg.usage_authoritative {
+                    msg.output_tokens = Some(msg.output_tokens.unwrap_or(token_count));
+                }
                 msg.token_count = msg.output_tokens;
                 msg.duration_ms = Some(decode_duration_ms);
                 msg.tokens_per_sec = final_tps;

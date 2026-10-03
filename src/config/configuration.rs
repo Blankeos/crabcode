@@ -501,12 +501,35 @@ pub enum CompactionConfig {
     Settings {
         auto: bool,
         prune: bool,
+        reserved: Option<u32>,
     },
 }
 
 impl CompactionConfig {
     pub fn is_enabled(&self) -> bool {
         !matches!(self, Self::Disabled)
+    }
+
+    pub fn auto(&self) -> bool {
+        match self {
+            Self::Enabled => true,
+            Self::Disabled => false,
+            Self::Settings { auto, .. } => *auto,
+        }
+    }
+
+    pub fn prune(&self) -> bool {
+        match self {
+            Self::Settings { prune, .. } => *prune,
+            Self::Enabled | Self::Disabled => false,
+        }
+    }
+
+    pub fn reserved(&self) -> Option<u32> {
+        match self {
+            Self::Settings { reserved, .. } => *reserved,
+            Self::Enabled | Self::Disabled => None,
+        }
     }
 }
 
@@ -1494,6 +1517,10 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
                 .get("prune")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            reserved: settings
+                .get("reserved")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok()),
         },
         _ => CompactionConfig::Enabled,
     };
@@ -2779,6 +2806,7 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "tui",
         "instructions",
         "tools",
+        "compaction",
         "watcher",
         "disabled_providers",
         "enabled_providers",
@@ -2826,6 +2854,8 @@ mod tests {
         assert_eq!(config.instructions, vec!["AGENTS.md"]);
         assert_eq!(config.tools.get("bash"), Some(&false));
         assert!(!config.compaction.is_enabled());
+        assert!(!config.compaction.auto());
+        assert!(!config.compaction.prune());
         assert_eq!(config.watcher.ignored_paths(), ["generated", "tmp/cache"]);
         assert_eq!(
             config.formatter.get("rs"),
@@ -2857,6 +2887,26 @@ mod tests {
             config.small_model.as_deref(),
             Some("anthropic/claude-haiku")
         );
+    }
+
+    #[test]
+    fn parses_opencode_compaction_settings() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(
+            &json!({
+                "compaction": {
+                    "auto": true,
+                    "prune": false,
+                    "reserved": 10000
+                }
+            }),
+            &mut diagnostics,
+        );
+
+        assert!(config.compaction.auto());
+        assert!(!config.compaction.prune());
+        assert_eq!(config.compaction.reserved(), Some(10_000));
+        assert!(diagnostics.unimplemented_keys.is_empty());
     }
 
     #[test]

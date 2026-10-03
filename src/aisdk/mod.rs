@@ -29,7 +29,8 @@ pub mod core {
 
     pub mod response {
         pub use super::super::response::{
-            stream_with_tools, LanguageModelStream, StreamTextResponse,
+            stream_with_tools_options, LanguageModelStream, StreamTextResponse,
+            StreamWithToolsOptions,
         };
     }
 

@@ -35,6 +35,25 @@ const OPENAI_WEBSOCKET_IO_TIMEOUT: Duration = Duration::from_secs(300);
 const OPENAI_WEBSOCKET_STREAM_RETRIES: usize = 1;
 const OPENAI_WEBSOCKET_FAILURES_BEFORE_FALLBACK: usize = 5;
 
+fn responses_incomplete_chunk(value: &serde_json::Value) -> ChunkType {
+    let reason = value
+        .get("response")
+        .and_then(|response| response.get("incomplete_details"))
+        .and_then(|details| details.get("reason"))
+        .and_then(serde_json::Value::as_str);
+    match reason {
+        Some("max_output_tokens" | "max_tokens") => ChunkType::End {
+            reason: Some(crate::chunk::FinishReason::Length),
+        },
+        Some("content_filter" | "refusal" | "safety") => ChunkType::End {
+            reason: Some(crate::chunk::FinishReason::Refusal),
+        },
+        _ => ChunkType::RetryableFailure(RetryError::from_message(responses_incomplete_message(
+            value,
+        ))),
+    }
+}
+
 #[async_trait]
 pub trait HttpResponseRetryPolicy: Send + Sync + std::fmt::Debug {
     async fn retry_headers(
@@ -601,7 +620,7 @@ impl OpenAI {
                     // Plugins are not Responses `tools` entries.
                 }
                 crate::aisdk::tool::ToolTransport::ClientFunction => {
-                    let schema = serde_json::to_value(&t.input_schema).unwrap_or_default();
+                    let schema = crate::tool::openai_compatible_input_schema(&t.input_schema);
                     let mut tool = serde_json::json!({
                         "type": "function",
                         "name": t.name,
@@ -1560,9 +1579,7 @@ fn response_sse_data_to_chunk(data: &str) -> Option<Result<ChunkType>> {
                 "doom_loop_check triggers={triggers}"
             ))))
         }
-        "response.incomplete" => Some(Ok(ChunkType::RetryableFailure(RetryError::from_message(
-            responses_incomplete_message(&value),
-        )))),
+        "response.incomplete" => Some(Ok(responses_incomplete_chunk(&value))),
         "response.failed" | "error" => Some(Ok(responses_error_chunk(&value, event_type))),
         _ => {
             if let Some(reasoning_item) = responses_reasoning_item_chunk(&value) {
@@ -2618,6 +2635,37 @@ mod tests {
     }
 
     #[test]
+    fn response_incomplete_safety_reasons_emit_refusal() {
+        for reason in ["refusal", "content_filter", "safety"] {
+            let chunk = response_sse_data_to_chunk(&format!(
+                r#"{{"type":"response.incomplete","response":{{"incomplete_details":{{"reason":"{reason}"}}}}}}"#
+            ))
+            .expect("expected incomplete chunk");
+            assert!(matches!(
+                chunk,
+                Ok(ChunkType::End {
+                    reason: Some(crate::chunk::FinishReason::Refusal)
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn response_incomplete_max_output_tokens_emits_terminal_reason() {
+        let chunk = response_sse_data_to_chunk(
+            r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}"#,
+        )
+        .expect("expected incomplete chunk");
+
+        assert!(matches!(
+            chunk,
+            Ok(ChunkType::End {
+                reason: Some(crate::chunk::FinishReason::Length)
+            })
+        ));
+    }
+
+    #[test]
     fn retryable_failure_is_terminal_for_sse_eof_tracking() {
         let chunk = Ok(ChunkType::RetryableFailure(
             crate::retry::RetryError::from_message("stream error"),
@@ -3231,6 +3279,47 @@ mod tests {
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], true);
         assert_eq!(body["tools"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn responses_body_removes_unsupported_tool_regex_lookaround() {
+        let provider = OpenAI::builder()
+            .base_url("https://api.openai.com")
+            .api_key("test-key")
+            .model_name("gpt-test")
+            .build()
+            .unwrap();
+        let schema: Schema = serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "email": {
+                            "type": "string",
+                            "pattern": "^(?!\\.)(?!.*\\.\\.)[^@]+@[^@]+$"
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let tools = vec![Tool::builder()
+            .name("contact_create")
+            .description("Create a contact")
+            .input_schema(schema)
+            .execute(ToolExecute::new(|_| async { Ok("ok") }))
+            .build()
+            .unwrap()];
+
+        let body = provider.build_responses_body(
+            vec![serde_json::json!({"role": "user", "content": "create contact"})],
+            &tools,
+        );
+
+        assert!(body
+            .pointer("/tools/0/parameters/properties/data/properties/email/pattern")
+            .is_none());
     }
 
     #[test]
