@@ -1532,6 +1532,7 @@ mod tests {
             structured_output: false,
             free: false,
             local: true,
+            context_window: None,
             reasoning_options: Vec::new(),
         };
         crate::model::effective_catalog::publish_refreshed_models(vec![marker])
