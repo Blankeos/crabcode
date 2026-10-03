@@ -57,6 +57,10 @@ pub async fn selectable_models(
     } else {
         Vec::new()
     };
+    merge_dialog_models(
+        &mut models,
+        discovery.discover_custom_models_for_dialog().await,
+    );
     discovery.apply_custom_models_to_dialog(&mut models);
 
     let mut runtime_errors = Vec::new();
