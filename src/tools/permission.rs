@@ -317,6 +317,15 @@ impl ToolPermissions {
         )
     }
 
+    /// Skills requiring approval are discoverable; explicitly denied skills are not.
+    pub(crate) fn is_skill_visible_for_agent(&self, agent_mode: &str, name: &str) -> bool {
+        self.is_tool_visible_for_agent(agent_mode, "skill")
+            && !matches!(
+                self.evaluate_config_decision(agent_mode, "skill", "skill", &[name.to_string()]),
+                Some(PermissionPolicyAction::Deny)
+            )
+    }
+
     pub async fn preflight(
         &self,
         agent_mode: &str,
