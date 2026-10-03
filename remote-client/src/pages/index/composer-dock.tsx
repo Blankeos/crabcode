@@ -239,7 +239,7 @@ function ComposerSuggestions(props: { composer: ComposerController }) {
           {(suggestion, index) => (
             <button
               class={cx(
-                "grid min-h-[3.05rem] w-full grid-cols-[1.7rem_minmax(0,1fr)] items-center gap-3 rounded-[9px] px-2 py-1.5 text-left text-[var(--text)] hover:bg-white/[0.07]",
+                "grid min-h-[3.05rem] w-full grid-cols-[1.7rem_minmax(0,1fr)_auto] items-center gap-3 rounded-[9px] px-2 py-1.5 text-left text-[var(--text)] hover:bg-white/[0.07]",
                 index() === composer.suggestionIndex() && "bg-white/[0.07]"
               )}
               type="button"
@@ -264,6 +264,9 @@ function ComposerSuggestions(props: { composer: ComposerController }) {
                   )}
                 </Show>
               </span>
+              <Show when={suggestion.kind === "skill" || suggestion.kind === "agent"}>
+                <span class="text-right text-[0.78rem] text-[var(--muted)]">{suggestion.kind}</span>
+              </Show>
             </button>
           )}
         </For>
@@ -470,6 +473,7 @@ function SuggestionIcon(props: { suggestion: RemoteSuggestion }) {
   const suggestion = props.suggestion
   if (suggestion.kind === "command") return <IconTerminal class="h-[1.35rem] w-[1.35rem] text-[var(--muted)]" />
   if (suggestion.kind === "agent") return <IconBrainGlyph class="h-[1.35rem] w-[1.35rem] text-[#d9a6ff]" />
+  if (suggestion.kind === "skill") return <IconBrainGlyph class="h-[1.35rem] w-[1.35rem] text-[var(--muted)]" />
   if (suggestion.is_directory) return <IconFolder class="h-[1.35rem] w-[1.35rem] text-[#85827a]" />
 
   const FileIcon = iconForFile(suggestion.name)
@@ -493,6 +497,6 @@ function iconForFile(path: string) {
 
 function suggestionPrefix(suggestion: RemoteSuggestion) {
   if (suggestion.kind === "command") return "/"
-  if (suggestion.kind === "agent") return "@"
+  if (suggestion.kind === "agent" || suggestion.kind === "skill") return "@"
   return ""
 }

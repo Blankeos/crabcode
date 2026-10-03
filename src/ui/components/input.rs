@@ -1245,7 +1245,7 @@ impl Input {
 
     fn command_query(&self) -> Option<String> {
         let text = self.get_text();
-        if !text.starts_with('/') || text.contains('\n') {
+        if !text.starts_with('/') || text.chars().any(char::is_whitespace) {
             return None;
         }
         Some(text.trim_start_matches('/').to_string())
@@ -2239,7 +2239,7 @@ impl Input {
                 let text = self.get_text();
                 self.replace_range(0..text.len(), &replacement);
             }
-            SuggestionKind::Agent => {
+            SuggestionKind::Agent | SuggestionKind::Skill => {
                 let Some(token) = self.current_at_token(true) else {
                     return;
                 };
@@ -2285,33 +2285,9 @@ impl Input {
     }
 
     pub fn get_autocomplete_selection(&self, is_chat: bool) -> Option<String> {
-        if let Some(autocomplete) = &self.autocomplete {
-            let suggestions = if let Some(filter) = self.command_query() {
-                autocomplete.command_auto.get_suggestions(&filter, is_chat)
-            } else if let Some(token) = self.current_at_token(true) {
-                let mut suggestions = Vec::new();
-                suggestions.extend(
-                    autocomplete
-                        .agents
-                        .iter()
-                        .filter(|agent| {
-                            agent
-                                .name
-                                .to_ascii_lowercase()
-                                .starts_with(&token.query.to_ascii_lowercase())
-                        })
-                        .cloned(),
-                );
-                suggestions.extend(autocomplete.file_auto.get_suggestions(&token.query));
-                suggestions
-            } else {
-                Vec::new()
-            };
-            if !suggestions.is_empty() {
-                return Some(suggestions[0].name.clone());
-            }
-        }
-        None
+        self.get_autocomplete_suggestions(is_chat)
+            .first()
+            .map(|suggestion| suggestion.name.clone())
     }
 
     pub fn get_text(&self) -> String {
@@ -2452,21 +2428,7 @@ impl Input {
                 return autocomplete.command_auto.get_suggestions(&filter, is_chat);
             }
             if let Some(token) = self.current_at_token(true) {
-                let mut suggestions = Vec::new();
-                suggestions.extend(
-                    autocomplete
-                        .agents
-                        .iter()
-                        .filter(|agent| {
-                            agent
-                                .name
-                                .to_ascii_lowercase()
-                                .starts_with(&token.query.to_ascii_lowercase())
-                        })
-                        .cloned(),
-                );
-                suggestions.extend(autocomplete.file_auto.get_suggestions(&token.query));
-                return suggestions;
+                return autocomplete.mention_suggestions(&token.query);
             }
         }
         Vec::new()
@@ -3174,6 +3136,76 @@ mod tests {
         assert!(suggestions
             .iter()
             .any(|s| s.kind == SuggestionKind::Agent && s.name == "general"));
+    }
+
+    #[test]
+    fn test_skill_autocomplete_is_discovered_with_mentions_not_slashes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut input = Input::new().with_autocomplete(
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::default(),
+                root.path(),
+                false,
+                Vec::new(),
+            )
+            .with_agents(vec![Suggestion::agent("explore", "Explore code")])
+            .with_skills(vec![
+                Suggestion::skill("ratatui", "Build terminal UIs"),
+                Suggestion::skill("codebase-design", "Design deep modules"),
+            ]),
+        );
+        for is_chat in [false, true] {
+            input.set_text("@");
+            let suggestions = input.get_autocomplete_suggestions(is_chat);
+            assert_eq!(suggestions[0].name, "codebase-design");
+            assert_eq!(suggestions[0].kind, SuggestionKind::Skill);
+            assert_eq!(suggestions[1].name, "ratatui");
+            assert_eq!(suggestions[2].kind, SuggestionKind::Agent);
+
+            input.set_text("@CODE");
+            assert_eq!(
+                input.get_autocomplete_suggestions(is_chat),
+                vec![Suggestion::skill("codebase-design", "Design deep modules")]
+            );
+            assert_eq!(
+                input.get_autocomplete_selection(is_chat).as_deref(),
+                Some("codebase-design")
+            );
+
+            input.set_text("/code");
+            assert!(input.get_autocomplete_suggestions(is_chat).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_skill_completion_replaces_only_current_mention() {
+        let mut input = Input::new();
+        input.set_text("Use @code and keep the rest");
+        input.textarea.move_cursor(CursorMove::Jump(0, 9));
+        input.apply_suggestion(&Suggestion::skill("codebase-design", "Design deep modules"));
+        assert_eq!(input.get_text(), "Use @codebase-design  and keep the rest");
+        assert_eq!(input.submission_text(), input.get_text());
+        assert!(!input.should_show_suggestions());
+    }
+
+    #[test]
+    fn test_skill_completion_inside_slash_command_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let mut input = Input::new().with_autocomplete(
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::default(),
+                root.path(),
+                false,
+                Vec::new(),
+            )
+            .with_skills(vec![Suggestion::skill(
+                "codebase-design",
+                "Design deep modules",
+            )]),
+        );
+        input.set_text("/review @code");
+        input.complete_selection(true);
+        assert_eq!(input.get_text(), "/review @codebase-design ");
     }
 
     #[test]

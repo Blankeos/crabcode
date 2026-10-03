@@ -360,6 +360,7 @@ Your output will be displayed on a command line interface. Your responses should
                 let skills_block = format!(
                     "\n\nSkills provide specialized instructions and workflows for specific tasks.\n\
                      Use the skill tool to load a skill when a task matches its description.\n\
+                     When the user explicitly mentions a listed skill as @name or /name, use the skill tool to load it before responding.\n\
                      <available_skills>\n{}\n</available_skills>",
                     skills_xml
                 );

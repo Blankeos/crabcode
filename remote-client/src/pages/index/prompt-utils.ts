@@ -17,6 +17,10 @@ export function loadPromptHistory() {
   }
 }
 
+export function shouldSubmitLiteralSlash(text: string, selectionExplicit: boolean) {
+  return text.trim() === "/" && !selectionExplicit
+}
+
 export function savePromptHistory(entries: string[]) {
   try {
     localStorage.setItem(PROMPT_HISTORY_KEY, JSON.stringify(entries.slice(0, MAX_PROMPT_HISTORY)))
@@ -38,7 +42,7 @@ export function mergePromptHistoryEntries(...groups: string[][]) {
 
   for (const text of groups.flat()) {
     const entry = normalizePromptHistoryEntry(text)
-    if (!entry || seen.has(entry) || parseSlashCommand(entry)) continue
+    if (!entry || seen.has(entry)) continue
     seen.add(entry)
     entries.push(entry)
     if (entries.length >= MAX_PROMPT_HISTORY) break
@@ -404,4 +408,10 @@ export function parseSlashCommand(text: string) {
   const match = body.match(/^([^\s]+)(?:\s+([\s\S]*))?$/)
   if (!match) return null
   return { name: match[1], args: match[2] ?? "" }
+}
+
+// Registry names include aliases and hidden skills; they are not completion suggestions.
+export function isRegisteredSlashCommand(text: string, commandNames: readonly string[]) {
+  const parsed = parseSlashCommand(text)
+  return parsed !== null && commandNames.includes(parsed.name)
 }

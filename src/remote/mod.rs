@@ -364,6 +364,8 @@ struct RemoteThreadTabs {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct RemoteState {
     status: RemoteStatus,
+    #[serde(default)]
+    command_names: Vec<String>,
     projects: Vec<RemoteWorkspace>,
     sessions: Vec<RemoteSession>,
     current_session_id: Option<String>,
@@ -2300,6 +2302,17 @@ async fn write_response(
 
 fn remote_state(app: &App, host_state: &HostState) -> RemoteState {
     let status = remote_status(app, host_state);
+    // Classification includes aliases and hidden skills, unlike autocomplete.
+    let mut command_names = app
+        .command_registry
+        .list_commands()
+        .into_iter()
+        .flat_map(|command| {
+            std::iter::once(command.name.clone()).chain(command.hidden_tokens.iter().cloned())
+        })
+        .collect::<Vec<_>>();
+    command_names.sort();
+    command_names.dedup();
     let mut session_infos = app
         .session_manager
         .list_sessions()
@@ -2339,6 +2352,7 @@ fn remote_state(app: &App, host_state: &HostState) -> RemoteState {
 
     RemoteState {
         status,
+        command_names,
         projects,
         sessions,
         current_session_id,
@@ -3139,6 +3153,7 @@ fn remote_suggestions(app: &App, payload: &AutocompleteRequest) -> Vec<RemoteSug
         kind: match suggestion.kind {
             crate::autocomplete::SuggestionKind::Command => "command",
             crate::autocomplete::SuggestionKind::Agent => "agent",
+            crate::autocomplete::SuggestionKind::Skill => "skill",
             crate::autocomplete::SuggestionKind::File => "file",
         }
         .to_string(),

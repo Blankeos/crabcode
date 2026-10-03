@@ -1368,7 +1368,8 @@ impl App {
                 loaded_config.merged_config.watcher.is_enabled(),
                 loaded_config.merged_config.watcher.ignored_paths().to_vec(),
             )
-            .with_agents(agent_suggestions),
+            .with_agents(agent_suggestions)
+            .with_skills(Self::skill_suggestions(&agent_registry)),
         );
 
         let mut agent = self.agent.clone();
@@ -4768,6 +4769,15 @@ impl App {
     }
 
     fn handle_suggestions_popup_keys(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Enter
+            && key.modifiers == KeyModifiers::NONE
+            && self.input.submission_text().trim() == "/"
+            && !self.suggestions_popup_state.popup.selection_is_explicit()
+        {
+            self.clear_suggestions_and_blur();
+            self.handle_input_and_app_keys(key);
+            return true;
+        }
         let action = handle_suggestions_popup_key_event(&mut self.suggestions_popup_state, key);
         match action {
             crate::ui::components::popup::PopupAction::Handled => true,
@@ -5073,9 +5083,7 @@ impl App {
                 let image_paths = self.input.local_image_paths_for_submission();
                 let input_text = self.input.submission_text();
                 if !input_text.is_empty() || !image_paths.is_empty() {
-                    use crate::command::parser::parse_input;
-
-                    let input_type = parse_input(&input_text);
+                    let input_type = self.parse_prompt_input(&input_text);
                     match input_type {
                         crate::command::parser::InputType::Command(parsed) => {
                             // Don't save commands to prompt history
@@ -5146,6 +5154,59 @@ impl App {
 
     fn can_submit_input(input_type: &InputType, is_streaming: bool) -> bool {
         matches!(input_type, InputType::Command(_)) || !is_streaming
+    }
+
+    /// Only registered slash commands and agent mentions are special input.
+    /// Skill mentions and unknown slash tokens are ordinary prompts, retaining
+    /// history, attachments, and the normal busy-session queue behavior.
+    fn parse_prompt_input(&self, input: &str) -> InputType {
+        match crate::command::parser::parse_input(input) {
+            InputType::Command(parsed) if self.command_registry.get(&parsed.name).is_none() => {
+                InputType::Message(parsed.raw)
+            }
+            InputType::AgentMention(mention)
+                if self.agent_registry.task_target(&mention.agent).is_none()
+                    && (self
+                        .input
+                        .autocomplete
+                        .as_ref()
+                        .is_some_and(|autocomplete| {
+                            autocomplete
+                                .skills
+                                .iter()
+                                .any(|skill| skill.name.eq_ignore_ascii_case(&mention.agent))
+                        })
+                        || crate::skill::get_skill_store().is_some_and(|store| {
+                            store
+                                .all()
+                                .iter()
+                                .any(|skill| skill.name.eq_ignore_ascii_case(&mention.agent))
+                        })) =>
+            {
+                InputType::Message(mention.raw)
+            }
+            input => input,
+        }
+    }
+
+    fn skill_suggestions(
+        agent_registry: &crate::agent::definition::AgentRegistry,
+    ) -> Vec<crate::autocomplete::Suggestion> {
+        crate::skill::get_skill_store()
+            .map(|store| {
+                store
+                    .all()
+                    .into_iter()
+                    .filter(|skill| agent_registry.task_target(&skill.name).is_none())
+                    .map(|skill| {
+                        crate::autocomplete::Suggestion::skill(
+                            skill.name.clone(),
+                            skill.description.clone().unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn update_suggestions(&mut self) {
@@ -6311,6 +6372,7 @@ impl App {
                     }
                 }
                 crate::autocomplete::SuggestionKind::Agent
+                | crate::autocomplete::SuggestionKind::Skill
                 | crate::autocomplete::SuggestionKind::File => {
                     self.input.apply_suggestion(&selected);
                     self.update_suggestions();
@@ -7358,9 +7420,7 @@ impl App {
     }
 
     async fn process_input(&mut self, input: &str) {
-        use crate::command::parser::parse_input;
-
-        match parse_input(input) {
+        match self.parse_prompt_input(input) {
             InputType::Command(mut parsed) => {
                 // Popup Accept / autocomplete_and_submit land here — must record MRU
                 // (process_command_input is only used by some Enter paths).
@@ -7616,6 +7676,10 @@ impl App {
     }
 
     async fn process_command_input(&mut self, mut parsed: crate::command::parser::ParsedCommand) {
+        if self.command_registry.get(&parsed.name).is_none() {
+            self.handle_message_input(parsed.raw);
+            return;
+        }
         if let Some(autocomplete) = self.input.autocomplete.as_ref() {
             autocomplete.command_auto.touch_mru(&parsed.name);
         }
@@ -11746,7 +11810,7 @@ impl App {
         }
 
         let input = prompt.trim();
-        let parsed_input = crate::command::parser::parse_input(input);
+        let parsed_input = self.parse_prompt_input(input);
         let is_message = matches!(parsed_input, crate::command::parser::InputType::Message(_));
         let agent_mention = match &parsed_input {
             crate::command::parser::InputType::AgentMention(mention) => {
@@ -11870,25 +11934,25 @@ impl App {
                     .collect()
             }
             "mention" => {
+                if let Some(autocomplete) = &self.input.autocomplete {
+                    return autocomplete.mention_suggestions(query);
+                }
                 let query_lower = query.to_ascii_lowercase();
-                let mut suggestions = self
-                    .agent_registry
-                    .visible_subagents()
+                let mut suggestions = Self::skill_suggestions(&self.agent_registry)
                     .into_iter()
-                    .filter(|agent| agent.name.to_ascii_lowercase().starts_with(&query_lower))
-                    .map(|agent| {
-                        crate::autocomplete::Suggestion::agent(
-                            agent.name.clone(),
-                            agent.description.clone(),
-                        )
-                    })
+                    .filter(|skill| skill.name.to_ascii_lowercase().starts_with(&query_lower))
                     .collect::<Vec<_>>();
                 suggestions.extend(
-                    self.input
-                        .autocomplete
-                        .as_ref()
-                        .map(|autocomplete| autocomplete.file_auto.get_suggestions(query))
-                        .unwrap_or_default(),
+                    self.agent_registry
+                        .visible_subagents()
+                        .into_iter()
+                        .filter(|agent| agent.name.to_ascii_lowercase().starts_with(&query_lower))
+                        .map(|agent| {
+                            crate::autocomplete::Suggestion::agent(
+                                agent.name.clone(),
+                                agent.description.clone(),
+                            )
+                        }),
                 );
                 suggestions
             }
@@ -17157,6 +17221,158 @@ mod tests {
         app.base_focus = BaseFocus::Chat;
         assert!(!app.reject_chat_only_command_outside_chat("compact"));
         assert!(!app.reject_chat_only_command_outside_chat("branch"));
+    }
+
+    fn add_test_skill_autocomplete(app: &mut App, root: &std::path::Path) {
+        let agents = app
+            .agent_registry
+            .visible_subagents()
+            .into_iter()
+            .map(|agent| crate::autocomplete::Suggestion::agent(&agent.name, &agent.description))
+            .collect();
+        app.input.autocomplete = Some(
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::new(&app.command_registry),
+                root,
+                false,
+                Vec::new(),
+            )
+            .with_agents(agents)
+            .with_skills(vec![crate::autocomplete::Suggestion::skill(
+                "codebase-design",
+                "Design deep modules",
+            )]),
+        );
+    }
+
+    #[test]
+    fn unknown_slash_prompts_are_messages_and_known_commands_remain_commands() {
+        let mut app = test_app();
+        for text in ["/", "/not-a-command explain this", "/tmp/example.txt"] {
+            assert_eq!(
+                app.parse_prompt_input(text),
+                InputType::Message(text.to_string())
+            );
+        }
+        for text in ["/models", "/compact", "/branch"] {
+            assert!(matches!(
+                app.parse_prompt_input(text),
+                InputType::Command(_)
+            ));
+        }
+        app.command_registry
+            .register(crate::command::registry::Command {
+                name: "codebase-design".to_string(),
+                description: "Design deep modules".to_string(),
+                handler: crate::command::handlers::handle_skill_command,
+                hidden_tokens: Vec::new(),
+                chat_only: false,
+            });
+        app.command_registry
+            .hide_from_autocomplete("codebase-design");
+        assert!(matches!(
+            app.parse_prompt_input("/codebase-design what is it"),
+            InputType::Command(_)
+        ));
+    }
+
+    #[test]
+    fn skill_mentions_are_chat_prompts_and_agent_mentions_still_delegate() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        add_test_skill_autocomplete(&mut app, root.path());
+        for text in [
+            "@codebase-design what is it",
+            "@CODEBASE-DESIGN",
+            "Use @codebase-design",
+        ] {
+            assert_eq!(
+                app.parse_prompt_input(text),
+                InputType::Message(text.to_string())
+            );
+        }
+        for text in ["@explore find the parser", "@not-an-agent find the parser"] {
+            assert!(matches!(
+                app.parse_prompt_input(text),
+                InputType::AgentMention(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn skill_suggestions_fill_without_submitting_and_match_remote_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        add_test_skill_autocomplete(&mut app, root.path());
+        app.input.set_text("@CODE");
+        let suggestions = app.input.get_autocomplete_suggestions(false);
+        assert_eq!(
+            suggestions,
+            app.remote_autocomplete_suggestions("mention", "CODE", false)
+        );
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(
+            suggestions[0].kind,
+            crate::autocomplete::SuggestionKind::Skill
+        );
+        assert!(app
+            .remote_autocomplete_suggestions("slash", "codebase", false)
+            .is_empty());
+        set_suggestions(&mut app.suggestions_popup_state, suggestions);
+        app.autocomplete_and_submit();
+        assert_eq!(app.input.get_text(), "@codebase-design ");
+        assert!(app.session_manager.get_current_session_id().is_none());
+        assert!(!is_suggestions_visible(&app.suggestions_popup_state));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_slash_and_skill_prompts_use_the_normal_busy_session_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        add_test_skill_autocomplete(&mut app, root.path());
+        let session_id = app.create_new_session(Some("Prompt fallback queue".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+        app.input.set_text("/");
+        app.update_suggestions();
+        assert!(is_suggestions_visible(&app.suggestions_popup_state));
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+        app.input.set_text("/not-a-command explain this");
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+        app.input.set_text("@codebase-design what is it");
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+        let returned_id = app
+            .remote_submit_input("/remote-unknown explain".to_string())
+            .await
+            .unwrap();
+        assert_eq!(returned_id, session_id);
+        let returned_id = app
+            .remote_submit_input("@codebase-design help".to_string())
+            .await
+            .unwrap();
+        assert_eq!(returned_id, session_id);
+        assert_eq!(
+            app.queued_message_previews_for_current_session(),
+            vec![
+                "/",
+                "/not-a-command explain this",
+                "@codebase-design what is it",
+                "/remote-unknown explain",
+                "@codebase-design help",
+            ]
+        );
     }
 
     #[test]
