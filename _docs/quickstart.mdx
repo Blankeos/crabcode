@@ -48,6 +48,19 @@ Custom slash commands can live in `.opencode/commands/` or `.crabcode/commands/`
 
 ---
 
+## Skip permission prompts (dangerous)
+
+For a trusted, isolated workspace, use `--yolo` (an alias of `--dangerously-skip-permissions`):
+
+```bash
+crabcode --yolo                         # Interactive session
+crabcode -p --yolo "Run the test suite"  # Non-interactive execution
+```
+
+This skips permission prompts for this invocation, including requests to access paths outside the workspace. Explicit `deny` rules, disabled tools, and agent tool restrictions still apply. Normal permission behavior remains the default; this flag does not save a preference or provide a sandbox.
+
+The flag applies to local interactive and print modes, not remote `--attach`, `serve`, or ACP sessions.
+
 ## Configure crabcode
 
 crabcode uses JSONC (JSON with comments). Create a `crabcode.jsonc` in your project:

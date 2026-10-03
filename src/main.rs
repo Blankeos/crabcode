@@ -781,8 +781,8 @@ pub(crate) struct Args {
     #[arg(long = "reasoning-effort", value_parser = parse_reasoning_effort_arg)]
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
 
-    /// Skip permission prompts in print mode. Intended for isolated benchmark/CI workspaces.
-    #[arg(long = "dangerously-skip-permissions")]
+    /// Skip permission prompts in local interactive/print mode (dangerous). Explicit denies still apply.
+    #[arg(long = "dangerously-skip-permissions", visible_alias = "yolo")]
     dangerously_skip_permissions: bool,
 
     #[arg(long = "emit-logs", hide = true)]
@@ -1227,7 +1227,14 @@ async fn main() -> Result<()> {
         .await;
     }
 
-    let mut app = App::new_with_model_override(args.model.as_deref(), args.agent.as_deref())?;
+    let mut app = App::new_with_runtime_options(
+        args.model.as_deref(),
+        args.agent.as_deref(),
+        crate::config::ConfigRuntimeOptions {
+            dangerously_skip_permissions: args.dangerously_skip_permissions,
+            ..Default::default()
+        },
+    )?;
     // Keep herdr authority until this guard drops (normal exit or panic).
     let _herdr = crate::herdr::Session::start();
 
@@ -1312,6 +1319,42 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_bypass_is_opt_in() {
+        assert!(
+            !Args::try_parse_from(["crabcode"])
+                .unwrap()
+                .dangerously_skip_permissions
+        );
+        assert!(
+            !Args::try_parse_from(["crabcode", "-p", "hi"])
+                .unwrap()
+                .dangerously_skip_permissions
+        );
+    }
+
+    #[test]
+    fn parses_permission_bypass_in_interactive_and_print_modes() {
+        for flag in ["--dangerously-skip-permissions", "--yolo"] {
+            let args = Args::try_parse_from(["crabcode", flag]).unwrap();
+            assert!(args.dangerously_skip_permissions);
+            assert!(!args.print_mode);
+
+            let args = Args::try_parse_from(["crabcode", "-p", "hi", flag]).unwrap();
+            assert!(args.dangerously_skip_permissions);
+            assert!(args.print_mode);
+            assert_eq!(args.prompt, vec!["hi"]);
+        }
+    }
+
+    #[test]
+    fn help_documents_permission_bypass_and_alias() {
+        let help = root_help().unwrap();
+        assert!(help.contains("--dangerously-skip-permissions"));
+        assert!(help.contains("yolo"));
+        assert!(help.contains("Explicit denies still apply"));
+    }
 
     #[test]
     fn print_output_separates_tool_preambles_from_final_answer() {

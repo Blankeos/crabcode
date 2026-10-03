@@ -1024,6 +1024,7 @@ pub struct App {
     startup_hydrated: bool,
     pending_model_override: Option<String>,
     pending_cli_agent: Option<String>,
+    runtime_options: crate::config::ConfigRuntimeOptions,
     /// Shared background/interactive process registry (jobs UI next).
     pub process_registry: std::sync::Arc<crate::tools::ProcessRegistry>,
 }
@@ -1078,12 +1079,24 @@ impl App {
         model_override: Option<&str>,
         cli_agent: Option<&str>,
     ) -> Result<Self> {
-        Self::new_shell(model_override, cli_agent)
+        Self::new_with_runtime_options(model_override, cli_agent, Default::default())
+    }
+
+    pub fn new_with_runtime_options(
+        model_override: Option<&str>,
+        cli_agent: Option<&str>,
+        runtime_options: crate::config::ConfigRuntimeOptions,
+    ) -> Result<Self> {
+        Self::new_shell(model_override, cli_agent, runtime_options)
     }
 
     /// Minimal App for first paint. Heavy config/prefs/themes/skills load in
     /// [`Self::ensure_startup_hydrated`].
-    fn new_shell(model_override: Option<&str>, cli_agent: Option<&str>) -> Result<Self> {
+    fn new_shell(
+        model_override: Option<&str>,
+        cli_agent: Option<&str>,
+        runtime_options: crate::config::ConfigRuntimeOptions,
+    ) -> Result<Self> {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
@@ -1264,7 +1277,8 @@ impl App {
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
-            tool_permissions: crate::tools::ToolPermissions::new(cwd_path.clone()),
+            tool_permissions: crate::tools::ToolPermissions::new(cwd_path.clone())
+                .dangerously_skip_permissions(runtime_options.dangerously_skip_permissions),
             skills_dirs: Vec::new(),
             is_streaming: false,
             pending_session_title: None,
@@ -1292,6 +1306,7 @@ impl App {
             startup_hydrated: false,
             pending_model_override: model_override.map(str::to_string),
             pending_cli_agent: cli_agent.map(str::to_string),
+            runtime_options,
             process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
                 cwd_path,
             )),
@@ -1475,11 +1490,7 @@ impl App {
         self.chat_state.wave_spinner.set_color(agent_color);
         self.session_rename_dialog_state.set_colors(colors);
 
-        let runtime = crate::config::ConfigRuntime::from_merged(
-            &loaded_config.merged_config,
-            cwd_path.clone(),
-            crate::config::ConfigRuntimeOptions::default(),
-        );
+        self.apply_config_runtime(&loaded_config.merged_config, cwd_path.clone());
 
         self.prefs_dao = prefs_dao;
         self.agent = agent;
@@ -1498,15 +1509,24 @@ impl App {
         self.compaction = loaded_config.merged_config.compaction.clone();
         self.mcp = mcp_config;
         self.config_raw_merged = loaded_config.raw_merged;
-        self.custom_instructions = runtime.custom_instructions;
-        self.tool_permissions = runtime.tool_permissions;
         self.skills_dirs = loaded_config.inventory.opencode_skills_dirs;
-        self.discovery = runtime.discovery;
         self.terminal_title_items = terminal_title_items;
         self.startup_hydrated = true;
         self.pending_model_override = None;
         self.pending_cli_agent = None;
         Ok(())
+    }
+
+    fn apply_config_runtime(
+        &mut self,
+        merged: &crate::config::configuration::MergedConfig,
+        cwd: std::path::PathBuf,
+    ) {
+        let runtime =
+            crate::config::ConfigRuntime::from_merged(merged, cwd, self.runtime_options.clone());
+        self.custom_instructions = runtime.custom_instructions;
+        self.tool_permissions = runtime.tool_permissions;
+        self.discovery = runtime.discovery;
     }
 
     fn open_variants_dialog(&mut self, args: &[String]) {
@@ -13491,6 +13511,32 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn permission_bypass_survives_startup_config_application() {
+        let mut app = test_app();
+        app.runtime_options.dangerously_skip_permissions = true;
+        let mut merged = crate::config::configuration::MergedConfig::default();
+        merged.permission_rules.push(crate::tools::PermissionRule {
+            permission: "read".into(),
+            pattern: "*".into(),
+            action: crate::tools::PermissionPolicyAction::Ask,
+        });
+        app.apply_config_runtime(&merged, "/tmp/workspace".into());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(app
+            .tool_permissions
+            .preflight(
+                "build",
+                "read",
+                &json!({ "file_path": "/tmp/elsewhere/file.txt" }),
+                Some(&tx),
+            )
+            .await
+            .is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
     fn test_app() -> App {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
@@ -13630,6 +13676,7 @@ mod tests {
             startup_hydrated: true,
             pending_model_override: None,
             pending_cli_agent: None,
+            runtime_options: crate::config::ConfigRuntimeOptions::default(),
             process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
                 std::path::PathBuf::from("."),
             )),

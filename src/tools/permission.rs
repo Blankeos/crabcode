@@ -1848,4 +1848,42 @@ mod tests {
         assert!(result.is_ok());
         assert!(rx.try_recv().is_err());
     }
+
+    #[tokio::test]
+    async fn dangerous_skip_preserves_explicit_denies() {
+        for permission in ["read", "external_directory"] {
+            let perms = ToolPermissions::new("/tmp/workspace")
+                .with_permission_rules(vec![PermissionRule {
+                    permission: permission.into(),
+                    pattern: "*".into(),
+                    action: PermissionPolicyAction::Deny,
+                }])
+                .dangerously_skip_permissions(true);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let result = perms
+                .preflight(
+                    "build",
+                    "read",
+                    &serde_json::json!({ "file_path": "/tmp/elsewhere/file.txt" }),
+                    Some(&tx),
+                )
+                .await;
+            assert!(matches!(result, Err(ToolError::Permission(_))));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn dangerous_skip_preserves_agent_tool_restrictions() {
+        let perms = ToolPermissions::new("/tmp/workspace").dangerously_skip_permissions(true);
+        let result = perms
+            .preflight(
+                "plan",
+                "write",
+                &serde_json::json!({ "file_path": "/tmp/workspace/file.txt", "content": "hi" }),
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(ToolError::Permission(_))));
+    }
 }

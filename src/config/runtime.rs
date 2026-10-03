@@ -16,7 +16,7 @@ use crate::tools::{
 pub struct ConfigRuntimeOptions {
     /// When true, deny interactive-only tools (`question`, `update_plan`).
     pub print_mode: bool,
-    /// Skip permission prompts (print-mode `--dangerously-skip-permissions`).
+    /// Skip permission prompts (`--dangerously-skip-permissions` / `--yolo`).
     pub dangerously_skip_permissions: bool,
 }
 
@@ -94,6 +94,47 @@ mod tests {
     use super::*;
     use crate::config::configuration::MergedConfig;
     use std::collections::BTreeSet;
+
+    #[tokio::test]
+    async fn permission_bypass_applies_in_both_modes_without_enabling_denied_tools() {
+        for print_mode in [false, true] {
+            let mut merged = MergedConfig::default();
+            merged.tools.insert("bash".into(), false);
+            merged.permission_rules.push(PermissionRule {
+                permission: "read".into(),
+                pattern: "*".into(),
+                action: PermissionPolicyAction::Ask,
+            });
+            let rt = ConfigRuntime::from_merged(
+                &merged,
+                "/tmp/workspace",
+                ConfigRuntimeOptions {
+                    print_mode,
+                    dangerously_skip_permissions: true,
+                },
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            assert!(rt
+                .tool_permissions
+                .preflight(
+                    "build",
+                    "read",
+                    &serde_json::json!({ "file_path": "/tmp/elsewhere/file.txt" }),
+                    Some(&tx),
+                )
+                .await
+                .is_ok());
+            assert!(rx.try_recv().is_err());
+            assert!(!rt
+                .tool_permissions
+                .is_tool_allowed_for_agent("build", "bash"));
+            assert_eq!(
+                rt.tool_permissions
+                    .is_tool_visible_for_agent("build", "question"),
+                !print_mode,
+            );
+        }
+    }
 
     #[test]
     fn applies_global_tool_disable() {
