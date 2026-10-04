@@ -108,6 +108,7 @@ fn refresh_models_dialog_lines(colors: ThemeColors, frame: usize) -> Vec<Line<'s
 pub struct ModelsDialogState {
     pub dialog: Dialog,
     loading: bool,
+    reasoning_arrow_areas: Option<(Rect, Rect)>,
 }
 
 impl ModelsDialogState {
@@ -115,6 +116,7 @@ impl ModelsDialogState {
         Self {
             dialog,
             loading: false,
+            reasoning_arrow_areas: None,
         }
     }
 
@@ -124,11 +126,13 @@ impl ModelsDialogState {
                 .with_search_priority_groups(vec!["Favorite".to_string()])
                 .with_actions(base_actions()),
             loading: false,
+            reasoning_arrow_areas: None,
         }
     }
 
     pub fn start_loading(&mut self) {
         self.loading = true;
+        self.reasoning_arrow_areas = None;
     }
 
     pub fn finish_loading(&mut self) {
@@ -140,6 +144,7 @@ impl ModelsDialogState {
     }
 
     pub fn refresh_items(&mut self, items: Vec<DialogItem>) {
+        self.reasoning_arrow_areas = None;
         let title = self.dialog.title.clone();
         let was_visible = self.dialog.is_visible();
         let selected_item = self
@@ -177,6 +182,10 @@ pub fn render_models_dialog(
     reasoning_effort: Option<&str>,
     reasoning_effort_explicit: bool,
 ) {
+    dialog_state.reasoning_arrow_areas = None;
+    if !dialog_state.dialog.is_visible() {
+        return;
+    }
     if dialog_state.loading {
         dialog_state.dialog.actions.clear();
         dialog_state.dialog.set_bottom_gap_height(1);
@@ -192,7 +201,7 @@ pub fn render_models_dialog(
     dialog_state.dialog.render(f, area, colors);
 
     if let Some(reasoning_effort) = reasoning_effort {
-        render_reasoning_control(
+        dialog_state.reasoning_arrow_areas = render_reasoning_control(
             f,
             &dialog_state.dialog,
             colors,
@@ -221,10 +230,10 @@ fn render_reasoning_control(
     colors: ThemeColors,
     reasoning_effort: &str,
     reasoning_effort_explicit: bool,
-) {
+) -> Option<(Rect, Rect)> {
     let gap_height = 3;
     if dialog.content_area.height < gap_height + dialog.footer_height() {
-        return;
+        return None;
     }
 
     let gap_area = Rect {
@@ -254,6 +263,18 @@ fn render_reasoning_control(
         Paragraph::new(line).alignment(Alignment::Left),
         control_area,
     );
+    let center_width = reasoning_effort.len()
+        + if reasoning_effort_explicit {
+            0
+        } else {
+            " (default)".len()
+        };
+    (control_area.width as usize > center_width + 2).then(|| {
+        (
+            Rect::new(control_area.x, control_area.y, 1, 1),
+            Rect::new(control_area.right() - 1, control_area.y, 1, 1),
+        )
+    })
 }
 
 fn reasoning_control_line<'a>(
@@ -377,8 +398,35 @@ pub fn handle_models_dialog_mouse_event(
     dialog_state: &mut ModelsDialogState,
     event: MouseEvent,
 ) -> ModelsDialogAction {
-    if !dialog_state.dialog.is_visible() || dialog_state.loading {
+    if !dialog_state.dialog.is_visible() {
         return ModelsDialogAction::None;
+    }
+
+    if let Some(key) = dialog_state.dialog.mouse_key_event(event) {
+        return handle_models_dialog_key_event(dialog_state, key);
+    }
+    if dialog_state.loading {
+        return ModelsDialogAction::None;
+    }
+    if !dialog_state.dialog.is_dragging_scrollbar
+        && matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+    {
+        if let Some((left, right)) = dialog_state.reasoning_arrow_areas {
+            let point = ratatui::layout::Position::new(event.column, event.row);
+            let code = if left.contains(point) {
+                Some(KeyCode::Left)
+            } else if right.contains(point) {
+                Some(KeyCode::Right)
+            } else {
+                None
+            };
+            if let Some(code) = code {
+                return handle_models_dialog_key_event(
+                    dialog_state,
+                    KeyEvent::new(code, KeyModifiers::NONE),
+                );
+            }
+        }
     }
 
     let clicked_item = if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -432,6 +480,124 @@ mod tests {
     }
 
     const CENTER_DIALOG_LIST_Y: u16 = 6;
+
+    fn render_clickable_models(
+        state: &mut ModelsDialogState,
+        width: u16,
+        effort: Option<&str>,
+    ) -> ratatui::buffer::Buffer {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_models_dialog(
+                    frame,
+                    state,
+                    frame.area(),
+                    crate::theme::Theme::load_builtin_default().get_colors(true),
+                    effort,
+                    false,
+                )
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn click_rendered_text(buffer: &ratatui::buffer::Buffer, text: &str) -> MouseEvent {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if (x..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .starts_with(text)
+                {
+                    return left_click(x, y);
+                }
+            }
+        }
+        panic!("missing {text:?}");
+    }
+
+    #[test]
+    fn rendered_reasoning_arrows_cycle_selected_model_without_selecting_it() {
+        let mut state = init_models_dialog("Models", vec![model_item("gpt-5", "GPT-5", "openai")]);
+        state.dialog.show();
+        let buffer = render_clickable_models(&mut state, 80, Some("medium"));
+        for (text, direction) in [("<", -1), (">", 1)] {
+            let click = click_rendered_text(&buffer, text);
+            for kind in [
+                MouseEventKind::Moved,
+                MouseEventKind::Up(MouseButton::Left),
+                MouseEventKind::Down(MouseButton::Right),
+            ] {
+                assert_eq!(
+                    handle_models_dialog_mouse_event(&mut state, MouseEvent { kind, ..click }),
+                    ModelsDialogAction::None
+                );
+            }
+            assert_eq!(
+                handle_models_dialog_mouse_event(&mut state, click),
+                ModelsDialogAction::CycleReasoning {
+                    provider_id: "openai".into(),
+                    model_id: "gpt-5".into(),
+                    direction
+                }
+            );
+            assert!(state.dialog.is_visible());
+        }
+        let value = click_rendered_text(&buffer, "medium");
+        state.dialog.is_dragging_scrollbar = true;
+        assert_eq!(
+            handle_models_dialog_mouse_event(&mut state, click_rendered_text(&buffer, "<")),
+            ModelsDialogAction::None
+        );
+        state.dialog.is_dragging_scrollbar = false;
+        assert_eq!(
+            handle_models_dialog_mouse_event(&mut state, value),
+            ModelsDialogAction::None
+        );
+        assert!(state.dialog.is_visible());
+    }
+
+    #[test]
+    fn reasoning_arrows_clear_when_control_is_hidden_or_clipped() {
+        let mut state = init_models_dialog("Models", vec![model_item("gpt-5", "GPT-5", "openai")]);
+        state.dialog.show();
+        let buffer = render_clickable_models(&mut state, 80, Some("medium"));
+        let click = click_rendered_text(&buffer, "<");
+        render_clickable_models(&mut state, 80, None);
+        assert!(state.reasoning_arrow_areas.is_none());
+        assert_eq!(
+            handle_models_dialog_mouse_event(&mut state, click),
+            ModelsDialogAction::None
+        );
+        render_clickable_models(&mut state, 15, Some("medium"));
+        assert!(state.reasoning_arrow_areas.is_none());
+        state.start_loading();
+        assert!(state.reasoning_arrow_areas.is_none());
+    }
+
+    #[test]
+    fn rendered_models_close_and_favorite_hints_use_keyboard_behavior() {
+        let mut state = init_models_dialog("Models", vec![model_item("gpt-5", "GPT-5", "openai")]);
+        state.dialog.show();
+        let buffer = render_clickable_models(&mut state, 80, None);
+        assert_eq!(
+            handle_models_dialog_mouse_event(&mut state, click_rendered_text(&buffer, "ctrl+f")),
+            ModelsDialogAction::ToggleFavorite {
+                provider_id: "openai".into(),
+                model_id: "gpt-5".into()
+            }
+        );
+        assert!(state.dialog.is_visible());
+        state.start_loading();
+        let buffer = render_clickable_models(&mut state, 80, None);
+        assert_eq!(
+            handle_models_dialog_mouse_event(&mut state, click_rendered_text(&buffer, "esc")),
+            ModelsDialogAction::None
+        );
+        assert!(!state.dialog.is_visible());
+    }
 
     #[test]
     fn search_prioritizes_favorite_models() {

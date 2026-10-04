@@ -5596,6 +5596,32 @@ impl App {
             return;
         }
 
+        // Clickable picker hints use exactly the same dispatch as keyboard
+        // shortcuts, including app-level actions such as connecting a provider.
+        let dialog = match self.overlay_focus {
+            OverlayFocus::AgentsDialog => Some(&self.agents_dialog_state.dialog),
+            OverlayFocus::ModelsDialog => Some(&self.models_dialog_state.dialog),
+            OverlayFocus::VariantsDialog => Some(&self.variants_dialog_state.dialog),
+            OverlayFocus::ThemesDialog => Some(&self.themes_dialog_state.dialog),
+            OverlayFocus::ConnectDialog => Some(&self.connect_dialog_state.dialog),
+            OverlayFocus::SessionsDialog if self.sessions_dialog_state.item_menu.is_none() => {
+                Some(&self.sessions_dialog_state.dialog)
+            }
+            OverlayFocus::SkillsDialog => Some(&self.skills_dialog_state.dialog),
+            OverlayFocus::McpDialog => Some(&self.mcp_dialog_state.dialog),
+            OverlayFocus::TimelineDialog => Some(&self.timeline_dialog_state.dialog),
+            OverlayFocus::CommandPalette => Some(&self.command_palette_state.dialog),
+            OverlayFocus::MoveSessionDialog => Some(&self.move_session_dialog_state.dialog),
+            OverlayFocus::JobsDialog if !self.jobs_dialog_state.is_detail_open() => {
+                Some(&self.jobs_dialog_state.dialog)
+            }
+            _ => None,
+        };
+        if let Some(key) = dialog.and_then(|dialog| dialog.mouse_key_event(mouse)) {
+            self.handle_keys(key);
+            return;
+        }
+
         if self.overlay_focus == OverlayFocus::AgentsDialog {
             let action = handle_agents_dialog_mouse_event(&mut self.agents_dialog_state, mouse);
             match action {
@@ -13681,6 +13707,92 @@ mod tests {
                 std::path::PathBuf::from("."),
             )),
         }
+    }
+
+    fn click_dialog_text(buffer: &ratatui::buffer::Buffer, text: &str) -> MouseEvent {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let row = (x..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                if row.starts_with(text) {
+                    return mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+                }
+            }
+        }
+        panic!("missing rendered dialog text: {text}");
+    }
+
+    #[test]
+    fn dialog_escape_clicks_close_overlay_without_changing_chat_draft() {
+        let mut app = test_app();
+        app.input.set_text("keep this draft");
+        let colors = crate::theme::Theme::load_builtin_default().get_colors(true);
+        for focus in [
+            OverlayFocus::ModelsDialog,
+            OverlayFocus::AgentsDialog,
+            OverlayFocus::ConnectDialog,
+            OverlayFocus::McpDialog,
+            OverlayFocus::CommandPalette,
+            OverlayFocus::JobsDialog,
+        ] {
+            app.overlay_focus = focus;
+            let dialog = match focus {
+                OverlayFocus::ModelsDialog => &mut app.models_dialog_state.dialog,
+                OverlayFocus::AgentsDialog => &mut app.agents_dialog_state.dialog,
+                OverlayFocus::ConnectDialog => &mut app.connect_dialog_state.dialog,
+                OverlayFocus::McpDialog => &mut app.mcp_dialog_state.dialog,
+                OverlayFocus::CommandPalette => &mut app.command_palette_state.dialog,
+                OverlayFocus::JobsDialog => &mut app.jobs_dialog_state.dialog,
+                _ => unreachable!(),
+            };
+            dialog.show();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+            terminal
+                .draw(|frame| dialog.render(frame, frame.area(), colors))
+                .unwrap();
+            let click = click_dialog_text(terminal.backend().buffer(), "esc");
+            app.handle_mouse_event(click);
+            assert_eq!(app.overlay_focus, OverlayFocus::None, "{focus:?}");
+            assert_eq!(app.input.get_text(), "keep this draft");
+        }
+    }
+
+    #[test]
+    fn variant_footer_click_confirms_through_app_key_dispatch() {
+        let mut app = test_app();
+        app.overlay_focus = OverlayFocus::VariantsDialog;
+        let capability = crate::model::reasoning::ReasoningCapability::effort(
+            vec![
+                crate::model::reasoning::ReasoningEffort::Low,
+                crate::model::reasoning::ReasoningEffort::High,
+            ],
+            crate::model::reasoning::ReasoningEffort::Low,
+        );
+        app.variants_dialog_state.show(
+            &capability,
+            Some(crate::model::reasoning::ReasoningEffort::High),
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_variants_dialog(
+                    frame,
+                    &mut app.variants_dialog_state,
+                    frame.area(),
+                    crate::theme::Theme::load_builtin_default().get_colors(true),
+                )
+            })
+            .unwrap();
+        let click = click_dialog_text(terminal.backend().buffer(), "Select  enter");
+        app.handle_mouse_event(click);
+        assert_eq!(app.overlay_focus, OverlayFocus::None);
+        assert_eq!(
+            app.reasoning_effort_override_for_model(&app.provider_name, &app.model),
+            Some(crate::model::reasoning::ReasoningEffort::High)
+        );
     }
 
     fn message_action_names(app: &App) -> Vec<String> {
