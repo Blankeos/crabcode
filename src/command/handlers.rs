@@ -68,7 +68,6 @@ pub fn handle_sessions<'a>(
                 } else {
                     session.title.clone()
                 };
-
                 crate::command::registry::DialogItem {
                     id: session.id.clone(),
                     name,
@@ -399,6 +398,10 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
         };
 
         if let Ok(discovery) = discovery.as_ref() {
+            crate::model::discovery::merge_dialog_models(
+                &mut models,
+                discovery.discover_custom_models_for_dialog().await,
+            );
             discovery.apply_custom_models_to_dialog(&mut models);
         }
 
@@ -880,7 +883,6 @@ pub async fn refresh_models() -> CommandResult {
                 return CommandResult::Success(String::new());
             }
         };
-
         let (providers_result, runtime_result) = tokio::join!(
             discovery.refresh_cache(),
             crate::model::extensions::ModelExtensions::refresh_runtime_models()

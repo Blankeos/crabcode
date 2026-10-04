@@ -35,25 +35,13 @@ pub(crate) fn apply_extra_headers(
 /// version segment when one is already present (which produced
 /// `/v1/v1/responses`-style 404s).
 pub(crate) fn base_url_has_version_segment(base_url: &str) -> bool {
-    // Check if the URL path already contains a /vN segment (e.g., /v4, /v1)
-    if let Some(pos) = base_url.find("://") {
-        let after_scheme = &base_url[pos + 3..];
-        if let Some(path_start) = after_scheme.find('/') {
-            let path = &after_scheme[path_start..];
-            // Match /vN where N is one or more digits, followed by / or end of string
-            let bytes = path.as_bytes();
-            for i in 0..bytes.len().saturating_sub(2) {
-                if bytes[i] == b'/'
-                    && bytes[i + 1] == b'v'
-                    && bytes[i + 2].is_ascii_digit()
-                    && (i + 3 >= bytes.len() || bytes[i + 3] == b'/')
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    reqwest::Url::parse(base_url).ok().is_some_and(|url| {
+        url.path().split('/').any(|segment| {
+            segment.strip_prefix('v').is_some_and(|version| {
+                !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
+    })
 }
 
 #[cfg(test)]
@@ -85,6 +73,18 @@ mod tests {
             "https://opencode.ai/zen/go/v1/"
         ));
         assert!(base_url_has_version_segment("http://localhost:11434/v1"));
+        assert!(base_url_has_version_segment(
+            "https://gateway.example/api/v4"
+        ));
+        assert!(base_url_has_version_segment(
+            "https://gateway.example/v10/openai"
+        ));
+        assert!(!base_url_has_version_segment(
+            "https://gateway.example?v=/v1"
+        ));
+        assert!(!base_url_has_version_segment(
+            "https://gateway.example/v1beta"
+        ));
         assert!(!base_url_has_version_segment("https://api.openai.com"));
         assert!(!base_url_has_version_segment("https://api.anthropic.com"));
     }

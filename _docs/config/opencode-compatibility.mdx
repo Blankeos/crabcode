@@ -36,6 +36,7 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 | `agent.<name>.model` / `temperature` / `top_p` | ✅ | partial | Subagent `model` overrides are applied for Task/`@agent`; sampling settings are parsed but not yet applied. |
 | Markdown agent files | ✅ | ✅ | `.opencode/agents/*.md` frontmatter is parsed; body content becomes agent instructions. |
 | `provider.<id>.options.timeout` | ✅ | partial | Integer milliseconds or `false` to disable timeout. |
+| `provider.<id>` using `@ai-sdk/openai-compatible` | ✅ | ✅ | When `options.baseURL` is configured, crabcode requests its OpenAI-compatible `/v1/models` endpoint for `/models`. Discovered models are added alongside manually configured models; manually configured model metadata takes precedence; unsupported endpoints leave manual models unchanged. |
 | `theme` | ✅ | ✅ | In crabcode config files only. OpenCode config `theme` is ignored by crabcode. |
 | `notifications` |  | ✅ | crabcode-specific sounds, desktop notifications, and terminal alert signals such as Zed tab dots. |
 | `images` |  | ✅ | crabcode-specific image placeholder opener. |
