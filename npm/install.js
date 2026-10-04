@@ -37,7 +37,7 @@ function getPlatformInfo() {
   }
 
   const target = platformMap[platform][arch];
-  const extension = platform === "win32" ? ".zip" : ".tar.xz";
+  const extension = platform === "win32" ? ".zip" : ".tar.gz";
   const binaryName = platform === "win32" ? `${BINARY_NAME}.exe` : BINARY_NAME;
 
   return {
@@ -49,24 +49,49 @@ function getPlatformInfo() {
   };
 }
 
-async function downloadFile(url, dest) {
-  console.log(`Downloading ${url}...`);
-
-  const file = fs.createWriteStream(dest);
-  const response = await new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        if (res.statusCode === 302 || res.statusCode === 301) {
-          https.get(res.headers.location, resolve).on("error", reject);
-        } else if (res.statusCode === 200) {
-          resolve(res);
-        } else {
-          reject(new Error(`Failed to download: ${res.statusCode} ${res.statusMessage}`));
-        }
-      })
-      .on("error", reject);
+function fetchResponse(url, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new Error("Too many download redirects"));
+    https.get(url, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+        res.resume();
+        if (!res.headers.location) return reject(new Error("Missing redirect location"));
+        resolve(fetchResponse(new URL(res.headers.location, url).href, redirects + 1));
+      } else if (res.statusCode === 200) {
+        resolve(res);
+      } else {
+        res.resume();
+        const error = new Error(`Failed to download: ${res.statusCode} ${res.statusMessage}`);
+        error.statusCode = res.statusCode;
+        reject(error);
+      }
+    }).on("error", reject);
   });
+}
 
+async function downloadArchive(info, dest, download = downloadFile) {
+  try {
+    await download(info.url, dest);
+    return info;
+  } catch (error) {
+    // Older releases published xz only. Do not retry transient/network errors.
+    if (info.extension !== ".tar.gz" || error.statusCode !== 404) throw error;
+    const legacy = {
+      ...info,
+      extension: ".tar.xz",
+      filename: info.filename.replace(/\.tar\.gz$/, ".tar.xz"),
+      url: info.url.replace(/\.tar\.gz$/, ".tar.xz"),
+    };
+    await download(legacy.url, dest);
+    return legacy;
+  }
+}
+
+async function downloadFile(url, dest) {
+  console.error(`Downloading ${url}...`);
+
+  const response = await fetchResponse(url);
+  const file = fs.createWriteStream(dest);
   response.pipe(file);
   return new Promise((resolve, reject) => {
     file.on("finish", () => {
@@ -81,14 +106,15 @@ async function downloadFile(url, dest) {
 }
 
 function extractArchive(archivePath, extractDir, platformInfo) {
-  console.log("Extracting binary...");
+  console.error("Extracting binary...");
 
   const cmd =
     platformInfo.extension === ".zip"
       ? `unzip -o "${archivePath}" -d "${extractDir}" 2>/dev/null || powershell -command "Expand-Archive -Path '${archivePath}' -DestinationPath '${extractDir}' -Force"`
       : `tar -xf "${archivePath}" -C "${extractDir}"`;
 
-  execSync(cmd, { stdio: "inherit" });
+  // Extraction diagnostics must never corrupt the ACP stdout transport.
+  execSync(cmd, { stdio: ["ignore", 2, 2] });
 }
 
 function logInstallFailure(error) {
@@ -102,14 +128,14 @@ function logInstallFailure(error) {
 
 async function install({ exitOnComplete = false } = {}) {
   try {
-    const platformInfo = getPlatformInfo();
+    let platformInfo = getPlatformInfo();
     const binDir = path.join(__dirname, "bin");
     const archivePath = path.join(__dirname, platformInfo.filename);
     const binaryPath = path.join(binDir, platformInfo.binaryName);
 
     if (!fs.existsSync(binDir)) fs.mkdirSync(binDir, { recursive: true });
 
-    await downloadFile(platformInfo.url, archivePath);
+    platformInfo = await downloadArchive(platformInfo, archivePath);
     extractArchive(archivePath, __dirname, platformInfo);
 
     const extractedBinaryPath = path.join(__dirname, platformInfo.binaryName);
@@ -130,7 +156,7 @@ async function install({ exitOnComplete = false } = {}) {
     }
 
   fs.unlinkSync(archivePath);
-  console.log(`crabcode v${VERSION} installed successfully!`);
+  console.error(`crabcode v${VERSION} installed successfully!`);
 
     if (exitOnComplete) {
       process.exit(0);
@@ -155,4 +181,4 @@ if (require.main === module) {
   install({ exitOnComplete: true });
 }
 
-module.exports = { getPlatformInfo, install };
+module.exports = { getPlatformInfo, downloadArchive, install };

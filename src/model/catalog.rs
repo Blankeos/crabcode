@@ -138,6 +138,7 @@ mod tests {
             free: false,
             local: false,
             reasoning_options: Vec::new(),
+            context_window: None,
         };
 
         assert_eq!(model_ref(&model), "openai/gpt-5");
@@ -196,6 +197,7 @@ mod tests {
             structured_output: false,
             free: false,
             local: true,
+            context_window: None,
             reasoning_options: Vec::new(),
         };
         crate::model::effective_catalog::publish_refreshed_models(vec![marker])

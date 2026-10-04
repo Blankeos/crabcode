@@ -2,6 +2,71 @@ use crate::tools::ToolRegistry;
 
 mod rules;
 
+pub(crate) fn render_skill_guidance<'a>(
+    skills: impl IntoIterator<Item = &'a crate::skill::SkillInfo>,
+) -> String {
+    let skills_xml = skills
+        .into_iter()
+        .map(|skill| {
+            format!(
+                "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>file://{}</location>\n  </skill>",
+                skill.name,
+                skill.description.as_deref().unwrap_or(""),
+                skill.location.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if skills_xml.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "Skills provide specialized instructions and workflows for specific tasks.\n\
+         Use the skill tool to load a skill when a task matches its description.\n\
+         When the user explicitly mentions a listed skill as @name or /name, use the skill tool to load it before responding.\n\
+         <available_skills>\n{skills_xml}\n</available_skills>"
+    )
+}
+
+const WORKSPACE_DISCOVERY_GUIDANCE: &str = r#"Workspace discovery:
+- Use the supplied working directory and instructions; do not run pwd or re-read instruction files merely to rediscover context already provided.
+- Project/global instruction files found by Crabcode are included below as 'Instructions from: <path>'. An absent section is not a reason to scan other projects.
+- Never recursively search parent or sibling directories for instruction files (for example, find .. -name AGENTS.md). This applies to primary agents and subagents alike.
+- If nested instructions are relevant, check exact AGENTS.md/CLAUDE.md paths along the target files' directory ancestry, not unrelated directory trees.
+- Keep discovery scoped to the task's project and relevant paths. Prefer glob/grep/list/read over shell find when available; respect ignore rules and avoid repeating identical searches.
+- For an explicitly requested different project, check that project's instruction paths directly rather than scanning a shared parent directory."#;
+
+/// Shared runtime context for primary agents and subagents. Keep role-specific
+/// prompts separate, but resolve workspace rules through the same loader.
+pub(crate) async fn compose_runtime_context(
+    working_directory: &str,
+    is_git_repo: bool,
+    platform: &str,
+) -> String {
+    let git_status = if is_git_repo { "yes" } else { "no" };
+    let date = chrono::Local::now().format("%a %b %d %Y").to_string();
+    let environment = format!(
+        r#"<env>
+  Working directory: {working_directory}
+  Is directory a git repo: {git_status}
+  Platform: {platform}
+  Today's date: {date}
+ </env>"#
+    );
+    let instructions = rules::get_custom_instructions(working_directory).await;
+
+    [
+        environment,
+        WORKSPACE_DISCOVERY_GUIDANCE.to_string(),
+        instructions,
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n---\n\n")
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderType {
     OpenAI,
@@ -97,7 +162,6 @@ impl SystemPromptComposer {
         if self.print_mode {
             parts.push(self.get_print_mode_context());
         }
-        parts.push(self.get_environment_context());
         if !self.custom_instructions.is_empty() {
             parts.push(format!(
                 "\n# Custom Instructions\n{}",
@@ -109,6 +173,10 @@ impl SystemPromptComposer {
             parts.push(self.get_tools_context(registry).await);
         }
 
+        parts.push(
+            compose_runtime_context(&self.working_directory, self.is_git_repo, &self.platform)
+                .await,
+        );
         parts.push(self.get_custom_instructions().await);
 
         parts
@@ -141,9 +209,9 @@ impl SystemPromptComposer {
         r#"You are an expert software engineer. You MUST iterate and keep going until the problem is solved.
 
 Core Directives:
-- Plan extensively before each function call
+- Plan in proportion to the task; use a plan for non-trivial multi-step work, not every tool call
 - Fetch URLs provided by user + discover recursive links
-- Deeply understand problem via investigation
+- Investigate relevant files first and stop exploring once you have enough evidence to act
 - Research dependencies on internet for accuracy
 - Make incremental, testable changes
 - Debug to root cause (not symptoms)
@@ -285,23 +353,9 @@ Validation:
 Your output will be displayed on a command line interface. Your responses should be short and concise (typically < 4 lines, excluding tool calls)."#.to_string()
     }
 
-    fn get_environment_context(&self) -> String {
-        let git_status = if self.is_git_repo { "yes" } else { "no" };
-        let date = chrono::Local::now().format("%a %b %d %Y").to_string();
-
-        format!(
-            r#"<env>
-  Working directory: {}
-  Is directory a git repo: {}
-  Platform: {}
-  Today's date: {}
- </env>"#,
-            self.working_directory, git_status, self.platform, date
-        )
-    }
-
     fn get_print_mode_context(&self) -> String {
         r#"Non-Interactive Print Mode:
+- Override conversational preamble/progress instructions: do not announce tool calls or emit interim commentary. Only output the requested final answer.
 - Keep planning internal; do not call update_plan.
 - Do not ask the user questions or wait for interactive input.
 - Prefer direct read/apply_patch/edit/bash tool use.
@@ -330,43 +384,18 @@ Your output will be displayed on a command line interface. Your responses should
             r#"Tool use:
 - Use the model's built-in tool/function calling mechanism (do not print tool calls as text).
 - Prefer specialized tools over bash when possible (available: {names}). For long-running jobs use bash mode=background and manage with bash_output/bash_kill/bash_restart; interactive PTY Esc minimizes, ctrl+] stops.
+- For file discovery, prefer glob over bash find; glob/grep respect ignore rules by default. Set include_ignored=true only when needed. If using bash for search, prefer rg/rg --files (use --no-ignore only when explicitly needed); find does not respect .gitignore.
 - After tool results are returned, use them to answer.
 "#
         )
     }
 
     async fn get_custom_instructions(&self) -> String {
-        let mut instructions = rules::get_custom_instructions(&self.working_directory).await;
+        let mut instructions = String::new();
 
         // Add available skills listing
         if let Some(store) = crate::skill::get_skill_store() {
-            let skills = store.all();
-            if !skills.is_empty() {
-                let skills_xml = skills
-                    .iter()
-                    .map(|s| {
-                        format!(
-                            "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>file://{}</location>\n  </skill>",
-                            s.name,
-                            s.description.as_deref().unwrap_or(""),
-                            s.location.display()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let skills_block = format!(
-                    "\n\nSkills provide specialized instructions and workflows for specific tasks.\n\
-                     Use the skill tool to load a skill when a task matches its description.\n\
-                     <available_skills>\n{}\n</available_skills>",
-                    skills_xml
-                );
-
-                if !instructions.is_empty() {
-                    instructions.push_str("\n\n");
-                }
-                instructions.push_str(&skills_block);
-            }
+            instructions.push_str(&render_skill_guidance(store.all()));
         }
 
         // Add available subagents listing
@@ -422,6 +451,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn skill_guidance_advertises_metadata_only_and_omits_empty_catalogs() {
+        assert!(render_skill_guidance([]).is_empty());
+        let skill = crate::skill::SkillInfo {
+            name: "test-skill".to_string(),
+            description: None,
+            location: "/skills/test-skill/SKILL.md".into(),
+            content: "full skill instructions must not be advertised".to_string(),
+        };
+        let guidance = render_skill_guidance([&skill]);
+
+        assert_eq!(guidance.matches("<available_skills>").count(), 1);
+        assert!(guidance.contains("<name>test-skill</name>"));
+        assert!(guidance.contains("<description></description>"));
+        assert!(guidance.contains("file:///skills/test-skill/SKILL.md"));
+        assert!(!guidance.contains(&skill.content));
+    }
+
+    #[test]
     fn test_provider_type_detection() {
         assert_eq!(ProviderType::from_model_id("gpt-4"), ProviderType::OpenAI);
         assert_eq!(ProviderType::from_model_id("gpt-5"), ProviderType::Codex);
@@ -437,6 +484,41 @@ mod tests {
             ProviderType::from_model_id("unknown"),
             ProviderType::Generic
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_context_and_discovery_guidance_are_shared_across_models() {
+        let root = tempfile::tempdir().unwrap();
+        let working_directory = root.path().to_string_lossy();
+        std::fs::write(root.path().join("AGENTS.md"), "project-rule-marker").unwrap();
+
+        for model in ["gpt-6.1-sol", "gpt-5", "claude-3", "gemini-pro", "unknown"] {
+            let prompt = SystemPromptComposer::new(model, &*working_directory, true, "test")
+                .with_custom_instructions("configuration-instruction-marker".to_string())
+                .compose()
+                .await;
+
+            assert!(prompt.contains(&format!("Working directory: {working_directory}")));
+            assert!(prompt.contains("Is directory a git repo: yes"));
+            assert!(prompt.contains("Platform: test"));
+            assert!(prompt.contains(WORKSPACE_DISCOVERY_GUIDANCE));
+            assert!(prompt.contains("Instructions from: "));
+            assert_eq!(prompt.matches("project-rule-marker").count(), 1);
+            assert!(
+                prompt.find("configuration-instruction-marker").unwrap()
+                    < prompt.find("project-rule-marker").unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn openai_prompt_uses_proportional_investigation() {
+        let composer = SystemPromptComposer::new("gpt-6.1-sol", ".", true, "test");
+        let prompt = composer.get_core_prompt();
+
+        assert!(prompt.contains("Plan in proportion to the task"));
+        assert!(prompt.contains("stop exploring once you have enough evidence to act"));
+        assert!(!prompt.contains("Plan extensively before each function call"));
     }
 
     #[test]
@@ -463,6 +545,7 @@ mod tests {
         let context = composer.get_print_mode_context();
 
         assert!(context.contains("do not call update_plan"));
+        assert!(context.contains("do not announce tool calls or emit interim commentary"));
         assert!(context.contains("Do not ask the user questions"));
         assert!(context.contains("apply_patch"));
         assert!(context.contains("write_files"));

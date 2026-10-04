@@ -1,6 +1,7 @@
 pub mod cli;
 mod credentials;
 pub mod oauth;
+mod oauth_client;
 
 use crate::config::configuration::{McpConfig, McpRemoteConfig, McpServerConfig};
 use crate::tools::{
@@ -10,7 +11,6 @@ use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{CallToolRequestParams, ContentBlock, JsonObject};
 use rmcp::service::{RoleClient, RunningService};
-use rmcp::transport::auth::AuthorizationManager;
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::ServiceExt;
 use serde_json::Value;
@@ -318,21 +318,60 @@ impl McpManager {
                     "MCP tool timed out after {} ms",
                     timeout.as_millis()
                 ))
-            })?
-            .map_err(|err| ToolError::Execution(err.to_string()))?;
+            })?;
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                let msg = err.to_string();
+                if matches!(&state.config, McpServerConfig::Remote(remote) if oauth::should_use_oauth(remote))
+                    && oauth_client::is_auth_service_error(&err)
+                {
+                    state.status = McpStatus::NeedsAuth;
+                    state.tools.clear();
+                    state.client = None;
+                    toast_needs_auth(server_name);
+                }
+                return Err(ToolError::Execution(msg));
+            }
+        };
         if result.is_error == Some(true) {
             return Err(ToolError::Execution(call_tool_result_text(&result)));
         }
-        let output = if let Some(structured) = result.structured_content {
-            serde_json::to_string_pretty(&structured).unwrap_or_else(|_| structured.to_string())
-        } else {
-            call_tool_result_text(&result)
-        };
-        Ok(ToolResult::new(
-            format!("MCP: {server_name}.{tool_name}"),
-            output,
-        ))
+        Ok(mcp_tool_result(server_name, tool_name, &result))
     }
+}
+
+fn mcp_tool_result(
+    server_name: &str,
+    tool_name: &str,
+    result: &rmcp::model::CallToolResult,
+) -> ToolResult {
+    let text = call_tool_result_text(result);
+    let output = if let Some(structured) = result.structured_content.as_ref() {
+        let structured =
+            serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string());
+        if text.trim().is_empty() || text == structured {
+            structured
+        } else {
+            format!("{structured}\n\n{text}")
+        }
+    } else {
+        text
+    };
+    let mut tool_result = ToolResult::new(format!("MCP: {server_name}.{tool_name}"), output)
+        .with_metadata(
+            "mcp_result",
+            serde_json::to_value(&result).unwrap_or(serde_json::Value::Null),
+        );
+    for content in &result.content {
+        if let ContentBlock::Image(image) = content {
+            tool_result = tool_result.with_image(
+                format!("data:{};base64,{}", image.mime_type, image.data),
+                image.mime_type.clone(),
+            );
+        }
+    }
+    tool_result
 }
 
 type ConnectOutcome = Result<(RunningService<RoleClient, ()>, Vec<McpToolSpec>), McpStatus>;
@@ -412,15 +451,15 @@ async fn open_and_list_tools(
         Ok(client) => client,
         Err(err) => {
             let msg = err.to_string();
-            let oauth_enabled = matches!(
-                config,
-                McpServerConfig::Remote(remote) if oauth::should_use_oauth(remote)
+            return Err(
+                if matches!(config, McpServerConfig::Remote(remote) if oauth::should_use_oauth(remote))
+                    && oauth_client::is_auth_connect_error(&err)
+                {
+                    McpStatus::NeedsAuth
+                } else {
+                    McpStatus::Failed(msg)
+                },
             );
-            return Err(if oauth_enabled && oauth::is_auth_error_message(&msg) {
-                McpStatus::NeedsAuth
-            } else {
-                McpStatus::Failed(msg)
-            });
         }
     };
 
@@ -438,7 +477,18 @@ async fn open_and_list_tools(
                 .collect();
             Ok((client, tools))
         }
-        Ok(Err(err)) => Err(McpStatus::Failed(err.to_string())),
+        Ok(Err(err)) => {
+            let msg = err.to_string();
+            Err(
+                if matches!(config, McpServerConfig::Remote(remote) if oauth::should_use_oauth(remote))
+                    && oauth_client::is_auth_service_error(&err)
+                {
+                    McpStatus::NeedsAuth
+                } else {
+                    McpStatus::Failed(msg)
+                },
+            )
+        }
         Err(_) => Err(McpStatus::Failed(format!(
             "timed out after {} ms while listing tools",
             timeout.as_millis()
@@ -481,31 +531,18 @@ async fn open_remote_client(
     remote: &McpRemoteConfig,
 ) -> anyhow::Result<RunningService<RoleClient, ()>> {
     let headers = remote_headers(remote)?;
-    let mut transport_config =
+    let transport_config =
         rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
             remote.url.clone(),
         )
         .custom_headers(headers);
 
     if oauth::should_use_oauth(remote) && credentials::has_credentials(name, &remote.url) {
-        let mut manager = AuthorizationManager::new(remote.url.as_str())
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to start OAuth client: {e}"))?;
-        manager.set_credential_store(credentials::FileCredentialStore::new(
-            name.to_string(),
-            remote.url.clone(),
-        ));
-        let hydrated = manager
-            .initialize_from_store()
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to load MCP OAuth credentials: {e}"))?;
-        if hydrated {
-            let token = manager
-                .get_access_token()
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            transport_config = transport_config.auth_header(token);
-        }
+        let manager = oauth::stored_authorization_manager(name, remote).await?;
+        let client = oauth_client::RefreshingHttpClient::new(manager)?
+            .with_refresh_lock(credentials::refresh_lock_path(name, &remote.url));
+        let transport = StreamableHttpClientTransport::with_client(client, transport_config);
+        return Ok(().serve(transport).await?);
     }
 
     let transport = StreamableHttpClientTransport::from_config(transport_config);
@@ -788,6 +825,36 @@ fn parameter_type_from_schema(schema: &Value) -> ParameterType {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn mcp_result_preserves_images_resources_annotations_and_structured_content() {
+        let resource = rmcp::model::Resource::new("file:///tmp/readme.md", "readme")
+            .with_mime_type("text/markdown");
+        let mut result = rmcp::model::CallToolResult::success(vec![
+            ContentBlock::Image(
+                rmcp::model::ImageContent::new("aGk=", "image/png")
+                    .with_annotations(rmcp::model::Annotations::default().with_priority(0.8)),
+            ),
+            ContentBlock::ResourceLink(resource),
+        ]);
+        result.structured_content = Some(json!({"answer": 42}));
+
+        let converted = mcp_tool_result("docs", "lookup", &result);
+        assert_eq!(converted.images.len(), 1);
+        assert_eq!(converted.images[0].media_type, "image/png");
+        assert_eq!(
+            converted.metadata["mcp_result"]["structuredContent"]["answer"],
+            42
+        );
+        let priority = converted.metadata["mcp_result"]["content"][0]["annotations"]["priority"]
+            .as_f64()
+            .unwrap();
+        assert!((priority - 0.8).abs() < 0.000_001);
+        assert_eq!(
+            converted.metadata["mcp_result"]["content"][1]["uri"],
+            "file:///tmp/readme.md"
+        );
+    }
 
     #[test]
     fn normalize_strips_root_anyof_with_non_object_branches() {

@@ -798,17 +798,22 @@ pub fn handle_skill_command<'a>(
     parsed: &'a ParsedCommand,
     _sm: &'a mut SessionManager,
 ) -> Pin<Box<dyn std::future::Future<Output = CommandResult> + Send + 'a>> {
-    let skill_name = parsed.name.clone();
+    Box::pin(async move { skill_command_result(parsed, crate::skill::get_skill_store()) })
+}
 
-    Box::pin(async move {
-        if let Some(store) = crate::skill::get_skill_store() {
-            if let Some(skill) = store.get(&skill_name) {
-                return CommandResult::Success(skill.content.clone());
-            }
-        }
-
-        CommandResult::Error(format!("Unknown command: {}", skill_name))
-    })
+fn skill_command_result(
+    parsed: &ParsedCommand,
+    store: Option<&crate::skill::SkillStore>,
+) -> CommandResult {
+    if store.is_some_and(|store| store.get(&parsed.name).is_some()) {
+        return CommandResult::RunPrompt {
+            prompt: parsed.raw.clone(),
+            agent: None,
+            model: None,
+            subtask: None,
+        };
+    }
+    CommandResult::Error(format!("Unknown command: {}", parsed.name))
 }
 
 pub fn register_skill_commands(registry: &mut Registry) {
@@ -1168,6 +1173,37 @@ mod tests {
         registry
     }
 
+    #[test]
+    fn skill_slash_command_runs_the_user_prompt_instead_of_printing_skill_content() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(".crabcode/skills/test-skill-prompt");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: test-skill-prompt\ndescription: Test skill\n---\nSkill instructions",
+        )
+        .unwrap();
+        let store = crate::skill::SkillStore::load(&root.path().join("config"), root.path());
+        let crate::command::parser::InputType::Command(parsed) =
+            crate::command::parser::parse_input("/test-skill-prompt what is it")
+        else {
+            panic!("expected a parsed slash command");
+        };
+        assert_eq!(
+            skill_command_result(&parsed, Some(&store)),
+            CommandResult::RunPrompt {
+                prompt: "/test-skill-prompt what is it".to_string(),
+                agent: None,
+                model: None,
+                subtask: None,
+            }
+        );
+        assert_eq!(
+            skill_command_result(&parsed, None),
+            CommandResult::Error("Unknown command: test-skill-prompt".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn test_handle_btw_requires_question() {
         let parsed = ParsedCommand {
@@ -1498,6 +1534,7 @@ mod tests {
             structured_output: false,
             free: false,
             local: true,
+            context_window: None,
             reasoning_options: Vec::new(),
         };
         crate::model::effective_catalog::publish_refreshed_models(vec![marker])

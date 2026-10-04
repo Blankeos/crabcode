@@ -24,6 +24,7 @@ impl From<SessionMessage> for Message {
         } else {
             msg.parts
                 .into_iter()
+                .filter(|part| part.part_type != "local_image" && part.part_type != "local_audio")
                 .map(|part| PersistenceMessagePart {
                     part_type: part.part_type,
                     data: part.data,
@@ -43,6 +44,12 @@ impl From<SessionMessage> for Message {
         for path in &msg.local_image_paths {
             parts.push(PersistenceMessagePart {
                 part_type: "local_image".to_string(),
+                data: serde_json::json!({ "path": path }),
+            });
+        }
+        for path in &msg.local_audio_paths {
+            parts.push(PersistenceMessagePart {
+                part_type: "local_audio".to_string(),
                 data: serde_json::json!({ "path": path }),
             });
         }
@@ -87,7 +94,7 @@ impl From<SessionMessage> for Message {
         };
 
         Message {
-            id: cuid2::create_id(),
+            id: msg.id,
             session_id: 0,
             role: match msg.role {
                 MessageRole::User => "user".to_string(),
@@ -110,6 +117,11 @@ impl From<SessionMessage> for Message {
             t1_ms: msg.t1_ms.map(|v| v as i64),
             tn_ms: msg.tn_ms.map(|v| v as i64),
             output_tokens: msg.output_tokens.map(|v| v as i64),
+            input_tokens: msg.input_tokens.map(|v| v as i64),
+            cache_read_tokens: msg.cache_read_tokens.map(|v| v as i64),
+            cache_write_tokens: msg.cache_write_tokens.map(|v| v as i64),
+            cost: msg.cost,
+            usage_authoritative: msg.usage_authoritative,
             tokens_per_sec: msg.tokens_per_sec,
         }
     }
@@ -127,6 +139,20 @@ impl TryFrom<Message> for SessionMessage {
                 data: part.data.clone(),
             })
             .collect();
+        let local_audio_paths = session_parts
+            .iter()
+            .filter_map(|part| {
+                (part.part_type == "local_audio")
+                    .then(|| part.data.get("path").and_then(|value| value.as_str()))
+                    .flatten()
+            })
+            .map(str::to_string)
+            .fold(Vec::new(), |mut paths, path| {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+                paths
+            });
 
         let content = session_parts
             .iter()
@@ -163,7 +189,12 @@ impl TryFrom<Message> for SessionMessage {
                 }
             })
             .map(|path| path.to_string())
-            .collect();
+            .fold(Vec::new(), |mut paths, path| {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+                paths
+            });
 
         let compaction_stats = session_parts
             .iter()
@@ -212,6 +243,7 @@ impl TryFrom<Message> for SessionMessage {
         let output_tokens = persisted_output_tokens.or(billed_output);
 
         Ok(SessionMessage {
+            id: msg.id,
             role,
             content,
             reasoning,
@@ -240,10 +272,30 @@ impl TryFrom<Message> for SessionMessage {
                 .tn_ms
                 .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
             output_tokens,
+            input_tokens: msg
+                .input_tokens
+                .and_then(|v| if v > 0 { Some(v as usize) } else { None }),
+            cache_read_tokens: msg.cache_read_tokens.and_then(|v| {
+                if v > 0 {
+                    Some(v as usize)
+                } else {
+                    None
+                }
+            }),
+            cache_write_tokens: msg.cache_write_tokens.and_then(|v| {
+                if v > 0 {
+                    Some(v as usize)
+                } else {
+                    None
+                }
+            }),
+            cost: msg.cost,
+            usage_authoritative: msg.usage_authoritative,
             tokens_per_sec: msg.tokens_per_sec.filter(|v| v.is_finite() && *v > 0.0),
             model: msg.model.clone(),
             provider: msg.provider.clone(),
             local_image_paths,
+            local_audio_paths,
             compaction_stats,
             was_interrupted,
         })
@@ -270,6 +322,98 @@ pub fn persistence_to_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_id_round_trips_through_persistence() {
+        let session_message = SessionMessage::assistant("hello");
+        let id = session_message.id.clone();
+
+        let persistence_message: Message = session_message.into();
+        assert_eq!(persistence_message.id, id);
+
+        let restored = SessionMessage::try_from(persistence_message).unwrap();
+        assert_eq!(restored.id, id);
+    }
+
+    #[test]
+    fn authoritative_usage_round_trips_through_persistence() {
+        let mut session_message = SessionMessage::assistant("hello");
+        session_message.apply_usage(
+            crate::aisdk::chunk::TokenUsage {
+                input: 100,
+                output: 25,
+                cache_read: 60,
+                cache_write: 10,
+            },
+            Some(0.0125),
+        );
+        session_message.tokens_per_sec = Some(80.0);
+
+        let restored = SessionMessage::try_from(Message::from(session_message)).unwrap();
+        assert_eq!(restored.input_tokens, Some(100));
+        assert_eq!(restored.output_tokens, Some(25));
+        assert_eq!(restored.cache_read_tokens, Some(60));
+        assert_eq!(restored.cache_write_tokens, Some(10));
+        assert_eq!(restored.cost, Some(0.0125));
+        assert!(restored.usage_authoritative);
+        assert_eq!(restored.tokens_per_sec, Some(80.0));
+    }
+
+    #[test]
+    fn audio_paths_round_trip_through_persistence() {
+        let mut session_message = SessionMessage::user("listen");
+        session_message.local_audio_paths = vec!["/tmp/audio.wav".to_string()];
+
+        let persisted = Message::from(session_message);
+        assert_eq!(
+            persisted
+                .parts
+                .iter()
+                .filter(|part| part.part_type == "local_audio")
+                .count(),
+            1
+        );
+        let restored = SessionMessage::try_from(persisted).unwrap();
+        assert_eq!(restored.local_audio_paths, vec!["/tmp/audio.wav"]);
+    }
+
+    #[test]
+    fn duplicate_legacy_attachment_parts_are_deduplicated() {
+        let message = Message {
+            id: "message".to_string(),
+            session_id: 1,
+            role: "user".to_string(),
+            parts: vec![
+                PersistenceMessagePart {
+                    part_type: "local_audio".to_string(),
+                    data: serde_json::json!({ "path": "/tmp/audio.wav" }),
+                },
+                PersistenceMessagePart {
+                    part_type: "local_audio".to_string(),
+                    data: serde_json::json!({ "path": "/tmp/audio.wav" }),
+                },
+            ],
+            timestamp: 0,
+            tokens_used: 0,
+            model: None,
+            provider: None,
+            agent_mode: None,
+            duration_ms: 0,
+            t0_ms: None,
+            t1_ms: None,
+            tn_ms: None,
+            output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost: None,
+            usage_authoritative: false,
+            tokens_per_sec: None,
+        };
+
+        let restored = SessionMessage::try_from(message).unwrap();
+        assert_eq!(restored.local_audio_paths, vec!["/tmp/audio.wav"]);
+    }
 
     #[test]
     fn compaction_stats_round_trip_through_message_parts() {
@@ -419,6 +563,11 @@ mod tests {
             t1_ms: Some(10_000),
             tn_ms: Some(12_600),
             output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost: None,
+            usage_authoritative: false,
             tokens_per_sec: None,
         };
         legacy.parts.push(PersistenceMessagePart {

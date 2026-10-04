@@ -986,6 +986,7 @@ pub struct App {
     pub editor: crate::config::EditorConfig,
     pending_editor_suspend: Option<String>,
     pub websearch: crate::config::configuration::WebsearchConfig,
+    compaction: crate::config::configuration::CompactionConfig,
     pub mcp: crate::config::configuration::McpConfig,
     mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
     mcp_summary: crate::views::home::McpSummary,
@@ -1023,6 +1024,7 @@ pub struct App {
     startup_hydrated: bool,
     pending_model_override: Option<String>,
     pending_cli_agent: Option<String>,
+    runtime_options: crate::config::ConfigRuntimeOptions,
     /// Shared background/interactive process registry (jobs UI next).
     pub process_registry: std::sync::Arc<crate::tools::ProcessRegistry>,
 }
@@ -1077,12 +1079,24 @@ impl App {
         model_override: Option<&str>,
         cli_agent: Option<&str>,
     ) -> Result<Self> {
-        Self::new_shell(model_override, cli_agent)
+        Self::new_with_runtime_options(model_override, cli_agent, Default::default())
+    }
+
+    pub fn new_with_runtime_options(
+        model_override: Option<&str>,
+        cli_agent: Option<&str>,
+        runtime_options: crate::config::ConfigRuntimeOptions,
+    ) -> Result<Self> {
+        Self::new_shell(model_override, cli_agent, runtime_options)
     }
 
     /// Minimal App for first paint. Heavy config/prefs/themes/skills load in
     /// [`Self::ensure_startup_hydrated`].
-    fn new_shell(model_override: Option<&str>, cli_agent: Option<&str>) -> Result<Self> {
+    fn new_shell(
+        model_override: Option<&str>,
+        cli_agent: Option<&str>,
+        runtime_options: crate::config::ConfigRuntimeOptions,
+    ) -> Result<Self> {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
 
@@ -1255,6 +1269,7 @@ impl App {
             editor: crate::config::EditorConfig::default(),
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
+            compaction: crate::config::configuration::CompactionConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             mcp_manager: None,
             mcp_summary: crate::views::home::McpSummary::default(),
@@ -1262,7 +1277,8 @@ impl App {
             config_raw_merged: serde_json::json!({}),
             custom_instructions: String::new(),
             terminal_focused: true,
-            tool_permissions: crate::tools::ToolPermissions::new(cwd_path.clone()),
+            tool_permissions: crate::tools::ToolPermissions::new(cwd_path.clone())
+                .dangerously_skip_permissions(runtime_options.dangerously_skip_permissions),
             skills_dirs: Vec::new(),
             is_streaming: false,
             pending_session_title: None,
@@ -1290,6 +1306,7 @@ impl App {
             startup_hydrated: false,
             pending_model_override: model_override.map(str::to_string),
             pending_cli_agent: cli_agent.map(str::to_string),
+            runtime_options,
             process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
                 cwd_path,
             )),
@@ -1368,7 +1385,8 @@ impl App {
                 loaded_config.merged_config.watcher.is_enabled(),
                 loaded_config.merged_config.watcher.ignored_paths().to_vec(),
             )
-            .with_agents(agent_suggestions),
+            .with_agents(agent_suggestions)
+            .with_skills(Self::skill_suggestions(&agent_registry)),
         );
 
         let mut agent = self.agent.clone();
@@ -1472,11 +1490,7 @@ impl App {
         self.chat_state.wave_spinner.set_color(agent_color);
         self.session_rename_dialog_state.set_colors(colors);
 
-        let runtime = crate::config::ConfigRuntime::from_merged(
-            &loaded_config.merged_config,
-            cwd_path.clone(),
-            crate::config::ConfigRuntimeOptions::default(),
-        );
+        self.apply_config_runtime(&loaded_config.merged_config, cwd_path.clone());
 
         self.prefs_dao = prefs_dao;
         self.agent = agent;
@@ -1492,17 +1506,27 @@ impl App {
         self.images = loaded_config.merged_config.images.clone();
         self.editor = loaded_config.merged_config.editor.clone();
         self.websearch = loaded_config.merged_config.websearch.clone();
+        self.compaction = loaded_config.merged_config.compaction.clone();
         self.mcp = mcp_config;
         self.config_raw_merged = loaded_config.raw_merged;
-        self.custom_instructions = runtime.custom_instructions;
-        self.tool_permissions = runtime.tool_permissions;
         self.skills_dirs = loaded_config.inventory.opencode_skills_dirs;
-        self.discovery = runtime.discovery;
         self.terminal_title_items = terminal_title_items;
         self.startup_hydrated = true;
         self.pending_model_override = None;
         self.pending_cli_agent = None;
         Ok(())
+    }
+
+    fn apply_config_runtime(
+        &mut self,
+        merged: &crate::config::configuration::MergedConfig,
+        cwd: std::path::PathBuf,
+    ) {
+        let runtime =
+            crate::config::ConfigRuntime::from_merged(merged, cwd, self.runtime_options.clone());
+        self.custom_instructions = runtime.custom_instructions;
+        self.tool_permissions = runtime.tool_permissions;
+        self.discovery = runtime.discovery;
     }
 
     fn open_variants_dialog(&mut self, args: &[String]) {
@@ -2343,6 +2367,19 @@ impl App {
     }
 
     fn persist_chat_messages_for_session(&mut self, session_id: &str) -> bool {
+        // Snapshots must be self-contained even if the process exits before
+        // finalization. Use the captured turn metadata, not the current selection.
+        if let Some((start, model, provider)) = self.streaming_boundary_for_session(session_id) {
+            if let Some(chat) = self.chat_for_session_mut(session_id) {
+                for message in chat.messages.iter_mut().skip(start) {
+                    if message.role == crate::session::types::MessageRole::Assistant {
+                        message.model = model.clone();
+                        message.provider = provider.clone();
+                    }
+                }
+            }
+        }
+
         let Some(messages) = self
             .chat_for_session(session_id)
             .map(|chat| chat.messages.clone())
@@ -3448,7 +3485,7 @@ impl App {
         self.themes_dialog_state.set_transparent(transparent);
         if let Some(ref dao) = self.prefs_dao {
             if let Err(e) = dao.set_theme_transparent(transparent) {
-                eprintln!("Failed to save theme transparency: {}", e);
+                crate::emit_log!("Failed to save theme transparency: {}", e);
             }
         }
     }
@@ -3456,7 +3493,7 @@ impl App {
     fn persist_theme_selection(&self, theme_id: &str) {
         if let Some(ref dao) = self.prefs_dao {
             if let Err(e) = dao.set_active_theme(theme_id.to_string()) {
-                eprintln!("Failed to save active theme: {}", e);
+                crate::emit_log!("Failed to save active theme: {}", e);
             }
         }
     }
@@ -3959,6 +3996,23 @@ impl App {
             self.record_overlay_close_after_key(overlay_before_key);
             return;
         }
+        // Ctrl+D quits when there is no draft (EOF semantics, like opencode).
+        // Non-empty input falls through to the input handler where tui-textarea
+        // maps Ctrl+D to delete-forward, preserving emacs editing. Guarded to
+        // chat-level focus so ConnectDialog disconnect, sessions search/item
+        // menu, and other dialog Ctrl+D actions keep working.
+        if key.code == KeyCode::Char('d')
+            && key.modifiers == event::KeyModifiers::CONTROL
+            && matches!(
+                self.overlay_focus,
+                OverlayFocus::None | OverlayFocus::SuggestionsPopup
+            )
+            && !self.input.has_draft_content()
+        {
+            self.quit();
+            self.record_overlay_close_after_key(overlay_before_key);
+            return;
+        }
 
         if self.handle_selection_action_key(key) {
             self.record_overlay_close_after_key(overlay_before_key);
@@ -4077,7 +4131,7 @@ impl App {
                             if let Err(e) =
                                 dao.set_active_model(provider_id.clone(), model_id_clone.clone())
                             {
-                                eprintln!("Failed to save active model: {}", e);
+                                crate::emit_log!("Failed to save active model: {}", e);
                             }
                         }
 
@@ -4755,6 +4809,15 @@ impl App {
     }
 
     fn handle_suggestions_popup_keys(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Enter
+            && key.modifiers == KeyModifiers::NONE
+            && self.input.submission_text().trim() == "/"
+            && !self.suggestions_popup_state.popup.selection_is_explicit()
+        {
+            self.clear_suggestions_and_blur();
+            self.handle_input_and_app_keys(key);
+            return true;
+        }
         let action = handle_suggestions_popup_key_event(&mut self.suggestions_popup_state, key);
         match action {
             crate::ui::components::popup::PopupAction::Handled => true,
@@ -4835,7 +4898,7 @@ impl App {
         self.chat_state.compact_mode = enabled;
         if let Some(dao) = &self.prefs_dao {
             if let Err(error) = dao.set_compact_mode(enabled) {
-                eprintln!("Failed to persist compact mode preference: {error}");
+                crate::emit_log!("Failed to persist compact mode preference: {}", error);
             }
         }
         push_toast(Toast::new(
@@ -5060,9 +5123,7 @@ impl App {
                 let image_paths = self.input.local_image_paths_for_submission();
                 let input_text = self.input.submission_text();
                 if !input_text.is_empty() || !image_paths.is_empty() {
-                    use crate::command::parser::parse_input;
-
-                    let input_type = parse_input(&input_text);
+                    let input_type = self.parse_prompt_input(&input_text);
                     match input_type {
                         crate::command::parser::InputType::Command(parsed) => {
                             // Don't save commands to prompt history
@@ -5133,6 +5194,59 @@ impl App {
 
     fn can_submit_input(input_type: &InputType, is_streaming: bool) -> bool {
         matches!(input_type, InputType::Command(_)) || !is_streaming
+    }
+
+    /// Only registered slash commands and agent mentions are special input.
+    /// Skill mentions and unknown slash tokens are ordinary prompts, retaining
+    /// history, attachments, and the normal busy-session queue behavior.
+    fn parse_prompt_input(&self, input: &str) -> InputType {
+        match crate::command::parser::parse_input(input) {
+            InputType::Command(parsed) if self.command_registry.get(&parsed.name).is_none() => {
+                InputType::Message(parsed.raw)
+            }
+            InputType::AgentMention(mention)
+                if self.agent_registry.task_target(&mention.agent).is_none()
+                    && (self
+                        .input
+                        .autocomplete
+                        .as_ref()
+                        .is_some_and(|autocomplete| {
+                            autocomplete
+                                .skills
+                                .iter()
+                                .any(|skill| skill.name.eq_ignore_ascii_case(&mention.agent))
+                        })
+                        || crate::skill::get_skill_store().is_some_and(|store| {
+                            store
+                                .all()
+                                .iter()
+                                .any(|skill| skill.name.eq_ignore_ascii_case(&mention.agent))
+                        })) =>
+            {
+                InputType::Message(mention.raw)
+            }
+            input => input,
+        }
+    }
+
+    fn skill_suggestions(
+        agent_registry: &crate::agent::definition::AgentRegistry,
+    ) -> Vec<crate::autocomplete::Suggestion> {
+        crate::skill::get_skill_store()
+            .map(|store| {
+                store
+                    .all()
+                    .into_iter()
+                    .filter(|skill| agent_registry.task_target(&skill.name).is_none())
+                    .map(|skill| {
+                        crate::autocomplete::Suggestion::skill(
+                            skill.name.clone(),
+                            skill.description.clone().unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn update_suggestions(&mut self) {
@@ -5511,7 +5625,7 @@ impl App {
                         if let Err(e) =
                             dao.set_active_model(provider_id.clone(), model_id_clone.clone())
                         {
-                            eprintln!("Failed to save active model: {}", e);
+                            crate::emit_log!("Failed to save active model: {}", e);
                         }
                     }
 
@@ -6298,6 +6412,7 @@ impl App {
                     }
                 }
                 crate::autocomplete::SuggestionKind::Agent
+                | crate::autocomplete::SuggestionKind::Skill
                 | crate::autocomplete::SuggestionKind::File => {
                     self.input.apply_suggestion(&selected);
                     self.update_suggestions();
@@ -7132,6 +7247,10 @@ impl App {
     }
 
     fn start_compact_session(&mut self, session_id: &str) {
+        self.start_compact_session_with_min(session_id, 0);
+    }
+
+    fn start_compact_session_with_min(&mut self, session_id: &str, minimum_tokens: usize) {
         if self.compaction_receiver.is_some() {
             push_toast(Toast::new(
                 "Compaction is already running",
@@ -7167,7 +7286,7 @@ impl App {
         let Some(selection) = crate::session::compaction::select_messages_for_compaction_with_min(
             &messages,
             crate::session::compaction::DEFAULT_TAIL_TURNS,
-            0,
+            minimum_tokens,
         ) else {
             self.play_sound_event(crate::sound::SoundEvent::Error);
             push_toast(Toast::new(
@@ -7345,9 +7464,7 @@ impl App {
     }
 
     async fn process_input(&mut self, input: &str) {
-        use crate::command::parser::parse_input;
-
-        match parse_input(input) {
+        match self.parse_prompt_input(input) {
             InputType::Command(mut parsed) => {
                 // Popup Accept / autocomplete_and_submit land here — must record MRU
                 // (process_command_input is only used by some Enter paths).
@@ -7603,6 +7720,10 @@ impl App {
     }
 
     async fn process_command_input(&mut self, mut parsed: crate::command::parser::ParsedCommand) {
+        if self.command_registry.get(&parsed.name).is_none() {
+            self.handle_message_input(parsed.raw);
+            return;
+        }
         if let Some(autocomplete) = self.input.autocomplete.as_ref() {
             autocomplete.command_auto.touch_mru(&parsed.name);
         }
@@ -8229,9 +8350,23 @@ impl App {
             .map(|session| fork_title_from_session_title(&session.title))
             .unwrap_or_else(|| fork_title_from_session_title("fork"));
 
-        let _ = self.create_new_session(Some(fork_title));
-        for msg in &messages_to_fork {
-            let _ = self.session_manager.add_message_to_current_session(msg);
+        let fork_id = self.create_new_session(Some(fork_title));
+        let messages_to_fork =
+            match crate::persistence::attachments::clone_messages(&messages_to_fork, &fork_id) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    self.session_manager.delete_session(&fork_id);
+                    self.push_command_error(format!("Failed to copy fork attachments: {error}"));
+                    return false;
+                }
+            };
+        if let Err(error) = self
+            .session_manager
+            .replace_session_messages(&fork_id, messages_to_fork.clone())
+        {
+            self.session_manager.delete_session(&fork_id);
+            self.push_command_error(format!("Failed to persist fork: {error:?}"));
+            return false;
         }
 
         self.chat_state.chat.clear();
@@ -10702,7 +10837,21 @@ impl App {
                 self.cancelled_streaming_session(session_id);
                 false
             }
-            crate::llm::ChunkMessage::Metrics { .. } => true,
+            crate::llm::ChunkMessage::Metrics {
+                duration_ms,
+                usage,
+                cost,
+                ..
+            } => {
+                if let Some(usage) = usage {
+                    if let Some(chat) = self.chat_for_session_mut(session_id) {
+                        chat.apply_streaming_usage(usage, cost, duration_ms);
+                    }
+                    self.mark_streaming_snapshot_pending(session_id);
+                }
+                true
+            }
+            crate::llm::ChunkMessage::TurnStopReason(_) => true,
             crate::llm::ChunkMessage::ToolCalls(tool_calls) => {
                 self.set_session_retry_status(session_id, None);
                 // Close the generation sample as a tool-calls finish (excluded from
@@ -10781,6 +10930,7 @@ impl App {
             crate::llm::ChunkMessage::QuestionRequest {
                 questions,
                 response_tx,
+                ..
             } => {
                 self.maybe_persist_streaming_snapshot_for_session(session_id, true);
                 let _ = self.session_manager.set_session_status(
@@ -10949,6 +11099,9 @@ impl App {
         }
 
         self.cleanup_streaming_for_session(session_id);
+        if self.maybe_start_auto_compaction(session_id) {
+            return;
+        }
         if self.submit_queued_messages_for_session(session_id) {
             return;
         }
@@ -10962,6 +11115,59 @@ impl App {
             completion_stats.as_deref(),
         );
         self.notify_terminal_event(completion_event);
+    }
+
+    fn maybe_start_auto_compaction(&mut self, session_id: &str) -> bool {
+        if !self.is_active_session(session_id)
+            || self.compaction_receiver.is_some()
+            || self.session_has_active_compaction(session_id)
+        {
+            return false;
+        }
+        if !self.should_auto_compact_current_session(None) {
+            return false;
+        }
+        self.start_compact_session_with_min(
+            session_id,
+            crate::session::compaction::MIN_COMPACTABLE_TOKENS,
+        );
+        self.compaction_receiver.is_some()
+    }
+
+    fn should_auto_compact_current_session(
+        &self,
+        pending_message: Option<&crate::session::types::Message>,
+    ) -> bool {
+        let mut messages = self.chat_state.chat.messages.clone();
+        if let Some(message) = pending_message {
+            messages.push(message.clone());
+        }
+        let used_tokens = crate::session::compaction::total_context_tokens(&messages)
+            .saturating_add(self.mcp_tool_prefix_tokens());
+        let (context_window, max_output_tokens) = self
+            .discovery
+            .as_ref()
+            .map(|discovery| {
+                (
+                    discovery.get_model_limit(&self.provider_name.to_lowercase(), &self.model),
+                    discovery
+                        .get_model_output_limit(&self.provider_name.to_lowercase(), &self.model),
+                )
+            })
+            .unwrap_or((None, None));
+        if !crate::session::compaction::should_auto_compact(
+            &self.compaction,
+            used_tokens,
+            context_window,
+            max_output_tokens,
+        ) {
+            return false;
+        }
+        crate::session::compaction::select_messages_for_compaction(
+            &self.chat_state.chat.messages,
+            crate::session::compaction::DEFAULT_TAIL_TURNS,
+        )
+        .is_some()
     }
 
     fn defer_finish_if_tools_are_running(&mut self, session_id: &str) -> bool {
@@ -11547,6 +11753,7 @@ impl App {
         let agent_registry = self.agent_registry.clone();
         let websearch_config = self.websearch.clone();
         let mcp_config = self.mcp.clone();
+        let compaction_config = self.compaction.clone();
         let custom_instructions = self.custom_instructions.clone();
         let process_registry = self.process_registry.clone();
         let cwd = self.cwd.clone();
@@ -11619,6 +11826,7 @@ impl App {
                 tool_permissions,
                 websearch_config,
                 mcp_config,
+                compaction_config,
                 cwd,
                 None,
                 messages,
@@ -11733,7 +11941,7 @@ impl App {
         }
 
         let input = prompt.trim();
-        let parsed_input = crate::command::parser::parse_input(input);
+        let parsed_input = self.parse_prompt_input(input);
         let is_message = matches!(parsed_input, crate::command::parser::InputType::Message(_));
         let agent_mention = match &parsed_input {
             crate::command::parser::InputType::AgentMention(mention) => {
@@ -11857,25 +12065,25 @@ impl App {
                     .collect()
             }
             "mention" => {
+                if let Some(autocomplete) = &self.input.autocomplete {
+                    return autocomplete.mention_suggestions(query);
+                }
                 let query_lower = query.to_ascii_lowercase();
-                let mut suggestions = self
-                    .agent_registry
-                    .visible_subagents()
+                let mut suggestions = Self::skill_suggestions(&self.agent_registry)
                     .into_iter()
-                    .filter(|agent| agent.name.to_ascii_lowercase().starts_with(&query_lower))
-                    .map(|agent| {
-                        crate::autocomplete::Suggestion::agent(
-                            agent.name.clone(),
-                            agent.description.clone(),
-                        )
-                    })
+                    .filter(|skill| skill.name.to_ascii_lowercase().starts_with(&query_lower))
                     .collect::<Vec<_>>();
                 suggestions.extend(
-                    self.input
-                        .autocomplete
-                        .as_ref()
-                        .map(|autocomplete| autocomplete.file_auto.get_suggestions(query))
-                        .unwrap_or_default(),
+                    self.agent_registry
+                        .visible_subagents()
+                        .into_iter()
+                        .filter(|agent| agent.name.to_ascii_lowercase().starts_with(&query_lower))
+                        .map(|agent| {
+                            crate::autocomplete::Suggestion::agent(
+                                agent.name.clone(),
+                                agent.description.clone(),
+                            )
+                        }),
                 );
                 suggestions
             }
@@ -12475,6 +12683,22 @@ impl App {
         {
             if let Some(session_id) = self.session_manager.get_current_session_id().cloned() {
                 self.ensure_session_view_state(&session_id);
+                let mut pending_message = crate::session::types::Message::user(&msg);
+                pending_message.local_image_paths = image_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect();
+                if self.compaction_receiver.is_none()
+                    && !self.session_has_active_compaction(&session_id)
+                    && self.should_auto_compact_current_session(Some(&pending_message))
+                    && self.queue_message_for_current_session(msg.clone(), image_paths.clone())
+                {
+                    self.start_compact_session_with_min(
+                        &session_id,
+                        crate::session::compaction::MIN_COMPACTABLE_TOKENS,
+                    );
+                    return;
+                }
             }
             self.append_user_message_to_current_session(msg.clone(), image_paths);
 
@@ -13287,6 +13511,32 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn permission_bypass_survives_startup_config_application() {
+        let mut app = test_app();
+        app.runtime_options.dangerously_skip_permissions = true;
+        let mut merged = crate::config::configuration::MergedConfig::default();
+        merged.permission_rules.push(crate::tools::PermissionRule {
+            permission: "read".into(),
+            pattern: "*".into(),
+            action: crate::tools::PermissionPolicyAction::Ask,
+        });
+        app.apply_config_runtime(&merged, "/tmp/workspace".into());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(app
+            .tool_permissions
+            .preflight(
+                "build",
+                "read",
+                &json!({ "file_path": "/tmp/elsewhere/file.txt" }),
+                Some(&tx),
+            )
+            .await
+            .is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
     fn test_app() -> App {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
@@ -13390,6 +13640,7 @@ mod tests {
             editor: crate::config::EditorConfig::default(),
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
+            compaction: crate::config::configuration::CompactionConfig::default(),
             mcp: crate::config::configuration::McpConfig::default(),
             mcp_manager: None,
             mcp_summary: crate::views::home::McpSummary::default(),
@@ -13425,6 +13676,7 @@ mod tests {
             startup_hydrated: true,
             pending_model_override: None,
             pending_cli_agent: None,
+            runtime_options: crate::config::ConfigRuntimeOptions::default(),
             process_registry: std::sync::Arc::new(crate::tools::ProcessRegistry::with_workdir(
                 std::path::PathBuf::from("."),
             )),
@@ -13539,6 +13791,7 @@ mod tests {
         let mut app = test_app();
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -13546,7 +13799,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
@@ -13570,6 +13825,7 @@ mod tests {
         let mut app = test_app();
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -13577,7 +13833,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         let (question_tx, _question_rx) = tokio::sync::oneshot::channel();
@@ -14607,6 +14865,7 @@ mod tests {
         app.chat_state.chat.scroll_offset = 0;
         let (permission_tx, _permission_rx) = tokio::sync::oneshot::channel();
         app.permission_dialog_state.enqueue(PermissionPrompt {
+            tool_call_id: None,
             tool_id: "list".to_string(),
             action: PermissionAction::List,
             permission: "external_directory".to_string(),
@@ -14614,7 +14873,9 @@ mod tests {
             target: Some("/tmp".to_string()),
             command: None,
             workdir: None,
+            workspace: "/tmp".to_string(),
             reason: "approval required".to_string(),
+            raw_input: serde_json::Value::Null,
             response_tx: permission_tx,
         });
         app.overlay_focus = OverlayFocus::PermissionDialog;
@@ -16703,6 +16964,56 @@ mod tests {
     }
 
     #[test]
+    fn streaming_snapshot_preserves_original_model_before_finalization() {
+        let mut app = test_app();
+        let session_id = app.create_new_session(Some("Snapshot model".to_string()));
+        let mut previous = crate::session::types::Message::assistant("Earlier answer");
+        previous.model = Some("earlier-model".to_string());
+        app.chat_state.chat.add_message(previous);
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::user("Prompt"));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Partial"));
+
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("original-model".to_string()),
+                Some("original-provider".to_string()),
+                2,
+            ));
+        app.model = "new-model".to_string();
+        app.provider_name = "new-provider".to_string();
+
+        // Cover both the initial save and a later snapshot containing a new
+        // assistant message, without ever finalizing the streaming turn.
+        assert!(app.persist_chat_messages_for_session(&session_id));
+        app.chat_state
+            .chat
+            .add_message(crate::session::types::Message::incomplete("Continued"));
+        app.mark_streaming_snapshot_pending(&session_id);
+        app.maybe_persist_streaming_snapshot_for_session(&session_id, true);
+
+        let session = app.session_manager.get_session_ref(&session_id).unwrap();
+        assert_eq!(session.messages[0].model.as_deref(), Some("earlier-model"));
+        assert!(session.messages[1].model.is_none());
+        assert_eq!(session.messages.len(), 4);
+        for message in &session.messages[2..] {
+            assert!(!message.is_complete);
+            assert_eq!(message.model.as_deref(), Some("original-model"));
+            assert_eq!(message.provider.as_deref(), Some("original-provider"));
+            let persisted: crate::persistence::Message = message.clone().into();
+            let restored: crate::session::types::Message = persisted.try_into().unwrap();
+            assert_eq!(restored.model, message.model);
+            assert_eq!(restored.provider, message.provider);
+        }
+    }
+
+    #[test]
     fn interrupted_stream_persists_partial_messages() {
         let mut app = test_app();
         let session_id = app.create_new_session(Some("Interrupted".to_string()));
@@ -17094,6 +17405,158 @@ mod tests {
         app.base_focus = BaseFocus::Chat;
         assert!(!app.reject_chat_only_command_outside_chat("compact"));
         assert!(!app.reject_chat_only_command_outside_chat("branch"));
+    }
+
+    fn add_test_skill_autocomplete(app: &mut App, root: &std::path::Path) {
+        let agents = app
+            .agent_registry
+            .visible_subagents()
+            .into_iter()
+            .map(|agent| crate::autocomplete::Suggestion::agent(&agent.name, &agent.description))
+            .collect();
+        app.input.autocomplete = Some(
+            AutoComplete::new_at_with_file_config(
+                crate::autocomplete::CommandAuto::new(&app.command_registry),
+                root,
+                false,
+                Vec::new(),
+            )
+            .with_agents(agents)
+            .with_skills(vec![crate::autocomplete::Suggestion::skill(
+                "codebase-design",
+                "Design deep modules",
+            )]),
+        );
+    }
+
+    #[test]
+    fn unknown_slash_prompts_are_messages_and_known_commands_remain_commands() {
+        let mut app = test_app();
+        for text in ["/", "/not-a-command explain this", "/tmp/example.txt"] {
+            assert_eq!(
+                app.parse_prompt_input(text),
+                InputType::Message(text.to_string())
+            );
+        }
+        for text in ["/models", "/compact", "/branch"] {
+            assert!(matches!(
+                app.parse_prompt_input(text),
+                InputType::Command(_)
+            ));
+        }
+        app.command_registry
+            .register(crate::command::registry::Command {
+                name: "codebase-design".to_string(),
+                description: "Design deep modules".to_string(),
+                handler: crate::command::handlers::handle_skill_command,
+                hidden_tokens: Vec::new(),
+                chat_only: false,
+            });
+        app.command_registry
+            .hide_from_autocomplete("codebase-design");
+        assert!(matches!(
+            app.parse_prompt_input("/codebase-design what is it"),
+            InputType::Command(_)
+        ));
+    }
+
+    #[test]
+    fn skill_mentions_are_chat_prompts_and_agent_mentions_still_delegate() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        add_test_skill_autocomplete(&mut app, root.path());
+        for text in [
+            "@codebase-design what is it",
+            "@CODEBASE-DESIGN",
+            "Use @codebase-design",
+        ] {
+            assert_eq!(
+                app.parse_prompt_input(text),
+                InputType::Message(text.to_string())
+            );
+        }
+        for text in ["@explore find the parser", "@not-an-agent find the parser"] {
+            assert!(matches!(
+                app.parse_prompt_input(text),
+                InputType::AgentMention(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn skill_suggestions_fill_without_submitting_and_match_remote_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        add_test_skill_autocomplete(&mut app, root.path());
+        app.input.set_text("@CODE");
+        let suggestions = app.input.get_autocomplete_suggestions(false);
+        assert_eq!(
+            suggestions,
+            app.remote_autocomplete_suggestions("mention", "CODE", false)
+        );
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(
+            suggestions[0].kind,
+            crate::autocomplete::SuggestionKind::Skill
+        );
+        assert!(app
+            .remote_autocomplete_suggestions("slash", "codebase", false)
+            .is_empty());
+        set_suggestions(&mut app.suggestions_popup_state, suggestions);
+        app.autocomplete_and_submit();
+        assert_eq!(app.input.get_text(), "@codebase-design ");
+        assert!(app.session_manager.get_current_session_id().is_none());
+        assert!(!is_suggestions_visible(&app.suggestions_popup_state));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_slash_and_skill_prompts_use_the_normal_busy_session_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        add_test_skill_autocomplete(&mut app, root.path());
+        let session_id = app.create_new_session(Some("Prompt fallback queue".to_string()));
+        app.base_focus = BaseFocus::Chat;
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.session_view_states.get_mut(&session_id).unwrap().stream =
+            Some(SessionStreamState::new(
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+                Some("test-model".to_string()),
+                Some("test-provider".to_string()),
+                0,
+            ));
+        app.is_streaming = true;
+        app.input.set_text("/");
+        app.update_suggestions();
+        assert!(is_suggestions_visible(&app.suggestions_popup_state));
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+        app.input.set_text("/not-a-command explain this");
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+        app.input.set_text("@codebase-design what is it");
+        app.handle_keys(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+        let returned_id = app
+            .remote_submit_input("/remote-unknown explain".to_string())
+            .await
+            .unwrap();
+        assert_eq!(returned_id, session_id);
+        let returned_id = app
+            .remote_submit_input("@codebase-design help".to_string())
+            .await
+            .unwrap();
+        assert_eq!(returned_id, session_id);
+        assert_eq!(
+            app.queued_message_previews_for_current_session(),
+            vec![
+                "/",
+                "/not-a-command explain this",
+                "@codebase-design what is it",
+                "/remote-unknown explain",
+                "@codebase-design help",
+            ]
+        );
     }
 
     #[test]
@@ -17593,6 +18056,87 @@ mod tests {
 
         assert_eq!(app.overlay_focus, OverlayFocus::None);
         assert!(!app.chat_state.chat.thinking_visible());
+    }
+
+    #[test]
+    fn ctrl_d_quits_when_input_empty() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        assert!(app.running);
+        assert!(!app.input.has_draft_content());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn ctrl_d_does_not_quit_when_input_has_text() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::None;
+        app.input.insert_str("draft prompt");
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        // Non-empty input keeps emacs delete-forward behavior instead of quitting.
+        assert!(app.running);
+        assert_eq!(app.input.get_text(), "draft prompt");
+    }
+
+    #[test]
+    fn ctrl_d_does_not_quit_when_connect_dialog_focused() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::ConnectDialog;
+        app.connect_dialog_state.dialog.show();
+        assert!(app.input.is_empty());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        // ConnectDialog reserves Ctrl+D for Disconnect.
+        assert!(app.running);
+    }
+
+    #[test]
+    fn ctrl_d_does_not_quit_when_sessions_dialog_focused() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.open_sessions_dialog();
+        assert_eq!(app.overlay_focus, OverlayFocus::SessionsDialog);
+        assert!(app.input.is_empty());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(app.running);
+    }
+
+    #[test]
+    fn ctrl_d_quits_when_suggestions_popup_open_and_input_empty() {
+        let mut app = test_app();
+        app.base_focus = BaseFocus::Chat;
+        app.overlay_focus = OverlayFocus::SuggestionsPopup;
+        assert!(!app.input.has_draft_content());
+
+        app.handle_keys(KeyEvent::new(
+            KeyCode::Char('d'),
+            event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(!app.running);
     }
 
     #[test]

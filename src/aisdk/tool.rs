@@ -16,6 +16,193 @@ pub struct ToolOutput {
     pub images: Vec<ImageContent>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::openai_compatible_input_schema;
+    use schemars::Schema;
+    use serde_json::json;
+
+    fn schema(value: serde_json::Value) -> Schema {
+        serde_json::from_value(value).expect("valid schema")
+    }
+
+    #[test]
+    fn strips_nested_regex_lookaround_from_openai_tool_schema() {
+        let input = schema(json!({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "email": {
+                            "type": "string",
+                            "description": "Contact email.",
+                            "pattern": "^(?!\\.)(?!.*\\.\\.)[^@]+@[^@]+$"
+                        }
+                    }
+                },
+                "slug": { "type": "string", "pattern": "^[a-z0-9-]+$" }
+            }
+        }));
+
+        let sanitized = openai_compatible_input_schema(&input);
+        assert!(sanitized
+            .pointer("/properties/data/properties/email/pattern")
+            .is_none());
+        assert_eq!(
+            sanitized.pointer("/properties/data/properties/email/description"),
+            Some(&json!(
+                "Contact email. Validation for this value is enforced by the tool."
+            ))
+        );
+        assert_eq!(
+            sanitized.pointer("/properties/slug/pattern"),
+            Some(&json!("^[a-z0-9-]+$"))
+        );
+    }
+
+    #[test]
+    fn strips_all_lookaround_forms_from_schema_branches() {
+        for pattern in ["a(?=b)", "a(?!b)", "(?<=a)b", "(?<!a)b"] {
+            let input = schema(json!({
+                "type": "array",
+                "items": { "type": "string", "pattern": pattern }
+            }));
+            let sanitized = openai_compatible_input_schema(&input);
+            assert!(sanitized.pointer("/items/pattern").is_none(), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn preserves_literal_pattern_properties_and_escaped_tokens() {
+        let input = schema(json!({
+            "type": "object",
+            "properties": {
+                "literal": {
+                    "type": "object",
+                    "default": { "pattern": "(?=do-not-touch)" },
+                    "enum": [{ "pattern": "(?=do-not-touch)" }]
+                },
+                "escaped": { "type": "string", "pattern": "^\\\\(\\\\?=value$" },
+                "class": { "type": "string", "pattern": "[(?=]+" }
+            }
+        }));
+
+        assert_eq!(
+            openai_compatible_input_schema(&input),
+            serde_json::to_value(input).unwrap()
+        );
+    }
+}
+
+/// Return a model-facing tool schema compatible with OpenAI's JSON Schema
+/// validator. MCP servers can emit ECMAScript patterns containing lookahead or
+/// lookbehind assertions, which OpenAI rejects before the model runs. The MCP
+/// server remains the authoritative validator, so unsupported pattern
+/// constraints are removed only from the provider-facing copy.
+pub(crate) fn openai_compatible_input_schema(schema: &Schema) -> serde_json::Value {
+    let mut schema = serde_json::to_value(schema).unwrap_or_default();
+    sanitize_openai_schema_node(&mut schema);
+    schema
+}
+
+fn sanitize_openai_schema_node(node: &mut serde_json::Value) {
+    match node {
+        serde_json::Value::Object(object) => {
+            if object
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(contains_regex_lookaround)
+            {
+                object.remove("pattern");
+                const NOTE: &str = "Validation for this value is enforced by the tool.";
+                let description = object
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|description| format!("{description} {NOTE}"))
+                    .unwrap_or_else(|| NOTE.to_string());
+                object.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(description),
+                );
+            }
+
+            // Visit schema-valued keywords only. Literal values under `const`,
+            // `default`, `enum`, `examples`, or extension metadata must remain
+            // untouched even when they contain a property named `pattern`.
+            for (keyword, value) in object.iter_mut() {
+                match keyword.as_str() {
+                    "properties" | "patternProperties" | "$defs" | "definitions"
+                    | "dependentSchemas" | "dependencies" => {
+                        if let Some(schemas) = value.as_object_mut() {
+                            for schema in schemas.values_mut() {
+                                sanitize_openai_schema_node(schema);
+                            }
+                        }
+                    }
+                    "items"
+                    | "additionalItems"
+                    | "additionalProperties"
+                    | "contains"
+                    | "propertyNames"
+                    | "not"
+                    | "if"
+                    | "then"
+                    | "else"
+                    | "unevaluatedProperties"
+                    | "unevaluatedItems"
+                    | "contentSchema"
+                    | "allOf"
+                    | "anyOf"
+                    | "oneOf"
+                    | "prefixItems" => sanitize_openai_schema_node(value),
+                    _ => {}
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                sanitize_openai_schema_node(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn contains_regex_lookaround(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut escaped = false;
+    let mut in_character_class = false;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'[' if !in_character_class => in_character_class = true,
+            b']' if in_character_class => in_character_class = false,
+            b'(' if !in_character_class && bytes.get(index + 1) == Some(&b'?') => {
+                let forward = matches!(bytes.get(index + 2), Some(b'=') | Some(b'!'));
+                let backward = matches!(
+                    (bytes.get(index + 2), bytes.get(index + 3)),
+                    (Some(b'<'), Some(b'=' | b'!'))
+                );
+                if forward || backward {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
 impl ToolOutput {
     pub fn new(text: impl Into<String>) -> Self {
         Self {

@@ -295,6 +295,11 @@ fn dialog_model(
         ) && model.cost.as_ref().is_some_and(|cost| cost.input == 0.0),
         local: false,
         reasoning_options: model.reasoning_options.clone(),
+        context_window: model
+            .limit
+            .as_ref()
+            .map(|limit| limit.context)
+            .filter(|context| *context > 0),
     })
 }
 
@@ -422,6 +427,7 @@ impl Discovery {
                     free: false,
                     local: false,
                     reasoning_options: Vec::new(),
+                    context_window: custom_model.context_window,
                 });
             }
         }
@@ -1224,6 +1230,41 @@ impl Discovery {
         model.limit.as_ref().map(|l| l.context)
     }
 
+    pub fn get_model_output_limit(&self, provider_id: &str, model_id: &str) -> Option<u32> {
+        if let Some(limit) = self
+            .custom_providers
+            .as_ref()
+            .and_then(|providers| providers.get(&provider_id.trim().to_ascii_lowercase()))
+            .and_then(|provider| provider.models.get(model_id))
+            .and_then(|model| model.max_tokens)
+        {
+            return Some(limit);
+        }
+        let (_, model) = self.cached_model(provider_id, model_id)?;
+        model.limit.as_ref().map(|limit| limit.output)
+    }
+
+    pub fn model_supports_input_modality(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        modality: &str,
+    ) -> bool {
+        if self
+            .custom_providers
+            .as_ref()
+            .and_then(|providers| providers.get(&provider_id.trim().to_ascii_lowercase()))
+            .and_then(|provider| provider.models.get(model_id))
+            .and_then(|model| model.modalities.as_ref())
+            .is_some_and(|modalities| modalities.input.iter().any(|input| input == modality))
+        {
+            return true;
+        }
+        self.cached_model(provider_id, model_id)
+            .and_then(|(_, model)| model.modalities)
+            .is_some_and(|modalities| modalities.input.iter().any(|input| input == modality))
+    }
+
     pub fn get_model_name(&self, provider_id: &str, model_id: &str) -> Option<String> {
         if let Some(name) = self
             .custom_providers
@@ -1623,6 +1664,11 @@ mod tests {
                 .input,
             2.0
         );
+        assert_eq!(
+            request_discovery.get_model_output_limit("gateway", "gpt-6-astra"),
+            Some(8192)
+        );
+        assert!(request_discovery.model_supports_input_modality("gateway", "gpt-6-astra", "image"));
         assert!(request_discovery
             .get_model_reasoning_capability("gateway", "gpt-6-astra")
             .is_some());
@@ -1855,6 +1901,7 @@ mod tests {
             free: false,
             local: false,
             reasoning_options: Vec::new(),
+            context_window: None,
         };
         let connected_provider_ids = std::collections::HashSet::new();
         let configured_provider_ids =
@@ -2156,6 +2203,40 @@ mod tests {
             Some(128000)
         );
         assert_eq!(model.limit.as_ref().map(|limit| limit.output), Some(8192));
+    }
+
+    #[test]
+    fn custom_model_modalities_enable_audio_input_lookup() {
+        let custom_providers = HashMap::from([(
+            "openai".to_string(),
+            CustomProviderConfig {
+                name: None,
+                npm: Some("@ai-sdk/openai-compatible".to_string()),
+                base_url: Some("https://api.openai.com/v1".to_string()),
+                api_key: None,
+                models: HashMap::from([(
+                    "audio-model".to_string(),
+                    CustomModelConfig {
+                        name: None,
+                        context_window: None,
+                        max_tokens: None,
+                        attachment: None,
+                        reasoning: None,
+                        reasoning_options: None,
+                        temperature: None,
+                        tool_call: None,
+                        modalities: Some(CustomModelModalities {
+                            input: vec!["text".to_string(), "audio".to_string()],
+                            output: vec!["text".to_string()],
+                        }),
+                        launch: false,
+                    },
+                )]),
+            },
+        )]);
+        let discovery = Discovery::new_with_custom(Some(custom_providers)).unwrap();
+
+        assert!(discovery.model_supports_input_modality("openai", "audio-model", "audio"));
     }
 
     #[test]

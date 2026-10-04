@@ -161,6 +161,7 @@ export type RemoteThreadTabs = {
 
 export type RemoteState = {
   status: RemoteStatus
+  command_names: string[]
   projects: RemoteWorkspace[]
   sessions: RemoteSession[]
   current_session_id: string | null
@@ -186,7 +187,7 @@ export type RemoteSuggestion = {
   name: string
   description: string
   replacement: string
-  kind: "command" | "agent" | "file"
+  kind: "command" | "agent" | "skill" | "file"
   is_directory: boolean
 }
 

@@ -58,12 +58,10 @@ async fn list() -> Result<()> {
                 } else {
                     "disabled"
                 };
-                let auth = if super::credentials::has_credentials(name, &remote.url) {
-                    "authenticated"
-                } else if super::oauth::should_use_oauth(remote) {
-                    "needs_auth"
-                } else {
+                let auth = if !super::oauth::should_use_oauth(remote) {
                     "no_oauth"
+                } else {
+                    super::credentials::credential_status(name, &remote.url).as_str()
                 };
                 println!("{name}\tremote\t{enabled}\t{auth}\t{}", remote.url);
             }

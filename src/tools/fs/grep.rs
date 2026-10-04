@@ -1,6 +1,6 @@
 use crate::tools::{
-    get_string_param, validate_required, ParameterSchema, ParameterType, Tool, ToolContext,
-    ToolError, ToolHandler, ToolResult,
+    get_bool_param, get_string_param, validate_required, ParameterSchema, ParameterType, Tool,
+    ToolContext, ToolError, ToolHandler, ToolResult,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -43,7 +43,7 @@ impl ToolHandler for GrepTool {
     fn definition(&self) -> Tool {
         Tool {
             id: "grep".to_string(),
-            description: "Search file contents using regex and return matching lines with file paths and line numbers.".to_string(),
+            description: "Search file contents using regex and return matching lines with file paths and line numbers. Includes hidden files, respects ignore rules by default, and excludes .git internals. Set include_ignored=true to search ignored files.".to_string(),
             parameters: vec![
                 ParameterSchema {
                     name: "pattern".to_string(),
@@ -65,6 +65,12 @@ impl ToolHandler for GrepTool {
                         .to_string(),
                     required: false,
                     param_type: ParameterType::String,
+                },
+                ParameterSchema {
+                    name: "include_ignored".to_string(),
+                    description: "Include files excluded by .gitignore and other ignore rules (default: false)".to_string(),
+                    required: false,
+                    param_type: ParameterType::Boolean,
                 },
             ],
             input_schema: None,
@@ -129,14 +135,8 @@ impl ToolHandler for GrepTool {
                 }
             }
         } else {
-            let mut walker = ignore::WalkBuilder::new(&base);
-            walker
-                .hidden(false)
-                .git_ignore(true)
-                .git_global(true)
-                .git_exclude(true)
-                .parents(true)
-                .standard_filters(true);
+            let walker =
+                super::search_walker(&base, get_bool_param(&params, "include_ignored", false));
 
             for entry in walker.build() {
                 let entry = match entry {

@@ -29,6 +29,55 @@ pub async fn build_scoped_registry(
     scoped
 }
 
+async fn build_subagent_messages(
+    agent: &AgentDefinition,
+    description: &str,
+    prompt: &str,
+    permissions: &crate::tools::ToolPermissions,
+    scoped_registry: &ToolRegistry,
+    skills: &[&crate::skill::SkillInfo],
+) -> Vec<crate::aisdk::core::Message> {
+    use crate::aisdk::core::Message;
+
+    // Use the tool execution directory, not process cwd or the parent's full
+    // conversation. Subagents need workspace rules even with a custom role prompt.
+    let working_directory = permissions.workdir().to_string_lossy();
+    let is_git_repo = crate::utils::git::is_git_repo(&working_directory).unwrap_or(false);
+    let runtime_context = crate::prompt::compose_runtime_context(
+        &working_directory,
+        is_git_repo,
+        std::env::consts::OS,
+    )
+    .await;
+    let role_prompt = agent
+        .instructions
+        .as_deref()
+        .unwrap_or("Complete the delegated task and return a concise, comprehensive result.");
+    let skill_guidance = if scoped_registry.get("skill").await.is_some() {
+        crate::prompt::render_skill_guidance(
+            skills
+                .iter()
+                .copied()
+                .filter(|skill| permissions.is_skill_visible_for_agent(&agent.name, &skill.name)),
+        )
+    } else {
+        String::new()
+    };
+    let system_prompt = [role_prompt, &runtime_context, &skill_guidance]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+
+    vec![
+        Message::system(system_prompt),
+        Message::user(format!(
+            "## Task Description\n{}\n\n## Task Prompt\n{}",
+            description, prompt
+        )),
+    ]
+}
+
 pub async fn run_subagent(
     agent: AgentDefinition,
     parent_session: crate::agent::config::LlmSessionConfig,
@@ -73,6 +122,18 @@ pub async fn run_subagent(
     }
 
     let scoped_registry = build_scoped_registry(full_registry, &agent).await;
+    let skills = crate::skill::get_skill_store()
+        .map(|store| store.all())
+        .unwrap_or_default();
+    let messages = build_subagent_messages(
+        &agent,
+        description,
+        prompt,
+        &permissions,
+        &scoped_registry,
+        &skills,
+    )
+    .await;
 
     let mut aisdk_tools = crate::tools::aisdk_bridge::convert_to_aisdk_tools(
         &scoped_registry,
@@ -110,20 +171,6 @@ pub async fn run_subagent(
             ));
         }
     }
-
-    let system_prompt = agent
-        .instructions
-        .as_deref()
-        .unwrap_or("Complete the delegated task and return a concise, comprehensive result.");
-    let user_content = format!(
-        "## Task Description\n{}\n\n## Task Prompt\n{}",
-        description, prompt
-    );
-
-    let messages = vec![
-        AisdkMessage::system(system_prompt),
-        AisdkMessage::user(user_content),
-    ];
 
     let headers = HashMap::new();
     let stream_started_at = std::time::Instant::now();
@@ -381,7 +428,7 @@ async fn start_subagent_stream(
     headers: std::collections::HashMap<String, String>,
     cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<crate::aisdk::core::response::StreamTextResponse, String> {
-    use crate::aisdk::core::response::stream_with_tools;
+    use crate::aisdk::core::response::{stream_with_tools_options, StreamWithToolsOptions};
     use crate::aisdk::{Anthropic, OpenAI, OpenAICompatible};
 
     let headers = crate::llm::opencode::ensure_session_headers(
@@ -417,7 +464,7 @@ async fn start_subagent_stream(
                 .build()
                 .map_err(|e| format!("Failed to build OpenAICompatible provider: {}", e))?;
 
-            stream_with_tools(
+            stream_with_tools_options(
                 provider,
                 messages,
                 tools,
@@ -425,6 +472,9 @@ async fn start_subagent_stream(
                 None,
                 headers,
                 cancel_token,
+                StreamWithToolsOptions {
+                    prune_tool_outputs: session.prune_tool_outputs,
+                },
             )
             .await
             .map_err(|e| format!("Stream error: {}", e))
@@ -442,7 +492,7 @@ async fn start_subagent_stream(
                 .build()
                 .map_err(|e| format!("Failed to build Anthropic provider: {}", e))?;
 
-            stream_with_tools(
+            stream_with_tools_options(
                 provider,
                 messages,
                 tools,
@@ -450,6 +500,9 @@ async fn start_subagent_stream(
                 None,
                 headers,
                 cancel_token,
+                StreamWithToolsOptions {
+                    prune_tool_outputs: session.prune_tool_outputs,
+                },
             )
             .await
             .map_err(|e| format!("Stream error: {}", e))
@@ -469,7 +522,9 @@ async fn start_subagent_stream(
             if session.openai_options.force_store_false {
                 builder = builder.store_override(false);
             }
-            if let Some(instructions) = session.openai_options.default_instructions.as_deref() {
+            if let Some(instructions) =
+                crate::llm::client::openai_request_instructions(&session.openai_options, &messages)
+            {
                 builder = builder.default_instructions(instructions);
             }
             if session.openai_options.disallow_system_messages {
@@ -493,7 +548,7 @@ async fn start_subagent_stream(
                 .build()
                 .map_err(|e| format!("Failed to build OpenAI provider: {}", e))?;
 
-            stream_with_tools(
+            stream_with_tools_options(
                 provider,
                 messages,
                 tools,
@@ -501,6 +556,9 @@ async fn start_subagent_stream(
                 None,
                 headers,
                 cancel_token,
+                StreamWithToolsOptions {
+                    prune_tool_outputs: session.prune_tool_outputs,
+                },
             )
             .await
             .map_err(|e| format!("Stream error: {}", e))
@@ -542,14 +600,17 @@ async fn resolve_subagent_session(
 
     let (fallback_sender, _fallback_rx) = tokio::sync::mpsc::unbounded_channel();
     let sender = sender.unwrap_or(&fallback_sender);
-    crate::llm::client::build_subagent_llm_session(
+    let prune_tool_outputs = parent_session.prune_tool_outputs;
+    let mut session = crate::llm::client::build_subagent_llm_session(
         provider,
         model.to_string(),
         agent.reasoning_effort,
         sender,
     )
     .await
-    .map_err(|err| err.to_string())
+    .map_err(|err| err.to_string())?;
+    session.prune_tool_outputs = prune_tool_outputs;
+    Ok(session)
 }
 
 fn normalize_subagent_output(output: String) -> String {
@@ -562,7 +623,315 @@ fn normalize_subagent_output(output: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_subagent_output, resolve_subagent_session};
+    use super::{build_subagent_messages, normalize_subagent_output, resolve_subagent_session};
+    use crate::aisdk::core::Message;
+
+    #[tokio::test]
+    async fn builtin_subagents_receive_workspace_rules_and_scoped_discovery_guidance() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let working_directory = project.join("src");
+        std::fs::create_dir_all(&working_directory).unwrap();
+        std::fs::write(project.join("AGENTS.md"), "subagent-project-rule-marker").unwrap();
+        std::fs::write(project.join("CLAUDE.md"), "ignored-claude-rule-marker").unwrap();
+        let sibling = root.path().join("sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("AGENTS.md"), "unrelated-sibling-rule-marker").unwrap();
+        let permissions = crate::tools::ToolPermissions::new(&working_directory);
+        let registry = crate::agent::definition::AgentRegistry::default();
+
+        for name in ["general", "explore"] {
+            let agent = registry.task_target(name).unwrap();
+            let messages = build_subagent_messages(
+                agent,
+                "Fix page resolution",
+                "Edit owned files only.",
+                &permissions,
+                &crate::tools::ToolRegistry::new(),
+                &[],
+            )
+            .await;
+
+            assert_eq!(messages.len(), 2);
+            let Message::System(system) = &messages[0] else {
+                panic!("expected system message");
+            };
+            assert!(system
+                .content
+                .starts_with(agent.instructions.as_deref().unwrap()));
+            assert!(system.content.contains(&format!(
+                "Working directory: {}",
+                permissions.workdir().display()
+            )));
+            assert!(system.content.contains("Platform: "));
+            assert!(system.content.contains("Today's date: "));
+            assert!(system.content.contains(&format!(
+                "Instructions from: {}",
+                std::fs::canonicalize(project.join("AGENTS.md"))
+                    .unwrap()
+                    .display()
+            )));
+            assert_eq!(
+                system
+                    .content
+                    .matches("subagent-project-rule-marker")
+                    .count(),
+                1
+            );
+            assert!(!system.content.contains("ignored-claude-rule-marker"));
+            assert!(!system.content.contains("unrelated-sibling-rule-marker"));
+            assert!(system
+                .content
+                .contains("Never recursively search parent or sibling directories"));
+            assert!(system
+                .content
+                .contains("Prefer glob/grep/list/read over shell find"));
+            assert!(!system
+                .content
+                .contains("Plan extensively before each function call"));
+            let Message::User(user) = &messages[1] else {
+                panic!("expected user message");
+            };
+            assert_eq!(
+                user.content,
+                "## Task Description\nFix page resolution\n\n## Task Prompt\nEdit owned files only."
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_and_fallback_subagent_prompts_keep_workspace_context() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "custom-project-rule-marker").unwrap();
+        let permissions = crate::tools::ToolPermissions::new(root.path());
+        let mut agent = crate::agent::definition::AgentRegistry::default()
+            .task_target("general")
+            .unwrap()
+            .clone();
+
+        for instructions in [Some("Custom role instructions"), None] {
+            agent.instructions = instructions.map(str::to_string);
+            let messages = build_subagent_messages(
+                &agent,
+                "Task",
+                "Do the task.",
+                &permissions,
+                &crate::tools::ToolRegistry::new(),
+                &[],
+            )
+            .await;
+            let Message::System(system) = &messages[0] else {
+                panic!("expected system message");
+            };
+
+            let expected_role = instructions.unwrap_or("Complete the delegated task");
+            assert!(system.content.starts_with(expected_role));
+            assert!(system.content.contains("custom-project-rule-marker"));
+            assert!(system
+                .content
+                .contains("Use the supplied working directory and instructions"));
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_oauth_subagent_instructions_preserve_role_and_workspace_rules() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "oauth-project-rule-marker").unwrap();
+        let permissions = crate::tools::ToolPermissions::new(root.path());
+        let registry = crate::agent::definition::AgentRegistry::default();
+        let agent = registry.task_target("general").unwrap();
+        let tools = skill_registry().await;
+        let skill = test_skill("oauth-skill");
+        let messages = build_subagent_messages(
+            agent,
+            "Task",
+            "Do the task.",
+            &permissions,
+            &tools,
+            &[&skill],
+        )
+        .await;
+        let options = crate::agent::config::OpenAIRequestOptions {
+            default_instructions: Some("base oauth instructions".to_string()),
+            disallow_system_messages: true,
+            ..Default::default()
+        };
+
+        let instructions = crate::llm::client::openai_request_instructions(&options, &messages)
+            .expect("system prompt must survive stripping");
+
+        assert!(instructions.starts_with("base oauth instructions"));
+        assert!(instructions.contains(agent.instructions.as_deref().unwrap()));
+        assert!(instructions.contains("Working directory: "));
+        assert!(instructions.contains("Never recursively search parent or sibling directories"));
+        assert_eq!(instructions.matches("oauth-project-rule-marker").count(), 1);
+        assert_eq!(instructions.matches("<available_skills>").count(), 1);
+        assert!(instructions.contains("<name>oauth-skill</name>"));
+        assert!(!instructions.contains(&skill.content));
+        assert!(!instructions.contains("## Task Description"));
+    }
+
+    fn test_skill(name: &str) -> crate::skill::SkillInfo {
+        crate::skill::SkillInfo {
+            name: name.to_string(),
+            description: Some(format!("Use {name} for focused testing.")),
+            location: std::path::PathBuf::from(format!("/skills/{name}/SKILL.md")),
+            content: format!("full-body-marker-{name}"),
+        }
+    }
+
+    async fn skill_registry() -> crate::tools::ToolRegistry {
+        let tools = crate::tools::ToolRegistry::new();
+        tools
+            .register(std::sync::Arc::new(crate::tools::SkillTool::new()))
+            .await;
+        tools
+    }
+
+    #[tokio::test]
+    async fn eligible_subagents_receive_shared_skill_metadata_without_bodies() {
+        let root = tempfile::tempdir().unwrap();
+        let permissions = crate::tools::ToolPermissions::new(root.path());
+        let registry = crate::agent::definition::AgentRegistry::default();
+        let mut agent = registry.task_target("general").unwrap().clone();
+        let tools = skill_registry().await;
+        let skill = test_skill("test-workflow");
+        let guidance = crate::prompt::render_skill_guidance([&skill]);
+
+        for custom in [false, true] {
+            if custom {
+                agent.name = "custom-agent".to_string();
+                agent.tools = Some(vec!["skill".to_string()]);
+                agent.instructions = Some("Custom role instructions".to_string());
+            }
+            let scoped = super::build_scoped_registry(&tools, &agent).await;
+            let messages = build_subagent_messages(
+                &agent,
+                "Task",
+                "Use test-workflow.",
+                &permissions,
+                &scoped,
+                &[&skill],
+            )
+            .await;
+            let Message::System(system) = &messages[0] else {
+                panic!("expected system message")
+            };
+            assert!(system.content.contains(&guidance));
+            assert_eq!(system.content.matches("<available_skills>").count(), 1);
+            assert!(system
+                .content
+                .contains("<description>Use test-workflow for focused testing.</description>"));
+            assert!(system
+                .content
+                .contains("<location>file:///skills/test-workflow/SKILL.md</location>"));
+            assert!(system
+                .content
+                .contains("use the skill tool to load it before responding"));
+            assert!(!system.content.contains(&skill.content));
+        }
+    }
+
+    #[tokio::test]
+    async fn subagents_do_not_advertise_unavailable_skill_tools_or_empty_catalogs() {
+        use crate::tools::permission::{PermissionPolicyAction, PermissionRule};
+
+        let root = tempfile::tempdir().unwrap();
+        let permissions = crate::tools::ToolPermissions::new(root.path());
+        let disabled =
+            permissions
+                .clone()
+                .with_global_tool_config(std::collections::HashMap::from([(
+                    "skill".to_string(),
+                    false,
+                )]));
+        let denied = permissions
+            .clone()
+            .with_permission_rules(vec![PermissionRule {
+                permission: "skill".to_string(),
+                pattern: "*".to_string(),
+                action: PermissionPolicyAction::Deny,
+            }]);
+        let registry = crate::agent::definition::AgentRegistry::default();
+        let general = registry.task_target("general").unwrap();
+        let explore = registry.task_target("explore").unwrap();
+        let tools = skill_registry().await;
+        let empty_tools = crate::tools::ToolRegistry::new();
+        let skill = test_skill("test-workflow");
+        let skills = [&skill];
+
+        for (agent, permissions, tools, skills) in [
+            (explore, &permissions, &tools, skills.as_slice()),
+            (general, &disabled, &tools, skills.as_slice()),
+            (general, &denied, &tools, skills.as_slice()),
+            (general, &permissions, &empty_tools, skills.as_slice()),
+            (general, &permissions, &tools, &[][..]),
+        ] {
+            let scoped = super::build_scoped_registry(tools, agent).await;
+            let messages = build_subagent_messages(
+                agent,
+                "Task",
+                "Do the task.",
+                permissions,
+                &scoped,
+                skills,
+            )
+            .await;
+            let Message::System(system) = &messages[0] else {
+                panic!("expected system message")
+            };
+            assert!(!system.content.contains("<available_skills>"));
+            assert!(!system.content.contains("test-workflow"));
+            assert!(!system.content.contains("Use the skill tool"));
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_advertising_respects_agent_overrides_and_keeps_ask_skills_visible() {
+        use crate::tools::permission::{PermissionPolicyAction, PermissionRule};
+
+        let root = tempfile::tempdir().unwrap();
+        let registry = crate::agent::definition::AgentRegistry::default();
+        let agent = registry.task_target("general").unwrap();
+        let rule = |name: &str, action| PermissionRule {
+            permission: "skill".to_string(),
+            pattern: name.to_string(),
+            action,
+        };
+        let permissions = crate::tools::ToolPermissions::new(root.path())
+            .with_permission_rules(vec![
+                rule("blocked", PermissionPolicyAction::Deny),
+                rule("overridden", PermissionPolicyAction::Deny),
+            ])
+            .with_agent_permission_rules(std::collections::HashMap::from([(
+                agent.name.clone(),
+                vec![
+                    rule("overridden", PermissionPolicyAction::Allow),
+                    rule("approval", PermissionPolicyAction::Ask),
+                ],
+            )]));
+        let tools = skill_registry().await;
+        let allowed = test_skill("allowed");
+        let blocked = test_skill("blocked");
+        let overridden = test_skill("overridden");
+        let approval = test_skill("approval");
+        let messages = build_subagent_messages(
+            agent,
+            "Task",
+            "Do the task.",
+            &permissions,
+            &tools,
+            &[&allowed, &blocked, &overridden, &approval],
+        )
+        .await;
+        let Message::System(system) = &messages[0] else {
+            panic!("expected system message")
+        };
+        for name in ["allowed", "overridden", "approval"] {
+            assert!(system.content.contains(&format!("<name>{name}</name>")));
+        }
+        assert!(!system.content.contains("blocked"));
+    }
 
     #[test]
     fn empty_subagent_output_is_not_an_error_payload() {
@@ -601,6 +970,27 @@ mod tests {
 
         assert!(warnings.is_empty());
         assert_eq!(session.reasoning_effort, None);
+    }
+
+    #[test]
+    fn subagent_inherits_parent_pruning_policy() {
+        let mut warnings = Vec::new();
+        let agent = crate::agent::definition::parse_agent_definitions_from_config(
+            Some(&serde_json::json!({
+                "explore": { "mode": "subagent" }
+            })),
+            &mut warnings,
+        )
+        .pop()
+        .expect("agent definition");
+        let mut parent = test_session(None);
+        parent.prune_tool_outputs = true;
+
+        let session = tokio_test::block_on(resolve_subagent_session(&agent, parent, None))
+            .expect("resolved session");
+
+        assert!(warnings.is_empty());
+        assert!(session.prune_tool_outputs);
     }
 
     #[test]
@@ -714,6 +1104,7 @@ mod tests {
             openai_options: crate::agent::config::OpenAIRequestOptions::default(),
             prompt_cache_key: None,
             gateway_caching_auto: false,
+            prune_tool_outputs: false,
         }
     }
 }

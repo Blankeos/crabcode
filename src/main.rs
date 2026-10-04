@@ -473,6 +473,7 @@ async fn run_print_mode(
     let agent_registry = loaded_config.merged_config.agent_registry.clone();
     let websearch_config = loaded_config.merged_config.websearch.clone();
     let mcp_config = loaded_config.merged_config.mcp.clone();
+    let compaction_config = loaded_config.merged_config.compaction.clone();
     let agent_max_steps = agent_registry
         .get(&agent_mode)
         .and_then(|agent| agent.max_steps);
@@ -531,6 +532,7 @@ async fn run_print_mode(
             tool_permissions,
             websearch_config,
             mcp_config,
+            compaction_config,
             cwd,
             Some(prompt_registry),
             messages,
@@ -545,14 +547,14 @@ async fn run_print_mode(
         let _ = completion_sender.send(crate::llm::ChunkMessage::End);
     });
 
+    let mut output = PrintOutput::default();
     while let Some(chunk) = receiver.recv().await {
+        if let Some(commentary) = output.observe(&chunk) {
+            eprintln!("{commentary}");
+        }
         match chunk {
-            crate::llm::ChunkMessage::Text(text) => {
-                print!("{}", text);
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            }
-            crate::llm::ChunkMessage::ToolCalls(_)
+            crate::llm::ChunkMessage::Text(_)
+            | crate::llm::ChunkMessage::ToolCalls(_)
             | crate::llm::ChunkMessage::ToolResult(_)
             | crate::llm::ChunkMessage::Metrics { .. }
             | crate::llm::ChunkMessage::Cancelled
@@ -563,9 +565,10 @@ async fn run_print_mode(
             | crate::llm::ChunkMessage::SubagentStarted { .. }
             | crate::llm::ChunkMessage::SubagentChunk { .. }
             | crate::llm::ChunkMessage::TerminalSessionEvent { .. }
-            | crate::llm::ChunkMessage::BackgroundJobEvent { .. } => {}
+            | crate::llm::ChunkMessage::BackgroundJobEvent { .. }
+            | crate::llm::ChunkMessage::TurnStopReason(_) => {}
             crate::llm::ChunkMessage::End => {
-                println!();
+                println!("{}", output.pending);
                 play_resolved_sound(&sounds, crate::sound::SoundEvent::Complete);
                 break;
             }
@@ -608,6 +611,42 @@ async fn run_print_mode(
 
     let _ = no_session_persistence;
     Ok(())
+}
+
+/// Buffer text until we know whether it is tool-step commentary or the final answer.
+/// Streaming every delta to stdout joins preambles directly onto machine-consumed output.
+#[derive(Default)]
+struct PrintOutput {
+    pending: String,
+}
+
+impl PrintOutput {
+    fn observe(&mut self, chunk: &crate::llm::ChunkMessage) -> Option<String> {
+        use crate::llm::ChunkMessage;
+        match chunk {
+            ChunkMessage::Text(text) => self.pending.push_str(text),
+            ChunkMessage::ToolCalls(calls) if !calls.is_empty() => {
+                return self.take_commentary();
+            }
+            // Some providers can emit text after announcing a tool call.
+            ChunkMessage::ToolResult(_) => return self.take_commentary(),
+            ChunkMessage::StreamRollback { text, .. } => {
+                if self.pending.ends_with(text) {
+                    self.pending.truncate(self.pending.len() - text.len());
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn take_commentary(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.pending))
+        }
+    }
 }
 
 fn play_resolved_sound(
@@ -718,7 +757,7 @@ pub(crate) struct Args {
     #[arg(short = 's', long = "session")]
     session: Option<String>,
 
-    /// Run in print mode (non-interactive, streams output to stdout)
+    /// Run non-interactively (final answer on stdout, tool-step commentary on stderr)
     #[arg(short = 'p', long = "print")]
     print_mode: bool,
 
@@ -742,8 +781,8 @@ pub(crate) struct Args {
     #[arg(long = "reasoning-effort", value_parser = parse_reasoning_effort_arg)]
     reasoning_effort: Option<crate::model::reasoning::ReasoningEffort>,
 
-    /// Skip permission prompts in print mode. Intended for isolated benchmark/CI workspaces.
-    #[arg(long = "dangerously-skip-permissions")]
+    /// Skip permission prompts in local interactive/print mode (dangerous). Explicit denies still apply.
+    #[arg(long = "dangerously-skip-permissions", visible_alias = "yolo")]
     dangerously_skip_permissions: bool,
 
     #[arg(long = "emit-logs", hide = true)]
@@ -769,6 +808,9 @@ enum Command {
         /// Working directory used for the initial ACP workspace
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Connect a provider interactively, then exit (no ACP server or chat)
+        #[arg(long)]
+        login: bool,
     },
 
     /// Generate or install shell completions
@@ -1021,8 +1063,12 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Some(Command::Acp { cwd }) => {
-            return crate::acp::run(cwd.clone()).await;
+        Some(Command::Acp { cwd, login }) => {
+            return if *login {
+                crate::acp::login(cwd.clone()).await
+            } else {
+                crate::acp::run(cwd.clone()).await
+            };
         }
         Some(Command::Completion { shell, install }) => {
             crate::completion::run(
@@ -1181,7 +1227,14 @@ async fn main() -> Result<()> {
         .await;
     }
 
-    let mut app = App::new_with_model_override(args.model.as_deref(), args.agent.as_deref())?;
+    let mut app = App::new_with_runtime_options(
+        args.model.as_deref(),
+        args.agent.as_deref(),
+        crate::config::ConfigRuntimeOptions {
+            dangerously_skip_permissions: args.dangerously_skip_permissions,
+            ..Default::default()
+        },
+    )?;
     // Keep herdr authority until this guard drops (normal exit or panic).
     let _herdr = crate::herdr::Session::start();
 
@@ -1266,6 +1319,102 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_bypass_is_opt_in() {
+        assert!(
+            !Args::try_parse_from(["crabcode"])
+                .unwrap()
+                .dangerously_skip_permissions
+        );
+        assert!(
+            !Args::try_parse_from(["crabcode", "-p", "hi"])
+                .unwrap()
+                .dangerously_skip_permissions
+        );
+    }
+
+    #[test]
+    fn parses_permission_bypass_in_interactive_and_print_modes() {
+        for flag in ["--dangerously-skip-permissions", "--yolo"] {
+            let args = Args::try_parse_from(["crabcode", flag]).unwrap();
+            assert!(args.dangerously_skip_permissions);
+            assert!(!args.print_mode);
+
+            let args = Args::try_parse_from(["crabcode", "-p", "hi", flag]).unwrap();
+            assert!(args.dangerously_skip_permissions);
+            assert!(args.print_mode);
+            assert_eq!(args.prompt, vec!["hi"]);
+        }
+    }
+
+    #[test]
+    fn help_documents_permission_bypass_and_alias() {
+        let help = root_help().unwrap();
+        assert!(help.contains("--dangerously-skip-permissions"));
+        assert!(help.contains("yolo"));
+        assert!(help.contains("Explicit denies still apply"));
+    }
+
+    #[test]
+    fn print_output_separates_tool_preambles_from_final_answer() {
+        use crate::llm::{ChunkMessage, FunctionCall, ToolCall, ToolCallResult};
+        let mut output = PrintOutput::default();
+        for preamble in [
+            "Fetching staged diff to draft the commit message.",
+            "Checking one more file.",
+        ] {
+            output.observe(&ChunkMessage::Text(preamble.into()));
+            let commentary = output.observe(&ChunkMessage::ToolCalls(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            }]));
+            assert_eq!(commentary.as_deref(), Some(preamble));
+            output.observe(&ChunkMessage::Text("Late commentary".into()));
+            assert_eq!(
+                output.observe(&ChunkMessage::ToolResult(ToolCallResult {
+                    tool_call_id: "call_1".into(),
+                    role: "tool".into(),
+                    name: "read".into(),
+                    content: "file contents".into(),
+                })),
+                Some("Late commentary".into())
+            );
+        }
+        output.observe(&ChunkMessage::Reasoning("private reasoning".into()));
+        output.observe(&ChunkMessage::Text(
+            "fix(session): preserve metadata".into(),
+        ));
+        output.observe(&ChunkMessage::Text("\n\n- cover snapshots".into()));
+        output.observe(&ChunkMessage::End);
+        assert_eq!(
+            output.pending,
+            "fix(session): preserve metadata\n\n- cover snapshots"
+        );
+    }
+
+    #[test]
+    fn print_output_preserves_direct_answers_and_applies_retry_rollbacks() {
+        use crate::llm::ChunkMessage;
+        let mut output = PrintOutput::default();
+        output.observe(&ChunkMessage::Text("fix: café".into()));
+        output.observe(&ChunkMessage::StreamRollback {
+            text: "café".into(),
+            reasoning: String::new(),
+        });
+        output.observe(&ChunkMessage::Text("retry".into()));
+        output.observe(&ChunkMessage::StreamRollback {
+            text: "not a suffix".into(),
+            reasoning: String::new(),
+        });
+        output.observe(&ChunkMessage::ToolCalls(vec![]));
+        output.observe(&ChunkMessage::End);
+        assert_eq!(output.pending, "fix: retry");
+    }
 
     #[test]
     fn parses_model_after_print_prompt() {
@@ -1357,9 +1506,25 @@ mod tests {
         let args = Args::try_parse_from(["crabcode", "acp", "--cwd", "/tmp/workspace"]).unwrap();
 
         match args.command {
-            Some(Command::Acp { cwd }) => assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace"))),
+            Some(Command::Acp { cwd, login }) => {
+                assert_eq!(cwd, Some(PathBuf::from("/tmp/workspace")));
+                assert!(!login);
+            }
             other => panic!("expected acp command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_acp_login_only_command() {
+        let args = Args::try_parse_from(["crabcode", "acp", "--cwd", "/tmp/workspace", "--login"])
+            .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Acp {
+                login: true,
+                cwd: Some(_)
+            })
+        ));
     }
 
     #[test]

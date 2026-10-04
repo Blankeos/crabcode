@@ -43,7 +43,7 @@ json5 = "0.4"
 schemars = "1.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
-agent-client-protocol = { version = "=2.0.0", features = ["unstable_session_fork"] }
+agent-client-protocol = { version = "=2.0.0", features = ["unstable_elicitation", "unstable_session_fork", "unstable_auth_methods"] }
 clap_complete = "4.5"
 ignore = "0.4"
 copypasta = "0.10"
@@ -87,6 +87,10 @@ shlex = "1.3"
 syntect = "5.3"
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 rmcp = { version = "2.0.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-native-tls", "auth"] }
+# Match rmcp's HTTP/SSE types without migrating the app's reqwest 0.12 clients.
+reqwest-mcp = { package = "reqwest", version = "0.13.2", default-features = false }
+sse-stream = "0.2"
+oauth2 = { version = "5", default-features = false }
 http = "1.3"
 portable-pty = "0.9"
 libc = "0.2"
