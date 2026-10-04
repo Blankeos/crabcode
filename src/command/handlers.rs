@@ -878,8 +878,6 @@ pub async fn refresh_models() -> CommandResult {
                 return CommandResult::Success(String::new());
             }
         };
-        discovery.clear_custom_model_discovery_cache();
-
         let (providers_result, runtime_result) = tokio::join!(
             discovery.refresh_cache(),
             crate::model::extensions::ModelExtensions::refresh_runtime_models()
