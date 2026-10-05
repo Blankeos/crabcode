@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod cwd;
+pub mod file_opener;
 pub mod frecency;
 pub mod git;
 pub mod ignore;

@@ -982,7 +982,6 @@ pub struct App {
     pub theme_transparent: bool,
     pub sounds: crate::sound::ResolvedSoundsConfig,
     pub notifications: crate::config::NotificationsConfig,
-    pub images: crate::config::ImagesConfig,
     pub editor: crate::config::EditorConfig,
     pending_editor_suspend: Option<String>,
     pub websearch: crate::config::configuration::WebsearchConfig,
@@ -1104,7 +1103,7 @@ impl App {
         let placeholder = Self::get_random_placeholder();
         let placeholder_static: &'static str = Box::leak(placeholder.into_boxed_str());
         input.set_placeholder(placeholder_static);
-        input.set_image_open_config(crate::config::ImagesConfig::default());
+        input.set_editor_config(crate::config::EditorConfig::default());
 
         let mut chat = Chat::new();
         chat.set_agent_mention_names(Vec::new());
@@ -1265,7 +1264,6 @@ impl App {
             theme_transparent,
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
-            images: crate::config::ImagesConfig::default(),
             editor: crate::config::EditorConfig::default(),
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),
@@ -1341,7 +1339,7 @@ impl App {
         let warm_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         self.mcp_manager = Some(crate::mcp::McpManager::ensure(mcp_config.clone(), warm_cwd));
         self.input
-            .set_image_open_config(loaded_config.merged_config.images.clone());
+            .set_editor_config(loaded_config.merged_config.editor.clone());
         if !loaded_config.diagnostics.info.is_empty() {
             for msg in &loaded_config.diagnostics.info {
                 crate::startup_diag!("Config: {}", msg);
@@ -1503,7 +1501,6 @@ impl App {
         self.reasoning_efforts = reasoning_efforts;
         self.sounds = resolved_sounds;
         self.notifications = loaded_config.merged_config.notifications.clone();
-        self.images = loaded_config.merged_config.images.clone();
         self.editor = loaded_config.merged_config.editor.clone();
         self.websearch = loaded_config.merged_config.websearch.clone();
         self.compaction = loaded_config.merged_config.compaction.clone();
@@ -2021,13 +2018,13 @@ impl App {
             return true;
         };
 
-        match crate::utils::image_attachment::open_file_path_at_location(
+        match crate::utils::file_opener::open_file_path_at_location(
             &location.path,
             location.line,
             location.column,
             &self.editor,
         ) {
-            Ok(crate::utils::image_attachment::OpenOutcome::Spawned) => {
+            Ok(crate::utils::file_opener::OpenOutcome::Spawned) => {
                 push_toast(Toast::new(
                     format!(
                         "Opened {}:{}:{}",
@@ -2040,15 +2037,7 @@ impl App {
                 ));
                 self.dismiss_selection_actions();
             }
-            Ok(crate::utils::image_attachment::OpenOutcome::Copied(text)) => {
-                push_toast(Toast::new(
-                    format!("Copied {}", text),
-                    ToastLevel::Info,
-                    None,
-                ));
-                self.dismiss_selection_actions();
-            }
-            Ok(crate::utils::image_attachment::OpenOutcome::Suspend(command)) => {
+            Ok(crate::utils::file_opener::OpenOutcome::Suspend(command)) => {
                 self.pending_editor_suspend = Some(command);
                 self.dismiss_selection_actions();
             }
@@ -5404,14 +5393,17 @@ impl App {
         true
     }
 
-    fn open_chat_image_target(&self, target: &ChatImageTarget) {
+    fn open_chat_image_target(&mut self, target: &ChatImageTarget) {
         let path = std::path::Path::new(&target.path);
-        match crate::utils::image_attachment::open_path(path, &self.images) {
-            Ok(()) => push_toast(Toast::new(
+        match crate::utils::file_opener::open_file_path(path, &self.editor) {
+            Ok(crate::utils::file_opener::OpenOutcome::Spawned) => push_toast(Toast::new(
                 format!("Opened {}", target.placeholder),
                 ToastLevel::Info,
                 None,
             )),
+            Ok(crate::utils::file_opener::OpenOutcome::Suspend(command)) => {
+                self.pending_editor_suspend = Some(command);
+            }
             Err(err) => push_toast(Toast::new(
                 format!("Failed to open image: {}", err),
                 ToastLevel::Error,
@@ -5424,27 +5416,22 @@ impl App {
         match target {
             HyperlinkTarget::File(target) => {
                 let result = if let Some(line) = target.line {
-                    crate::utils::image_attachment::open_file_path_at_location(
+                    crate::utils::file_opener::open_file_path_at_location(
                         &target.path,
                         line,
                         target.column.unwrap_or(1),
                         &self.editor,
                     )
                 } else {
-                    crate::utils::image_attachment::open_file_path(&target.path, &self.editor)
+                    crate::utils::file_opener::open_file_path(&target.path, &self.editor)
                 };
                 match result {
-                    Ok(crate::utils::image_attachment::OpenOutcome::Spawned) => {
-                        push_toast(Toast::new(
-                            format!("Opened {}", target.path.display()),
-                            ToastLevel::Info,
-                            None,
-                        ))
-                    }
-                    Ok(crate::utils::image_attachment::OpenOutcome::Copied(text)) => push_toast(
-                        Toast::new(format!("Copied {}", text), ToastLevel::Info, None),
-                    ),
-                    Ok(crate::utils::image_attachment::OpenOutcome::Suspend(command)) => {
+                    Ok(crate::utils::file_opener::OpenOutcome::Spawned) => push_toast(Toast::new(
+                        format!("Opened {}", target.path.display()),
+                        ToastLevel::Info,
+                        None,
+                    )),
+                    Ok(crate::utils::file_opener::OpenOutcome::Suspend(command)) => {
                         self.pending_editor_suspend = Some(command);
                     }
                     Err(err) => push_toast(Toast::new(
@@ -5454,7 +5441,7 @@ impl App {
                     )),
                 }
             }
-            HyperlinkTarget::Url(url) => match crate::utils::image_attachment::open_url(url) {
+            HyperlinkTarget::Url(url) => match crate::utils::file_opener::open_url(url) {
                 Ok(()) => push_toast(Toast::new(
                     format!("Opened {}", url),
                     ToastLevel::Info,
@@ -8515,7 +8502,9 @@ impl App {
     }
 
     pub fn take_editor_suspend(&mut self) -> Option<String> {
-        self.pending_editor_suspend.take()
+        self.pending_editor_suspend
+            .take()
+            .or_else(|| self.input.take_editor_suspend())
     }
 
     fn open_remote_dialog(&mut self) {
@@ -9391,7 +9380,7 @@ impl App {
         tokio::spawn(async move {
             let auth =
                 crate::mcp::oauth::authenticate_with_url_callback(&server_name, &remote, |url| {
-                    let _ = crate::utils::image_attachment::open_url(url);
+                    let _ = crate::utils::file_opener::open_url(url);
                 })
                 .await;
             let result = match auth {
@@ -13563,6 +13552,37 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    #[test]
+    fn image_and_filename_clicks_resolve_to_same_editor_command() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("screenshot.png");
+        std::fs::write(&path, [0, 255]).unwrap();
+        let mut app = test_app();
+        app.editor = crate::config::EditorConfig {
+            open: Some("my-editor {path}".to_string()),
+            suspend: true,
+            ..Default::default()
+        };
+        app.open_chat_image_target(&ChatImageTarget {
+            message_index: 0,
+            image_index: 0,
+            placeholder: "[Image #1]".to_string(),
+            path: path.to_string_lossy().into_owned(),
+        });
+        let image_command = app
+            .take_editor_suspend()
+            .expect("image requested suspension");
+        app.open_chat_hyperlink_target(&HyperlinkTarget::File(
+            crate::ui::hyperlink::FileHyperlinkTarget {
+                path,
+                line: None,
+                column: None,
+            },
+        ));
+        assert_eq!(app.take_editor_suspend(), Some(image_command));
+        assert_eq!(app.take_editor_suspend(), None);
+    }
+
     fn test_app() -> App {
         let mut registry = Registry::new();
         register_all_commands(&mut registry);
@@ -13575,7 +13595,7 @@ mod tests {
             version: "test".to_string(),
             input: {
                 let mut input = Input::new();
-                input.set_image_open_config(crate::config::ImagesConfig::default());
+                input.set_editor_config(crate::config::EditorConfig::default());
                 input
             },
             command_registry: registry,
@@ -13662,7 +13682,6 @@ mod tests {
             theme_transparent: false,
             sounds: crate::sound::ResolvedSoundsConfig::default(),
             notifications: crate::config::NotificationsConfig::default(),
-            images: crate::config::ImagesConfig::default(),
             editor: crate::config::EditorConfig::default(),
             pending_editor_suspend: None,
             websearch: crate::config::configuration::WebsearchConfig::default(),

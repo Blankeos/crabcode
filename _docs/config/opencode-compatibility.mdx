@@ -39,8 +39,7 @@ Blank cells mean that runtime behavior is not supported by that project today. `
 | `provider.<id>` using `@ai-sdk/openai-compatible` | ✅ | ✅ | When `options.baseURL` is configured, crabcode requests its OpenAI-compatible `/v1/models` endpoint for `/models`. Discovered models are added alongside manually configured models; manually configured model metadata takes precedence; unsupported endpoints leave manual models unchanged. |
 | `theme` | ✅ | ✅ | In crabcode config files only. OpenCode config `theme` is ignored by crabcode. |
 | `notifications` |  | ✅ | crabcode-specific sounds, desktop notifications, and terminal alert signals such as Zed tab dots. |
-| `images` |  | ✅ | crabcode-specific image placeholder opener. |
-| `editor` |  | ✅ | crabcode-specific shell template for clicked file paths. See [Editor](/config/editor). |
+| `editor` |  | ✅ | crabcode-specific unified file opener with shell templates and filename overrides. See [Editor](/config/editor). |
 | `mcp` | ✅ | ✅ | Uses the OpenCode MCP config shape. Enabled servers are connected at runtime and their tools are exposed as crabcode tools. |
 | `permission` | ✅ | ✅ | Global tool permission rules are enforced during AI SDK tool execution. |
 | `instructions` | ✅ | ✅ | Loads the listed files relative to the project root (or from absolute and `~/` paths) and appends their contents to the system prompt. Unreadable files produce a config warning. |

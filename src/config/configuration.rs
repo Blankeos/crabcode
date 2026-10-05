@@ -2,6 +2,7 @@ use crate::tools::{
     expand_permission_pattern, PermissionPolicyAction, PermissionRule, PermissionRules,
 };
 use anyhow::{anyhow, Context, Result};
+use globset::{GlobBuilder, GlobMatcher};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -319,33 +320,6 @@ impl Default for NotificationsConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageOpenCommandConfig {
-    pub command: String,
-    pub args: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImageOpenWith {
-    Auto,
-    System,
-    Editor,
-    Command(ImageOpenCommandConfig),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImagesConfig {
-    pub open_with: ImageOpenWith,
-}
-
-impl Default for ImagesConfig {
-    fn default() -> Self {
-        Self {
-            open_with: ImageOpenWith::Auto,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EditorConfig {
     /// Shell template used when a file path is clicked. Placeholders:
@@ -354,7 +328,39 @@ pub struct EditorConfig {
     pub open: Option<String>,
     /// Leave the TUI, run `open` with the terminal, then restore crabcode.
     pub suspend: bool,
+    /// Basename-specific openers, in document order. The first match wins.
+    pub overrides: Vec<EditorOverride>,
 }
+
+impl EditorConfig {
+    /// Resolve an opener without interpreting reserved commands such as `system`.
+    pub fn opener_for_path(&self, path: &Path) -> (Option<&str>, bool) {
+        if let Some(basename) = path.file_name() {
+            for entry in &self.overrides {
+                if entry.matcher.is_match(Path::new(basename)) {
+                    return (Some(entry.open.as_str()), entry.suspend);
+                }
+            }
+        }
+        (self.open.as_deref(), self.suspend)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorOverride {
+    pub pattern: String,
+    pub open: String,
+    pub suspend: bool,
+    matcher: GlobMatcher,
+}
+
+impl PartialEq for EditorOverride {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern && self.open == other.open && self.suspend == other.suspend
+    }
+}
+
+impl Eq for EditorOverride {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebsearchProvider {
@@ -587,7 +593,6 @@ pub struct MergedConfig {
     pub disabled_providers: BTreeSet<String>,
     pub custom_providers: HashMap<String, CustomProviderConfig>,
     pub notifications: NotificationsConfig,
-    pub images: ImagesConfig,
     pub editor: EditorConfig,
     pub websearch: WebsearchConfig,
     pub mcp: McpConfig,
@@ -1175,7 +1180,6 @@ fn crabcode_allowed_keys() -> BTreeSet<&'static str> {
     let mut out = opencode_allowed_keys();
     out.insert("theme");
     out.insert("notifications");
-    out.insert("images");
     out.insert("editor");
     out.insert("websearch");
     out.insert("tui");
@@ -1485,7 +1489,6 @@ fn parse_merged_config(merged: &Value, diagnostics: &mut ConfigDiagnostics) -> M
     let mut notifications = NotificationsConfig::default();
     apply_notifications(obj.get("notifications"), &mut notifications, diagnostics);
     out.notifications = notifications;
-    out.images = parse_images(obj.get("images"), diagnostics);
     out.editor = parse_editor(obj.get("editor"), diagnostics);
     out.websearch = parse_websearch(obj.get("websearch"), diagnostics);
     out.mcp = parse_mcp(obj.get("mcp"), diagnostics);
@@ -2348,94 +2351,6 @@ fn parse_custom_providers(
     out
 }
 
-fn parse_images(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> ImagesConfig {
-    let mut images = ImagesConfig::default();
-    let Some(value) = value else {
-        return images;
-    };
-    if value.is_null() {
-        return images;
-    }
-    let Value::Object(map) = value else {
-        diagnostics
-            .warnings
-            .push("images must be an object".to_string());
-        return images;
-    };
-
-    let Some(open_with) = map.get("openWith").or_else(|| map.get("open_with")) else {
-        return images;
-    };
-
-    images.open_with = parse_image_open_with(open_with, "images.openWith", diagnostics);
-    images
-}
-
-fn parse_image_open_with(
-    value: &Value,
-    key: &str,
-    diagnostics: &mut ConfigDiagnostics,
-) -> ImageOpenWith {
-    match value {
-        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
-            "auto" => ImageOpenWith::Auto,
-            "system" => ImageOpenWith::System,
-            "editor" => ImageOpenWith::Editor,
-            _ => {
-                diagnostics.warnings.push(format!(
-                    "{}: expected auto, system, editor, or a command object",
-                    key
-                ));
-                ImageOpenWith::Auto
-            }
-        },
-        Value::Object(map) => {
-            let command = match map.get("command").and_then(Value::as_str) {
-                Some(command) if !command.trim().is_empty() => command.trim().to_string(),
-                _ => {
-                    diagnostics
-                        .warnings
-                        .push(format!("{}.command must be a non-empty string", key));
-                    return ImageOpenWith::Auto;
-                }
-            };
-
-            let args = match map.get("args") {
-                Some(Value::Array(raw_args)) => {
-                    let mut args = Vec::new();
-                    for arg in raw_args {
-                        if let Some(arg) = arg.as_str() {
-                            args.push(arg.to_string());
-                        } else {
-                            diagnostics
-                                .warnings
-                                .push(format!("{}.args must contain only strings", key));
-                            return ImageOpenWith::Auto;
-                        }
-                    }
-                    args
-                }
-                Some(_) => {
-                    diagnostics
-                        .warnings
-                        .push(format!("{}.args must be an array of strings", key));
-                    return ImageOpenWith::Auto;
-                }
-                None => vec!["{path}".to_string()],
-            };
-
-            ImageOpenWith::Command(ImageOpenCommandConfig { command, args })
-        }
-        _ => {
-            diagnostics.warnings.push(format!(
-                "{}: expected auto, system, editor, or a command object",
-                key
-            ));
-            ImageOpenWith::Auto
-        }
-    }
-}
-
 fn parse_editor(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> EditorConfig {
     let mut editor = EditorConfig::default();
     let Some(value) = value else {
@@ -2446,34 +2361,32 @@ fn parse_editor(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> E
     }
 
     match value {
-        Value::String(open) => {
-            let open = open.trim();
-            if !open.is_empty() {
-                editor.open = Some(open.to_string());
-            }
+        Value::String(_) => {
+            editor.open = parse_editor_command(value, "editor", diagnostics);
         }
         Value::Object(map) => {
-            if let Some(open) = map.get("open") {
-                match open {
-                    Value::String(open) => {
-                        let open = open.trim();
-                        if !open.is_empty() {
-                            editor.open = Some(open.to_string());
-                        }
-                    }
-                    Value::Null => {}
-                    _ => diagnostics
-                        .warnings
-                        .push("editor.open must be a string".to_string()),
-                }
+            if let Some(open) = map.get("open").filter(|value| !value.is_null()) {
+                editor.open = parse_editor_command(open, "editor.open", diagnostics);
             }
-
             if let Some(suspend) = map.get("suspend") {
                 match suspend {
                     Value::Bool(suspend) => editor.suspend = *suspend,
                     _ => diagnostics
                         .warnings
                         .push("editor.suspend must be a boolean".to_string()),
+                }
+            }
+            if let Some(overrides) = map.get("overrides") {
+                if let Value::Object(overrides) = overrides {
+                    for (pattern, value) in overrides {
+                        if let Some(entry) = parse_editor_override(pattern, value, diagnostics) {
+                            editor.overrides.push(entry);
+                        }
+                    }
+                } else {
+                    diagnostics
+                        .warnings
+                        .push("editor.overrides must be an object".to_string());
                 }
             }
         }
@@ -2483,6 +2396,78 @@ fn parse_editor(value: Option<&Value>, diagnostics: &mut ConfigDiagnostics) -> E
     }
 
     editor
+}
+
+fn parse_editor_command(
+    value: &Value,
+    key: &str,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Option<String> {
+    match value.as_str() {
+        Some(open) if !open.trim().is_empty() => Some(open.to_string()),
+        _ => {
+            diagnostics
+                .warnings
+                .push(format!("{key} must be a non-empty string"));
+            None
+        }
+    }
+}
+
+fn parse_editor_override(
+    pattern: &str,
+    value: &Value,
+    diagnostics: &mut ConfigDiagnostics,
+) -> Option<EditorOverride> {
+    let key = format!("editor.overrides[{pattern:?}]");
+    if pattern.trim().is_empty() {
+        diagnostics
+            .warnings
+            .push(format!("{key}: pattern must be non-empty"));
+        return None;
+    }
+    let glob = match GlobBuilder::new(pattern).case_insensitive(true).build() {
+        Ok(glob) => glob,
+        Err(error) => {
+            diagnostics
+                .warnings
+                .push(format!("{key}: invalid glob pattern: {error}"));
+            return None;
+        }
+    };
+    let (open, suspend) = match value {
+        Value::String(_) => (parse_editor_command(value, &key, diagnostics)?, false),
+        Value::Object(map) => {
+            let open = parse_editor_command(
+                map.get("open").unwrap_or(&Value::Null),
+                &format!("{key}.open"),
+                diagnostics,
+            )?;
+            let suspend = match map.get("suspend") {
+                None => false,
+                Some(Value::Bool(suspend)) => *suspend,
+                Some(_) => {
+                    diagnostics
+                        .warnings
+                        .push(format!("{key}.suspend must be a boolean"));
+                    return None;
+                }
+            };
+            (open, suspend)
+        }
+        _ => {
+            diagnostics
+                .warnings
+                .push(format!("{key} must be a string or object"));
+            return None;
+        }
+    };
+    Some(EditorOverride {
+        pattern: pattern.to_string(),
+        open,
+        suspend,
+        matcher: glob.compile_matcher(),
+    })
 }
 
 fn apply_notifications(
@@ -2800,7 +2785,6 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
         "enabled_providers",
         "enabledProviders",
         "notifications",
-        "images",
         "editor",
         "websearch",
         "tui",
@@ -3336,11 +3320,10 @@ mod tests {
     }
 
     #[test]
-    fn images_open_with_defaults_to_auto() {
+    fn editor_defaults_without_an_explicit_opener() {
         let mut diagnostics = ConfigDiagnostics::default();
         let config = parse_merged_config(&json!({}), &mut diagnostics);
 
-        assert_eq!(config.images.open_with, ImageOpenWith::Auto);
         assert_eq!(config.editor, EditorConfig::default());
         assert!(diagnostics.warnings.is_empty());
     }
@@ -3381,45 +3364,256 @@ mod tests {
         assert!(diagnostics.warnings.is_empty());
     }
 
-    #[test]
-    fn parses_images_open_with_string() {
+    fn editor_from_document(document: &str) -> (EditorConfig, ConfigDiagnostics) {
+        let value: Value = json5::from_str(document).unwrap();
         let mut diagnostics = ConfigDiagnostics::default();
-        let config = parse_merged_config(
-            &json!({
-                "images": {
-                    "openWith": "system"
-                }
-            }),
-            &mut diagnostics,
-        );
+        let config = parse_merged_config(&value, &mut diagnostics);
+        (config.editor, diagnostics)
+    }
 
-        assert_eq!(config.images.open_with, ImageOpenWith::System);
+    #[test]
+    fn editor_defaults_and_missing_basename_use_main_opener() {
+        for document in ["{}", "{editor: null}", "{editor: {}}"] {
+            let (editor, diagnostics) = editor_from_document(document);
+            assert_eq!(editor, EditorConfig::default());
+            assert_eq!(
+                editor.opener_for_path(Path::new("image.png")),
+                (None, false)
+            );
+            assert!(diagnostics.warnings.is_empty());
+        }
+        let (editor, _) = editor_from_document(
+            "{editor: {open: 'main', suspend: true, overrides: {'*': 'override'}}}",
+        );
+        for path in ["", "/", ".."] {
+            assert_eq!(
+                editor.opener_for_path(Path::new(path)),
+                (Some("main"), true)
+            );
+        }
+    }
+
+    #[test]
+    fn editor_system_commands_remain_raw() {
+        for document in ["{editor: 'system'}", "{editor: {open: 'system'}}"] {
+            let (editor, diagnostics) = editor_from_document(document);
+            assert_eq!(
+                editor.opener_for_path(Path::new("a.rs")),
+                (Some("system"), false)
+            );
+            assert!(diagnostics.warnings.is_empty());
+        }
+        let (editor, diagnostics) = editor_from_document(
+            "{editor: {open: '  system  ', overrides: {'*.png': 'system', '*.jpg': {open: 'system', suspend: true}}}}",
+        );
+        assert_eq!(editor.open.as_deref(), Some("  system  "));
+        assert_eq!(
+            editor.opener_for_path(Path::new("a.png")),
+            (Some("system"), false)
+        );
+        assert_eq!(
+            editor.opener_for_path(Path::new("a.jpg")),
+            (Some("system"), true)
+        );
         assert!(diagnostics.warnings.is_empty());
     }
 
     #[test]
-    fn parses_images_open_with_command() {
-        let mut diagnostics = ConfigDiagnostics::default();
-        let config = parse_merged_config(
-            &json!({
-                "images": {
-                    "openWith": {
-                        "command": "zed",
-                        "args": ["{path}"]
-                    }
-                }
-            }),
-            &mut diagnostics,
+    fn editor_override_document_order_and_first_match_win() {
+        // Deliberately not lexicographic: json! alone cannot verify document order.
+        let (editor, diagnostics) = editor_from_document(
+            r#"{
+            editor: {
+                open: 'main {pathname}',
+                overrides: {
+                    'z*.png': 'first {path}',
+                    '*.png': {open: 'second', suspend: true},
+                    '*': 'last',
+                },
+            },
+        }"#,
         );
-
         assert_eq!(
-            config.images.open_with,
-            ImageOpenWith::Command(ImageOpenCommandConfig {
-                command: "zed".to_string(),
-                args: vec!["{path}".to_string()],
-            })
+            editor
+                .overrides
+                .iter()
+                .map(|entry| entry.pattern.as_str())
+                .collect::<Vec<_>>(),
+            vec!["z*.png", "*.png", "*"]
+        );
+        assert_eq!(
+            editor.opener_for_path(Path::new("nested/Zebra.PNG")),
+            (Some("first {path}"), false)
+        );
+        assert_eq!(
+            editor.opener_for_path(Path::new("other.png")),
+            (Some("second"), true)
+        );
+        assert_eq!(
+            editor.opener_for_path(Path::new("a.rs")),
+            (Some("last"), false)
+        );
+        assert_eq!(editor, editor.clone());
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn editor_override_braces_case_and_basename_matching() {
+        let (editor, diagnostics) = editor_from_document(
+            r#"{
+            editor: {
+                open: 'main',
+                overrides: {
+                    'assets/*.png': 'directory pattern',
+                    '*.{png,jpg,JPEG}': 'system',
+                    'README.?d': 'docs {filename}',
+                },
+            },
+        }"#,
+        );
+        for path in ["a.PNG", "deep/tree/photo.jPg", "assets/a.JPEG"] {
+            assert_eq!(
+                editor.opener_for_path(Path::new(path)),
+                (Some("system"), false)
+            );
+        }
+        assert_eq!(
+            editor.opener_for_path(Path::new("nested/readme.MD")),
+            (Some("docs {filename}"), false)
+        );
+        for path in ["photo.png/file.rs", "assets/file.rs", "a.png.rs"] {
+            assert_eq!(
+                editor.opener_for_path(Path::new(path)),
+                (Some("main"), false)
+            );
+        }
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn editor_override_suspend_is_independent_of_main() {
+        let (editor, diagnostics) = editor_from_document(
+            r#"{
+            editor: {
+                suspend: true,
+                overrides: {
+                    '*.png': 'system',
+                    '*.jpg': {open: 'viewer {pathname}'},
+                    '*.gif': {open: 'viewer', suspend: false},
+                    '*.rs': {open: 'hx {location}', suspend: true},
+                },
+            },
+        }"#,
+        );
+        for path in ["a.png", "a.jpg", "a.gif"] {
+            assert!(!editor.opener_for_path(Path::new(path)).1);
+        }
+        assert_eq!(
+            editor.opener_for_path(Path::new("a.rs")),
+            (Some("hx {location}"), true)
+        );
+        assert_eq!(editor.opener_for_path(Path::new("a.txt")), (None, true));
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
+    fn editor_overrides_control_runtime_commands_and_suspension() {
+        let (editor, diagnostics) = editor_from_document(
+            r#"{editor: {
+                open: 'main-editor {path}',
+                suspend: true,
+                overrides: {
+                    'special*.png': {open: 'image-editor {location}', suspend: true},
+                    '*.{png,jpg}': {open: 'other-viewer {path}', suspend: true},
+                },
+            }}"#,
         );
         assert!(diagnostics.warnings.is_empty());
+        let root = tempfile::tempdir().unwrap();
+        for (name, template) in [
+            ("SPECIAL.PNG", "image-editor {location}"),
+            ("photo.JPG", "other-viewer {path}"),
+            ("archive.bin", "main-editor {path}"),
+        ] {
+            let path = root.path().join(name);
+            std::fs::write(&path, [0, 255]).unwrap();
+            assert_eq!(
+                crate::utils::file_opener::open_file_path_at_location(&path, 12, 4, &editor)
+                    .unwrap(),
+                crate::utils::file_opener::OpenOutcome::Suspend(
+                    crate::utils::file_opener::expand_editor_open_command(template, &path, 12, 4)
+                        .unwrap()
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn editor_invalid_overrides_warn_and_are_skipped() {
+        let (editor, diagnostics) = editor_from_document(
+            r#"{
+            editor: {open: 'main', overrides: {
+                '': 'empty pattern',
+                '   ': 'blank pattern',
+                '[': 'bad glob',
+                '*.{png,jpg': 'bad brace',
+                '*.png': '',
+                '*.jpg': '   ',
+                '*.gif': {},
+                '*.webp': {open: 42},
+                '*.bmp': {open: null},
+                '*.ico': {open: 'viewer', suspend: 'yes'},
+                '*.svg': false,
+                '*.pdf': [],
+                '*.tiff': null,
+                '*.rs': {open: 'hx', suspend: true},
+            }},
+        }"#,
+        );
+        assert_eq!(editor.overrides.len(), 1);
+        assert_eq!(editor.overrides[0].pattern, "*.rs");
+        assert_eq!(diagnostics.warnings.len(), 13);
+        for warning in &diagnostics.warnings {
+            assert!(warning.starts_with("editor.overrides["), "{warning}");
+        }
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("invalid glob pattern")));
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains(".suspend must be a boolean")));
+        assert_eq!(
+            editor.opener_for_path(Path::new("a.png")),
+            (Some("main"), false)
+        );
+        assert_eq!(
+            editor.opener_for_path(Path::new("a.rs")),
+            (Some("hx"), true)
+        );
+    }
+
+    #[test]
+    fn editor_invalid_config_types_and_commands_warn() {
+        for document in [
+            "{editor: false}",
+            "{editor: []}",
+            "{editor: 42}",
+            "{editor: ''}",
+            "{editor: '   '}",
+            "{editor: {open: false}}",
+            "{editor: {open: []}}",
+            "{editor: {open: ''}}",
+            "{editor: {suspend: 'yes'}}",
+            "{editor: {overrides: []}}",
+            "{editor: {overrides: null}}",
+        ] {
+            let (editor, diagnostics) = editor_from_document(document);
+            assert_eq!(editor, EditorConfig::default(), "{document}");
+            assert_eq!(diagnostics.warnings.len(), 1, "{document}");
+            assert!(diagnostics.warnings[0].starts_with("editor"));
+        }
     }
 
     #[test]

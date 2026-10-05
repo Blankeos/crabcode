@@ -734,6 +734,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "glob",
+ "globset",
  "http",
  "ignore",
  "image",

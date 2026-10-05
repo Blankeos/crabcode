@@ -106,7 +106,7 @@ pub async fn authenticate(name: &str, remote: &McpRemoteConfig) -> Result<()> {
                 open_browser_on_enter(
                     &url,
                     wait_for_enter(),
-                    crate::utils::image_attachment::open_url,
+                    crate::utils::file_opener::open_url,
                 )
                 .await;
             }

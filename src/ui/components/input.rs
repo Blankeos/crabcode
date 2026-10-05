@@ -79,7 +79,8 @@ pub struct Input {
     draft_state: Option<DraftState>,
     local_images: Vec<LocalImageAttachment>,
     pending_pastes: Vec<PendingPaste>,
-    image_open_config: crate::config::ImagesConfig,
+    editor_config: crate::config::EditorConfig,
+    pending_editor_suspend: Option<String>,
     hovered_image_placeholder: Option<String>,
     hovered_paste_placeholder: Option<String>,
 }
@@ -134,7 +135,8 @@ impl Input {
             draft_state: None,
             local_images: Vec::new(),
             pending_pastes: Vec::new(),
-            image_open_config: crate::config::ImagesConfig::default(),
+            editor_config: crate::config::EditorConfig::default(),
+            pending_editor_suspend: None,
             hovered_image_placeholder: None,
             hovered_paste_placeholder: None,
         }
@@ -349,8 +351,12 @@ impl Input {
         self
     }
 
-    pub fn set_image_open_config(&mut self, config: crate::config::ImagesConfig) {
-        self.image_open_config = config;
+    pub fn take_editor_suspend(&mut self) -> Option<String> {
+        self.pending_editor_suspend.take()
+    }
+
+    pub fn set_editor_config(&mut self, config: crate::config::EditorConfig) {
+        self.editor_config = config;
     }
 
     pub fn contains_mouse(&self, mouse: MouseEvent) -> bool {
@@ -986,12 +992,20 @@ impl Input {
                 {
                     let offset = self.flat_offset_for_position(target_row, target_col);
                     if let Some(image) = self.image_at_offset(offset) {
-                        match image_attachment::open_path(&image.path, &self.image_open_config) {
-                            Ok(()) => push_toast(Toast::new(
-                                format!("Opened {}", image.placeholder),
-                                ToastLevel::Info,
-                                None,
-                            )),
+                        match crate::utils::file_opener::open_file_path(
+                            &image.path,
+                            &self.editor_config,
+                        ) {
+                            Ok(crate::utils::file_opener::OpenOutcome::Spawned) => {
+                                push_toast(Toast::new(
+                                    format!("Opened {}", image.placeholder),
+                                    ToastLevel::Info,
+                                    None,
+                                ))
+                            }
+                            Ok(crate::utils::file_opener::OpenOutcome::Suspend(command)) => {
+                                self.pending_editor_suspend = Some(command);
+                            }
                             Err(err) => push_toast(Toast::new(
                                 format!("Failed to open image: {}", err),
                                 ToastLevel::Error,
@@ -3346,6 +3360,60 @@ mod tests {
         assert!(input.has_active_selection_edge_scroll());
         assert_eq!(input.textarea.cursor(), (0, 14));
         assert_eq!(input.get_selected_text(), "0123456789ABCD");
+    }
+
+    #[test]
+    fn image_click_uses_editor_and_requests_suspension() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("screenshot.png");
+        std::fs::write(&path, [0, 255]).unwrap();
+        let mut input = Input::new();
+        input.set_editor_config(crate::config::EditorConfig {
+            open: Some("my-editor {path}".to_string()),
+            suspend: true,
+            ..Default::default()
+        });
+        input.attach_image(path.clone());
+
+        let colors = test_colors();
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(
+                    frame,
+                    Rect::new(0, 0, 60, 8),
+                    "Plan",
+                    "model",
+                    "provider",
+                    None,
+                    false,
+                    &colors,
+                    true,
+                );
+            })
+            .unwrap();
+        let (x, y) = find_buffer_text(terminal.backend().buffer(), 60, 8, "[Image #1]")
+            .expect("image placeholder rendered");
+        assert!(input.handle_mouse_event(mouse_event_at(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            y,
+        )));
+        assert_eq!(
+            input.take_editor_suspend(),
+            Some(
+                crate::utils::file_opener::expand_editor_open_command(
+                    "my-editor {path}",
+                    &path,
+                    1,
+                    1
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(input.take_editor_suspend(), None);
     }
 
     #[test]
