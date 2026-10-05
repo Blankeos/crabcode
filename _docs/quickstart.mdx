@@ -1,48 +1,91 @@
 ---
 title: Quickstart
-description: Get up and running with crabcode in 5 minutes.
+description: Install crabcode, connect a provider, and start your first coding session.
 ---
 
 # Get from zero to coding
 
-Five minutes from now you'll be pair programming with AI in your terminal.
+Install crabcode, connect an AI provider, and ask it to help with your project.
 
----
+<Steps>
+  <Step title="Install crabcode">
 
-## Install
+Choose one installation method:
+
+<Tabs items={["npm", "Bun", "Cargo binstall", "Cargo", "Shell"]} label="Installation method">
+  <Tab value="npm">
 
 ```bash
-npm install -g crabcode  # npm
-bun install -g crabcode  # or bun
-cargo binstall crabcode  # or cargo-binstall (prebuilt binary, faster)
-cargo install crabcode   # or cargo (build from source)
-curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | sh # or linux/macos (via curl)
+npm install -g crabcode
 ```
 
----
-
-## First run
-
-Launch crabcode:
+  </Tab>
+  <Tab value="Bun">
 
 ```bash
+bun install -g crabcode
+```
+
+  </Tab>
+  <Tab value="Cargo binstall">
+
+Install a prebuilt binary with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
+
+```bash
+cargo binstall crabcode
+```
+
+  </Tab>
+  <Tab value="Cargo">
+
+Build from source with Cargo:
+
+```bash
+cargo install crabcode
+```
+
+  </Tab>
+  <Tab value="Shell">
+
+On Linux or macOS:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Blankeos/crabcode/main/install.sh | sh
+```
+
+  </Tab>
+</Tabs>
+
+> [!TIP]
+> Already installed? Run `crabcode upgrade` to get the latest release, then restart crabcode. It detects your installation method automatically. To install a specific version, use `crabcode upgrade 0.0.13` (version pinning is not supported for Homebrew installs).
+
+  </Step>
+  <Step title="Open your project">
+
+In your terminal, change to your project directory and launch crabcode:
+
+```bash
+cd /path/to/your/project
 crabcode
 ```
 
-Run `/connect` to add your first provider (OpenAI, Anthropic, etc.). That's it—you're ready.
+  </Step>
+  <Step title="Connect a provider">
 
-🎉 That's it! If you know how to use OpenCode, you're pretty much good to go!
+Run `/connect` inside crabcode and follow the prompts to connect a provider, such as OpenAI or Anthropic. Use `/models` to choose a model.
 
----
+  </Step>
+  <Step title="Start your first session">
 
-## Your first session
-
-crabcode works best when you type naturally, like you're pair programming:
+Type a request in the prompt, just as you would ask a teammate:
 
 - **Ask questions:** "Explain the main function in src/lib.rs"
 - **Request changes:** "Add error handling to this module"
 - **Plan first:** `/plan` when you're not sure how to approach something
 - **Build directly:** `/build` when you know what you want done
+
+</Step>
+</Steps>
 
 Custom slash commands can live in `.opencode/commands/` or `.crabcode/commands/`. crabcode reads the [OpenCode command format](https://opencode.ai/docs/commands/).
 
@@ -50,14 +93,17 @@ Custom slash commands can live in `.opencode/commands/` or `.crabcode/commands/`
 
 ## Skip permission prompts (dangerous)
 
-For a trusted, isolated workspace, use `--yolo` (an alias of `--dangerously-skip-permissions`):
+> [!WARNING]
+> Only use `--yolo` in a trusted, isolated workspace. It skips permission prompts, including requests to access paths outside your workspace, and does not provide a sandbox.
+
+`--yolo` is an alias of `--dangerously-skip-permissions`:
 
 ```bash
 crabcode --yolo                         # Interactive session
 crabcode -p --yolo "Run the test suite"  # Non-interactive execution
 ```
 
-This skips permission prompts for this invocation, including requests to access paths outside the workspace. Explicit `deny` rules, disabled tools, and agent tool restrictions still apply. Normal permission behavior remains the default; this flag does not save a preference or provide a sandbox.
+Explicit `deny` rules, disabled tools, and agent tool restrictions still apply. Normal permission behavior remains the default; this flag only affects the current invocation and does not save a preference.
 
 The flag applies to local interactive and print modes, not remote `--attach`, `serve`, or ACP sessions.
 
@@ -136,9 +182,9 @@ Once you're in crabcode:
 
 ## Where your data lives
 
-| What                     | Default                                               | With `XDG_STATE_HOME`                                  |
-| ------------------------ | ----------------------------------------------------- | ------------------------------------------------------ |
-| Credentials              | `~/.local/state/crabcode/auth.json`                   | `$XDG_STATE_HOME/crabcode/auth.json`                   |
-| Preferences and Sessions | `~/.local/state/crabcode/data.db`                     | `$XDG_STATE_HOME/crabcode/data.db`                     |
-| Model cache              | `~/.local/state/crabcode/cache/models_dev_cache.json` | `$XDG_STATE_HOME/crabcode/cache/models_dev_cache.json` |
-| Bundled notification sounds | `~/.local/state/crabcode/sounds`                   | `$XDG_STATE_HOME/crabcode/sounds`                      |
+| What                        | Default                                               | With `XDG_STATE_HOME`                                  |
+| --------------------------- | ----------------------------------------------------- | ------------------------------------------------------ |
+| Credentials                 | `~/.local/state/crabcode/auth.json`                   | `$XDG_STATE_HOME/crabcode/auth.json`                   |
+| Preferences and Sessions    | `~/.local/state/crabcode/data.db`                     | `$XDG_STATE_HOME/crabcode/data.db`                     |
+| Model cache                 | `~/.local/state/crabcode/cache/models_dev_cache.json` | `$XDG_STATE_HOME/crabcode/cache/models_dev_cache.json` |
+| Bundled notification sounds | `~/.local/state/crabcode/sounds`                      | `$XDG_STATE_HOME/crabcode/sounds`                      |

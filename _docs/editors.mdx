@@ -47,19 +47,38 @@ Editors in standalone terminals normally have no single remote process unlike GU
 
 `wezterm cli spawn` opens a tab in the current window (`WEZTERM_PANE` must be set):
 
+Choose the editor to launch in the new tab:
+
+<Tabs items={["Helix", "Neovim"]} groupId="terminal-editor" persist label="WezTerm editor">
+  <Tab value="Helix">
+
 ```jsonc title="crabcode.jsonc"
 {
   "editor": {
-    // Helix
     "open": "wezterm cli spawn -- hx -- {pathname}:{line}:{column}",
-    // Or replace open with this Neovim command:
-    // "open": "wezterm cli spawn -- nvim +{line} -- {pathname}",
     "overrides": {
       "*.{png,jpg,jpeg,gif,webp}": "system",
     },
   },
 }
 ```
+
+  </Tab>
+  <Tab value="Neovim">
+
+```jsonc title="crabcode.jsonc"
+{
+  "editor": {
+    "open": "wezterm cli spawn -- nvim +{line} -- {pathname}",
+    "overrides": {
+      "*.{png,jpg,jpeg,gif,webp}": "system",
+    },
+  },
+}
+```
+
+  </Tab>
+</Tabs>
 
 Add `--new-window` if you want a separate window.
 
