@@ -6782,13 +6782,13 @@ impl App {
     }
 
     fn open_copy_actions_dialog(&mut self) {
-        let model_item = ActionDialogItem {
-            id: "model".to_string(),
-            key: 'm',
-            label: "Copy provider+model id".to_string(),
-            description: "Active provider/model identifier".to_string(),
+        let input_item = ActionDialogItem {
+            id: "input".to_string(),
+            key: 'c',
+            label: "Copy current chat input".to_string(),
+            description: "Current draft in the input box".to_string(),
         };
-        let items = if self.base_focus == BaseFocus::Chat {
+        let mut items = if self.base_focus == BaseFocus::Chat {
             vec![
                 ActionDialogItem {
                     id: "transcript".to_string(),
@@ -6796,12 +6796,7 @@ impl App {
                     label: "Copy session transcript".to_string(),
                     description: "Full conversation as Markdown".to_string(),
                 },
-                ActionDialogItem {
-                    id: "input".to_string(),
-                    key: 'c',
-                    label: "Copy current chat input".to_string(),
-                    description: "Current draft in the input box".to_string(),
-                },
+                input_item,
                 ActionDialogItem {
                     id: "id".to_string(),
                     key: 'i',
@@ -6814,11 +6809,32 @@ impl App {
                     label: "Copy session title".to_string(),
                     description: "Current session name".to_string(),
                 },
-                model_item,
             ]
+        } else if !self.input.submission_text().trim().is_empty() {
+            vec![input_item]
         } else {
-            vec![model_item]
+            vec![]
         };
+        items.extend([
+            ActionDialogItem {
+                id: "provider".to_string(),
+                key: 'p',
+                label: "Copy provider id".to_string(),
+                description: "Active provider identifier".to_string(),
+            },
+            ActionDialogItem {
+                id: "model_id".to_string(),
+                key: 'd',
+                label: "Copy model id".to_string(),
+                description: "Active model identifier without the provider prefix".to_string(),
+            },
+            ActionDialogItem {
+                id: "model".to_string(),
+                key: 'm',
+                label: "Copy provider+model id".to_string(),
+                description: "Active provider/model identifier".to_string(),
+            },
+        ]);
         let mut dialog = ActionDialog::with_items("Copy", items);
         dialog.show();
         self.copy_actions_dialog = Some(dialog);
@@ -6827,6 +6843,14 @@ impl App {
 
     fn execute_copy_action(&mut self, action: &str) {
         match action {
+            "provider" => {
+                let text = self.provider_name.clone();
+                self.copy_text_with_toast(&text, "Provider id copied to clipboard");
+            }
+            "model_id" => {
+                let text = self.model.clone();
+                self.copy_text_with_toast(&text, "Model id copied to clipboard");
+            }
             "model" => {
                 let text = format!("{}/{}", self.provider_name, self.model);
                 self.copy_text_with_toast(&text, "Provider+model id copied to clipboard");
@@ -15151,10 +15175,19 @@ mod tests {
             Some("model")
         );
         assert_eq!(dialog.items.last().map(|item| item.key), Some('m'));
+        assert_eq!(
+            dialog.item_id_for_shortcut('p').as_deref(),
+            Some("provider")
+        );
+        assert_eq!(
+            dialog.item_id_for_shortcut('d').as_deref(),
+            Some("model_id")
+        );
+        assert_eq!(dialog.item_id_for_shortcut('c').as_deref(), Some("input"));
     }
 
     #[test]
-    fn copy_command_on_home_only_offers_model_id() {
+    fn copy_command_on_home_offers_provider_and_model_ids() {
         let mut app = test_app();
         app.base_focus = BaseFocus::Home;
 
@@ -15162,9 +15195,59 @@ mod tests {
 
         let dialog = app.copy_actions_dialog.as_ref().expect("copy dialog");
         assert_eq!(app.overlay_focus, OverlayFocus::CopyActions);
-        assert_eq!(dialog.items.len(), 1);
-        assert_eq!(dialog.items[0].id, "model");
-        assert_eq!(dialog.items[0].key, 'm');
+        assert_eq!(dialog.items.len(), 3);
+        assert_eq!(
+            dialog.item_id_for_shortcut('p').as_deref(),
+            Some("provider")
+        );
+        assert_eq!(
+            dialog.item_id_for_shortcut('d').as_deref(),
+            Some("model_id")
+        );
+        assert_eq!(dialog.item_id_for_shortcut('m').as_deref(), Some("model"));
+        assert_eq!(dialog.item_id_for_shortcut('c'), None);
+    }
+
+    #[test]
+    fn ctrl_x_c_on_home_only_offers_input_when_present() {
+        for draft in ["", " \n\t ", "draft prompt\nsecond line"] {
+            let mut app = test_app();
+            app.base_focus = BaseFocus::Home;
+            app.input.set_text(draft);
+
+            app.handle_keys(KeyEvent::new(
+                KeyCode::Char('x'),
+                event::KeyModifiers::CONTROL,
+            ));
+            assert_eq!(app.overlay_focus, OverlayFocus::WhichKey);
+            app.handle_keys(KeyEvent::new(KeyCode::Char('c'), event::KeyModifiers::NONE));
+
+            let dialog = app.copy_actions_dialog.as_ref().expect("home copy dialog");
+            assert_eq!(app.overlay_focus, OverlayFocus::CopyActions);
+            assert!(!app.which_key_state.is_visible());
+            assert_eq!(
+                dialog.items.len(),
+                if draft.trim().is_empty() { 3 } else { 4 }
+            );
+            assert_eq!(
+                dialog.item_id_for_shortcut('c').as_deref(),
+                if draft.trim().is_empty() {
+                    None
+                } else {
+                    Some("input")
+                }
+            );
+            for id in ["transcript", "id", "title"] {
+                assert!(!dialog.items.iter().any(|item| item.id == id));
+            }
+            assert_eq!(app.input.submission_text(), draft);
+
+            app.handle_keys(KeyEvent::new(KeyCode::Esc, event::KeyModifiers::NONE));
+            assert_eq!(app.overlay_focus, OverlayFocus::None);
+            assert!(app.copy_actions_dialog.is_none());
+            assert_eq!(app.base_focus, BaseFocus::Home);
+            assert_eq!(app.input.submission_text(), draft);
+        }
     }
 
     #[test]

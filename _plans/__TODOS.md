@@ -531,7 +531,7 @@ I think this is how the TUI works already anyway right?
 
 - [x] For errors, when stuff is toasted, let me click the toast so I can copy the whole thing to clipboard.
 
-- [ ] Make `ctrl-x c` work on the home page by opening the copy dialog. Include options to copy the current provider and model IDs, and to copy the current chat input when one is present.
+- [x] Make `ctrl-x c` work on the home page by opening the copy dialog. Include options to copy the current provider and model IDs, and to copy the current chat input when one is present.
 
 - [ ] Add a Claude Code–style auto permission mode: use a separate safety classifier to review risky tool calls against user intent, auto-allow routine actions, preserve explicit deny/ask rules, and deny blocked calls with guidance so the agent can recover. Do not treat this as equivalent to `--dangerously-skip-permissions`.
 
