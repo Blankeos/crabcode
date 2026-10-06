@@ -9,6 +9,35 @@ pub struct ConnectDialogState {
     pub pending_selection: Option<DialogItem>,
 }
 
+pub fn meridian_connect_dialog() -> ConnectDialogState {
+    let items = [
+        (
+            "meridian-no-key",
+            "Connect without an endpoint key",
+            "Default for a local, unprotected Meridian server",
+        ),
+        (
+            "meridian-endpoint-key",
+            "Connect with an endpoint key",
+            "Only for a protected Meridian endpoint; not backend account credentials",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, name, description)| DialogItem {
+        id: id.to_string(),
+        name: name.to_string(),
+        group: "Meridian".to_string(),
+        description: description.to_string(),
+        tip: None,
+        provider_id: "meridian".to_string(),
+        active: false,
+    })
+    .collect();
+    let mut state = ConnectDialogState::with_items("Connect Meridian", items);
+    state.dialog.show();
+    state
+}
+
 impl ConnectDialogState {
     pub fn new(dialog: Dialog) -> Self {
         Self {
@@ -95,6 +124,17 @@ mod tests {
             provider_id: id.to_string(),
             active: false,
         }
+    }
+
+    #[test]
+    fn meridian_defaults_to_no_key_and_keeps_protected_option_separate() {
+        let state = meridian_connect_dialog();
+        assert!(state.dialog.is_visible());
+        assert_eq!(state.dialog.get_selected().unwrap().id, "meridian-no-key");
+        assert_eq!(state.dialog.items.len(), 2);
+        assert!(state.dialog.items[1]
+            .description
+            .contains("not backend account credentials"));
     }
 
     #[test]
