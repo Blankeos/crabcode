@@ -15,8 +15,12 @@ pub async fn selectable_models(
         .load()
         .context("failed to load providers")?;
     let connected_provider_ids = connected_providers.keys().cloned().collect::<HashSet<_>>();
-    let discovery = Discovery::new_with_custom(Some(config.merged_config.custom_providers.clone()))
-        .context("failed to initialize model discovery")?;
+    let discovery = Discovery::new_with_config(
+        Some(config.merged_config.custom_providers.clone()),
+        config.merged_config.disabled_providers.clone(),
+        config.merged_config.enabled_providers.clone(),
+    )
+    .context("failed to initialize model discovery")?;
     let configured_provider_ids = discovery.custom_provider_ids();
 
     let filter_matches_runtime = provider_filter.is_some_and(|filter| {
@@ -57,6 +61,8 @@ pub async fn selectable_models(
     } else {
         Vec::new()
     };
+    // Endpoint rows supersede old snapshot rows, including removed Meridian models.
+    models.retain(|model| model.provider_id != "meridian");
     merge_dialog_models(
         &mut models,
         discovery.discover_custom_models_for_dialog().await,

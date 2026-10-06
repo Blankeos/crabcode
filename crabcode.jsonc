@@ -1,5 +1,12 @@
 {
   "$schema": "crabcode.schema.json",
+  // Opt into the user-run Meridian provider without selecting a default model.
+  // No key needed for an unprotected local endpoint; upstream login is separate.
+  "provider": {
+    "meridian": {
+      "options": { "baseURL": "http://127.0.0.1:3456/v1" },
+    },
+  },
   // Crabcode theme id (see src/generated_themes/carbonfox.json)
   // "theme": "vercel",
   "notifications": {

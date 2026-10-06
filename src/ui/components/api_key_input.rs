@@ -147,7 +147,11 @@ impl ApiKeyInput {
             .split(chunks[0]);
 
         let title_paragraph = Paragraph::new(Line::from(vec![Span::styled(
-            "API key",
+            if self.provider_name == "meridian" {
+                "Meridian endpoint key"
+            } else {
+                "API key"
+            },
             Style::default()
                 .fg(colors.text)
                 .add_modifier(Modifier::BOLD),
