@@ -1355,7 +1355,14 @@ async fn prepare_request_config(
         provider.name.clone(),
         base_url,
         model_route.model_name.clone(),
-        resolve_api_key(auth_config.as_ref(), custom_provider_api_key),
+        if provider_name == "meridian" {
+            crate::model::extensions::meridian::endpoint_key(
+                auth_config.as_ref(),
+                custom_provider_api_key,
+            )
+        } else {
+            resolve_api_key(auth_config.as_ref(), custom_provider_api_key)
+        },
         reasoning_effort,
         supports_image_input,
     );
@@ -1395,6 +1402,7 @@ async fn prepare_request_config(
     );
 
     if request_config.api_key.is_none()
+        && provider_name != "meridian"
         && !crate::model::extensions::ModelExtensions::is_runtime_provider(provider_name)
     {
         send_warning(
@@ -2940,6 +2948,18 @@ mod tests {
 
     use crate::persistence::AuthConfig;
     use base64::Engine as _;
+
+    #[test]
+    fn meridian_provider_routes_to_local_chat_completions_without_model_prefix() {
+        let provider = crate::model::extensions::meridian::provider();
+        let route = resolve_model_route(&provider, "claude-sonnet-5-5".to_string());
+        assert_eq!(route.api, "http://127.0.0.1:3456/v1");
+        assert_eq!(route.model_name, "claude-sonnet-5-5");
+        assert_eq!(
+            ProviderKind::from_provider(&provider.id, &route.npm_package),
+            ProviderKind::OpenAICompatible,
+        );
+    }
 
     #[test]
     fn audio_model_receives_base64_audio_attachment() {

@@ -263,6 +263,12 @@ enum ConnectDialogMode {
     ProviderSelection,
     OpenAIMethodSelection,
     XAIMethodSelection,
+    MeridianMethodSelection,
+}
+
+struct MeridianConnectionResult {
+    connection: crate::persistence::AuthConfig,
+    result: Result<usize, String>,
 }
 
 #[derive(Debug)]
@@ -933,6 +939,8 @@ pub struct App {
     pub api_key_input: crate::ui::components::api_key_input::ApiKeyInput,
     provider_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<ProviderOAuthTaskMessage>>,
     provider_oauth_in_progress: Option<OAuthProvider>,
+    meridian_connection_receiver:
+        Option<tokio::sync::mpsc::UnboundedReceiver<MeridianConnectionResult>>,
     mcp_oauth_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<McpOAuthTaskMessage>>,
     mcp_oauth_in_progress: Option<String>,
     compaction_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<CompactionTaskMessage>>,
@@ -1193,6 +1201,7 @@ impl App {
             api_key_input,
             provider_oauth_receiver: None,
             provider_oauth_in_progress: None,
+            meridian_connection_receiver: None,
             mcp_oauth_receiver: None,
             mcp_oauth_in_progress: None,
             compaction_receiver: None,
@@ -4223,6 +4232,10 @@ impl App {
                         api_key,
                         provider_name,
                     } => {
+                        if provider_name == "meridian" {
+                            self.begin_meridian_connection(Some(api_key));
+                            return;
+                        }
                         if let Some(auth_dao) = crate::persistence::AuthDAO::new().ok() {
                             let _ = auth_dao.set_provider(
                                 provider_name,
@@ -9635,6 +9648,10 @@ impl App {
 
         let provider_id = selected_item.id;
         let provider_name = selected_item.name;
+        // Discard an in-flight check so it cannot reconnect after a disconnect.
+        if provider_id == "meridian" {
+            self.meridian_connection_receiver = None;
+        }
 
         let auth_dao = match crate::persistence::AuthDAO::new() {
             Ok(dao) => dao,
@@ -9659,6 +9676,12 @@ impl App {
                     return;
                 }
 
+                if provider_id == "meridian" {
+                    self.discovery = crate::model::discovery::Discovery::new().ok();
+                    if let Some(discovery) = &self.discovery {
+                        discovery.clear_custom_model_discovery_cache();
+                    }
+                }
                 push_toast(Toast::new(
                     format!("Disconnected {}", provider_name),
                     ToastLevel::Info,
@@ -9690,6 +9713,13 @@ impl App {
     ) {
         match self.connect_dialog_mode {
             ConnectDialogMode::ProviderSelection => {
+                if selected_item.id == "meridian" {
+                    self.connect_dialog_state =
+                        crate::views::connect_dialog::meridian_connect_dialog();
+                    self.connect_dialog_mode = ConnectDialogMode::MeridianMethodSelection;
+                    self.overlay_focus = OverlayFocus::ConnectDialog;
+                    return;
+                }
                 if crate::model::extensions::ModelExtensions::is_runtime_provider(&selected_item.id)
                 {
                     self.connect_local_provider(&selected_item.id);
@@ -9709,6 +9739,15 @@ impl App {
                 self.api_key_input.show(&selected_item.id);
                 self.overlay_focus = OverlayFocus::ApiKeyInput;
             }
+            ConnectDialogMode::MeridianMethodSelection => match selected_item.id.as_str() {
+                "meridian-no-key" => self.begin_meridian_connection(None),
+                "meridian-endpoint-key" => {
+                    self.api_key_input.show("meridian");
+                    self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+                    self.overlay_focus = OverlayFocus::ApiKeyInput;
+                }
+                _ => self.overlay_focus = OverlayFocus::None,
+            },
             ConnectDialogMode::OpenAIMethodSelection => match selected_item.id.as_str() {
                 "openai-oauth-browser" => {
                     self.begin_provider_oauth_browser(OAuthProvider::OpenAI);
@@ -9741,6 +9780,116 @@ impl App {
                     self.overlay_focus = OverlayFocus::None;
                 }
             },
+        }
+    }
+
+    fn begin_meridian_connection(&mut self, endpoint_key: Option<String>) {
+        self.overlay_focus = OverlayFocus::None;
+        if self.meridian_connection_receiver.is_some() {
+            push_toast(Toast::new(
+                "Checking Meridian connection already",
+                ToastLevel::Info,
+                None,
+            ));
+            return;
+        }
+        let loaded = match crate::config::ConfigLoader::load() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                push_toast(Toast::new(
+                    format!("Cannot load Meridian endpoint config: {error}"),
+                    ToastLevel::Error,
+                    None,
+                ));
+                return;
+            }
+        };
+        if !loaded.merged_config.provider_is_enabled("meridian") {
+            push_toast(Toast::new(
+                "Meridian is disabled by provider configuration",
+                ToastLevel::Error,
+                None,
+            ));
+            return;
+        }
+        let config = loaded
+            .merged_config
+            .custom_providers
+            .get("meridian")
+            .cloned()
+            .unwrap_or_else(|| crate::config::CustomProviderConfig {
+                name: None,
+                npm: None,
+                base_url: None,
+                api_key: None,
+                models: Default::default(),
+            });
+        let connection = match endpoint_key {
+            Some(key) => crate::persistence::AuthConfig::Api {
+                key: key.trim().to_string(),
+            },
+            None => crate::persistence::AuthConfig::Local,
+        };
+        let key = crate::model::extensions::meridian::endpoint_key(Some(&connection), None);
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.meridian_connection_receiver = Some(receiver);
+        push_toast(Toast::new(
+            "Checking Meridian endpoint and models…",
+            ToastLevel::Info,
+            None,
+        ));
+        tokio::spawn(async move {
+            let result = crate::model::extensions::meridian::check_connection(config, key)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = sender.send(MeridianConnectionResult { connection, result });
+        });
+    }
+
+    fn process_meridian_connection_events(&mut self) {
+        let event = match self
+            .meridian_connection_receiver
+            .as_mut()
+            .map(|rx| rx.try_recv())
+        {
+            Some(Ok(event)) => event,
+            Some(Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)) => {
+                self.meridian_connection_receiver = None;
+                push_toast(Toast::new(
+                    "Meridian connection check stopped",
+                    ToastLevel::Error,
+                    None,
+                ));
+                return;
+            }
+            _ => return,
+        };
+        self.meridian_connection_receiver = None;
+        let result = event.result.and_then(|count| {
+            crate::persistence::AuthDAO::new()
+                .and_then(|dao| dao.set_provider("meridian".to_string(), event.connection))
+                .map(|_| count)
+                .map_err(|error| format!("Failed to save Meridian connection: {error}"))
+        });
+        match result {
+            Ok(count) => {
+                self.discovery = crate::model::discovery::Discovery::new().ok();
+                if let Some(discovery) = &self.discovery {
+                    discovery.clear_custom_model_discovery_cache();
+                }
+                self.connect_dialog_state = init_connect_dialog();
+                self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
+                push_toast(Toast::new(
+                    format!("Connected Meridian ({count} advertised models)"),
+                    ToastLevel::Success,
+                    None,
+                ));
+            }
+            Err(error) => push_toast(Toast::new(
+                format!("Meridian connection failed: {error}"),
+                ToastLevel::Error,
+                None,
+            )),
         }
     }
 
@@ -10657,12 +10806,14 @@ impl App {
             || self.jobs_dialog_state.is_visible()
     }
 
-    /// Background update/upgrade in flight (version lookup or installer).
+    /// Background endpoint check/update/upgrade in flight.
     /// The event loop uses this for a bounded non-animation poll (~10Hz,
     /// no renders) so completion lands promptly without 60fps churn and
     /// without blocking startup (check starts after first paint).
     pub fn has_pending_update_work(&self) -> bool {
-        self.update_check_receiver.is_some() || self.upgrade_receiver.is_some()
+        self.update_check_receiver.is_some()
+            || self.upgrade_receiver.is_some()
+            || self.meridian_connection_receiver.is_some()
     }
 
     fn sessions_dialog_has_streaming_rows(&self) -> bool {
@@ -10773,11 +10924,13 @@ impl App {
         input_scrolled || chat_scrolled
     }
 
-    /// Drain background channels + streams. Returns true when an update or
-    /// upgrade toast landed so the event loop can redraw once (idle wakeup
-    /// path has no animation to carry the repaint).
+    /// Drain background channels + streams. Returns true when an idle background
+    /// completion needs one redraw (there is no animation to carry the repaint).
     pub fn process_streaming_chunks(&mut self) -> bool {
         self.process_provider_oauth_events();
+        let meridian_was_pending = self.meridian_connection_receiver.is_some();
+        self.process_meridian_connection_events();
+        let meridian_toasted = meridian_was_pending && self.meridian_connection_receiver.is_none();
         self.process_mcp_oauth_events();
         let update_toasted = self.process_update_check_events();
         let upgrade_toasted = self.process_upgrade_events();
@@ -10842,7 +10995,7 @@ impl App {
 
         self.sync_active_streaming_flag();
         self.update_sessions_dialog_live_state(false);
-        update_toasted || upgrade_toasted
+        update_toasted || upgrade_toasted || meridian_toasted
     }
 
     fn process_streaming_chunk_for_session(
@@ -13944,6 +14097,7 @@ mod tests {
             api_key_input: crate::ui::components::api_key_input::ApiKeyInput::new(),
             provider_oauth_receiver: None,
             provider_oauth_in_progress: None,
+            meridian_connection_receiver: None,
             mcp_oauth_receiver: None,
             mcp_oauth_in_progress: None,
             compaction_receiver: None,
@@ -14026,6 +14180,65 @@ mod tests {
                 std::path::PathBuf::from("."),
             )),
         }
+    }
+
+    #[test]
+    fn meridian_connect_tui_routes_to_no_key_default_and_optional_endpoint_input() {
+        let mut app = test_app();
+        let item = crate::ui::components::dialog::DialogItem {
+            id: "meridian".to_string(),
+            name: "Meridian".to_string(),
+            group: "Local".to_string(),
+            description: String::new(),
+            tip: None,
+            provider_id: "meridian".to_string(),
+            active: false,
+        };
+        app.handle_connect_dialog_selection(item);
+        assert_eq!(
+            app.connect_dialog_mode,
+            ConnectDialogMode::MeridianMethodSelection
+        );
+        assert_eq!(app.overlay_focus, OverlayFocus::ConnectDialog);
+        assert!(!app.api_key_input.is_visible());
+        assert_eq!(
+            app.connect_dialog_state.dialog.get_selected().unwrap().id,
+            "meridian-no-key"
+        );
+        let protected = app.connect_dialog_state.dialog.items[1].clone();
+        app.handle_connect_dialog_selection(protected);
+        assert_eq!(app.overlay_focus, OverlayFocus::ApiKeyInput);
+        assert_eq!(app.api_key_input.provider_name, "meridian");
+    }
+
+    #[test]
+    fn meridian_connect_tui_failed_check_preserves_model_and_provider_connection() {
+        let mut app = test_app();
+        let old_connection = crate::persistence::AuthDAO::new()
+            .unwrap()
+            .get_provider("meridian")
+            .unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        app.meridian_connection_receiver = Some(receiver);
+        assert!(app.has_pending_update_work());
+        sender
+            .send(MeridianConnectionResult {
+                connection: crate::persistence::AuthConfig::Local,
+                result: Err("Meridian is not running".to_string()),
+            })
+            .unwrap_or_else(|_| panic!("receiver open"));
+        app.process_meridian_connection_events();
+        assert!(!app.has_pending_update_work());
+        assert_eq!(app.model, "test-model");
+        assert_eq!(app.provider_name, "test-provider");
+        let connection = crate::persistence::AuthDAO::new()
+            .unwrap()
+            .get_provider("meridian")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(old_connection).unwrap(),
+            serde_json::to_value(connection).unwrap()
+        );
     }
 
     fn click_dialog_text(buffer: &ratatui::buffer::Buffer, text: &str) -> MouseEvent {

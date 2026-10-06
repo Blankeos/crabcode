@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use crate::model::discovery::{Model, Provider};
 
 pub mod commandcode;
+pub mod meridian;
 pub mod ollama;
 
 const CATALOG_EXTENSIONS_JSON: &str = include_str!("catalog_extensions.jsonc");
@@ -484,9 +485,9 @@ mod tests {
     #[test]
     fn catalog_extensions_do_not_create_provider() {
         let mut providers = HashMap::new();
-
         assert!(!merge_catalog_extensions(&mut providers));
         assert!(!providers.contains_key("xai"));
+        assert!(!providers.contains_key("meridian"));
     }
 
     #[test]

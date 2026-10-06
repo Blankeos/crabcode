@@ -74,6 +74,43 @@ If `XDG_CONFIG_HOME` is set, replace `~/.config` with `$XDG_CONFIG_HOME` in the 
 }
 ```
 
+## Providers and models
+
+Use `/connect` to manage provider connections and `/models` to choose a model. Connection methods depend on the provider: API keys, supported sign-in flows, or keyless local endpoints. Model references use `provider-id/model-id`; the `model` config sets the startup default when no saved active model or CLI override is present.
+
+The `provider` map can customize built-in providers or register compatible endpoints. For example:
+
+```jsonc title="crabcode.jsonc"
+{
+  "provider": {
+    "my-endpoint": {
+      "name": "My endpoint",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "{env:MODEL_ENDPOINT_KEY}"
+      },
+      "models": {
+        "coding-model": {
+          "name": "Coding Model",
+          "tool_call": true,
+          "limit": { "context": 128000, "output": 8192 }
+        }
+      }
+    }
+  }
+}
+```
+
+Replace the example model ID, capabilities, and limits with values supported by your endpoint. Omit `apiKey` for an unprotected endpoint; otherwise use its key, not backend account credentials. Use environment references rather than committing secrets to project config.
+
+Configured OpenAI-compatible endpoints are queried for their model list when available. Explicit model definitions remain usable if discovery is unsupported and take precedence over discovered metadata. `/refreshmodels` refreshes discovery; the `models` map also lets you override names, limits, and capabilities.
+
+Use `enabled_providers` to restrict discovery and selection, or `disabled_providers` to exclude providers. Disabled entries take precedence. See [OpenCode Compatibility](/config/opencode-compatibility) for supported provider settings.
+
+> [!NOTE]
+> **Meridian** is supported as a provider with automatic model discovery and optional endpoint-key authentication.
+
 ## Terminal UI
 
 Use `tui.compactMode` to explicitly control compact mode and its sticky message header:

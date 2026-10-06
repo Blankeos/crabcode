@@ -4452,6 +4452,21 @@ mod tests {
     }
 
     #[test]
+    fn meridian_opt_in_uses_endpoint_key_without_overriding_catalog() {
+        let value = json!({
+            "provider": {"meridian": {"options": {"apiKey": "x"}}}
+        });
+        let mut diagnostics = ConfigDiagnostics::default();
+        let config = parse_merged_config(&value, &mut diagnostics);
+        let provider = config.custom_providers.get("meridian").unwrap();
+        assert_eq!(provider.api_key.as_deref(), Some("x"));
+        assert!(provider.base_url.is_none());
+        assert!(provider.npm.is_none());
+        assert!(provider.models.is_empty());
+        assert!(diagnostics.warnings.is_empty());
+    }
+
+    #[test]
     fn parses_standard_custom_provider_options_and_model_metadata() {
         let mut diagnostics = ConfigDiagnostics::default();
         let config = parse_merged_config(
