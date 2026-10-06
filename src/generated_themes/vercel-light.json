@@ -192,8 +192,8 @@
       "light": "#999999"
     },
     "markdownListItem": {
-      "dark": "gray1000",
-      "light": "lightGray1000"
+      "dark": "blue900",
+      "light": "blue700"
     },
     "markdownListEnumeration": {
       "dark": "blue900",

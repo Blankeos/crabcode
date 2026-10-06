@@ -421,6 +421,8 @@ fn apply_markdown_theme(line: &mut Line<'_>, in_code_block: &mut bool, colors: &
         }
     }
 
+    highlight_task_list_markers(line, colors);
+
     for span in &mut line.spans {
         if span.style.fg.is_some() {
             continue;
@@ -437,6 +439,47 @@ fn apply_markdown_theme(line: &mut Line<'_>, in_code_block: &mut bool, colors: &
 
         span.style = span.style.fg(fg);
     }
+}
+
+/// tui-markdown folds unordered task markers into the bullet span, but emits
+/// ordered task markers in a separate span. Split only those marker spans so
+/// checkbox colors neither bleed into the body nor affect literal inline code.
+fn highlight_task_list_markers(line: &mut Line<'_>, colors: &ThemeColors) {
+    let mut spans = Vec::with_capacity(line.spans.len());
+    let mut after_list_marker = false;
+
+    for span in std::mem::take(&mut line.spans) {
+        let text = span.content.as_ref();
+        let trimmed = text.trim_start();
+        let checkbox_start = if matches!(trimmed, "- [x] " | "- [ ] ") {
+            Some(text.len() - trimmed.len() + 2)
+        } else if after_list_marker && matches!(text, "[x] " | "[ ] ") {
+            Some(0)
+        } else {
+            None
+        };
+        after_list_marker = is_detached_list_marker_text(text);
+
+        if let Some(start) = checkbox_start.filter(|_| span.style.bg.is_none()) {
+            if start > 0 {
+                spans.push(Span::styled(text[..start].to_string(), span.style));
+            }
+            let color = if &text[start..start + 3] == "[x]" {
+                colors.success
+            } else {
+                colors.text_weak
+            };
+            spans.push(Span::styled(
+                text[start..start + 3].to_string(),
+                span.style.fg(color),
+            ));
+            spans.push(Span::styled(text[start + 3..].to_string(), span.style));
+        } else {
+            spans.push(span);
+        }
+    }
+
+    line.spans = spans;
 }
 
 fn style_line(line: &mut Line<'_>, style: Style) {
@@ -734,6 +777,152 @@ mod tests {
         assert!(rendered.iter().any(|line| line.starts_with("2. Added")));
         assert!(!rendered.iter().any(|line| line.trim_end() == "1."));
         assert!(!rendered.iter().any(|line| line.trim_end() == "2."));
+    }
+
+    #[test]
+    fn vercel_list_markers_are_blue_in_both_modes() {
+        for (id, dark, expected) in [
+            ("vercel", true, Color::Rgb(0x52, 0xa8, 0xff)),
+            ("vercel-light", false, Color::Rgb(0x00, 0x70, 0xf3)),
+        ] {
+            let theme = crate::theme::Theme::bundled_themes()
+                .into_iter()
+                .find(|theme| theme.id == id)
+                .unwrap();
+            let colors = theme.get_colors(dark);
+            assert_eq!(colors.markdown_list_item, expected);
+            assert_eq!(colors.markdown_list_enumeration, expected);
+            let lines = render_markdown("- Plain\n- [x] Done\n- [ ] Pending\n\n1. First\n2. **Second**\n3. [x] Third\n4. [ ] Fourth\n", 80, &colors);
+            let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+            for marker in ["-", "1.", "2.", "3.", "4."] {
+                let matches: Vec<_> = spans
+                    .iter()
+                    .filter(|span| span.content.trim() == marker)
+                    .collect();
+                assert!(!matches.is_empty(), "missing {marker} for {id}");
+                assert!(matches.iter().all(|span| span.style.fg == Some(expected)));
+            }
+            assert!(spans
+                .iter()
+                .any(|span| span.content == "[x]" && span.style.fg == Some(colors.success)));
+            assert!(spans
+                .iter()
+                .any(|span| span.content == "[ ]" && span.style.fg == Some(colors.text_weak)));
+        }
+    }
+
+    #[test]
+    fn checklist_markers_use_theme_colors() {
+        let colors = test_colors();
+        let input = "- [x] Completed\n- [X] Uppercase\n- [ ] Pending\n  - [x] Nested\n\n1. [x] Ordered\n2. [ ] Waiting\n";
+        let lines = render_markdown(input, 80, &colors);
+        let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+
+        let checked: Vec<_> = spans.iter().filter(|span| span.content == "[x]").collect();
+        assert_eq!(checked.len(), 4);
+        assert!(checked
+            .iter()
+            .all(|span| span.style.fg == Some(colors.success)));
+        let unchecked: Vec<_> = spans.iter().filter(|span| span.content == "[ ]").collect();
+        assert_eq!(unchecked.len(), 2);
+        assert!(unchecked
+            .iter()
+            .all(|span| span.style.fg == Some(colors.text_weak)));
+        for body in [
+            "Completed",
+            "Uppercase",
+            "Pending",
+            "Nested",
+            "Ordered",
+            "Waiting",
+        ] {
+            let span = spans.iter().find(|span| span.content == body).unwrap();
+            assert_eq!(span.style.fg, Some(colors.markdown_text));
+        }
+        for span in spans.iter().filter(|span| span.content.trim() == "-") {
+            assert_eq!(span.style.fg, Some(colors.markdown_list_item));
+        }
+    }
+
+    #[test]
+    fn checklist_colors_follow_theme_overrides_and_cached_theme_changes() {
+        let mut colors = test_colors();
+        colors.success = ratatui::style::Color::Rgb(193, 42, 129);
+        colors.text_weak = ratatui::style::Color::Rgb(37, 138, 207);
+        let mut renderer = SimpleStreamingRenderer::new();
+        renderer.append("- [x] Done\n- [ ] Pending\n");
+
+        for (checked, unchecked) in [
+            (colors.success, colors.text_weak),
+            (
+                ratatui::style::Color::Rgb(222, 150, 39),
+                ratatui::style::Color::Rgb(143, 75, 201),
+            ),
+        ] {
+            colors.success = checked;
+            colors.text_weak = unchecked;
+            assert!(renderer.ensure_rendered(80, &colors, false));
+            let spans: Vec<_> = renderer
+                .rendered_lines()
+                .unwrap()
+                .iter()
+                .flat_map(|line| &line.spans)
+                .collect();
+            assert!(spans
+                .iter()
+                .any(|span| span.content == "[x]" && span.style.fg == Some(checked)));
+            assert!(spans
+                .iter()
+                .any(|span| span.content == "[ ]" && span.style.fg == Some(unchecked)));
+        }
+    }
+
+    #[test]
+    fn checklist_colors_survive_wrapping_without_coloring_body() {
+        let colors = test_colors();
+        let input = "- [x] **Completed** with several words wrapping onto more lines\n- [ ] *Pending* with several words wrapping onto more lines\n";
+        let lines = render_markdown(input, 24, &colors);
+        assert!(lines.len() > 2);
+        assert!(lines.iter().all(|line| line.width() <= 24));
+        let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+        assert!(spans
+            .iter()
+            .any(|span| span.content == "[x]" && span.style.fg == Some(colors.success)));
+        assert!(spans
+            .iter()
+            .any(|span| span.content == "[ ]" && span.style.fg == Some(colors.text_weak)));
+        assert!(spans.iter().any(|span| span.content == "Completed"
+            && span.style.add_modifier.contains(Modifier::BOLD)
+            && span.style.fg == Some(colors.markdown_strong)));
+        assert!(spans.iter().any(|span| span.content == "Pending"
+            && span.style.add_modifier.contains(Modifier::ITALIC)
+            && span.style.fg == Some(colors.markdown_emph)));
+        for span in spans
+            .iter()
+            .filter(|span| span.content.contains("words") || span.content.contains("lines"))
+        {
+            assert_eq!(span.style.fg, Some(colors.markdown_text));
+        }
+    }
+
+    #[test]
+    fn checklist_like_literals_are_not_highlighted() {
+        let mut colors = test_colors();
+        // Syntax-highlighted code may independently use green. Use a distinct
+        // theme color to detect checklist highlighting, not syntax colors.
+        colors.success = ratatui::style::Color::Rgb(197, 43, 131);
+        let input = "Prose [x] and [ ] are literal.\n\n- `[x] ` **code**\n- \\[x\\] **escaped**\n\n1. `[ ] ` **code**\n2. \\[x\\] **escaped**\n\n```markdown\n- [x] literal\n- [ ] literal\n```\n\n    - [x] indented code\n";
+        let lines = render_markdown(input, 80, &colors);
+        for span in lines.iter().flat_map(|line| &line.spans) {
+            assert_ne!(span.style.fg, Some(colors.success), "{span:?}");
+        }
+        let output = lines
+            .iter()
+            .map(line_to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(output.contains("- [x] literal"));
+        assert!(output.contains("- [ ] literal"));
     }
 
     #[test]
