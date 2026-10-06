@@ -27,6 +27,16 @@ static RUNTIME_EXTENSIONS: [&dyn RuntimeProviderCatalogExtension; 1] = [&ollama:
 /// - remote via `RemoteProviderCatalogExtension` i.e. commandcode
 pub struct ModelExtensions;
 
+/// Compose account-backed capabilities without networking or initiating login.
+/// Provider adapters own opt-in, credentials, defaults, and recovery policy.
+pub fn apply_capabilities(config: &mut crate::config::configuration::MergedConfig) {
+    let connection = crate::persistence::AuthDAO::new()
+        .ok()
+        .and_then(|auth| auth.get_provider(meridian::PROVIDER_ID).ok())
+        .flatten();
+    meridian::add_design_mcp(config, connection.as_ref());
+}
+
 pub trait ProviderCatalogExtension: Sync {
     fn provider_id(&self) -> &'static str;
     fn provider_name(&self) -> &'static str;
