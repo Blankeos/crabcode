@@ -19,7 +19,8 @@ pub struct SpawnDetachedOpts<'a> {
 
 /// Spawn a detached background job that survives crabcode exit.
 ///
-/// Unix: `/bin/sh -c command` in its own process group, stdout/stderr → output.log,
+/// Unix: `/bin/sh -c command` in its own session/process group (no controlling
+/// terminal), stdin → /dev/null, stdout/stderr → output.log.
 /// A detached waiter reaps the child (lazy status updates via prune).
 /// Windows: best-effort CREATE_NEW_PROCESS_GROUP + log redirect.
 pub async fn spawn_detached(opts: SpawnDetachedOpts<'_>) -> Result<JobMeta> {
@@ -76,18 +77,7 @@ fn spawn_detached_into(
     cmd.stderr(Stdio::from(log_err));
 
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                // Put child in its own process group (equivalent to setpgid(0,0)).
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    crate::utils::process::detach_from_terminal(&mut cmd);
 
     #[cfg(windows)]
     {
