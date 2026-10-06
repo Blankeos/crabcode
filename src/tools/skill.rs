@@ -61,35 +61,45 @@ impl ToolHandler for SkillTool {
         let store = crate::skill::get_skill_store()
             .ok_or_else(|| ToolError::Execution("Skill store not initialized".to_string()))?;
 
-        let info = store.get(name).ok_or_else(|| {
-            let available: Vec<String> = store.all().iter().map(|s| s.name.clone()).collect();
-            let msg = if available.is_empty() {
-                format!(
-                    "Skill \"{}\" not found. No skills are currently available.",
-                    name
-                )
-            } else {
-                format!(
-                    "Skill \"{}\" not found. Available skills: {}",
-                    name,
-                    available.join(", ")
-                )
-            };
-            ToolError::NotFound(msg)
-        })?;
+        load_skill(store, name)
+    }
+}
 
-        let dir = info
-            .location
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+fn load_skill(store: &crate::skill::SkillStore, name: &str) -> Result<ToolResult, ToolError> {
+    let info = store.get(name).ok_or_else(|| {
+        if store.get_installed(name).is_some() {
+            return ToolError::Execution(format!(
+                "Skill \"{name}\" is disabled. Enable it in /skills before loading it."
+            ));
+        }
+        let available: Vec<String> = store.all().iter().map(|s| s.name.clone()).collect();
+        let msg = if available.is_empty() {
+            format!(
+                "Skill \"{}\" not found. No skills are currently available.",
+                name
+            )
+        } else {
+            format!(
+                "Skill \"{}\" not found. Available skills: {}",
+                name,
+                available.join(", ")
+            )
+        };
+        ToolError::NotFound(msg)
+    })?;
 
-        let base_url = format!("file://{}", dir.display());
+    let dir = info
+        .location
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        // Sample up to 10 files in the skill directory (excluding SKILL.md)
-        let file_list = sample_skill_files(&dir, 10);
+    let base_url = format!("file://{}", dir.display());
 
-        let output = format!(
+    // Sample up to 10 files in the skill directory (excluding SKILL.md)
+    let file_list = sample_skill_files(&dir, 10);
+
+    let output = format!(
             "<skill_content name=\"{name}\">\n\
              # Skill: {name}\n\n\
              {content}\n\n\
@@ -105,13 +115,12 @@ impl ToolHandler for SkillTool {
             files = file_list,
         );
 
-        Ok(ToolResult::new(format!("Loaded skill: {}", name), output)
-            .with_metadata("name", serde_json::Value::String(info.name.clone()))
-            .with_metadata(
-                "dir",
-                serde_json::Value::String(dir.to_string_lossy().to_string()),
-            ))
-    }
+    Ok(ToolResult::new(format!("Loaded skill: {}", name), output)
+        .with_metadata("name", serde_json::Value::String(info.name.clone()))
+        .with_metadata(
+            "dir",
+            serde_json::Value::String(dir.to_string_lossy().to_string()),
+        ))
 }
 
 fn sample_skill_files(dir: &std::path::Path, limit: usize) -> String {
@@ -138,4 +147,43 @@ fn sample_skill_files(dir: &std::path::Path, limit: usize) -> String {
         .map(|f| format!("<file>{}</file>", f))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persistence::PrefsDAO;
+    use crate::skill::{SkillInfo, SkillStore};
+
+    #[test]
+    fn disabled_skills_cannot_be_loaded_or_advertised_in_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SkillStore::for_test(["alpha", "beta"].map(|name| SkillInfo {
+            name: name.to_string(),
+            description: None,
+            location: dir.path().join(name).join("SKILL.md"),
+            content: format!("{name} instructions"),
+        }));
+        let prefs = PrefsDAO::in_memory();
+        assert!(load_skill(&store, "alpha")
+            .unwrap()
+            .output
+            .contains("alpha instructions"));
+
+        store.set_enabled("alpha", false, &prefs).unwrap();
+        let err = load_skill(&store, "alpha").unwrap_err().to_string();
+        assert!(err.contains("disabled"));
+        assert!(err.contains("/skills"));
+        let err = load_skill(&store, "missing").unwrap_err().to_string();
+        assert!(err.contains("beta"));
+        assert!(!err.contains("alpha"));
+
+        store.set_enabled("beta", false, &prefs).unwrap();
+        assert!(load_skill(&store, "missing")
+            .unwrap_err()
+            .to_string()
+            .contains("No skills"));
+        store.set_enabled("alpha", true, &prefs).unwrap();
+        assert!(load_skill(&store, "alpha").is_ok());
+    }
 }

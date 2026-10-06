@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
+
+use crate::persistence::PrefsDAO;
 
 static SKILL_STORE: OnceLock<SkillStore> = OnceLock::new();
 
@@ -27,6 +29,7 @@ pub struct SkillInfo {
 pub struct SkillStore {
     skills: HashMap<String, SkillInfo>,
     dirs: HashSet<PathBuf>,
+    disabled: Arc<RwLock<BTreeSet<String>>>,
 }
 
 impl SkillStore {
@@ -102,20 +105,73 @@ impl SkillStore {
             crate::startup_diag!("Loaded {} skills", skills.len());
         }
 
-        Self {
+        let store = Self {
             skills,
             dirs: state.dirs,
+            disabled: Arc::new(RwLock::new(BTreeSet::new())),
+        };
+        if let Err(err) = PrefsDAO::new().and_then(|prefs| store.load_preferences(&prefs)) {
+            crate::startup_diag!("Warning: could not load skill preferences: {err}");
         }
+        store
     }
 
+    fn load_preferences(&self, prefs: &PrefsDAO) -> anyhow::Result<()> {
+        *self.disabled.write().unwrap() = prefs.get_disabled_skills()?;
+        Ok(())
+    }
+
+    /// Lookup for execution: disabled skills cannot be loaded.
     pub fn get(&self, name: &str) -> Option<&SkillInfo> {
+        self.get_installed(name).filter(|_| self.is_enabled(name))
+    }
+
+    pub fn get_installed(&self, name: &str) -> Option<&SkillInfo> {
         self.skills.get(name)
     }
 
+    /// The enabled catalog used by prompts, suggestions, and integrations.
     pub fn all(&self) -> Vec<&SkillInfo> {
+        let disabled = self.disabled.read().unwrap();
+        self.installed()
+            .into_iter()
+            .filter(|skill| !disabled.contains(&skill.name))
+            .collect()
+    }
+
+    /// The full catalog for management, including disabled skills, sorted A–Z
+    /// without treating uppercase names as a separate group.
+    pub fn installed(&self) -> Vec<&SkillInfo> {
         let mut list: Vec<&SkillInfo> = self.skills.values().collect();
-        list.sort_by(|a, b| a.name.cmp(&b.name));
+        list.sort_by_cached_key(|skill| (skill.name.to_lowercase(), skill.name.as_str()));
         list
+    }
+
+    pub fn is_enabled(&self, name: &str) -> bool {
+        self.skills.contains_key(name) && !self.disabled.read().unwrap().contains(name)
+    }
+
+    /// Persist before publishing the change, so a failed save leaves runtime
+    /// availability unchanged. Clones share activation state with tool callers.
+    pub fn set_enabled(&self, name: &str, enabled: bool, prefs: &PrefsDAO) -> anyhow::Result<()> {
+        if !self.skills.contains_key(name) {
+            anyhow::bail!("Skill \"{name}\" not found");
+        }
+        let mut disabled = self.disabled.write().unwrap();
+        *disabled = prefs.set_skill_enabled(name, enabled)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(skills: impl IntoIterator<Item = SkillInfo>) -> Self {
+        Self {
+            skills: skills
+                .into_iter()
+                .map(|skill| (skill.name.clone(), skill))
+                .collect(),
+            dirs: HashSet::new(),
+            disabled: Arc::new(RwLock::new(BTreeSet::new())),
+        }
     }
 
     pub fn dirs(&self) -> &HashSet<PathBuf> {
@@ -286,6 +342,152 @@ fn fallback_sanitize_yaml(frontmatter: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_store() -> SkillStore {
+        SkillStore::for_test(["beta", "alpha"].map(|name| SkillInfo {
+            name: name.to_string(),
+            description: Some(format!("Use {name}")),
+            location: PathBuf::from(format!("/skills/{name}/SKILL.md")),
+            content: format!("{name} instructions"),
+        }))
+    }
+
+    #[test]
+    fn disabled_skills_stay_installed_but_are_not_available() {
+        let store = test_store();
+        let clone = store.clone();
+        let prefs = PrefsDAO::in_memory();
+        assert_eq!(
+            store
+                .all()
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+        assert!(!store.is_enabled("missing"));
+
+        store.set_enabled("alpha", false, &prefs).unwrap();
+        assert!(store.get("alpha").is_none());
+        assert!(clone.get("alpha").is_none());
+        assert!(store.get_installed("alpha").is_some());
+        assert_eq!(store.installed().len(), 2);
+        assert_eq!(
+            store
+                .all()
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["beta"]
+        );
+
+        let guidance = crate::prompt::render_skill_guidance(store.all());
+        assert!(!guidance.contains("<name>alpha</name>"));
+        assert!(guidance.contains("<name>beta</name>"));
+
+        // Reconstructed activation state, as on restart, retains disabled names.
+        let reloaded = test_store();
+        reloaded.load_preferences(&prefs).unwrap();
+        assert!(reloaded.get("alpha").is_none());
+
+        store.set_enabled("alpha", true, &prefs).unwrap();
+        assert!(clone.get("alpha").is_some());
+        assert!(prefs.get_disabled_skills().unwrap().is_empty());
+    }
+
+    #[test]
+    fn disabled_preferences_survive_removal_and_reinstallation_by_name() {
+        let prefs = PrefsDAO::in_memory();
+        let store = test_store();
+        store.set_enabled("alpha", false, &prefs).unwrap();
+
+        let removed = SkillStore::for_test([store.get_installed("beta").unwrap().clone()]);
+        removed.load_preferences(&prefs).unwrap();
+        assert!(removed.get_installed("alpha").is_none());
+        removed.set_enabled("beta", false, &prefs).unwrap();
+        assert_eq!(
+            prefs.get_disabled_skills().unwrap(),
+            ["alpha".to_string(), "beta".to_string()].into()
+        );
+
+        let reinstalled = test_store();
+        reinstalled.load_preferences(&prefs).unwrap();
+        assert!(reinstalled.get_installed("alpha").is_some());
+        assert!(!reinstalled.is_enabled("alpha"));
+        assert!(!reinstalled.is_enabled("beta"));
+
+        // A new frontmatter name is a new skill, even at the same location.
+        let mut renamed = store.get_installed("alpha").unwrap().clone();
+        renamed.name = "renamed-alpha".to_string();
+        let renamed = SkillStore::for_test([renamed]);
+        renamed.load_preferences(&prefs).unwrap();
+        assert!(renamed.is_enabled("renamed-alpha"));
+    }
+
+    #[test]
+    fn disabling_all_skills_removes_prompt_guidance() {
+        let store = test_store();
+        let prefs = PrefsDAO::in_memory();
+        for skill in store.installed() {
+            store.set_enabled(&skill.name, false, &prefs).unwrap();
+        }
+        assert!(store.all().is_empty());
+        assert!(crate::prompt::render_skill_guidance(store.all()).is_empty());
+        assert_eq!(store.installed().len(), 2);
+    }
+
+    #[test]
+    fn restored_skill_catalog_tracks_activation_without_rewriting_other_rules() {
+        let store = test_store();
+        let prefs = PrefsDAO::in_memory();
+        let mut prompt = format!(
+            "base rules\n\n{}\n\ncustom rules <available_skills>not our catalog</available_skills>",
+            crate::prompt::render_skill_guidance(store.all())
+        );
+        let original = prompt.clone();
+        assert!(!crate::prompt::refresh_skill_guidance(
+            &mut prompt,
+            store.all()
+        ));
+        assert_eq!(prompt, original);
+
+        store.set_enabled("alpha", false, &prefs).unwrap();
+        assert!(crate::prompt::refresh_skill_guidance(
+            &mut prompt,
+            store.all()
+        ));
+        assert!(!prompt.contains("<name>alpha</name>"));
+        assert!(prompt.contains("<name>beta</name>"));
+        assert!(prompt.starts_with("base rules"));
+        assert!(
+            prompt.ends_with("custom rules <available_skills>not our catalog</available_skills>")
+        );
+
+        store.set_enabled("beta", false, &prefs).unwrap();
+        crate::prompt::refresh_skill_guidance(&mut prompt, store.all());
+        assert!(!prompt.contains("Skills provide specialized instructions"));
+        assert!(prompt.contains("not our catalog"));
+
+        store.set_enabled("alpha", true, &prefs).unwrap();
+        crate::prompt::refresh_skill_guidance(&mut prompt, store.all());
+        assert!(prompt.contains("<name>alpha</name>"));
+        assert!(!prompt.contains("<name>beta</name>"));
+        let refreshed = prompt.clone();
+        crate::prompt::refresh_skill_guidance(&mut prompt, store.all());
+        assert_eq!(prompt, refreshed);
+    }
+
+    #[test]
+    fn malformed_activation_preferences_do_not_change_availability() {
+        let store = test_store();
+        let prefs = PrefsDAO::in_memory();
+        prefs
+            .set_json_pref("disabled_skills", &serde_json::json!("invalid"))
+            .unwrap();
+        assert!(store.set_enabled("alpha", false, &prefs).is_err());
+        assert!(store.is_enabled("alpha"));
+        assert!(store.set_enabled("missing", false, &prefs).is_err());
+    }
 
     #[test]
     fn test_fallback_sanitize_yaml() {

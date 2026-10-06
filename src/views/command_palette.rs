@@ -66,7 +66,7 @@ impl CommandPaletteState {
                 "open-skills-dialog",
                 "Skills",
                 "Model",
-                "View and select available skills",
+                "View and toggle installed skills",
                 None,
                 &[],
             ),
@@ -576,7 +576,7 @@ fn is_skill_backed_command(registry: &Registry, command_name: &str) -> bool {
     }
 
     crate::skill::get_skill_store()
-        .and_then(|store| store.get(command_name))
+        .and_then(|store| store.get_installed(command_name))
         .is_some()
 }
 

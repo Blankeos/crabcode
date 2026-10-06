@@ -818,7 +818,9 @@ fn skill_command_result(
 
 pub fn register_skill_commands(registry: &mut Registry) {
     if let Some(store) = crate::skill::get_skill_store() {
-        for skill in store.all() {
+        // Register installed names so enabling a skill does not need a restart.
+        // The handler enforces current availability; these entries are hidden.
+        for skill in store.installed() {
             if registry.has_public_command(&skill.name) {
                 continue;
             }
@@ -1139,7 +1141,7 @@ pub fn register_all_commands(registry: &mut Registry) {
 
     registry.register(Command {
         name: "skills".to_string(),
-        description: "List available skills".to_string(),
+        description: "View and toggle installed skills".to_string(),
         handler: handle_skills,
         hidden_tokens: vec![],
         chat_only: false,
@@ -1202,6 +1204,21 @@ mod tests {
             skill_command_result(&parsed, None),
             CommandResult::Error("Unknown command: test-skill-prompt".to_string())
         );
+        let prefs = crate::persistence::PrefsDAO::in_memory();
+        store
+            .set_enabled("test-skill-prompt", false, &prefs)
+            .unwrap();
+        assert_eq!(
+            skill_command_result(&parsed, Some(&store)),
+            CommandResult::Error("Unknown command: test-skill-prompt".to_string())
+        );
+        store
+            .set_enabled("test-skill-prompt", true, &prefs)
+            .unwrap();
+        assert!(matches!(
+            skill_command_result(&parsed, Some(&store)),
+            CommandResult::RunPrompt { .. }
+        ));
     }
 
     #[tokio::test]

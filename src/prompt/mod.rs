@@ -2,6 +2,11 @@ use crate::tools::ToolRegistry;
 
 mod rules;
 
+const SKILL_GUIDANCE_PREFIX: &str = "Skills provide specialized instructions and workflows for specific tasks.\n\
+    Use the skill tool to load a skill when a task matches its description.\n\
+    When the user explicitly mentions a listed skill as @name or /name, use the skill tool to load it before responding.\n\
+    <available_skills>\n";
+
 pub(crate) fn render_skill_guidance<'a>(
     skills: impl IntoIterator<Item = &'a crate::skill::SkillInfo>,
 ) -> String {
@@ -21,12 +26,34 @@ pub(crate) fn render_skill_guidance<'a>(
         return String::new();
     }
 
-    format!(
-        "Skills provide specialized instructions and workflows for specific tasks.\n\
-         Use the skill tool to load a skill when a task matches its description.\n\
-         When the user explicitly mentions a listed skill as @name or /name, use the skill tool to load it before responding.\n\
-         <available_skills>\n{skills_xml}\n</available_skills>"
-    )
+    format!("{SKILL_GUIDANCE_PREFIX}{skills_xml}\n</available_skills>")
+}
+
+/// Refresh only our generated catalog in a restored system prompt. Do not
+/// rewrite skill content already loaded in conversation history or user rules.
+pub(crate) fn refresh_skill_guidance<'a>(
+    prompt: &mut String,
+    skills: impl IntoIterator<Item = &'a crate::skill::SkillInfo>,
+) -> bool {
+    let guidance = render_skill_guidance(skills);
+    if let Some(start) = prompt.find(SKILL_GUIDANCE_PREFIX) {
+        if let Some(end) = prompt[start..].find("</available_skills>") {
+            let end = start + end + "</available_skills>".len();
+            if prompt[start..end] == guidance {
+                return false;
+            }
+            prompt.replace_range(start..end, &guidance);
+            return true;
+        }
+    }
+    if !guidance.is_empty() {
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&guidance);
+        return true;
+    }
+    false
 }
 
 const WORKSPACE_DISCOVERY_GUIDANCE: &str = r#"Workspace discovery:

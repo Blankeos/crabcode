@@ -4510,22 +4510,11 @@ impl App {
                     &mut self.skills_dialog_state,
                     key,
                 );
-                match action {
-                    crate::views::skills_dialog::SkillsDialogAction::SelectSkill {
-                        skill_id: _,
-                    } => {
-                        if !self.skills_dialog_state.dialog.is_visible() {
-                            self.overlay_focus = OverlayFocus::None;
-                        }
-                        true
-                    }
-                    crate::views::skills_dialog::SkillsDialogAction::None => {
-                        if !self.skills_dialog_state.dialog.is_visible() {
-                            self.overlay_focus = OverlayFocus::None;
-                        }
-                        false
-                    }
+                self.handle_skills_dialog_action(action);
+                if !self.skills_dialog_state.dialog.is_visible() {
+                    self.overlay_focus = OverlayFocus::None;
                 }
+                true
             }
             OverlayFocus::McpDialog => {
                 let action = handle_mcp_dialog_key_event(&mut self.mcp_dialog_state, key);
@@ -5811,10 +5800,11 @@ impl App {
                 }
             }
         } else if self.overlay_focus == OverlayFocus::SkillsDialog {
-            crate::views::skills_dialog::handle_skills_dialog_mouse_event(
+            let action = crate::views::skills_dialog::handle_skills_dialog_mouse_event(
                 &mut self.skills_dialog_state,
                 mouse,
             );
+            self.handle_skills_dialog_action(action);
             if !self.skills_dialog_state.dialog.is_visible() {
                 self.overlay_focus = OverlayFocus::None;
             }
@@ -9234,33 +9224,45 @@ impl App {
     }
 
     fn show_skills_dialog(&mut self) {
-        use crate::ui::components::dialog::DialogItem;
-
-        let mut items: Vec<DialogItem> = Vec::new();
-
+        self.skills_dialog_state =
+            crate::views::skills_dialog::init_skills_dialog("Skills", vec![]);
         if let Some(store) = crate::skill::get_skill_store() {
-            for skill in store.all() {
-                items.push(DialogItem {
-                    id: skill.name.clone(),
-                    name: skill.name.clone(),
-                    group: "Skills".to_string(),
-                    description: skill.description.clone().unwrap_or_default(),
-                    tip: if skill.description.is_some() {
-                        None
-                    } else {
-                        Some("No description".to_string())
-                    },
-                    provider_id: String::new(),
-                    active: false,
-                });
-            }
+            self.skills_dialog_state.refresh(store);
         }
-
-        items.sort_by(|a, b| a.id.cmp(&b.id));
-
-        self.skills_dialog_state = crate::views::skills_dialog::init_skills_dialog("Skills", items);
         self.skills_dialog_state.dialog.show();
         self.overlay_focus = OverlayFocus::SkillsDialog;
+    }
+
+    fn handle_skills_dialog_action(
+        &mut self,
+        action: crate::views::skills_dialog::SkillsDialogAction,
+    ) {
+        let crate::views::skills_dialog::SkillsDialogAction::Toggle { skill_id } = action else {
+            return;
+        };
+        let result = (|| -> anyhow::Result<()> {
+            let store = crate::skill::get_skill_store()
+                .ok_or_else(|| anyhow::anyhow!("Skill store not initialized"))?;
+            let prefs = self
+                .prefs_dao
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Preferences are unavailable"))?;
+            store.set_enabled(&skill_id, !store.is_enabled(&skill_id), prefs)?;
+            self.skills_dialog_state.refresh(store);
+            let skills = Self::skill_suggestions(&self.agent_registry);
+            if let Some(autocomplete) = self.input.autocomplete.as_mut() {
+                autocomplete.skills = skills;
+            }
+            Ok(())
+        })();
+        if let Err(err) = result {
+            self.play_sound_event(crate::sound::SoundEvent::Error);
+            push_toast(Toast::new(
+                format!("Failed to toggle skill: {err}"),
+                ToastLevel::Error,
+                Some(std::time::Duration::from_secs(3)),
+            ));
+        }
     }
 
     fn handle_mcp_slash(&mut self, args: &[String]) {
@@ -11848,6 +11850,17 @@ impl App {
             });
             let system_msg = crate::session::types::Message::system(system_prompt);
             messages.insert(0, system_msg);
+        } else if let Some(store) = crate::skill::get_skill_store() {
+            for message in &mut messages {
+                if message.role == crate::session::types::MessageRole::System
+                    && !crate::session::compaction::is_compaction_marker(message)
+                {
+                    if crate::prompt::refresh_skill_guidance(&mut message.content, store.all()) {
+                        message.token_count = None;
+                    }
+                    break;
+                }
+            }
         }
 
         Self::apply_turn_guidance(&mut messages, turn_guidance);
