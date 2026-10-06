@@ -1,4 +1,5 @@
 - [x] VERY VERY far future. Rearchitect - multi-workspace, just like the codex desktop app.
+
   - Since it's a terminal, we have a special case to make it run even when closed, or when there are multiple instances of the program running. They have the same sort of "streaming" state. I will elaborate.
   - Mutli-workspace feature is essentially having multiple "chat sessions" running. Currently.. Every run of `crabcode` is its own isolated session.
   - We want to change that by making `crabcode` a multi-workspace agentic TUI by default, just like the codex desktop app, superconductor, etc. But simpler because the idea is literally just like a chat app on the web. Wherein, I want to be able to check the "sessions" in the sidebar, create new chats in the same tab (in this case a tab is a run of `crabcode`).
@@ -15,6 +16,7 @@
 - [x] Scrollbar, make it like opencode. As thin as opencode. That's the only change I want really.
 
 - [x] Add print-mode just like `opencode run "<PROMPT>"`. See the reference. But two things I want to deviate from the original implementation:
+
   - The preamble, just print whatever is printed, that's IT!
   - Also add Call it `opencode -p`. It's gonna be exactly the same as `opencode run`.
   - Add `--no-session-persistence` flag, exactly like Claude Code.
@@ -63,6 +65,7 @@
 - [x] Rendering: Thinking Rendering always has this massive space below it, even if the agent didn't really think much.
 
 - [x] Tool call rendering:
+
   - [x] editing files w/ diffs, like opencode does.
   - [x] webfetch rendering like codex does.
   - [x] todowrite - better looking, like opencode does.
@@ -87,6 +90,7 @@
 - [x] Highlight enhancements, if I click 1 place, then shift+click another. Treat it like the highlight in the browser that doesn't need a drag. Whatever I last clicked (without shift+click), treat it as the anchor for the "select start", and then whatever I shift+click after, treat it as a "select end" and autohighlight that part. (not supported)
 
 - [x] Remote usage. Also talk about how to use for remote usages in the docs later. I can imagine multiple usecases. But this stands out in particular:
+
   - Remotely accessing crabcode on VPS / another device.
     - via another PC.
     - via phone.
@@ -99,10 +103,12 @@
 - [x] compaction
 
 - [x] More mouse-friendly chat input box floating popovers i.e. `@` for files. `/` for commands. Requirements:
+
   - scroll w/ my mouse (no thumbs, just scroll)
   - click the item with my mouse
 
 - [x] Benchmark script to test performance against opencode + codex in comparison. As cheaply as possible. Using the same models. It doesn't need to be a state-of-the-art benchmark. It just needs to test a couple of usual things i.e. small stuff, see if the agent is at least just as capable, because what we're chasing is kinda exactly just the same as codex/opencode, not better. The "better" will be in the UX, it will have the better UX changes I want. So I will want to also explicitly say it's a make-shift benchmark. I want the benchmark to output:
+
   - [x] Cost to test - this is just my personal add
   - [x] Idk what metric usually is used, to define "better". - the goal is crabcode will have the same score as the others.
 
@@ -113,6 +119,7 @@
 - [x] better timeline highlighting of each "message"
 
 - [x] Timeline highlighting of each message is not very accurate. It's accurate for "my messages". but for the ai responses, ai can seem to only highlight, even via `ctrl+x g`, the first few messages before a tool call happens. This is the same with the mouse hover effects. Expectations:
+
   - I hover/timelinehighlight my message, it encapsulates the entire message box (met)
   - I hover/timelinehighlight an ai response's message, it encapsulates the entire block, including tool calls, including the thinking, etc. (not met).
   - Essentially, I was imagining kinda the same as having a 'copy' button under each "message" record in the "messages: []" array in vercel ai sdk. That's kinda the point here. But for the limitations of TUIs, I want to just use a click on the entire message block (mine or the AI response, and open a dialog -- which is mostly the current behavior now)
@@ -156,6 +163,7 @@ Replaced at line 239
 - [x] Codex's "update plan" tool sometimes has a weird premble before the actual checklist shows... Is this relevant for crabcode? Should we update our tool? Can we do it too?
 
 - [x] ~Pressing 'enter' while focusing on a grouplabel header for a "workspace". Make it show a dropdown on the right
+
   - Archive (can unarchive on new sessions)~ - dont do anymore
   - Collapse
   - Uncollapse
@@ -169,6 +177,7 @@ Replaced at line 239
 - [x] I have a "complete", "error", "question" (use this in both 'question' and 'permission') sounds. I'd love for them to be bundled in, or at least downloaded by default via fetching from github raw link if it doesnt exist yet.
 
 - [x] Like opencode, let's make a command palette via `ctrl+p`.
+
   - [x] Additionally, since the bottom area takes up too much space with `/ commands ctrl+x shortcuts tab agents ctrl+cc quit`. Let's reduce it to just `ctrl+p`?.
 
 - [x] linebreaks aren't really reserved when I finally send the message in the chat UI. For instance I send,
@@ -189,6 +198,7 @@ I want - [x] To do this But I dont want to do this
 - [x] Make the "bash" permission parity to codex. Also I currently dont see the command that it wants to run, so I'm kinda blind on what to run here.
 
 - [x] When pasting images and it creates this [Image #1] tag, make it hoverable (just change the color, not the background), then once clicked, goes to the preferred editor of the user.
+
   - Multiple paths here:
     - Should it be configurable?
     - Autodetected depending on the tool used: i.e. if Wezterm, other terminals "open w/ Finder on mac, or native image opener". If inside Zed, open image with Zed. If inside VSCode/Cursor, open with that IDE. (Ambitious but idk if possible)
@@ -211,6 +221,7 @@ I want - [x] To do this But I dont want to do this
 - [x] Mouse scroll ux just like opencode, when highlighting. Needs to scroll when I reach edges as I drag and click.
 
 - [x] Sometimes list items that have "bold" characters on them kinda break a new line between the number enum and the actual sentence i.e.
+
   - 1. <br/>**Replaced old indicator**.
   - Even though when I copy it looks like
 
@@ -227,6 +238,7 @@ I want - [x] To do this But I dont want to do this
 - [x] Make "▼ 💭 Thinking" rendered like this. And an accordion, so if I click it with my mouse, or with a special hotkey + command palette command. It can be toggled on and off.
 
 - [x] Subagent UI view is not rendering the full table it seems like.. I always see this.. just the top.
+
   - `┌─────────────────────────┬────────────────────────────────────────────────────────────────────────────` - never the full table
   - Thouh I think the table does have content. I think it's just being weird.
 
@@ -257,6 +269,7 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 - [x] IN the "Overview" of ocnfiguration docs, mention which ones "merge" int he "File Layout", very useful info. Like a legend on the table with an emoji, then say "\* Merges across both"
 
 - [x] Working websearch APIs
+
   - [x] exa-mcp - what opencode uses (default on). limits not visible. free, frictionless. no need for user to setup.
   - [x] tavily - I think has the best usage 1000q/m + free tier
   - [x] exa - has free + best quality, good 1000q/m + free tier, expensive after.
@@ -273,11 +286,13 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
 - [x] ~~Generate images with a codex exec call. No oauth spoofing needed. Just needs codex to be there.~~ (For now, no... lol)
 
 - [x] Scroll is not intuitive for interruptions. I'm using Logitech MX Master 3s, if I scroll the mouse SUPER down like at super speed. The scroll seems to just get stuck even if I scroll the other direction or just stop.
+
   - [x] Also slightly unperformant. I can definitely notice the animations slowing down when I scroll
 
 - [x] Add commandcode.ai since opencode is not planning to.
 
 - [x] /copy should now open a dialog more options to copy.
+
   - [x] Copy session transcript to clipboard (first option, so I can just double-enter for the default behavior)
   - [x] Copy session id
   - [x] Copy session title
@@ -286,6 +301,7 @@ For the /connect dialog it's a little unique. Let's keep it. Before this, I want
     And I also think it should have shortcuts for autoselecting them like if I press a certain character.
 
 - [x] Tables bug:
+
   - [x] I see a...
 
   ```
@@ -374,6 +390,7 @@ I think this is how the TUI works already anyway right?
 - [x] More than build | plan agents. /agents command (like opencode, opens a select agent cmdk dialog basically). and inferring what's in the "agents" config. command palette as well.
 
 - [x] I want the user input cursor + mousescroll behavior to be more like the browser. So the current issue is when I have multiple lines in the chat input and it's scrollable.
+
   - Current: When I scroll with my mouse, the cursor also changes along with the scroll view.
   - Expected: When I scroll with my mouse, the cursor stays in place, does not change, even when out of bounds. Then when I type, even when out of bounds, the scroll goes back to where my cursor is.
 
@@ -403,6 +420,7 @@ I think this is how the TUI works already anyway right?
 - [x] tps/duration counter still goes during non-llm waits i.e. questions, permission asks. Can we make sure to ignore them so they dont affect tps?
 
 - [x] Get mcps to work?
+
   - [x] In the tui: `/mcp` and cmd palette
   - [x] In the remote browser ui: I wanna see it in those dialog abs next to servers, skills, mcp.
 
@@ -440,19 +458,23 @@ I think this is how the TUI works already anyway right?
 - [x] When typing subagents names.. highlight them. In the chat input.
 
 - [ ] Cool Grok features
+
   - [x] I wanna imitate grok-build's `/compact-mode` and by default a sticky "most recent message i made" is just sticky top-0 essentially, so no matter where I am, my latest message follows the response it triggered
   - [ ] /create-workflow /workflows /workflow ??
   - [ ] memory??
 
 - [x] When autocompleting a "command" and my autosuggestions is focusing it and I press 'tab or enter'... It doesnt submit it... It just autocompletes it in the chat, but doesnt submit it.. This matches opencode behavior.. This is only for commands tho.
+
   - Clarified: only **custom** commands fill without submit; **builtins** (`/compact`, `/refreshmodels`, …) auto-submit.
 
 - [ ] opencode v2-like
+
   - [ ] apis for `crabcode session list` or something. So agents can just use the cli instead of checking the .db on its own.
   - [ ] Create sessions for you, and read sessions, etc.
   - [ ] toolsearch and codemode built-in https://x.com/thdxr/status/2085865399195779308 saves a lot of tokens
 
 - [x] Massively improve compaction, shouldnt remove the history for future reading, I think that's what's happening right now... Idk how others work but they dont really get rid of history in the db.. probabyl just make a summary and disable the other previous messages before compaction (that is my assumption)
+
   - [x] Be able to cancel compact
   - [x] Be able to queue a /compact
   - Soft compaction (OpenCode-style): keep full transcript in UI/DB, filter model context from latest summary boundary
@@ -460,6 +482,7 @@ I think this is how the TUI works already anyway right?
   - Queue `/compact` while streaming/compacting
 
 - [x] aisdk extract readiness (`src/aisdk/`) — **7/10 → 9/10** (10/10 = external users + API freeze). Domain is already SDK-shaped; these are packaging/host hooks, not product coupling. See `src/aisdk/README.md`.
+
   - [x] Replace `crate::emit_log!` in providers with a neutral story (`tracing`, optional log callback, or host-injected hook) — **7 → ~8**
   - [x] Drop `crate::aisdk::...` paths in `mod.rs` / re-exports so the tree is valid as a crate root — **~8 → ~8.5**
   - [x] Audit absolute `crate::chunk` / `crate::retry` / etc. under extract (tree becomes crate root, not a submodule) — bundled with previous
@@ -470,12 +493,13 @@ I think this is how the TUI works already anyway right?
 - [x] compacting context but when done, it doesnt show the 'Context compacted (56.1K -> 19.2K, saved 66%)' message part in the UI scrollable part.. Only see it after I close and open. (fixed: soft-compaction marker is mid-history; after /compact we now scroll+highlight the marker live)
 
 - [x] Light mode themes + grok build theme (people like the monochrome aesthetic)
+
   - [x] Add the background now, no more transparent background - but 'transparency' is activateable
 
 - [x] Thought time with Thought for 0.2s, and Thinking...
 
 - [x] I wanna be able to type `/compact|` (imagine "|" is my cursor) and press `ctrl-t` or `ctrl-x m`.. Right now doing those kinda make me stay in the focus of the autosuggestions popover, so I think it's an event handling thing, but it's such an often thing that happens that I wanna make a special case for it.
-
+      :q
 - [x] I wanna make it scrollable even when doing ctrl-f find, with my mouse
 - [x] "providers" config, does it work
 
@@ -506,3 +530,5 @@ I think this is how the TUI works already anyway right?
 - [ ] the prompt history cycler has some bugs, sometimes when crabcode crashes, I press `up` and it actually rewinded to the oldest prompt i had???
 
 - [x] For errors, when stuff is toasted, let me click the toast so I can copy the whole thing to clipboard.
+
+- [ ] Deactivateable/activateable skills like in claude

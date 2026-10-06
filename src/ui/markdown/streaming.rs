@@ -1,5 +1,5 @@
 use crate::theme::ThemeColors;
-use crate::ui::markdown::table::{contains_markdown_table, preprocess_tables};
+use crate::ui::markdown::table::{contains_markdown_table, render_tables};
 use crate::ui::wrapping::{wrap_styled_line, WrapOptions};
 use ratatui::{
     style::{Modifier, Style},
@@ -218,43 +218,29 @@ impl tui_markdown::StyleSheet for MarkdownStyleSheet {
 
 /// Render markdown content to lines
 /// This uses tui-markdown to parse and render the markdown.
-/// Tables are pre-processed and rendered with Unicode box-drawing characters.
+/// Tables are rendered as styled lines with Unicode box-drawing characters.
 pub fn render_markdown(
     content: &str,
     max_width: usize,
     colors: &ThemeColors,
 ) -> Vec<Line<'static>> {
     let max_width = max_width.max(1);
-    // Pre-process tables: render them as Unicode box-drawing text
-    let processed = preprocess_tables(content, max_width);
-
-    render_processed_markdown(processed.as_ref(), max_width, colors)
-}
-
-fn render_processed_markdown(
-    processed: &str,
-    max_width: usize,
-    colors: &ThemeColors,
-) -> Vec<Line<'static>> {
     let mut result = Vec::new();
-    let mut markdown_chunk = String::new();
-
-    for line in processed.split_inclusive('\n') {
-        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
-        if is_preprocessed_table_line(line_without_newline.trim_end()) {
-            result.extend(render_markdown_chunk(&markdown_chunk, max_width, colors));
-            markdown_chunk.clear();
-            result.push(Line::styled(
-                line_without_newline.trim_end().to_string(),
-                Style::default().fg(colors.markdown_text),
-            ));
-        } else {
-            markdown_chunk.push_str(line);
-        }
+    let mut last_end = 0;
+    for table in render_tables(content, max_width, colors) {
+        result.extend(render_markdown_chunk(
+            &content[last_end..table.source.start],
+            max_width,
+            colors,
+        ));
+        result.extend(table.lines);
+        last_end = table.source.end;
     }
-
-    result.extend(render_markdown_chunk(&markdown_chunk, max_width, colors));
-
+    result.extend(render_markdown_chunk(
+        &content[last_end..],
+        max_width,
+        colors,
+    ));
     result
 }
 
@@ -748,6 +734,150 @@ mod tests {
         assert!(rendered.iter().any(|line| line.starts_with("2. Added")));
         assert!(!rendered.iter().any(|line| line.trim_end() == "1."));
         assert!(!rendered.iter().any(|line| line.trim_end() == "2."));
+    }
+
+    #[test]
+    fn table_inline_formatting_survives_wrapping() {
+        let colors = test_colors();
+        let input = "| Feature | Example |\n| --- | --- |\n| Bold | **bold words across lines** |\n| Italic | *italic words across lines* |\n| Code | `code words across lines` |\n| Link | [linked words across lines](https://example.com) |\n| Nested | ***nested words across lines*** |\n| Strike | ~~deleted words across lines~~ |\n";
+
+        for width in [30, 60, 100] {
+            let lines = render_markdown(input, width, &colors);
+            let output = lines
+                .iter()
+                .map(line_to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            for (word, modifier, fg, bg) in [
+                ("bold", Modifier::BOLD, colors.markdown_strong, None),
+                ("italic", Modifier::ITALIC, colors.markdown_emph, None),
+                (
+                    "code",
+                    Modifier::empty(),
+                    colors.markdown_code,
+                    Some(colors.background_element),
+                ),
+                ("linked", Modifier::UNDERLINED, colors.markdown_link, None),
+                (
+                    "nested",
+                    Modifier::BOLD | Modifier::ITALIC,
+                    colors.markdown_strong,
+                    None,
+                ),
+                ("deleted", Modifier::CROSSED_OUT, colors.markdown_text, None),
+            ] {
+                let span = lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .find(|span| span.content.contains(word))
+                    .unwrap_or_else(|| panic!("missing {word}:\n{output}"));
+                assert!(
+                    span.style.add_modifier.contains(modifier),
+                    "{word}: {span:?}"
+                );
+                assert_eq!(span.style.fg, Some(fg), "{word}");
+                assert_eq!(span.style.bg, bg, "{word}");
+                let styled_text = lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .filter(|candidate| candidate.style == span.style)
+                    .flat_map(|candidate| candidate.content.split_whitespace())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(
+                    styled_text.contains(&format!("{word} words across lines")),
+                    "style lost after wrapping: {styled_text}"
+                );
+            }
+            assert!(
+                !output.contains("**") && !output.contains('`') && !output.contains("~~"),
+                "{output}"
+            );
+            for line in &lines {
+                assert!(line.width() <= width, "{output}");
+                for span in &line.spans {
+                    if span.content.contains('│') || span.content.trim().is_empty() {
+                        assert!(
+                            span.style.add_modifier.is_empty(),
+                            "border/padding inherited a style: {span:?}"
+                        );
+                        assert_eq!(span.style.bg, None);
+                    }
+                }
+            }
+            let styled_words = lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .filter(|span| span.style.add_modifier.contains(Modifier::BOLD))
+                .flat_map(|span| span.content.split_whitespace())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                styled_words, "bold words across lines nested words across lines",
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_literal_code_examples_are_not_reparsed_as_markdown() {
+        let colors = test_colors();
+        let input = "| Feature | Syntax |\n| --- | --- |\n| Bold | `**text**` |\n| Italic | `*text*` |\n| Inline code | `` `code` `` |\n";
+        let lines = render_markdown(input, 60, &colors);
+        for literal in ["**text**", "*text*", "`code`"] {
+            let span = lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .find(|span| span.content == literal)
+                .unwrap();
+            assert_eq!(span.style.fg, Some(colors.markdown_code));
+            assert!(!span
+                .style
+                .add_modifier
+                .intersects(Modifier::BOLD | Modifier::ITALIC));
+        }
+    }
+
+    #[test]
+    fn table_styles_end_at_inline_and_cell_boundaries() {
+        let colors = test_colors();
+        let input = "| First | Second |\n| --- | --- |\n| **outer *inner* tail** plain | neighbor |\n| \\*literal\\* | plain again |\n| | **next** |\n";
+        let lines = render_markdown(input, 50, &colors);
+        let spans = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .collect::<Vec<_>>();
+        let inner = spans
+            .iter()
+            .find(|span| span.content.contains("inner"))
+            .unwrap();
+        assert!(inner
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD | Modifier::ITALIC));
+        let tail = spans
+            .iter()
+            .find(|span| span.content.contains("tail"))
+            .unwrap();
+        assert!(tail.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!tail.style.add_modifier.contains(Modifier::ITALIC));
+        for word in ["plain", "neighbor", "literal"] {
+            for span in spans.iter().filter(|span| span.content.contains(word)) {
+                assert!(span.style.add_modifier.is_empty(), "{span:?}");
+                assert_eq!(span.style.fg, Some(colors.markdown_text));
+            }
+        }
+        let output = lines
+            .iter()
+            .map(line_to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(output.contains("*literal*"), "{output}");
+        let next_row = output.lines().find(|line| line.contains("next")).unwrap();
+        assert!(
+            next_row.split('│').nth(1).unwrap().trim().is_empty(),
+            "empty cell should retain its column:\n{output}"
+        );
     }
 
     #[test]
