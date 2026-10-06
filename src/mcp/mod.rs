@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod capability_tests;
 pub mod cli;
 mod credentials;
 pub mod oauth;
@@ -37,6 +39,15 @@ pub struct McpServerView {
     pub detail: Option<String>,
 }
 
+fn capability_recovery(config: &McpServerConfig, message: &str) -> Option<McpStatus> {
+    match config {
+        McpServerConfig::Remote(remote) => {
+            remote.capability.recovery(message).map(McpStatus::Recovery)
+        }
+        McpServerConfig::Local(_) => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct McpToolSpec {
     pub server: String,
@@ -65,6 +76,8 @@ enum McpStatus {
     Connected,
     Failed(String),
     NeedsAuth,
+    Recovery(crate::config::mcp_capability::Recovery),
+    Discovering,
 }
 
 impl McpStatus {
@@ -75,6 +88,8 @@ impl McpStatus {
             Self::Connected => "connected",
             Self::Failed(_) => "failed",
             Self::NeedsAuth => "needs_auth",
+            Self::Recovery(recovery) => recovery.kind.status(),
+            Self::Discovering => "connecting",
         }
     }
 
@@ -82,6 +97,7 @@ impl McpStatus {
         match self {
             Self::Failed(msg) => Some(msg.clone()),
             Self::NeedsAuth => Some("authentication required".to_string()),
+            Self::Recovery(recovery) => Some(recovery.message.clone()),
             _ => None,
         }
     }
@@ -204,21 +220,17 @@ impl McpManager {
         for (name, server_config) in config {
             match self.servers.get_mut(&name) {
                 Some(state) => {
-                    let was_enabled = state.config.enabled();
+                    let changed = state.config != server_config;
                     let now_enabled = server_config.enabled();
                     state.config = server_config;
-                    if was_enabled && !now_enabled {
+                    if !now_enabled {
                         state.client = None;
                         state.tools.clear();
                         state.status = McpStatus::Disabled;
-                    } else if !was_enabled && now_enabled {
+                    } else if changed {
                         state.status = McpStatus::Connecting;
                         state.client = None;
                         state.tools.clear();
-                    } else if now_enabled && state.client.is_none() {
-                        if !matches!(state.status, McpStatus::Connecting) {
-                            state.status = McpStatus::Connecting;
-                        }
                     }
                 }
                 None => {
@@ -297,7 +309,9 @@ impl McpManager {
             .servers
             .get_mut(server_name)
             .ok_or_else(|| ToolError::NotFound(format!("MCP server '{server_name}' not found")))?;
-        if !state.config.enabled() || !matches!(state.status, McpStatus::Connected) {
+        if !state.config.enabled()
+            || !matches!(state.status, McpStatus::Connected | McpStatus::Recovery(_))
+        {
             return Err(ToolError::Execution(format!(
                 "MCP server '{server_name}' is {}",
                 state.status.as_str()
@@ -323,6 +337,11 @@ impl McpManager {
             Ok(result) => result,
             Err(err) => {
                 let msg = err.to_string();
+                if let Some(status) = capability_recovery(&state.config, &msg) {
+                    let detail = status.detail().unwrap_or_default();
+                    state.status = status;
+                    return Err(ToolError::Execution(detail));
+                }
                 if matches!(&state.config, McpServerConfig::Remote(remote) if oauth::should_use_oauth(remote))
                     && oauth_client::is_auth_service_error(&err)
                 {
@@ -335,8 +354,23 @@ impl McpManager {
             }
         };
         if result.is_error == Some(true) {
-            return Err(ToolError::Execution(call_tool_result_text(&result)));
+            let text = call_tool_result_text(&result);
+            let diagnostic = format!(
+                "{text} {}",
+                result
+                    .structured_content
+                    .as_ref()
+                    .map(Value::to_string)
+                    .unwrap_or_default()
+            );
+            if let Some(status) = capability_recovery(&state.config, &diagnostic) {
+                let detail = status.detail().unwrap_or_default();
+                state.status = status;
+                return Err(ToolError::Execution(detail));
+            }
+            return Err(ToolError::Execution(text));
         }
+        state.status = McpStatus::Connected;
         Ok(mcp_tool_result(server_name, tool_name, &result))
     }
 }
@@ -386,10 +420,10 @@ async fn warm_connections(manager: Arc<Mutex<McpManager>>) {
             .filter(|(_, state)| {
                 state.config.enabled()
                     && state.client.is_none()
-                    && !matches!(state.status, McpStatus::Disabled)
+                    && matches!(state.status, McpStatus::Connecting)
             })
             .map(|(name, state)| {
-                state.status = McpStatus::Connecting;
+                state.status = McpStatus::Discovering;
                 (name.clone(), state.config.clone())
             })
             .collect();
@@ -404,14 +438,18 @@ async fn warm_connections(manager: Arc<Mutex<McpManager>>) {
         let workspace = workspace.clone();
         async move {
             let result = open_and_list_tools(&workspace, &name, &config).await;
-            (name, result)
+            (name, config, result)
         }
     }))
     .await;
 
     let mut m = manager.lock().await;
-    for (name, result) in results {
+    for (name, config, result) in results {
         if let Some(state) = m.servers.get_mut(&name) {
+            // A connection started before an endpoint/key change is no longer valid.
+            if state.config != config {
+                continue;
+            }
             if !state.config.enabled() {
                 state.client = None;
                 state.tools.clear();
@@ -447,10 +485,13 @@ async fn open_and_list_tools(
     config: &McpServerConfig,
 ) -> ConnectOutcome {
     let timeout = state_timeout(config);
-    let client = match open_client(workspace, name, config).await {
-        Ok(client) => client,
-        Err(err) => {
+    let client = match tokio::time::timeout(timeout, open_client(workspace, name, config)).await {
+        Ok(Ok(client)) => client,
+        Ok(Err(err)) => {
             let msg = err.to_string();
+            if let Some(status) = capability_recovery(config, &msg) {
+                return Err(status);
+            }
             return Err(
                 if matches!(config, McpServerConfig::Remote(remote) if oauth::should_use_oauth(remote))
                     && oauth_client::is_auth_connect_error(&err)
@@ -460,6 +501,12 @@ async fn open_and_list_tools(
                     McpStatus::Failed(msg)
                 },
             );
+        }
+        Err(_) => {
+            return Err(McpStatus::Failed(format!(
+                "timed out after {} ms while connecting",
+                timeout.as_millis()
+            )))
         }
     };
 
@@ -479,6 +526,9 @@ async fn open_and_list_tools(
         }
         Ok(Err(err)) => {
             let msg = err.to_string();
+            if let Some(status) = capability_recovery(config, &msg) {
+                return Err(status);
+            }
             Err(
                 if matches!(config, McpServerConfig::Remote(remote) if oauth::should_use_oauth(remote))
                     && oauth_client::is_auth_service_error(&err)
@@ -944,6 +994,7 @@ mod tests {
 
     fn remote_server(enabled: bool) -> McpServerConfig {
         McpServerConfig::Remote(McpRemoteConfig {
+            capability: Default::default(),
             url: "https://example.test/mcp".to_string(),
             headers: HashMap::new(),
             enabled,
@@ -1008,5 +1059,65 @@ mod tests {
         manager.disable_sync("doop");
         assert!(manager.tools().is_empty());
         assert_eq!(manager.status_of("doop"), Some("disabled"));
+    }
+
+    #[test]
+    fn config_changes_drop_stale_tools() {
+        for change_key in [false, true] {
+            let mut manager = manager_with_tool("account-tools", true, "account-tools_read");
+            let mut config = McpConfig::new();
+            let mut server = remote_server(true);
+            let McpServerConfig::Remote(remote) = &mut server else {
+                unreachable!()
+            };
+            if change_key {
+                remote.headers.insert(
+                    "Authorization".to_string(),
+                    "Bearer new-endpoint-key".to_string(),
+                );
+            } else {
+                remote.url = "http://127.0.0.1:3457/mcp".to_string();
+            }
+            config.insert("account-tools".to_string(), server);
+            manager.apply_config(config);
+            assert!(manager.tools().is_empty());
+            assert_eq!(manager.status_of("account-tools"), Some("connecting"));
+        }
+    }
+
+    #[test]
+    fn unchanged_config_preserves_recovery_state_and_retryable_tools() {
+        let mut manager = manager_with_tool("account-tools", true, "account-tools_read");
+        manager.servers.get_mut("account-tools").unwrap().status =
+            McpStatus::Recovery(crate::config::mcp_capability::Recovery {
+                kind: crate::config::mcp_capability::RecoveryKind::Consent,
+                message: "Grant account access".into(),
+            });
+        let config = [("account-tools".to_string(), remote_server(true))]
+            .into_iter()
+            .collect();
+        manager.apply_config(config);
+        assert_eq!(manager.status_of("account-tools"), Some("needs_consent"));
+        assert_eq!(manager.tools().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_handshake_does_not_retry_on_every_registry_refresh() {
+        let mut manager = manager_with_tool("account-tools", true, "account-tools_read");
+        manager.servers.get_mut("account-tools").unwrap().status =
+            McpStatus::Recovery(crate::config::mcp_capability::Recovery {
+                kind: crate::config::mcp_capability::RecoveryKind::Unavailable,
+                message: "Capability unavailable".into(),
+            });
+        let config = [("account-tools".to_string(), remote_server(true))]
+            .into_iter()
+            .collect();
+        manager.apply_config(config);
+        let manager = Arc::new(Mutex::new(manager));
+        warm_connections(manager.clone()).await;
+        assert_eq!(
+            manager.lock().await.status_of("account-tools"),
+            Some("unavailable")
+        );
     }
 }

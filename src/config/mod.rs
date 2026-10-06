@@ -1,4 +1,5 @@
 pub mod configuration;
+pub mod mcp_capability;
 pub mod runtime;
 
 pub use configuration::{

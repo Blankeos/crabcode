@@ -117,7 +117,7 @@ pub fn render_status_dialog(
                         .clone()
                         .unwrap_or_else(|| "Connection failed".to_string()),
                 ),
-                "needs_auth" => (
+                "needs_auth" | "needs_consent" | "unavailable" => (
                     colors.warning,
                     server
                         .detail

@@ -344,6 +344,7 @@ impl Server {
 
     fn remote(&self) -> crate::config::configuration::McpRemoteConfig {
         crate::config::configuration::McpRemoteConfig {
+            capability: Default::default(),
             url: format!("{}/mcp", self.url),
             headers: HashMap::new(),
             enabled: true,
