@@ -789,6 +789,7 @@ fn merge_acp_mcp_servers(config: &mut LoadedConfig, servers: Vec<McpServer>) {
                 server.name,
                 crate::config::configuration::McpServerConfig::Remote(
                     crate::config::configuration::McpRemoteConfig {
+                        capability: Default::default(),
                         url: server.url,
                         headers: server
                             .headers
@@ -808,6 +809,7 @@ fn merge_acp_mcp_servers(config: &mut LoadedConfig, servers: Vec<McpServer>) {
                 server.name,
                 crate::config::configuration::McpServerConfig::Remote(
                     crate::config::configuration::McpRemoteConfig {
+                        capability: Default::default(),
                         url: server.url,
                         headers: server
                             .headers

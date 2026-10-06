@@ -9429,6 +9429,26 @@ impl App {
     }
 
     fn begin_mcp_oauth(&mut self, name: &str) {
+        let authorization = match self.mcp.get(name) {
+            Some(crate::config::McpServerConfig::Remote(remote)) => {
+                remote.capability.authorization.clone()
+            }
+            _ => None,
+        };
+        if let Some(action) = authorization {
+            match crate::utils::file_opener::open_url(&action.url) {
+                Ok(_) => push_toast(Toast::new(action.instructions, ToastLevel::Info, None)),
+                Err(error) => push_toast(Toast::new(
+                    format!(
+                        "{} Open {} manually: {error}",
+                        action.instructions, action.url
+                    ),
+                    ToastLevel::Warning,
+                    None,
+                )),
+            }
+            return;
+        }
         if self.mcp_oauth_in_progress.is_some() || self.provider_oauth_in_progress.is_some() {
             push_toast(Toast::new(
                 "An OAuth flow is already in progress",
@@ -9681,6 +9701,7 @@ impl App {
                     if let Some(discovery) = &self.discovery {
                         discovery.clear_custom_model_discovery_cache();
                     }
+                    self.refresh_provider_mcp_config();
                 }
                 push_toast(Toast::new(
                     format!("Disconnected {}", provider_name),
@@ -9877,6 +9898,7 @@ impl App {
                 if let Some(discovery) = &self.discovery {
                     discovery.clear_custom_model_discovery_cache();
                 }
+                self.refresh_provider_mcp_config();
                 self.connect_dialog_state = init_connect_dialog();
                 self.connect_dialog_mode = ConnectDialogMode::ProviderSelection;
                 push_toast(Toast::new(
@@ -9890,6 +9912,34 @@ impl App {
                 ToastLevel::Error,
                 None,
             )),
+        }
+    }
+
+    fn refresh_provider_mcp_config(&mut self) {
+        let Ok(loaded) = crate::config::ConfigLoader::load_for(std::path::Path::new(&self.cwd))
+        else {
+            return;
+        };
+        self.tool_permissions = self
+            .tool_permissions
+            .clone()
+            .with_permission_rules(loaded.merged_config.permission_rules.clone());
+        self.mcp = loaded.merged_config.mcp;
+        // Remove stale tool schemas synchronously when possible; new connections
+        // warm in the background and sync through the normal registry refresh.
+        if let Some(manager) = &self.mcp_manager {
+            if let Ok(mut guard) = manager.try_lock() {
+                guard.apply_config(self.mcp.clone());
+            }
+        }
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.mcp_manager = Some(crate::mcp::McpManager::ensure(
+                self.mcp.clone(),
+                std::path::PathBuf::from(&self.cwd),
+            ));
+        }
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.refresh_mcp_dialog_items();
         }
     }
 

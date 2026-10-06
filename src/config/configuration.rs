@@ -485,6 +485,8 @@ pub struct McpLocalConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpRemoteConfig {
+    /// Runtime capability policy; never sourced from arbitrary config fields.
+    pub capability: crate::config::mcp_capability::McpCapabilityPolicy,
     pub url: String,
     pub headers: HashMap<String, String>,
     pub enabled: bool,
@@ -776,6 +778,9 @@ impl ConfigLoader {
             &mut diagnostics,
         );
         let mut merged_config = parse_merged_config(&merged, &mut diagnostics);
+        crate::model::extensions::apply_capabilities(&mut merged_config);
+        let prefs = crate::persistence::PrefsDAO::new().ok();
+        crate::remote_mcp::apply_mcp_overrides(&mut merged_config.mcp, prefs.as_ref());
         merged_config.instructions =
             load_instruction_files(&merged_config.instructions, &project_root, &mut diagnostics);
         let mut agent_definitions = crate::agent::definition::load_markdown_agent_definitions(
@@ -1718,6 +1723,7 @@ fn parse_mcp_server(
             let (oauth_enabled, oauth_client_id, oauth_client_secret, oauth_scope) =
                 parse_mcp_oauth(name, map.get("oauth"), diagnostics);
             Some(McpServerConfig::Remote(McpRemoteConfig {
+                capability: Default::default(),
                 url: url.to_string(),
                 headers: parse_string_map(
                     map.get("headers"),
@@ -2974,6 +2980,36 @@ fn collect_unimplemented_keys(merged: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn design_config_opt_out_preserves_full_disabled_entry() {
+        let mut diagnostics = ConfigDiagnostics::default();
+        let mut config = parse_merged_config(
+            &json!({
+                "provider": { "meridian": {} },
+                "mcp": { "claude-design": {
+                    "type": "remote", "url": "http://127.0.0.1:3456/v1/design/mcp",
+                    "enabled": false, "oauth": false
+                } }
+            }),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.warnings.is_empty());
+        let mut expected = config.mcp.clone();
+        crate::model::extensions::meridian::add_design_mcp(
+            &mut config,
+            Some(&crate::persistence::AuthConfig::Local),
+        );
+        if let McpServerConfig::Remote(remote) = expected.get_mut("claude-design").unwrap() {
+            let McpServerConfig::Remote(actual) = &config.mcp["claude-design"] else {
+                unreachable!()
+            };
+            assert!(actual.capability.authorization.is_some());
+            remote.capability = actual.capability.clone();
+        }
+        assert_eq!(config.mcp, expected);
+        assert!(!config.mcp["claude-design"].enabled());
+    }
 
     #[test]
     fn parses_and_applies_top_level_runtime_configuration() {

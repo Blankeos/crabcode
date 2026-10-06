@@ -1,11 +1,13 @@
-//! Endpoint validation and pure metadata mapping for opt-in Meridian.
+//! Endpoint validation, Design MCP defaults, and metadata mapping for opt-in Meridian.
 
 use serde_json::Value;
 use std::collections::HashSet;
 use std::time::Duration;
 
+use crate::config::configuration::{McpRemoteConfig, McpServerConfig, MergedConfig};
 use crate::config::CustomProviderConfig;
 use crate::model::discovery;
+use crate::persistence::AuthConfig;
 
 pub const PROVIDER_ID: &str = "meridian";
 pub const PROVIDER_NAME: &str = "Meridian";
@@ -13,8 +15,140 @@ pub const BASE_URL: &str = "http://127.0.0.1:3456/v1";
 pub const NPM_PACKAGE: &str = "@ai-sdk/openai-compatible";
 pub const API_KEY_ENV: &str = "MERIDIAN_API_KEY";
 pub const DOC_URL: &str = "https://github.com/rynfar/meridian/blob/main/docs/agents.md";
+pub const DESIGN_MCP_NAME: &str = "claude-design";
+pub const DESIGN_SETTINGS_URL: &str = "https://claude.ai/design/settings";
 
 const DEFAULT_OUTPUT_LIMIT: u32 = 8_192;
+
+fn design_policy() -> crate::config::mcp_capability::McpCapabilityPolicy {
+    use crate::config::mcp_capability::{
+        AuthorizationAction, McpCapabilityPolicy, Recovery, RecoveryKind, RecoveryRule,
+    };
+    let consent = format!("Enable Claude Design access: turn on 'Claude product access' at {DESIGN_SETTINGS_URL} for Meridian's active account, then retry. This grants access to Design projects, not all chat artifacts.");
+    McpCapabilityPolicy {
+        authorization: Some(AuthorizationAction {
+            url: DESIGN_SETTINGS_URL.to_string(),
+            instructions: format!("{consent} For auth_error, use Meridian's /design-login flow. No login is started automatically."),
+        }),
+        recovery_rules: vec![
+            RecoveryRule { markers: vec!["needs_consent".into()], recovery: Recovery { kind: RecoveryKind::Consent, message: consent } },
+            RecoveryRule { markers: vec!["auth_error".into(), "401".into(), "403".into()], recovery: Recovery { kind: RecoveryKind::Authorization, message: "Claude Design needs authorization. Check your Meridian endpoint key and account login; if upstream reports auth_error, use Meridian's /design-login flow, then retry. Crabcode does not start this login automatically.".into() } },
+            RecoveryRule { markers: vec!["404".into(), "405".into()], recovery: Recovery { kind: RecoveryKind::Unavailable, message: "Claude Design is unavailable on this Meridian endpoint; update Meridian or disable it in /mcp. Model chat is unaffected.".into() } },
+        ],
+    }
+}
+
+/// Add the Design transport only for an explicitly configured or saved connection.
+/// This only constructs configuration: it never connects or starts authentication.
+pub fn add_design_mcp(config: &mut MergedConfig, connection: Option<&AuthConfig>) {
+    let configured_key = config
+        .custom_providers
+        .get(PROVIDER_ID)
+        .and_then(CustomProviderConfig::resolved_api_key);
+    add_design_mcp_with_key(config, connection, configured_key, || {
+        std::env::var(API_KEY_ENV).ok()
+    });
+}
+
+fn add_design_mcp_with_key(
+    config: &mut MergedConfig,
+    connection: Option<&AuthConfig>,
+    configured_key: Option<String>,
+    environment_key: impl FnOnce() -> Option<String>,
+) {
+    for server in config.mcp.values_mut() {
+        if let McpServerConfig::Remote(remote) = server {
+            if !remote.oauth_enabled && is_design_mcp(remote) {
+                remote.capability = design_policy();
+            }
+        }
+    }
+    let provider = config.custom_providers.get(PROVIDER_ID);
+    if !config.provider_is_enabled(PROVIDER_ID)
+        || (provider.is_none()
+            && !matches!(connection, Some(AuthConfig::Local | AuthConfig::Api { .. })))
+        || config.mcp.contains_key(DESIGN_MCP_NAME)
+    {
+        return;
+    }
+
+    let base = provider
+        .and_then(|provider| provider.base_url.as_deref())
+        .unwrap_or(BASE_URL);
+    let Some(mut base) = normalized_design_url(base) else {
+        return;
+    };
+    if let Some(path) = base.path().strip_suffix("/models") {
+        let path = path.to_string();
+        base.set_path(&path);
+    }
+    let Ok(mut url) = discovery::openai_models_endpoint(base.as_str()) else {
+        return;
+    };
+    let Some(path) = url.path().strip_suffix("/models") else {
+        return;
+    };
+    url.set_path(&format!("{path}/design/mcp"));
+    if config.mcp.values().any(|server| matches!(server,
+        McpServerConfig::Remote(remote) if normalized_design_url(&remote.url) == Some(url.clone())
+    )) {
+        return;
+    }
+    let key = endpoint_key(connection, configured_key.or_else(environment_key));
+    let mut headers = std::collections::HashMap::new();
+    if let Some(key) = key.as_deref().map(str::trim).filter(|key| !key.is_empty()) {
+        let value = format!("Bearer {key}");
+        // Do not create unusable headers or allow a key to inject another header.
+        if reqwest::header::HeaderValue::from_str(&value).is_ok() {
+            headers.insert("Authorization".to_string(), value);
+        }
+    }
+    config.mcp.insert(
+        DESIGN_MCP_NAME.to_string(),
+        McpServerConfig::Remote(McpRemoteConfig {
+            capability: design_policy(),
+            url: url.to_string(),
+            headers,
+            enabled: true,
+            timeout_ms: Some(5_000),
+            oauth_enabled: false,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_scope: None,
+        }),
+    );
+    // Account-backed defaults must not silently grant edit/publish privileges.
+    // Explicit user rules appear later and retain their usual precedence.
+    config.permission_rules.insert(
+        0,
+        crate::tools::permission::PermissionRule {
+            permission: "claude-design_*".to_string(),
+            pattern: "*".to_string(),
+            action: crate::tools::permission::PermissionPolicyAction::Ask,
+        },
+    );
+}
+
+fn normalized_design_url(value: &str) -> Option<reqwest::Url> {
+    let mut url = reqwest::Url::parse(value.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&path);
+    Some(url)
+}
+
+/// Recognize Design endpoints by their parsed route, not a user-chosen MCP name.
+pub fn is_design_mcp(remote: &McpRemoteConfig) -> bool {
+    normalized_design_url(&remote.url).is_some_and(|url| url.path().ends_with("/design/mcp"))
+}
 
 pub fn provider() -> discovery::Provider {
     discovery::Provider {
@@ -315,6 +449,311 @@ mod tests {
         let mut disconnected = None;
         apply_connection(&mut disconnected, None);
         assert!(disconnected.is_none());
+    }
+
+    fn design_config(base: Option<&str>) -> MergedConfig {
+        let mut config = MergedConfig::default();
+        let mut provider = empty_config();
+        provider.base_url = base.map(str::to_string);
+        config
+            .custom_providers
+            .insert(PROVIDER_ID.to_string(), provider);
+        config
+    }
+
+    fn design_remote(config: &MergedConfig) -> &McpRemoteConfig {
+        match &config.mcp[DESIGN_MCP_NAME] {
+            McpServerConfig::Remote(remote) => remote,
+            _ => panic!("expected remote"),
+        }
+    }
+
+    #[test]
+    fn design_adapter_owns_recovery_and_authorization_guidance() {
+        use crate::config::mcp_capability::RecoveryKind;
+        let mut config = design_config(None);
+        add_design_mcp_with_key(&mut config, None, None, || None);
+        let policy = &design_remote(&config).capability;
+        assert_eq!(
+            policy.authorization.as_ref().unwrap().url,
+            DESIGN_SETTINGS_URL
+        );
+        let consent = policy.recovery("NEEDS_CONSENT 401").unwrap();
+        assert_eq!(consent.kind, RecoveryKind::Consent);
+        assert!(consent.message.contains(DESIGN_SETTINGS_URL));
+        for message in ["auth_error", "401 Unauthorized", "403 Forbidden"] {
+            let recovery = policy.recovery(message).unwrap();
+            assert_eq!(recovery.kind, RecoveryKind::Authorization);
+            assert!(recovery.message.contains("/design-login"));
+        }
+        assert_eq!(
+            policy.recovery("404 Not Found").unwrap().kind,
+            RecoveryKind::Unavailable
+        );
+        assert!(policy.recovery("connection refused").is_none());
+
+        // Existing manual aliases receive recovery guidance without transport changes.
+        let mut manual = config.mcp.remove(DESIGN_MCP_NAME).unwrap();
+        if let McpServerConfig::Remote(remote) = &mut manual {
+            remote.capability = Default::default();
+            remote.enabled = false;
+        }
+        config.mcp.insert("manual-alias".into(), manual);
+        add_design_mcp_with_key(&mut config, None, None, || None);
+        assert_eq!(config.mcp.len(), 1);
+        let McpServerConfig::Remote(remote) = &config.mcp["manual-alias"] else {
+            unreachable!()
+        };
+        assert!(!remote.enabled);
+        assert!(remote.capability.recovery("needs_consent").is_some());
+    }
+
+    #[test]
+    fn design_default_permissions_ask_and_preserve_user_precedence() {
+        use crate::tools::permission::{PermissionPolicyAction, PermissionRule};
+        let mut config = design_config(None);
+        let explicit = PermissionRule {
+            permission: "claude-design_*".to_string(),
+            pattern: "*".to_string(),
+            action: PermissionPolicyAction::Deny,
+        };
+        config.permission_rules.push(explicit.clone());
+        add_design_mcp_with_key(&mut config, None, None, || None);
+        assert_eq!(config.permission_rules.len(), 2);
+        assert_eq!(
+            config.permission_rules[0].action,
+            PermissionPolicyAction::Ask
+        );
+        assert_eq!(config.permission_rules[1], explicit);
+        // Reapplying defaults must not duplicate rules or overwrite manual config.
+        add_design_mcp_with_key(&mut config, None, None, || None);
+        assert_eq!(config.permission_rules.len(), 2);
+    }
+
+    #[test]
+    fn design_requires_opt_in_and_respects_provider_filters() {
+        let mut disconnected = MergedConfig::default();
+        add_design_mcp_with_key(&mut disconnected, None, None, || Some("env-key".into()));
+        assert!(disconnected.mcp.is_empty());
+        for connection in [
+            None,
+            Some(AuthConfig::Local),
+            Some(AuthConfig::Api { key: "key".into() }),
+            Some(AuthConfig::OAuth {
+                access: "upstream".into(),
+                refresh: "refresh".into(),
+                expires: 0,
+                account_id: None,
+                enterprise_url: None,
+            }),
+        ] {
+            let mut config = MergedConfig::default();
+            add_design_mcp_with_key(&mut config, connection.as_ref(), None, || None);
+            assert_eq!(
+                !config.mcp.is_empty(),
+                matches!(connection, Some(AuthConfig::Local | AuthConfig::Api { .. }))
+            );
+        }
+        for disabled in [false, true] {
+            let mut config = design_config(None);
+            if disabled {
+                config.disabled_providers.insert(PROVIDER_ID.into());
+            } else {
+                config.enabled_providers.insert("openai".into());
+            }
+            add_design_mcp_with_key(&mut config, Some(&AuthConfig::Local), None, || None);
+            assert!(config.mcp.is_empty());
+        }
+        let mut config = design_config(None);
+        config.enabled_providers.insert(PROVIDER_ID.into());
+        add_design_mcp_with_key(&mut config, None, None, || None);
+        let remote = design_remote(&config);
+        assert_eq!(remote.url, "http://127.0.0.1:3456/v1/design/mcp");
+        assert_eq!(remote.timeout_ms, Some(5000));
+        assert!(!remote.oauth_enabled);
+        assert!(remote.headers.is_empty());
+        assert!(is_design_mcp(remote));
+    }
+
+    #[test]
+    fn design_derives_urls_and_rejects_unsafe_bases() {
+        for (base, expected) in [
+            (
+                "https://EXAMPLE.com:443",
+                "https://example.com/v1/design/mcp",
+            ),
+            (
+                "http://localhost:3456/v1/",
+                "http://localhost:3456/v1/design/mcp",
+            ),
+            (
+                "https://example.com/proxy",
+                "https://example.com/proxy/v1/design/mcp",
+            ),
+            (
+                "https://example.com/proxy/v1/models/",
+                "https://example.com/proxy/v1/design/mcp",
+            ),
+            (
+                "https://example.com/proxy/v4",
+                "https://example.com/proxy/v4/design/mcp",
+            ),
+        ] {
+            let mut config = design_config(Some(base));
+            add_design_mcp_with_key(&mut config, None, None, || None);
+            assert_eq!(design_remote(&config).url, expected);
+        }
+        for base in [
+            "",
+            "not a URL",
+            "file:///tmp/v1",
+            "https://user:secret@example.com/v1",
+            "https://example.com/v1?q=1",
+            "https://example.com/v1#fragment",
+        ] {
+            let mut config = design_config(Some(base));
+            add_design_mcp_with_key(&mut config, None, None, || None);
+            assert!(config.mcp.is_empty(), "{base}");
+        }
+    }
+
+    #[test]
+    fn design_preserves_manual_names_and_disabled_aliases() {
+        for name in [DESIGN_MCP_NAME, "my-design"] {
+            for enabled in [true, false] {
+                let mut config = design_config(None);
+                add_design_mcp_with_key(&mut config, None, None, || None);
+                let mut manual = config.mcp.remove(DESIGN_MCP_NAME).unwrap();
+                manual.set_enabled(enabled);
+                if let McpServerConfig::Remote(remote) = &mut manual {
+                    remote.url.push('/');
+                    remote
+                        .headers
+                        .insert("x-meridian-profile".into(), "personal".into());
+                }
+                config.mcp.insert(name.into(), manual.clone());
+                add_design_mcp_with_key(&mut config, Some(&AuthConfig::Local), None, || None);
+                assert_eq!(config.mcp.len(), 1);
+                assert_eq!(config.mcp[name], manual);
+            }
+        }
+        let mut config = design_config(None);
+        let manual = McpServerConfig::Local(crate::config::configuration::McpLocalConfig {
+            command: vec!["custom".into()],
+            cwd: None,
+            environment: HashMap::new(),
+            enabled: false,
+            timeout_ms: None,
+        });
+        config.mcp.insert(DESIGN_MCP_NAME.into(), manual.clone());
+        add_design_mcp_with_key(&mut config, None, None, || None);
+        assert_eq!(config.mcp[DESIGN_MCP_NAME], manual);
+
+        let mut config = design_config(Some("https://example.com/proxy/v1"));
+        add_design_mcp_with_key(&mut config, None, None, || None);
+        let mut alias = config.mcp.remove(DESIGN_MCP_NAME).unwrap();
+        if let McpServerConfig::Remote(remote) = &mut alias {
+            remote.url = "https://EXAMPLE.com:443/proxy/v1/design/mcp/".into();
+            remote.enabled = false;
+        }
+        config.mcp.insert("alias".into(), alias.clone());
+        add_design_mcp_with_key(&mut config, None, None, || None);
+        assert_eq!(config.mcp.len(), 1);
+        assert_eq!(config.mcp["alias"], alias);
+    }
+
+    #[test]
+    fn design_uses_only_endpoint_keys_with_saved_connections_taking_precedence() {
+        let oauth = AuthConfig::OAuth {
+            access: "upstream-secret".into(),
+            refresh: "refresh".into(),
+            expires: 0,
+            account_id: None,
+            enterprise_url: None,
+        };
+        for (connection, configured, environment, expected) in [
+            (
+                None,
+                Some("configured"),
+                Some("env"),
+                Some("Bearer configured"),
+            ),
+            (None, None, Some("env"), Some("Bearer env")),
+            (None, None, None, None),
+            (
+                Some(AuthConfig::Local),
+                Some("configured"),
+                Some("env"),
+                None,
+            ),
+            (
+                Some(AuthConfig::Api {
+                    key: " saved ".into(),
+                }),
+                Some("configured"),
+                Some("env"),
+                Some("Bearer saved"),
+            ),
+            (Some(oauth.clone()), None, None, None),
+            (
+                Some(oauth),
+                Some("configured"),
+                None,
+                Some("Bearer configured"),
+            ),
+            (
+                Some(AuthConfig::Api {
+                    key: "bad\r\nheader".into(),
+                }),
+                None,
+                None,
+                None,
+            ),
+        ] {
+            let mut config = design_config(None);
+            add_design_mcp_with_key(
+                &mut config,
+                connection.as_ref(),
+                configured.map(str::to_string),
+                || environment.map(str::to_string),
+            );
+            assert_eq!(
+                design_remote(&config)
+                    .headers
+                    .get("Authorization")
+                    .map(String::as_str),
+                expected
+            );
+        }
+        // Explicit env references use the same resolver as model requests without
+        // mutating the process-wide environment in tests.
+        let mut provider = empty_config();
+        provider.api_key = Some("{env:PATH}".into());
+        assert_eq!(
+            provider.resolved_api_key(),
+            std::env::var("PATH")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        );
+    }
+
+    #[test]
+    fn design_recognition_is_route_based() {
+        let mut config = design_config(None);
+        add_design_mcp_with_key(&mut config, None, None, || None);
+        let mut remote = design_remote(&config).clone();
+        for (url, expected) in [
+            ("https://example.com/design/mcp", true),
+            ("https://example.com/proxy/v1/design/mcp/", true),
+            ("https://example.com/v1/models", false),
+            ("https://example.com/v1/design/mcp-other", false),
+            ("https://example.com/?path=/v1/design/mcp", false),
+            ("invalid/v1/design/mcp", false),
+        ] {
+            remote.url = url.into();
+            assert_eq!(is_design_mcp(&remote), expected);
+        }
     }
 
     async fn mock_endpoint(status: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {

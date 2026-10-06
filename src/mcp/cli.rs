@@ -73,6 +73,13 @@ async fn list() -> Result<()> {
 async fn auth(name: &str) -> Result<()> {
     let config = load_mcp_config()?;
     let (name, remote) = remote_named(&config, name)?;
+    if let Some(action) = &remote.capability.authorization {
+        println!(
+            "{} Open {}. No login was started.",
+            action.instructions, action.url
+        );
+        return Ok(());
+    }
     super::oauth::authenticate(name, remote).await?;
     println!("Authenticated MCP server \"{name}\".");
     Ok(())
