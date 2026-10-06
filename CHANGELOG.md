@@ -2,6 +2,74 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.14] - 2026-10-06
+
+### Bug Fixes
+
+- Theme task-list markers and Vercel list bullets by @Blankeos
+- Preserve inline styling in rendered tables by @Blankeos
+- Route tool-step commentary to stderr, keep stdout for final answer by @Blankeos
+- Interruptions cause falling back to current model by @Blankeos
+- Forbid direct console output in boundary check by @Blankeos
+- Measure first-frame startup without batching delay by @Blankeos
+- Harden lifecycle and prepare registry authentication by @Blankeos
+- Sanitize unsupported schema regex by @yan-ad
+- Remember permission grants per session by @yan-ad
+- Keep transport open on session errors by @yan-ad
+- Stream live context usage by @yan-ad
+- Expose chat-only commands by @yan-ad
+- Wire slash commands end to end by @yan-ad
+- Align provider filter types by @yan-ad
+- Report model context window by @yan-ad
+- Preserve permission tool call IDs by @yan-ad
+- Share compatible discovery metadata with runtime by @Blankeos
+- Authenticate compatible model discovery by @yan-ad
+
+### Documentation
+
+- Improve quickstart installation and editor setup by @Blankeos
+- Remove CROF provider references by @Blankeos
+
+### Features
+
+- Persist activation preferences and add dialog toggles by @Blankeos
+- Expand copy actions and expose shortcut on home screen by @Blankeos
+- Unify file opening with ordered filename overrides by @Blankeos
+- Make dialog shortcut hints clickable by @Blankeos
+- Add yolo permission parity for interactive mode by @Blankeos
+- Exit on Ctrl+D when input is empty by @Blankeos
+- Include workspace context and scoped skill guidance by @Blankeos
+- Add skills to mention autocomplete by @Blankeos
+- Respect gitignore by default in glob and grep with opt-out flag by @Blankeos
+- Harden OAuth with auto-refresh, locking, and expiry-aware status by @Blankeos
+- Require Enter to open browser for OAuth login by @Blankeos
+- Apply OpenCode settings by @yan-ad
+- Complete capability matrix by @yan-ad
+- Preserve structured MCP results by @yan-ad
+- Show permission edit metadata by @yan-ad
+- Support audio prompts by @yan-ad
+- Persist prompt attachments by @yan-ad
+- Retain authoritative usage by @yan-ad
+- Embed client terminals by @yan-ad
+- Forward interactive questions by @yan-ad
+- Add compact command by @yan-ad
+- Preserve stable message IDs by @yan-ad
+- Stream apply patch diffs by @yan-ad
+- Preserve provider stop reasons by @yan-ad
+- Stream structured tool content by @yan-ad
+- Stream full tool output by @yan-ad
+- Include discovered models alongside configured models by @yan-ad
+- Discover OpenAI-compatible provider models by @yan-ad
+
+### Tests
+
+- Update model fixtures for integrated context metadata by @Blankeos
+- Cover stdio subprocess lifecycle by @yan-ad
+
+### Style
+
+- Format merged imports by @yan-ad
+
 ## [0.0.13] - 2026-09-14
 
 ### Bug Fixes
@@ -190,10 +258,6 @@ All notable changes to this project will be documented in this file.
 - Add shell completion command (#9) by @yan-ad in [#9](https://github.com/Blankeos/crabcode/pull/9)
 - Add upgrade command (#7) by @yan-ad in [#7](https://github.com/Blankeos/crabcode/pull/7)
 
-
-### New Contributors
-
-- @yan-ad made their first contribution in [#12](https://github.com/Blankeos/crabcode/pull/12)
 ## [0.0.9] - 2026-07-28
 
 ### Bug Fixes
@@ -273,55 +337,55 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
-- Classify SSE errors as retryable/permanent and enforce stream termination by Blankeos
+- Classify SSE errors as retryable/permanent and enforce stream termination by @Blankeos
 
 ### Chores
 
-- Add per-task model selection and hard-task defaults by Blankeos
+- Add per-task model selection and hard-task defaults by @Blankeos
 
 ### Features
 
 - Add watched file indexer for completion suggestions by @Blankeos
-- Support mouse handling for permission/question dialogs by Blankeos
-- Play notification sounds for print-mode lifecycle events by Blankeos
-- Add configurable terminal title composition by Blankeos
-- Add dedicated subagent completion notification event by Blankeos
+- Support mouse handling for permission/question dialogs by @Blankeos
+- Play notification sounds for print-mode lifecycle events by @Blankeos
+- Add configurable terminal title composition by @Blankeos
+- Add dedicated subagent completion notification event by @Blankeos
 
 ### Performance
 
-- Improve subagent-aware chunk coalescing and markdown render performance by Blankeos
+- Improve subagent-aware chunk coalescing and markdown render performance by @Blankeos
 
 ## [0.0.6] - 2026-07-09
 
 ### Bug Fixes
 
-- Make active tool marker animation stateless by Blankeos
-- Infer apply_patch hunk line numbers from surrounding context by Blankeos
-- Preserve selection when restoring and updating search filters by Blankeos
-- Infer commandcode image support from capabilities by Blankeos
-- Surface websocket fallback warnings for stream disconnects by Blankeos
-- Add provider alias for connect autocomplete by Blankeos
-- Preserve chat input draft when running command palette commands by Blankeos
+- Make active tool marker animation stateless by @Blankeos
+- Infer apply_patch hunk line numbers from surrounding context by @Blankeos
+- Preserve selection when restoring and updating search filters by @Blankeos
+- Infer commandcode image support from capabilities by @Blankeos
+- Surface websocket fallback warnings for stream disconnects by @Blankeos
+- Add provider alias for connect autocomplete by @Blankeos
+- Preserve chat input draft when running command palette commands by @Blankeos
 
 ### Features
 
-- Prioritize current workspace sessions in search by Blankeos
-- Add expandable large paste placeholders with hover tooltip by Blankeos
-- Prioritize reasoning effort options from discovery metadata by Blankeos
-- Add editor-anchored opening for chat selections and file links by Blankeos
-- Scroll into view on load by Blankeos
-- Reuse Enter key for repeat navigation after search by Blankeos
+- Prioritize current workspace sessions in search by @Blankeos
+- Add expandable large paste placeholders with hover tooltip by @Blankeos
+- Prioritize reasoning effort options from discovery metadata by @Blankeos
+- Add editor-anchored opening for chat selections and file links by @Blankeos
+- Scroll into view on load by @Blankeos
+- Reuse Enter key for repeat navigation after search by @Blankeos
 
 ### Performance
 
-- Optimize streaming rendering and token usage updates by Blankeos
+- Optimize streaming rendering and token usage updates by @Blankeos
 
 ## [0.0.5] - 2026-06-30
 
 ### Bug Fixes
 
-- Clear command input before processing command submissions by Blankeos
-- Derive fork titles from session name by Blankeos
+- Clear command input before processing command submissions by @Blankeos
+- Derive fork titles from session name by @Blankeos
 - Exclude non-decode waits from streaming TPS and duration metrics by @Blankeos
 - Jump to latest child session for subagent navigation by @Blankeos
 - Propagate cancellation between parent and subagent sessions by @Blankeos
@@ -338,7 +402,7 @@ All notable changes to this project will be documented in this file.
 
 ### Chores
 
-- Fix release yml by Blankeos
+- Fix release yml by @Blankeos
 
 ### Features
 
@@ -361,7 +425,7 @@ All notable changes to this project will be documented in this file.
 
 ### Doc
 
-- Mcp docs up-to-date by Blankeos
+- Mcp docs up-to-date by @Blankeos
 
 ## [0.0.4] - 2026-06-14
 
