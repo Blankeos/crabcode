@@ -171,6 +171,9 @@ pub fn handle_connect<'a>(
             Err(_) => fallback_providers(),
         };
         crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers_map);
+        providers_map
+            .entry("meridian".to_string())
+            .or_insert_with(crate::model::extensions::meridian::provider);
 
         const POPULAR_PROVIDERS: &[&str] = &[
             "opencode",
@@ -184,7 +187,9 @@ pub fn handle_connect<'a>(
         let mut items: Vec<crate::command::registry::DialogItem> = providers_map
             .into_iter()
             .map(|(id, provider)| {
-                let group = if crate::model::extensions::ModelExtensions::is_runtime_provider(&id) {
+                let group = if id == "meridian"
+                    || crate::model::extensions::ModelExtensions::is_runtime_provider(&id)
+                {
                     "Local"
                 } else if POPULAR_PROVIDERS.contains(&id.as_str()) {
                     "Popular"
@@ -196,10 +201,13 @@ pub fn handle_connect<'a>(
                     id: id.clone(),
                     name: provider.name.clone(),
                     group: group.to_string(),
-                    description:
+                    description: if id == "meridian" {
+                        "User-run Meridian endpoint".to_string()
+                    } else {
                         crate::model::extensions::ModelExtensions::runtime_provider_description(&id)
                             .unwrap_or(id.as_str())
-                            .to_string(),
+                            .to_string()
+                    },
                     tip: if is_connected {
                         Some("🟢 Connected".to_string())
                     } else {
@@ -398,6 +406,7 @@ pub async fn load_models(parsed: ParsedCommand) -> CommandResult {
         };
 
         if let Ok(discovery) = discovery.as_ref() {
+            models.retain(|model| model.provider_id != "meridian");
             crate::model::discovery::merge_dialog_models(
                 &mut models,
                 discovery.discover_custom_models_for_dialog().await,

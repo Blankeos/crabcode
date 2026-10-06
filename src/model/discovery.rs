@@ -34,12 +34,15 @@ struct OpenAIModelsResponse {
     data: Vec<OpenAIModel>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct OpenAIModel {
     id: String,
+    #[serde(flatten)]
+    metadata: serde_json::Map<String, serde_json::Value>,
 }
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+const MERIDIAN_DISCOVERY_TTL: u64 = 60;
 static MEMORY_CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<CacheEntry>>>> = OnceLock::new();
 static MEMORY_MODEL_CACHE: OnceLock<Mutex<HashMap<(PathBuf, Vec<String>), CachedModels>>> =
     OnceLock::new();
@@ -50,7 +53,9 @@ static MEMORY_CUSTOM_MODEL_CACHE: OnceLock<
 #[derive(Clone)]
 struct CachedCustomModels {
     ids: HashMap<String, Vec<String>>,
+    metadata: HashMap<String, HashMap<String, Model>>,
     cached_at: std::time::Instant,
+    ttl: Duration,
 }
 
 #[derive(Clone)]
@@ -199,6 +204,7 @@ pub struct Discovery {
         Option<std::collections::HashMap<String, crate::config::CustomProviderConfig>>,
     disabled_providers: std::collections::BTreeSet<String>,
     enabled_providers: std::collections::BTreeSet<String>,
+    endpoint_api_keys: HashMap<String, String>,
 }
 
 pub fn is_model_selectable(
@@ -240,7 +246,7 @@ fn is_openai_compatible(provider: &crate::config::CustomProviderConfig) -> bool 
     )
 }
 
-fn openai_models_endpoint(base_url: &str) -> Result<reqwest::Url> {
+pub(crate) fn openai_models_endpoint(base_url: &str) -> Result<reqwest::Url> {
     let mut url = reqwest::Url::parse(base_url.trim()).context("invalid URL")?;
     let path = url.path().trim_end_matches('/');
     let models_path = if crate::aisdk::providers::base_url_has_version_segment(url.as_str()) {
@@ -357,9 +363,19 @@ impl Discovery {
             .iter()
             .map(|(provider_id, provider)| {
                 format!(
-                    "{provider_id}:{}:{}",
+                    "{provider_id}:{}:{}:{:x}",
                     provider.npm.as_deref().unwrap_or_default(),
-                    provider.base_url.as_deref().unwrap_or_default()
+                    provider.base_url.as_deref().unwrap_or_default(),
+                    {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        self.endpoint_api_keys
+                            .get(provider_id)
+                            .cloned()
+                            .or_else(|| provider.resolved_api_key())
+                            .hash(&mut hasher);
+                        hasher.finish()
+                    }
                 )
             })
             .collect::<Vec<_>>();
@@ -441,11 +457,7 @@ impl Discovery {
     }
 
     fn custom_provider_discovery_api_keys(&self) -> HashMap<String, String> {
-        Self::discovery_api_keys_from_auth(
-            crate::persistence::AuthDAO::new()
-                .and_then(|auth| auth.load())
-                .unwrap_or_default(),
-        )
+        self.endpoint_api_keys.clone()
     }
 
     fn discovery_api_keys_from_auth(
@@ -455,6 +467,7 @@ impl Discovery {
             .into_iter()
             .filter_map(|(provider_id, auth)| match auth {
                 crate::persistence::AuthConfig::Api { key } => Some((provider_id, key)),
+                crate::persistence::AuthConfig::OAuth { .. } if provider_id == "meridian" => None,
                 crate::persistence::AuthConfig::OAuth { access, .. } => Some((provider_id, access)),
                 crate::persistence::AuthConfig::Local => None,
             })
@@ -501,7 +514,7 @@ impl Discovery {
                     ))
                     .cloned()
             })
-            .filter(|cached| cached.cached_at.elapsed().as_secs() <= CACHE_TTL_SECONDS)
+            .filter(|cached| cached.cached_at.elapsed() <= cached.ttl)
             .map(|cached| cached.ids)
             .unwrap_or_default()
     }
@@ -515,7 +528,7 @@ impl Discovery {
             .lock()
             .ok()
             .and_then(|cache| cache.get(&cache_key).cloned())
-            .filter(|cached| cached.cached_at.elapsed().as_secs() <= CACHE_TTL_SECONDS)
+            .filter(|cached| cached.cached_at.elapsed() <= cached.ttl)
         {
             return cached.ids;
         }
@@ -526,6 +539,7 @@ impl Discovery {
         let stored_api_keys = self.custom_provider_discovery_api_keys();
 
         let mut advertised = HashMap::new();
+        let mut metadata = HashMap::new();
         for (provider_id, provider) in custom_providers {
             if !self.provider_is_enabled(provider_id) || !is_openai_compatible(provider) {
                 continue;
@@ -550,6 +564,7 @@ impl Discovery {
             let mut request = self
                 .client
                 .get(endpoint)
+                .timeout(Duration::from_secs(5))
                 .header("Accept", "application/json");
             if let Some(api_key) = stored_api_keys
                 .get(provider_id)
@@ -591,6 +606,28 @@ impl Discovery {
                 }
             };
 
+            if provider_id == crate::model::extensions::meridian::PROVIDER_ID {
+                metadata.insert(
+                    provider_id.clone(),
+                    response
+                        .data
+                        .iter()
+                        .filter_map(|model| {
+                            let id = model.id.trim();
+                            if id.is_empty() {
+                                return None;
+                            }
+                            Some((
+                                id.to_string(),
+                                crate::model::extensions::meridian::model_from_metadata(
+                                    id,
+                                    &serde_json::Value::Object(model.metadata.clone()),
+                                ),
+                            ))
+                        })
+                        .collect(),
+                );
+            }
             let mut ids = response
                 .data
                 .into_iter()
@@ -603,16 +640,40 @@ impl Discovery {
             advertised.insert(provider_id.clone(), ids);
         }
 
+        let had_failure = custom_providers.keys().any(|id| {
+            self.provider_is_enabled(id)
+                && is_openai_compatible(&custom_providers[id])
+                && custom_providers[id].base_url.is_some()
+                && !advertised.contains_key(id)
+        });
         if let Ok(mut cache) = memory_custom_model_cache().lock() {
             cache.insert(
                 cache_key,
                 CachedCustomModels {
                     ids: advertised.clone(),
+                    metadata,
                     cached_at: std::time::Instant::now(),
+                    ttl: Duration::from_secs(if had_failure {
+                        5
+                    } else {
+                        self.custom_discovery_ttl()
+                    }),
                 },
             );
         }
         advertised
+    }
+
+    fn custom_discovery_ttl(&self) -> u64 {
+        if self
+            .custom_providers
+            .as_ref()
+            .is_some_and(|p| p.contains_key("meridian"))
+        {
+            MERIDIAN_DISCOVERY_TTL
+        } else {
+            CACHE_TTL_SECONDS
+        }
     }
 
     // Resolve advertised IDs against the full catalog, not picker rows. Manual
@@ -622,13 +683,42 @@ impl Discovery {
         providers: &mut HashMap<String, Provider>,
         advertised: &HashMap<String, Vec<String>>,
     ) {
+        let discovered_metadata = memory_custom_model_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| {
+                cache
+                    .get(&(
+                        self.get_cache_path().clone(),
+                        self.custom_provider_endpoint_signature(),
+                    ))
+                    .map(|cached| cached.metadata.clone())
+            })
+            .unwrap_or_default();
+        // Discard static experiment rows from older models.dev caches. Meridian's
+        // currently advertised list (plus explicit manual overrides) is authoritative.
+        providers.insert(
+            "meridian".to_string(),
+            crate::model::extensions::meridian::provider(),
+        );
         let mut additions = Vec::new();
         for (provider_id, ids) in advertised {
             if !self.provider_is_enabled(provider_id) {
                 continue;
             }
             for model_id in ids {
-                let mut model = catalog_model_metadata(providers, provider_id, model_id)
+                let mut model = discovered_metadata
+                    .get(provider_id)
+                    .and_then(|models| models.get(model_id))
+                    .or_else(|| {
+                        // Endpoint model IDs do not imply a backend billing route.
+                        // Never borrow backend pricing or capabilities for Meridian.
+                        if provider_id == "meridian" {
+                            None
+                        } else {
+                            catalog_model_metadata(providers, provider_id, model_id)
+                        }
+                    })
                     .cloned()
                     .unwrap_or_else(|| Model {
                         id: model_id.clone(),
@@ -773,12 +863,20 @@ impl Discovery {
     }
 
     pub fn new_with_config(
-        custom_providers: Option<
+        mut custom_providers: Option<
             std::collections::HashMap<String, crate::config::CustomProviderConfig>,
         >,
         disabled_providers: std::collections::BTreeSet<String>,
         enabled_providers: std::collections::BTreeSet<String>,
     ) -> Result<Self> {
+        let connections = crate::persistence::AuthDAO::new()
+            .and_then(|auth| auth.load())
+            .unwrap_or_default();
+        crate::model::extensions::meridian::apply_connection(
+            &mut custom_providers,
+            connections.get("meridian"),
+        );
+        let endpoint_api_keys = Self::discovery_api_keys_from_auth(connections);
         if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
             let cache_dir = PathBuf::from("/tmp/crabcode_test_cache");
             fs::create_dir_all(&cache_dir).context("Failed to create test cache directory")?;
@@ -791,6 +889,7 @@ impl Discovery {
                 custom_providers,
                 disabled_providers,
                 enabled_providers,
+                endpoint_api_keys,
             })
         } else {
             crate::persistence::ensure_cache_dir().context("Failed to create cache directory")?;
@@ -804,6 +903,7 @@ impl Discovery {
                 custom_providers,
                 disabled_providers,
                 enabled_providers,
+                endpoint_api_keys,
             })
         }
     }
@@ -990,9 +1090,22 @@ impl Discovery {
                 }
             }
         } else {
-            let providers = self.fetch_with_internal_providers(None).await?;
-            self.save_to_cache(&providers)?;
-            providers
+            match self.fetch_with_internal_providers(None).await {
+                Ok(providers) => {
+                    self.save_to_cache(&providers)?;
+                    providers
+                }
+                Err(error)
+                    if self
+                        .custom_providers
+                        .as_ref()
+                        .is_some_and(|p| p.contains_key("meridian")) =>
+                {
+                    crate::emit_log!("Meridian discovery continues without models.dev: {}", error);
+                    HashMap::new()
+                }
+                Err(error) => return Err(error),
+            }
         };
 
         crate::model::extensions::ModelExtensions::augment_runtime_catalog(&mut providers);
@@ -1164,6 +1277,12 @@ impl Discovery {
             .ok()
             .and_then(|cache| cache.get(&cache_key).cloned())
             .filter(|cached| cached.cached_at.elapsed().as_secs() <= CACHE_TTL_SECONDS)
+            .filter(|_| {
+                !self
+                    .custom_providers
+                    .as_ref()
+                    .is_some_and(|p| p.contains_key("meridian"))
+            })
         {
             models.extend(cached.models);
             models.retain(|model| self.provider_is_enabled(&model.provider_id));
@@ -2618,5 +2737,184 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         let _ = fs::remove_file(cache_path);
+    }
+    #[tokio::test]
+    async fn meridian_discovery_uses_configured_endpoint_and_metadata() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request.starts_with("GET /antigravity/v1/models HTTP/1.1"));
+            assert!(request.contains("authorization: Bearer endpoint-test-key"));
+            let body = serde_json::json!({"data": [
+                {"id": "gemini-test-high", "display_name": "Gemini Test High", "context_window": 1000000,
+                 "capabilities": {"image_input": {"supported": true}, "thinking": {"supported": true}}},
+                {"id": "claude-test", "display_name": "Claude Test", "context_window": 200000},
+                {"id": ""}, {"id": "claude-test", "display_name": "Claude Test", "context_window": 200000}
+            ]}).to_string();
+            stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+        });
+        let mut discovery = Discovery::new_with_custom(Some(HashMap::from([(
+            "meridian".into(),
+            CustomProviderConfig {
+                name: None,
+                npm: None,
+                base_url: Some(format!("http://{address}/antigravity/v1")),
+                api_key: Some("endpoint-test-key".into()),
+                models: HashMap::new(),
+            },
+        )])))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        discovery.cache_path = dir.path().join("models.json");
+        let ids = discovery.discover_custom_model_ids().await;
+        assert_eq!(ids["meridian"], ["claude-test", "gemini-test-high"]);
+        // This read must hit the endpoint-specific memory cache, not a second request.
+        assert_eq!(discovery.discover_custom_model_ids().await, ids);
+        server.await.unwrap();
+        let mut providers = HashMap::new();
+        discovery.apply_custom_catalog(&mut providers, &ids);
+        let provider = &providers["meridian"];
+        assert_eq!(provider.name, "Meridian");
+        assert_eq!(provider.api, format!("http://{address}/antigravity/v1"));
+        assert_eq!(provider.npm, "@ai-sdk/openai-compatible");
+        let model = &provider.models["gemini-test-high"];
+        assert_eq!(model.name, "Gemini Test High");
+        assert_eq!(model.limit.as_ref().unwrap().context, 1000000);
+        assert!(model.tool_call && model.attachment && model.reasoning);
+        assert!(model.provider.is_none() && model.cost.is_none());
+        assert_eq!(
+            discovery.get_model_limit("meridian", "gemini-test-high"),
+            Some(1000000)
+        );
+        assert!(discovery
+            .get_model_pricing("meridian", "gemini-test-high")
+            .is_none());
+        discovery.clear_custom_model_discovery_cache();
+        discovery.apply_custom_catalog(&mut providers, &HashMap::new());
+        assert!(providers["meridian"].models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn meridian_discovery_failure_has_short_cache_and_keeps_manual_fallback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let mut discovery = Discovery::new_with_custom(Some(HashMap::from([(
+            "meridian".into(),
+            CustomProviderConfig {
+                name: None,
+                npm: None,
+                base_url: Some(format!("http://{address}/v1")),
+                api_key: None,
+                models: HashMap::from([(
+                    "manual-model".into(),
+                    crate::config::configuration::CustomModelConfig {
+                        name: Some("Manual Model".into()),
+                        tool_call: Some(true),
+                        context_window: None,
+                        max_tokens: None,
+                        attachment: None,
+                        reasoning: None,
+                        reasoning_options: None,
+                        temperature: None,
+                        modalities: None,
+                        launch: false,
+                    },
+                )]),
+            },
+        )])))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        discovery.cache_path = dir.path().join("models.json");
+        let ids = discovery.discover_custom_model_ids().await;
+        assert!(ids.is_empty());
+        server.await.unwrap();
+        assert!(discovery.discover_custom_model_ids().await.is_empty());
+        let ttl = memory_custom_model_cache()
+            .lock()
+            .unwrap()
+            .get(&(
+                discovery.cache_path.clone(),
+                discovery.custom_provider_endpoint_signature(),
+            ))
+            .unwrap()
+            .ttl;
+        assert_eq!(ttl, Duration::from_secs(5));
+        let mut providers = HashMap::new();
+        discovery.apply_custom_catalog(&mut providers, &ids);
+        assert_eq!(providers["meridian"].models.len(), 1);
+        assert_eq!(
+            providers["meridian"].models["manual-model"].name,
+            "Manual Model"
+        );
+    }
+
+    #[test]
+    fn meridian_endpoint_credentials_isolate_discovery_cache() {
+        let mut discovery = Discovery::new_with_custom(Some(HashMap::from([(
+            "meridian".into(),
+            CustomProviderConfig {
+                name: None,
+                npm: None,
+                base_url: None,
+                api_key: Some("configured-key".into()),
+                models: HashMap::new(),
+            },
+        )])))
+        .unwrap();
+        let configured = discovery.custom_provider_endpoint_signature();
+        discovery
+            .endpoint_api_keys
+            .insert("meridian".into(), "stored-key".into());
+        let stored = discovery.custom_provider_endpoint_signature();
+        assert_ne!(configured, stored);
+        discovery
+            .endpoint_api_keys
+            .insert("meridian".into(), "new-key".into());
+        assert_ne!(stored, discovery.custom_provider_endpoint_signature());
+        assert!(configured.iter().all(|s| !s.contains("configured-key")));
+    }
+
+    #[tokio::test]
+    async fn meridian_discovery_honors_disabled_provider_without_request() {
+        let config = CustomProviderConfig {
+            name: None,
+            npm: None,
+            base_url: None,
+            api_key: None,
+            models: HashMap::new(),
+        };
+        let mut discovery = Discovery::new_with_config(
+            Some(HashMap::from([("meridian".into(), config)])),
+            std::collections::BTreeSet::from(["meridian".into()]),
+            Default::default(),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        discovery.cache_path = dir.path().join("models.json");
+        assert!(!discovery.provider_is_enabled("meridian"));
+        assert!(discovery.discover_custom_model_ids().await.is_empty());
+        assert_eq!(
+            discovery.custom_providers.as_ref().unwrap()["meridian"]
+                .base_url
+                .as_deref(),
+            Some("http://127.0.0.1:3456/v1")
+        );
     }
 }
