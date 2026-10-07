@@ -111,6 +111,14 @@ Use `enabled_providers` to restrict discovery and selection, or `disabled_provid
 > [!NOTE]
 > **Meridian** is supported as a provider with automatic model discovery and optional endpoint-key authentication.
 
+When Meridian is connected through `/connect` or configured in `provider.meridian`, Crabcode warms up its local endpoint in the background. If it is not running, Crabcode starts the installed `meridian` executable in passthrough mode with the configured local host, port, and endpoint key. Startup never waits for Meridian; only model discovery, requests to Meridian, and its Claude Design MCP connection wait for readiness (up to 15 seconds).
+
+An existing listener is reused, and an automatically started Meridian process stays running after Crabcode exits. Install `@rynfar/meridian` and complete upstream account login once beforehand; Crabcode does not install Meridian or start login flows. Disabled providers are not warmed up. Remote endpoints, HTTPS, and reverse-proxy path prefixes are not automatically started.
+
+Successful readiness checks are cached for 60 seconds. Normal prompts reuse that in-memory result, and tool steps do not run readiness checks. There is no periodic polling: the next operation needing Meridian rechecks only after the cached result expires. If Meridian stops during that window, a request can fail until the next readiness check.
+
+Startup logs are stored under `~/.local/state/crabcode/meridian/` (or `$XDG_STATE_HOME/crabcode/meridian/`). If launch fails, check the log or start Meridian manually; Crabcode continues starting normally.
+
 ## Terminal UI
 
 Use `tui.compactMode` to explicitly control compact mode and its sticky message header:

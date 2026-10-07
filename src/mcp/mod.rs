@@ -412,6 +412,8 @@ type ConnectOutcome = Result<(RunningService<RoleClient, ()>, Vec<McpToolSpec>),
 
 /// Warm connections without holding the manager lock during I/O.
 async fn warm_connections(manager: Arc<Mutex<McpManager>>) {
+    use futures::StreamExt;
+
     let (workspace, jobs) = {
         let mut m = manager.lock().await;
         let jobs: Vec<(String, McpServerConfig)> = m
@@ -434,17 +436,21 @@ async fn warm_connections(manager: Arc<Mutex<McpManager>>) {
         return;
     }
 
-    let results = futures::future::join_all(jobs.into_iter().map(|(name, config)| {
-        let workspace = workspace.clone();
-        async move {
-            let result = open_and_list_tools(&workspace, &name, &config).await;
-            (name, config, result)
-        }
-    }))
-    .await;
+    let mut results = jobs
+        .into_iter()
+        .map(|(name, config)| {
+            let workspace = workspace.clone();
+            async move {
+                let result = open_and_list_tools(&workspace, &name, &config).await;
+                (name, config, result)
+            }
+        })
+        .collect::<futures::stream::FuturesUnordered<_>>();
 
-    let mut m = manager.lock().await;
-    for (name, config, result) in results {
+    // Publish each result immediately; one slow endpoint must not hold back
+    // ready tools from unrelated servers.
+    while let Some((name, config, result)) = results.next().await {
+        let mut m = manager.lock().await;
         if let Some(state) = m.servers.get_mut(&name) {
             // A connection started before an endpoint/key change is no longer valid.
             if state.config != config {
@@ -484,6 +490,15 @@ async fn open_and_list_tools(
     name: &str,
     config: &McpServerConfig,
 ) -> ConnectOutcome {
+    // Provider readiness can take longer than a transport handshake. It runs
+    // only in this server's background connect, never in the startup caller.
+    if let McpServerConfig::Remote(remote) = config {
+        if let Err(error) =
+            crate::model::extensions::ModelExtensions::prepare_mcp_endpoint(remote).await
+        {
+            return Err(McpStatus::Failed(error.to_string()));
+        }
+    }
     let timeout = state_timeout(config);
     let client = match tokio::time::timeout(timeout, open_client(workspace, name, config)).await {
         Ok(Ok(client)) => client,

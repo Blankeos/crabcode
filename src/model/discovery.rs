@@ -197,6 +197,7 @@ struct CacheEntry {
     schema_version: u32,
 }
 
+#[derive(Clone)]
 pub struct Discovery {
     client: Client,
     cache_path: PathBuf,
@@ -561,16 +562,26 @@ impl Discovery {
                 }
             };
 
+            let api_key = stored_api_keys
+                .get(provider_id)
+                .cloned()
+                .or_else(|| provider.resolved_api_key());
+            if let Err(error) = crate::model::extensions::ModelExtensions::prepare_endpoint(
+                provider_id,
+                base_url,
+                api_key.as_deref(),
+            )
+            .await
+            {
+                crate::emit_log!("Skipped {} model discovery: {}", provider_id, error);
+                continue;
+            }
             let mut request = self
                 .client
                 .get(endpoint)
                 .timeout(Duration::from_secs(5))
                 .header("Accept", "application/json");
-            if let Some(api_key) = stored_api_keys
-                .get(provider_id)
-                .cloned()
-                .or_else(|| provider.resolved_api_key())
-            {
+            if let Some(api_key) = api_key {
                 request = request.bearer_auth(api_key);
             }
 
@@ -877,6 +888,23 @@ impl Discovery {
             connections.get("meridian"),
         );
         let endpoint_api_keys = Self::discovery_api_keys_from_auth(connections);
+        // Warmup is fire-and-forget: constructors never wait for an endpoint.
+        for (id, provider) in custom_providers.iter().flatten() {
+            if !disabled_providers.contains(id)
+                && (enabled_providers.is_empty() || enabled_providers.contains(id))
+            {
+                if let Some(base_url) = &provider.base_url {
+                    crate::model::extensions::ModelExtensions::warmup_endpoint(
+                        id,
+                        base_url,
+                        endpoint_api_keys
+                            .get(id)
+                            .cloned()
+                            .or_else(|| provider.resolved_api_key()),
+                    );
+                }
+            }
+        }
         if cfg!(test) || env::var("CRABCODE_TEST_MODE").is_ok() {
             let cache_dir = PathBuf::from("/tmp/crabcode_test_cache");
             fs::create_dir_all(&cache_dir).context("Failed to create test cache directory")?;
@@ -1035,6 +1063,16 @@ impl Discovery {
         }
 
         Ok(())
+    }
+
+    /// Resolve one request's provider without probing unrelated custom endpoints.
+    /// Picker/refresh discovery still fetches the complete configured catalog.
+    pub async fn fetch_provider_for_request(&self, provider_id: &str) -> Result<Option<Provider>> {
+        let mut scoped = self.clone();
+        if let Some(custom) = &mut scoped.custom_providers {
+            custom.retain(|id, _| id == provider_id);
+        }
+        Ok(scoped.fetch_providers().await?.remove(provider_id))
     }
 
     pub async fn fetch_providers(&self) -> Result<HashMap<String, Provider>> {
@@ -2738,6 +2776,51 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         let _ = fs::remove_file(cache_path);
     }
+    #[tokio::test]
+    async fn request_provider_resolution_does_not_probe_unrelated_custom_endpoints() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let discovery = Discovery {
+            client: shared_http_client().unwrap(),
+            cache_path: dir.path().join("models.json"),
+            custom_providers: Some(HashMap::from([(
+                "meridian".into(),
+                CustomProviderConfig {
+                    name: None,
+                    npm: Some("@ai-sdk/openai-compatible".into()),
+                    base_url: Some(format!("http://{address}/v1")),
+                    api_key: None,
+                    models: HashMap::new(),
+                },
+            )])),
+            disabled_providers: Default::default(),
+            enabled_providers: Default::default(),
+            endpoint_api_keys: Default::default(),
+        };
+        let mut provider = crate::model::extensions::meridian::provider();
+        provider.id = "test-hosted".into();
+        provider.api = "https://hosted.example/v1".into();
+        discovery
+            .save_to_cache(&HashMap::from([(provider.id.clone(), provider)]))
+            .unwrap();
+        let resolved = tokio::time::timeout(
+            Duration::from_secs(2),
+            discovery.fetch_provider_for_request("test-hosted"),
+        )
+        .await
+        .expect("unrelated requests must not wait for local discovery")
+        .unwrap()
+        .unwrap();
+        assert_eq!(resolved.api, "https://hosted.example/v1");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "unrelated endpoint must not even be probed"
+        );
+    }
+
     #[tokio::test]
     async fn meridian_discovery_uses_configured_endpoint_and_metadata() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -75,6 +75,34 @@ pub trait RuntimeProviderCatalogExtension: ProviderCatalogExtension {
 }
 
 impl ModelExtensions {
+    /// Schedule local-provider warmup without networking or spawning on the
+    /// caller's thread. Safe during first-paint startup and outside a runtime.
+    pub fn warmup_endpoint(provider_id: &str, base_url: &str, key: Option<String>) {
+        if provider_id == meridian::PROVIDER_ID {
+            meridian::warmup_endpoint(base_url, key);
+        }
+    }
+
+    /// Await readiness only at an operation that uses this provider's endpoint.
+    /// Ordinary hosted endpoints have no lifecycle work to do.
+    pub async fn prepare_endpoint(
+        provider_id: &str,
+        base_url: &str,
+        key: Option<&str>,
+    ) -> Result<()> {
+        if provider_id == meridian::PROVIDER_ID {
+            meridian::ensure_running(base_url, key).await?;
+        }
+        Ok(())
+    }
+
+    /// Account-backed MCP adapters own readiness; transports stay generic.
+    pub async fn prepare_mcp_endpoint(
+        remote: &crate::config::configuration::McpRemoteConfig,
+    ) -> Result<()> {
+        meridian::prepare_design_mcp(remote).await
+    }
+
     pub fn persistent() -> &'static [&'static dyn PersistentProviderCatalogExtension] {
         &PERSISTENT_EXTENSIONS
     }
